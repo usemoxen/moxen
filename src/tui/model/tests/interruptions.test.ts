@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ActivityEnvelope, MessageEnvelope } from "../../../core/types.js";
 import { describeActivity } from "../activity.js";
-import { USAGE_CONTINUE_PROMPT } from "../../../core/threads/views.js";
+import { SELF_QUEUED_HEADER, USAGE_CONTINUE_PROMPT } from "../../../core/threads/views.js";
 import { toMessageEnvelope } from "../../../core/threads/project.js";
 import { isBackgroundNotification, applyThreadFrame, detectUsageLimit, emptyThreadState, isCompactPrompt, isUsageContinue, isUsageProtection, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedLabel, queuedMessages, queuedSummary } from "../thread.js";
 
@@ -201,6 +201,24 @@ describe("waiting messages", () => {
       ["m-held", "usage-hold"],
     ]);
     expect(items[0]).toMatchObject({ turnId: "t-queued", text: "first queued", attachments: 0, scheduledFor: null });
+  });
+
+  it("carries every condition and shows an agent's own first line with its marker", () => {
+    const text = `${SELF_QUEUED_HEADER}\n\nRecheck the build\nthen the tests`;
+    const agent = { ...user("m-agent", text), origin: "agent-message" } as MessageEnvelope;
+    const items = queuedMessages(
+      state({
+        messages: [agent],
+        thread: {
+          queuedTurns: [
+            { turnId: "t-agent", messageId: "m-agent", scheduledFor: null, scheduleReason: null, conditions: [{ type: "reset", provider: "claude", window: "session" }] },
+          ],
+        } as unknown as ThreadState["thread"],
+      }),
+    );
+    expect(items[0]!.conditions).toEqual([{ type: "reset", provider: "claude", window: "session" }]);
+    expect(items[0]!.agent).toBe(true);
+    expect(queuedLabel(items[0]!)).toBe("agent · Recheck the build");
   });
 
   it("labels a queued task notification by what settled, not by its tag", () => {

@@ -2217,7 +2217,10 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
                 key(item),
                 key(item),
             );
-            let label = if item.held {
+            let label = if item.agent {
+                // An agent's message, marked as the agent's rather than read as the user's.
+                crate::language::message("queued.agent").to_string()
+            } else if item.held {
                 "held".to_string()
             } else if item.scheduled.is_some() {
                 "scheduled".to_string()

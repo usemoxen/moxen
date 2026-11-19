@@ -149,6 +149,116 @@ describe("message_queue: when it runs", () => {
   }, 30_000);
 });
 
+describe("message_queue: taking back and changing what it queued", () => {
+  it("lists only what this thread queued, then edits and removes it through the Work queue", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const queued = await t.queue(t.orchestrator, { message: "Check the build\nthen the tests", conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }] });
+      const listed = await callMoxenTool(t.connection, t.orchestrator, "message_queue_list", {});
+      expect(listed.isError).toBe(false);
+      const messages = JSON.parse(listed.text).messages as Array<Record<string, unknown>>;
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ turnId: queued.json!.turnId, threadId: t.orchestrator, message: "Check the build\nthen the tests" });
+      expect(messages[0]!.waitingFor).toEqual(expect.arrayContaining([expect.stringContaining("Thread is running")]));
+
+      const edited = await callMoxenTool(t.connection, t.orchestrator, "message_queue_edit", {
+        turnId: queued.json!.turnId,
+        conditions: [{ type: "reset", provider: "claudeAgent", window: "session" }],
+      });
+      expect(edited.isError).toBe(false);
+      const entry = (await t.connection.query({ type: "queue.read" })).entries.find((row) => row.turnId === queued.json!.turnId)!;
+      expect(entry.policy.conditions).toEqual([expect.objectContaining({ type: "reset", provider: "claude", window: "session" })]);
+      expect(entry.agentThreadId).toBe(t.orchestrator);
+
+      const refused = await callMoxenTool(t.connection, t.orchestrator, "message_queue_edit", {
+        turnId: queued.json!.turnId,
+        conditions: [{ type: "thread", threadId: t.orchestrator }],
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("QUEUE_THREAD_SELF");
+      expect(refused.text).toContain("after this turn");
+
+      const removed = await callMoxenTool(t.connection, t.orchestrator, "message_queue_remove", { turnId: queued.json!.turnId });
+      expect(removed.isError).toBe(false);
+      expect((await t.connection.query({ type: "queue.read" })).entries.find((row) => row.turnId === queued.json!.turnId)?.policy.removed).toBe(true);
+      expect(JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "message_queue_list", {})).text).messages).toEqual([]);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("never lists, edits or removes the user's entries or another agent's", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      // The user's own queued message, through the composer's queue command.
+      const user = await t.connection.dispatch({ type: "thread.turn.start", threadId: t.orchestrator, message: { text: "from the user" }, delivery: "queue" });
+      // Another agent queueing on its own running thread.
+      const other = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Other agent", wait: false, threadEnvMode: "local" });
+      const otherEntry = await t.queue(other.threadId, { message: "theirs", conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }] });
+      expect(JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "message_queue_list", {})).text).messages).toEqual([]);
+
+      for (const turnId of [user.turnId, otherEntry.json!.turnId]) {
+        const edit = await callMoxenTool(t.connection, t.orchestrator, "message_queue_edit", { turnId, conditions: [] });
+        expect(edit.isError).toBe(true);
+        expect(edit.text).toContain("QUEUE_MESSAGE_NOT_YOURS");
+        const remove = await callMoxenTool(t.connection, t.orchestrator, "message_queue_remove", { turnId });
+        expect(remove.isError).toBe(true);
+        expect(remove.text).toContain("QUEUE_MESSAGE_NOT_YOURS");
+      }
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("refuses to take back a message that has already started", async () => {
+    const t = await setup();
+    try {
+      const taskId = await t.delegate();
+      await vi.waitFor(async () => expect((await t.store.readTurns(taskId)).every((turn) => turn.status === "completed")).toBe(true), { timeout: 10_000 });
+      const started = await t.queue(t.orchestrator, { threadId: taskId, message: "run now" });
+      expect(started.json).toMatchObject({ threadId: taskId, status: "running" });
+      const removed = await callMoxenTool(t.connection, t.orchestrator, "message_queue_remove", { turnId: started.json!.turnId });
+      expect(removed.isError).toBe(true);
+      expect(removed.text).toContain("QUEUE_MESSAGE_NOT_WAITING");
+      expect(removed.text).toContain("started");
+      await settleRuns();
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("reaches a task it delegated, while another thread's list stays empty", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const queued = await t.queue(t.orchestrator, { threadId: taskId, message: "correct the task", conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }] });
+      expect(queued.json).toMatchObject({ threadId: taskId, status: "queued" });
+      const messages = JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "message_queue_list", {})).text).messages as Array<Record<string, unknown>>;
+      expect(messages.find((row) => row.turnId === queued.json!.turnId)).toMatchObject({ threadId: taskId, message: "correct the task" });
+      expect((await callMoxenTool(t.connection, taskId, "message_queue_list", {})).isError).toBe(false);
+      expect(JSON.parse((await callMoxenTool(t.connection, taskId, "message_queue_list", {})).text).messages).toEqual([]);
+      expect((await callMoxenTool(t.connection, t.orchestrator, "message_queue_remove", { turnId: queued.json!.turnId })).isError).toBe(false);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+});
+
+describe("message_queue: a thread condition naming the calling thread", () => {
+  it("is refused, because after this turn is already implied", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const refused = await t.queue(t.orchestrator, { message: "wait for myself", conditions: [{ type: "thread", threadId: t.orchestrator }] });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("QUEUE_THREAD_SELF");
+      expect(refused.text).toContain("after this turn");
+      expect((await t.store.readTurns(t.orchestrator)).some((turn) => turn.agentThreadId === t.orchestrator)).toBe(false);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+});
+
 describe("message_queue: whose thread it is", () => {
   it("reaches only the caller's own thread and the tasks it delegated, continuations included", async () => {
     const t = await setup({ leaveTurnsRunning: true });
@@ -174,9 +284,11 @@ describe("message_queue: whose thread it is", () => {
   }, 30_000);
 
   it("is not offered to a delegated task, and refuses a research run's lead and roles", async () => {
-    expect(DELEGATION_TOOLS.has("message_queue")).toBe(true);
-    expect(moxenToolsFor({}).map((tool) => tool.name)).toContain("message_queue");
-    expect(moxenToolsFor({ delegated: true }).map((tool) => tool.name)).not.toContain("message_queue");
+    for (const name of ["message_queue", "message_queue_list", "message_queue_edit", "message_queue_remove"]) {
+      expect(DELEGATION_TOOLS.has(name)).toBe(true);
+      expect(moxenToolsFor({}).map((tool) => tool.name)).toContain(name);
+      expect(moxenToolsFor({ delegated: true }).map((tool) => tool.name)).not.toContain(name);
+    }
     const t = await setup();
     const unattended = t.connection.subscribeShell({ researchProposals: [t.orchestrator] }, () => {}, () => {});
     try {

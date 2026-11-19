@@ -210,6 +210,8 @@ pub struct Queued {
     pub images: Vec<Thumbnail>,
     /// Kept back until released.
     pub held: bool,
+    /// An agent queued it with `message_queue`, not the user (MXN-401).
+    pub agent: bool,
     /// When a scheduled send goes out, as the server wrote it.
     pub scheduled: Option<String>,
     /// How many places it can move earlier or later.

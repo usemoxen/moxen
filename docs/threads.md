@@ -588,6 +588,24 @@ retry. A restarted server never blindly replays a provider request whose
 acceptance is uncertain. **Schedule work** uses the same steps on one page that
 ends in "Queue this work".
 
+A waiting message's row says what it actually waits for: every condition the
+entry holds, not only "after this turn". The full text and the keys that act on
+it stay in the Work queue.
+
+An agent that queued a message with `message_queue` can see and take it back:
+`message_queue_list` lists the entries it created on its own thread and on
+tasks it delegated, `message_queue_edit` replaces what one waits for, and
+`message_queue_remove` drops it before it runs. They use the same Work queue
+edit and admission lock as the user's own actions. An agent never touches the
+user's entries or another agent's, and an entry that has started running
+cannot be taken back. The creating thread is recorded on the entry. A
+`thread` condition may not name the thread the message is queued on: it already
+waits for that thread's turn, so "after this turn" is implied.
+
+Conditions name a provider either by its usage account (`claude`, `codex`) or
+by its provider instance (`claudeAgent`, `opencode/<provider>`); both read the
+same account windows.
+
 The same controls are available without a TUI:
 
 ```sh

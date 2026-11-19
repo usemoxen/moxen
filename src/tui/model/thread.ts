@@ -1,7 +1,9 @@
 import { t, t as tr, tx } from "../i18n/index.js";
 import type { MessageEnvelope, SessionEnvelope, ThreadEnvelope, ActivityEnvelope } from "../../core/types.js";
 import { describeActivity } from "./activity.js";
-import { USAGE_CONTINUE_PROMPT } from "../../core/threads/views.js";
+import { agentMessageBody, USAGE_CONTINUE_PROMPT } from "../../core/threads/views.js";
+
+type QueueCondition = NonNullable<NonNullable<ThreadEnvelope["queuedTurns"]>[number]["conditions"]>[number];
 
 export interface TimelineEntry {
   id: string;
@@ -1183,6 +1185,10 @@ export interface QueuedMessage {
   /** When it will be sent, if it waits for a time rather than for the turn. */
   readonly scheduledFor: string | null;
   readonly reason: "user" | "usage-reset" | "usage-hold" | null;
+  /** Every condition the entry waits for; empty or absent when it waits only for the turn (MXN-349). */
+  readonly conditions?: readonly QueueCondition[];
+  /** Set when an agent queued it with `message_queue`, rather than the user typing it (MXN-401). */
+  readonly agent?: true;
   /** Set when the message is moxen's own "your delegated tasks settled" note. */
   readonly tasks?: readonly TaskNotificationView[];
   /** Set when it is a provider's own background-task notice, whose text is raw payload. */
@@ -1190,7 +1196,7 @@ export interface QueuedMessage {
 }
 
 /** What the Queued panel shows for a message: its first line, or a summary for a task notification (whose text is a tag the user never typed). */
-export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks" | "background">): string {
+export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks" | "background" | "agent">): string {
   if (item.background === true) return tr("timeline.backgroundNotification");
   const tasks = item.tasks;
   if (tasks !== undefined && tasks.length > 0) {
@@ -1198,7 +1204,10 @@ export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks" | "backgr
     const task = tasks[0]!;
     return `${task.title} ${tx(task.status === "completed" ? "finished" : task.status)}`;
   }
-  return item.text.split("\n")[0]?.trim() ?? "";
+  const firstLine = agentMessageBody(item.text).split("\n")[0]?.trim() ?? "";
+  // An agent's message opens with a line saying it is not the user's; the row
+  // marks it as the agent's instead, and shows what the agent actually said.
+  return item.agent === true ? `${t("queued.agent")} · ${firstLine}` : firstLine;
 }
 
 /**
@@ -1222,6 +1231,8 @@ export function queuedMessages(state: ThreadState): QueuedMessage[] {
         attachments,
         scheduledFor: queued.scheduledFor,
         reason: queued.scheduleReason,
+        conditions: queued.conditions ?? [],
+        ...(message.origin === "agent-message" ? { agent: true as const } : {}),
         ...(tasks === null ? {} : { tasks }),
         ...(isBackgroundNotification(message) ? { background: true as const } : {}),
       },

@@ -639,6 +639,7 @@ export async function sendTurn(
       threadId,
       status,
       ...(heldQueue ? { queue: heldQueue } : {}),
+      ...(input.agentThreadId ? { agentThreadId: input.agentThreadId } : {}),
       ...(heldBehind ? { heldAtSettle: true } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
       delivery:

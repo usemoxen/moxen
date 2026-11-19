@@ -48,6 +48,8 @@ export interface WorkQueueEntry {
   readonly threadId: string; readonly turnId: string; readonly title: string; readonly prompt: string;
   readonly provider: string; readonly status: string; readonly policy: QueuePolicy;
   readonly blocked: readonly string[]; readonly scheduledFor: string | null;
+  /** The agent thread that queued this entry with `message_queue`; only it may list or change it (MXN-401). */
+  readonly agentThreadId?: string;
 }
 
 export function parseQueuePolicy(value: unknown): QueuePolicy {
@@ -60,12 +62,13 @@ export function parseQueuePolicy(value: unknown): QueuePolicy {
     const c = raw as Record<string, unknown>;
     const id = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200;
     if (c.type === "at" && typeof c.at === "string" && Number.isFinite(Date.parse(c.at))) return { type: "at", at: new Date(c.at).toISOString() };
-    if (c.type === "usage" && id(c.provider) && ["session", "weekly", "all"].includes(String(c.window)) && typeof c.minimum === "number" && Number.isFinite(c.minimum) && c.minimum >= 0 && c.minimum <= 100) return { type: "usage", provider: c.provider, window: c.window as "session" | "weekly" | "all", minimum: c.minimum };
+    if (c.type === "usage" && id(c.provider) && ["session", "weekly", "all"].includes(String(c.window)) && typeof c.minimum === "number" && Number.isFinite(c.minimum) && c.minimum >= 0 && c.minimum <= 100) return { type: "usage", provider: usageKeyForInstance(c.provider), window: c.window as "session" | "weekly" | "all", minimum: c.minimum };
     if (c.type === "reset" && id(c.provider) && (c.window === "session" || c.window === "weekly" || c.window === "all")) {
       if (c.resetsAt !== undefined && c.resetsAt !== null && (typeof c.resetsAt !== "string" || !Number.isFinite(Date.parse(c.resetsAt)))) return bad();
-      return { type: "reset", provider: c.provider, window: c.window, resetsAt: typeof c.resetsAt === "string" ? c.resetsAt : nextReset(c.provider, c.window) };
+      const provider = usageKeyForInstance(c.provider);
+      return { type: "reset", provider, window: c.window, resetsAt: typeof c.resetsAt === "string" ? c.resetsAt : nextReset(provider, c.window) };
     }
-    if (c.type === "provider" && id(c.provider) && (c.state === "exhausted" || c.state === "protected") && (c.mode === "after" || c.mode === "while")) return { type: "provider", provider: c.provider, state: c.state, mode: c.mode };
+    if (c.type === "provider" && id(c.provider) && (c.state === "exhausted" || c.state === "protected") && (c.mode === "after" || c.mode === "while")) return { type: "provider", provider: usageKeyForInstance(c.provider), state: c.state, mode: c.mode };
     if (c.type === "thread" && id(c.threadId)) return { type: "thread", threadId: c.threadId };
     if (c.type === "entry" && id(c.threadId) && id(c.turnId)) return { type: "entry", threadId: c.threadId, turnId: c.turnId };
     return bad();
@@ -131,20 +134,25 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {
     if (condition.type === "at") { if (Date.parse(condition.at) > now) blocked.push(`Waiting until ${condition.at}`); }
     else if (condition.type === "usage") {
-      const windows = usageLimitsSnapshot(now)[condition.provider]?.windows.filter((w) => condition.window === "all" || w.kind === condition.window) ?? [];
-      if (!windows.length) blocked.push(`${condition.provider}: usage unavailable`);
-      else if (windows.some((w) => w.usedPercent >= 100 || 100 - w.usedPercent < condition.minimum)) blocked.push(`${condition.provider}: needs ${condition.minimum}% ${condition.window} remaining`);
+      const provider = usageKeyForInstance(condition.provider);
+      if (provider !== condition.provider) conditions[index] = { ...condition, provider };
+      const windows = usageLimitsSnapshot(now)[provider]?.windows.filter((w) => condition.window === "all" || w.kind === condition.window) ?? [];
+      if (!windows.length) blocked.push(`${provider}: usage unavailable`);
+      else if (windows.some((w) => w.usedPercent >= 100 || 100 - w.usedPercent < condition.minimum)) blocked.push(`${provider}: needs ${condition.minimum}% ${condition.window} remaining`);
     } else if (condition.type === "reset") {
-      const resetsAt = condition.resetsAt ?? nextReset(condition.provider, condition.window, now);
-      if (resetsAt && !condition.resetsAt) conditions[index] = { ...condition, resetsAt };
-      if (!resetsAt || Date.parse(resetsAt) + QUEUE_RESET_GRACE_MS > now) blocked.push(`${condition.provider}: waiting for ${condition.window} reset`);
+      const provider = usageKeyForInstance(condition.provider);
+      const resetsAt = condition.resetsAt ?? nextReset(provider, condition.window, now);
+      if (provider !== condition.provider || resetsAt && !condition.resetsAt) conditions[index] = { ...condition, provider, resetsAt };
+      if (!resetsAt || Date.parse(resetsAt) + QUEUE_RESET_GRACE_MS > now) blocked.push(`${provider}: waiting for ${condition.window} reset`);
     } else if (condition.type === "provider") {
-      const met = condition.state === "exhausted" ? usageLimitsSnapshot(now)[condition.provider]?.windows.some((w) => w.usedPercent >= 100) === true
-        : rows.some((r) => r.thread.usagePause?.provider === condition.provider && r.thread.usagePause.phase !== "resuming");
-      const signal = usageSignal(condition.provider, condition.state);
+      const provider = usageKeyForInstance(condition.provider);
+      if (provider !== condition.provider) conditions[index] = { ...condition, provider };
+      const met = condition.state === "exhausted" ? usageLimitsSnapshot(now)[provider]?.windows.some((w) => w.usedPercent >= 100) === true
+        : rows.some((r) => r.thread.usagePause?.provider === provider && r.thread.usagePause.phase !== "resuming");
+      const signal = usageSignal(provider, condition.state);
       const happened = signal !== null && Date.parse(signal) >= Date.parse(policy?.eventAfter ?? turn.createdAt);
       if (condition.mode === "after" && (met || happened) && !latched.includes(index)) latched.push(index);
-      if (!(condition.mode === "after" ? latched.includes(index) : met)) blocked.push(`${condition.mode} ${condition.provider} is ${condition.state}`);
+      if (!(condition.mode === "after" ? latched.includes(index) : met)) blocked.push(`${condition.mode} ${provider} is ${condition.state}`);
     } else {
       const dependency = rows.find((r) => r.thread.id === condition.threadId);
       if (!dependency) blocked.push("Dependency is unavailable");

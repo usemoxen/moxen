@@ -14,7 +14,7 @@ import { openThreadStore } from "../store.js";
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
-import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, queueAgentMessage, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -201,8 +201,7 @@ describe("conditional work queue", () => {
     expect(w.sent).toHaveLength(1);
   });
 
-  it("waits for every reported window when the condition asks for all", async () => {
-    const w = await world(); const thread = await w.make(); const now = Date.now();
+  it("waits for every reported window when the condition asks for all", async () => {    const w = await world(); const thread = await w.make(); const now = Date.now();
     await sendTurn(w.store, thread.id, { prompt: "when every allowance returns", queue: parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "all" }] }) });
     const soon = new Date(now + 60_000).toISOString();
     const later = new Date(now + 6 * 86400_000).toISOString();
@@ -264,6 +263,80 @@ describe("conditional work queue", () => {
     recordUsageWindows("codex", [{ id: "weekly", label: "Weekly", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 86400_000).toISOString() }]);
     expect(automaticUsageBlock("codex", w.ctx.config)).not.toEqual([]);
     expect(automaticUsageBlock("opencode", w.ctx.config)).toEqual([]);
+  });
+});
+
+describe("a message an agent queues on a running thread", () => {
+  /** The turn that is running when the agent queues its own message. */
+  async function selfQueued(w: Awaited<ReturnType<typeof world>>, provider: string, conditions: readonly unknown[]) {
+    const thread = await w.make(provider);
+    const running = await sendTurn(w.store, thread.id, { prompt: "first turn" });
+    const queued = await queueAgentMessage(w.ctx, thread.id, { message: "after the wait", conditions: parseQueuePolicy({ conditions }).conditions });
+    expect(queued).toMatchObject({ status: "queued", self: true });
+    expect(queued.waitingFor).toEqual(expect.arrayContaining([expect.stringContaining("Thread is running")]));
+    return { thread, running, queued };
+  }
+
+  it("runs once the turn ends and a reset condition, named by the provider instance, is met", async () => {
+    const w = await world();
+    const now = Date.now();
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 60_000).toISOString() }], now);
+    const { thread, running, queued } = await selfQueued(w, "claudeAgent", [{ type: "reset", provider: "claudeAgent", window: "session" }]);
+    // The account key, not the instance id, is what the usage snapshot holds (MXN-349).
+    expect(queued.waitingFor).not.toEqual(expect.arrayContaining([expect.stringContaining("claudeAgent")]));
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent).toEqual([]);
+    await runWorkQueue(w.ctx, now + 66_000); await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turnId)?.status).not.toBe("queued");
+  });
+
+  it("runs once the turn ends and a usage condition, named by the provider instance, is met", async () => {
+    const w = await world();
+    const now = Date.now();
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: new Date(now + 60_000).toISOString() }], now);
+    const { thread, running, queued } = await selfQueued(w, "claudeAgent", [{ type: "usage", provider: "claudeAgent", window: "session", minimum: 40 }]);
+    expect(queued.waitingFor).toEqual(expect.arrayContaining([expect.stringContaining("needs 40%")]));
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx, now + 1000); await settleRuns();
+    expect(w.sent).toEqual([]);
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: new Date(now + 120_000).toISOString() }], now + 2000);
+    await runWorkQueue(w.ctx, now + 3000); await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+  });
+
+  it("runs once the turn ends and the thread it waits for has nothing running or queued", async () => {
+    const w = await world();
+    const dependency = await w.make();
+    const dependencyTurn = await sendTurn(w.store, dependency.id, { prompt: "prerequisite" });
+    const { thread, running } = await selfQueued(w, "codex", [{ type: "thread", threadId: dependency.id }]);
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx); await settleRuns();
+    expect(w.sent).toEqual([]);
+    await completeTurn(w.store, dependency.id, dependencyTurn.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx); await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+  });
+
+  it("runs once the turn ends and an at condition's time arrives", async () => {
+    const w = await world();
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const { thread, running } = await selfQueued(w, "codex", [{ type: "at", at }]);
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx, Date.parse(at) - 1000); await settleRuns();
+    expect(w.sent).toEqual([]);
+    await runWorkQueue(w.ctx, Date.parse(at) + 1000); await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+  });
+
+  it("refuses a thread condition that names the calling thread, because after this turn is already implied", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const before = await w.store.readTurns(thread.id);
+    await expect(queueAgentMessage(w.ctx, thread.id, { message: "later", conditions: parseQueuePolicy({ conditions: [{ type: "thread", threadId: thread.id }] }).conditions }))
+      .rejects.toMatchObject({ code: "QUEUE_THREAD_SELF", message: expect.stringContaining("after this turn") });
+    expect(await w.store.readTurns(thread.id)).toHaveLength(before.length);
   });
 });
 

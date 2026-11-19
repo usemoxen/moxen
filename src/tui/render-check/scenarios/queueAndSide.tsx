@@ -2,6 +2,7 @@ import { act } from "react";
 import { testRender } from "../testrender.js";
 
 import { QueuedPanel } from "../../features/queuedpanel/queuedpanel.js";
+import { SELF_QUEUED_HEADER } from "../../../core/threads/views.js";
 import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";
 import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import type { QueuedMessage } from "../../model/thread.js";
@@ -27,13 +28,17 @@ const ITEMS: readonly QueuedMessage[] = [
   { turnId: "t1", messageId: "m1", text: "Also update the changelog", attachments: 0, scheduledFor: null, reason: null },
   { turnId: "t2", messageId: "m2", text: "Run the full suite after", attachments: 1, scheduledFor: "2026-09-26T12:00:00.000Z", reason: "user" },
   { turnId: "t3", messageId: "m3", text: "Then open the PR", attachments: 0, scheduledFor: "2026-09-26T15:01:00.000Z", reason: "usage-hold" },
+  // An agent's own queued message: the row marks it as the agent's and shows what it wrote, not the header line.
+  { turnId: "t4", messageId: "m4", text: `${SELF_QUEUED_HEADER}\n\nRecheck the nightly build`, attachments: 0, scheduledFor: null, reason: null, agent: true },
+  // A condition is not "after this turn": the row says what the entry actually waits for.
+  { turnId: "t5", messageId: "m5", text: "Verify the release after the reset", attachments: 0, scheduledFor: null, reason: null, conditions: [{ type: "reset", provider: "claude", window: "session", resetsAt: null }] },
 ];
 
 async function runQueued(): Promise<void> {
   const cancelled: string[] = [];
   const paged: number[] = [];
   const setup = await testRender(
-    <box style={{ width: 90, height: 8, flexDirection: "column" }}>
+    <box style={{ width: 90, height: 12, flexDirection: "column" }}>
       <QueuedPanel
         items={ITEMS}
         width={90}
@@ -42,7 +47,7 @@ async function runQueued(): Promise<void> {
         pager={<Pager position={0} count={2} onPage={(next) => paged.push(next)} />}
       />
     </box>,
-    { width: 92, height: 10, exitOnCtrlC: false },
+    { width: 92, height: 14, exitOnCtrlC: false },
   );
   await setup.flush();
   const frame = setup.captureCharFrame();
@@ -50,12 +55,14 @@ async function runQueued(): Promise<void> {
   console.log(frame);
   for (const expected of [
     "Queued",
-    "3 not sent yet, 1 of them held for the reset",
+    "5 not sent yet, 1 of them held for the reset",
     "1. Also update the changelog",
     "after this turn",
     "+1 image",
     "after the reset",
     "1/2",
+    "agent · Recheck the nightly build",
+    "After Claude's next session reset",
   ]) {
     if (!frame.includes(expected)) fail(`queued panel is missing "${expected}"`);
   }

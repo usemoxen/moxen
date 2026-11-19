@@ -172,6 +172,7 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
       messageId: turn.messageId,
       scheduledFor: turn.scheduledFor ?? null,
       scheduleReason: turn.scheduleReason ?? null,
+      ...(turn.queue && turn.queue.conditions.length > 0 ? { conditions: turn.queue.conditions.map((condition) => ({ ...condition })) } : {}),
     }));
   const turnModes: Record<string, TurnInteractionMode> = {};
   const turnUsagePauses = Object.fromEntries(turns.flatMap((turn) => turn.usagePause ? [[turn.id, turn.usagePause]] : []));

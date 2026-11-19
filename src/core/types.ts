@@ -1,4 +1,5 @@
 import type { McpServerEntry } from "./mcp.js";
+import type { QueueCondition } from "./threads/queue.js";
 
 export type ProjectPolicy = "create" | "existing";
 export type WorkspaceMode = "repo" | "folder";
@@ -668,6 +669,8 @@ export interface QueuedTurnEnvelope {
   messageId: string;
   scheduledFor: string | null;
   scheduleReason: "user" | "usage-reset" | "usage-hold" | null;
+  /** Every condition the entry waits for, so a client shows them all (MXN-349). Absent when it has none. */
+  conditions?: QueueCondition[];
 }
 
 export interface LatestTurnEnvelope {

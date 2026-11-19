@@ -67,7 +67,8 @@ import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
+import { buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { ranTurns, toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
@@ -110,7 +111,6 @@ import { parseScheduledTime } from "./scheduledtime.js";
 import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhausted, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
-import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
@@ -710,7 +710,7 @@ export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly Q
       if (stopped && !turn.queue?.removed) blocked.unshift(turn.error ?? "Stopped before completion; add back held to retry");
       if (policy.continuation !== "same-thread") blocked.unshift(turn.handoff?.fallback ? "Using stored handoff: model summary unavailable" : turn.handoff?.summary ? "Model handoff received" : policy.continuation === "model" ? "Preparing model handoff" : "Preparing stored handoff");
       if (row.thread.usagePause && row.thread.usagePause.phase !== "resuming") blocked.unshift("Waiting for usage protection");
-      entries.push({ threadId: row.thread.id, turnId: turn.id, title: row.thread.title, prompt: messages.find((m) => m.id === turn.messageId)?.text ?? "", provider: driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) ?? "unknown", status: turn.status, policy, blocked, scheduledFor: turn.scheduledFor ?? null });
+      entries.push({ threadId: row.thread.id, turnId: turn.id, title: row.thread.title, prompt: messages.find((m) => m.id === turn.messageId)?.text ?? "", provider: driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) ?? "unknown", status: turn.status, policy, blocked, scheduledFor: turn.scheduledFor ?? null, ...(turn.agentThreadId ? { agentThreadId: turn.agentThreadId } : {}) });
     }
   }
   return entries.sort((a, b) => a.policy.order - b.policy.order || a.turnId.localeCompare(b.turnId));
@@ -5002,10 +5002,21 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
   const scheduledFor = input.at === undefined ? undefined : parseScheduledTime(input.at, new Date(), "at");
   const conditions = input.conditions ?? [];
   const queue = conditions.length > 0 ? parseQueuePolicy({ conditions, sequential: ctx.config.usageRecovery === "sequential" }) : undefined;
+  // A condition naming the very thread the message runs on can never clear:
+  // the entry itself is queued there. A message queued for its own thread
+  // already waits for that thread's turn, so "after this turn" is implied.
+  if (queue?.conditions.some((condition) => condition.type === "thread" && condition.threadId === targetId)) {
+    throw new CliError(
+      "QUEUE_THREAD_SELF",
+      "A thread condition cannot name the thread the message is queued on: it already waits for that thread's turn, and 'after this turn' is already implied.",
+      { exitCode: 4, details: { threadId: targetId } },
+    );
+  }
   const started = await startTurn(ctx, {
     threadId: targetId,
     prompt: `${self ? SELF_QUEUED_HEADER : TASK_MESSAGE_HEADER}\n\n${message}`,
     origin: "agent-message",
+    agentThreadId: callerId,
     delivery: "queue",
     ...(scheduledFor ? { scheduledFor } : {}),
     ...(queue ? { queue } : {}),

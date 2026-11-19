@@ -24,6 +24,7 @@ export const MOXEN_MCP_INSTRUCTIONS =
   "task_send messages a task you delegated (a correction, a redirect); its outcome says whether the task read it (steered, started) or it waits for the task's next turn (queued), and a finished task needs wake: true. " +
   "task_ask checks on a task you delegated without disturbing it: its provider answers a side question on a copy of the task's thread, with no tools and nothing added there. " +
   "message_queue queues or schedules a message on your own thread (or a task you delegated) through the user's queue: at takes an ISO time or HH:MM, conditions wait for an allowance reset or another thread; with neither it runs after the current turn. A protected thread keeps it waiting. " +
+  "message_queue_list shows the messages you queued that are still waiting; message_queue_edit changes what one waits for and message_queue_remove takes it back before it runs. Never the user's entries, and never one that has started. " +
   "thread_search and thread_read find and read other threads, a step at a time. " +
   "The models tool lists the providers, models and efforts you can delegate to. " +
   "usage_status reports the user's current shared provider usage, fresh rather than the hours-old figures models carries: call it before fanning work out. " +

@@ -28,6 +28,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { APP_DISPLAY_NAME, APP_NAME } from "../config.js";
+import { TASK_MESSAGE_HEADER } from "./views.js";
 import type { ResearchRole, ThreadEnv } from "./types.js";
 import type { ResearchLens } from "./researchvocab.js";
 import { buildShellGuidance, detectShells, type ShellDetection } from "./shells.js";
@@ -209,12 +210,6 @@ export const MESSAGES_GUIDANCE = [
   INSTRUCTIONS_UPDATE_LINE,
   MODE_LINE,
 ].join("\n");
-
-/** Opens a message from the thread that delegated a task, so the task's model does not read it as the user's. */
-export const TASK_MESSAGE_HEADER = "Message from the thread that delegated this task (not from the user):";
-
-/** Opens a message this thread queued for itself with `message_queue`, so it is not read as the user's. */
-export const SELF_QUEUED_HEADER = "Message you queued for this thread earlier with message_queue (not from the user):";
 
 /**
  * What a session with the delegation tools is told about the message Moxen

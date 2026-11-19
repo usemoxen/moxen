@@ -6,6 +6,7 @@ import { useRef } from "react";
 
 import { useHover } from "../../hooks/useHover.js";
 import { clockTime } from "../../model/turns.js";
+import { queueConditionText } from "../../model/workqueue.js";
 import { queuedLabel, queuedSummary, type QueuedMessage } from "../../model/thread.js";
 import { COLOR, SURFACE } from "../../theme.js";
 
@@ -14,14 +15,17 @@ const MAX_QUEUED_ROWS = 6;
 
 /**
  * When a waiting message goes out. Plain queued ones go when the running
- * turn settles; the rest name their time.
+ * turn settles; the rest name their time, and every condition the entry
+ * waits for, so a held message never reads as a plain "after this turn".
  */
-export function whenLabel(item: QueuedMessage, now: number): string {
-  if (item.scheduledFor === null) return t("queued.after_this_turn_c5ef");
-  const at = clockTime(item.scheduledFor, now);
+export function whenLabel(item: QueuedMessage, now: number, threads: readonly { id: string; title: string }[] = []): string {
+  const at = item.scheduledFor === null ? null : clockTime(item.scheduledFor, now);
   // ◷, not the ⏲ emoji: terminals draw the emoji two cells wide over the space after it.
-  if (item.reason === "usage-hold") return t("queued.afterReset", { at });
-  return `◷ ${at}`;
+  const scheduled = at === null ? [] : [item.reason === "usage-hold" ? t("queued.afterReset", { at }) : `◷ ${at}`];
+  const conditions = item.conditions ?? [];
+  if (conditions.length > 0) return [...scheduled, ...conditions.map((condition) => queueConditionText(condition, threads, [], now))].join(" · ");
+  if (at === null) return t("queued.after_this_turn_c5ef");
+  return scheduled[0]!;
 }
 
 function CancelButton({ onClick }: { onClick: () => void }) {
@@ -52,6 +56,7 @@ export function QueuedPanel({
   now,
   onCancel,
   pager,
+  threads = [],
 }: {
   items: readonly QueuedMessage[];
   width: number;
@@ -59,13 +64,15 @@ export function QueuedPanel({
   onCancel: (turnId: string) => void;
   /** The `‹ 1/2 ›` control when Tasks shares the slot. */
   pager?: ReactNode;
+  /** Thread titles for a condition that waits for another thread. */
+  threads?: readonly { id: string; title: string }[];
 }) {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const overflows = items.length > MAX_QUEUED_ROWS;
   const rowWidth = Math.max(4, width - 2 - (overflows ? 1 : 0));
   const held = items.filter((item) => item.reason === "usage-hold").length;
   const rows = items.map((item, index) => {
-    const when = whenLabel(item, now);
+    const when = whenLabel(item, now, threads);
     const extra = item.attachments > 0 ? t("queued.images", { count: item.attachments }) : "";
     // Cancel is 3 cells, the when-label and its gap follow the text.
     const textWidth = Math.max(4, rowWidth - 4 - when.length - 2 - extra.length - 3);

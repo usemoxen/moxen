@@ -927,8 +927,16 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
         let listed = entries
             .iter()
             .position(|e| text(e, &["turnId"]) == Some(turn_id));
-        let (body, images) =
-            attachments::user_images(message, text(message, &["text"]).unwrap_or_default());
+        let agent = text(message, &["origin"]) == Some("agent-message");
+        let raw = text(message, &["text"]).unwrap_or_default();
+        // An agent's message opens with a line saying it is not the user's;
+        // the strip marks it as the agent's and shows what it actually wrote.
+        let body_text = if agent {
+            raw.split_once("\n\n").map_or(raw, |(_, body)| body)
+        } else {
+            raw
+        };
+        let (body, images) = attachments::user_images(message, body_text);
         waiting.push((
             listed.unwrap_or(usize::MAX),
             Queued {
@@ -936,6 +944,7 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
                 text: body,
                 images,
                 held: listed.is_some_and(|at| entries[at]["policy"]["held"] == true),
+                agent,
                 scheduled: text(turn, &["scheduledFor"]).map(str::to_string),
                 earlier: 0,
                 later: 0,
@@ -5453,6 +5462,26 @@ mod tests {
         assert!(queue[0].held && !queue[1].held);
         assert_eq!((queue[0].earlier, queue[0].later), (0, 1));
         assert_eq!((queue[1].earlier, queue[1].later), (1, 0));
+    }
+
+    #[test]
+    fn the_queue_marks_an_agents_message_and_shows_what_it_wrote() {
+        let thread = json!({
+            "messages": [{"id": "m1", "origin": "agent-message",
+                "text": "Message you queued for this thread earlier with message_queue (not from the user):\n\nRecheck the build\nthen lint"}],
+            "queuedTurns": [{"turnId": "t1", "messageId": "m1", "scheduledFor": null, "scheduleReason": null}],
+        });
+        let queue = queue_of(&thread, None);
+        assert!(queue[0].agent);
+        assert_eq!(queue[0].text, "Recheck the build\nthen lint");
+        // The user's own message keeps its text and is not marked as an agent's.
+        let typed = json!({
+            "messages": [{"id": "m1", "text": "Run the tests"}],
+            "queuedTurns": [{"turnId": "t1", "messageId": "m1", "scheduledFor": null, "scheduleReason": null}],
+        });
+        let queue = queue_of(&typed, None);
+        assert!(!queue[0].agent);
+        assert_eq!(queue[0].text, "Run the tests");
     }
 
     #[test]
