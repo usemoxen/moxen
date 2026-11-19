@@ -1701,7 +1701,7 @@ export async function threadFamily(store: ThreadStore, threadId: string): Promis
 }
 
 /** Hold every listed thread's lock at once; ids are taken in sorted order, so concurrent family operations cannot deadlock. */
-export async function withThreadLocks<T>(store: ThreadStore, ids: readonly string[], run: () => Promise<T>): Promise<T> {
+async function withThreadLocks<T>(store: ThreadStore, ids: readonly string[], run: () => Promise<T>): Promise<T> {
   const [first, ...rest] = [...ids].sort();
   if (first === undefined) return await run();
   return await store.withThreadLock(first, () => withThreadLocks(store, rest, run));
@@ -1742,7 +1742,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
         // Every live turn, queued ones included: a queue left behind would start the moment the settled thread woke.
         for (const turn of await store.readTurns(entry.id)) {
           if (turn.status === "running" || turn.status === "queued" || !isKnownTurnStatus(turn.status)) {
-            await interruptTurnLocked(store, entry.thread, turn, now);
+            await interruptTurnLocked(store, entry.thread, turn, now, undefined, "The thread was settled, stopping its work.");
           }
         }
         const index = members.findIndex((member) => member.id === entry.id);

@@ -42,7 +42,9 @@ process running it (pid and host). If that process dies mid-turn — a
 crashed server, a killed CLI, a TUI closed during a turn — nothing would
 ever settle it, so the next operation that touches the thread interrupts
 the orphaned turn and runs the one queued behind it. A turn owned on
-another host is never judged.
+another host is never judged. A running turn that a server shutdown stops
+is recorded interrupted with that reason, and so is one a settle ends, so a
+ledger never leaves an unexplained stop.
 
 A queued message outlives the settle it was waiting for when the thread
 cannot take it: a snoozed thread, or a provider whose allowance is
