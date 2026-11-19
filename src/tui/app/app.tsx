@@ -3283,7 +3283,7 @@ export function App({
                   sidePanel.tab === "git" ? (
                     <GitFooter overview={gitPanel.overview} forge={gitPanel.forge} width={diffPanel.diffWidth} />
                   ) : sidePanel.tab === "agents" && delegatedInfo !== null ? null : sidePanel.tab === "agents" ? (
-                    <text fg={COLOR.dim} selectable={false}>{t("agents.summary", { delegated: agentRows.length, subagents: subagentRows.length })}</text>
+                    <text fg={COLOR.dim} selectable={false}>{subagentRows.length === 0 ? t("agents.summaryDelegated", { delegated: agentRows.length }) : t("agents.summary", { delegated: agentRows.length, subagents: subagentRows.length })}</text>
                   ) : sidePanel.tab === "context" && effectiveBreakdown !== null ? (
                     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
                       <ActionText label={t("app.compact_now_08f8")} onClick={() => compactSession(() => undefined)} />

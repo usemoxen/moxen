@@ -47,7 +47,13 @@ the default outright.
 
 - Moxen has no plan mode. Claude Code's own plan tools (`EnterPlanMode`,
   `ExitPlanMode`) are never offered, and an OpenCode session an older build
-  left on its read-only `plan` agent goes back to `build`.
+  left on its read-only `plan` agent goes back to `build`. Claude Code's native
+  subagent tool is never offered either, under both of its names (`Agent` in
+  `tool_use` blocks, `Task` in the `system:init` tools list): both stay out of
+  the model's list in every Moxen-started session, whatever `disabledNativeTools`
+  holds (a stored `Agent` or `Task` entry changes nothing), and the settings
+  tool list leaves both out so neither can be switched back on. Fan out through
+  Moxen's `delegate` tool instead, which Moxen tracks.
 - After a 5-hour limit Anthropic may keep serving a subscription on spare
   capacity (Claude Code's `/low-priority`). Moxen cannot drive that lane:
   the SDK never forwards the offer, only the slash command reaches us as

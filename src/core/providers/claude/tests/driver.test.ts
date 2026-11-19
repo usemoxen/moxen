@@ -446,6 +446,29 @@ describe("claude driver permissions", () => {
     expect(switchable).not.toContain("ExitPlanMode");
   });
 
+  it("never offers Claude Code's native subagent tool, whatever the user switched off", async () => {
+    // Provider-native subagents escape Moxen's delegation tracking: fan out through `delegate` instead.
+    // Both names are denied: the tool appears as `Agent` in `tool_use` blocks but as `Task` in `system:init`.
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, disabledNativeTools: ["WebSearch"] }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hi" }));
+    // Exact: nothing else may ride along, and the prefix-similar checklist tools stay available.
+    expect(transport.created[0]!.options.disallowedTools).toEqual(["EnterPlanMode", "ExitPlanMode", "Agent", "Task", "WebSearch"]);
+    // A stored `Agent` or `Task` entry changes nothing: the tool stays blocked, with no settings row to switch it back on.
+    const stored = new FakeTransport([[initMessage()], [initMessage()]]);
+    const storedDriver = new ClaudeDriver({ transport: stored });
+    await Effect.runPromise(storedDriver.startSession({ ...START, disabledNativeTools: ["Agent"] }));
+    expect(stored.created[0]!.options.disallowedTools).toEqual(expect.arrayContaining(["Agent", "Task"]));
+    await Effect.runPromise(storedDriver.startSession({ ...START, threadId: "thread-2", disabledNativeTools: ["Task"] }));
+    expect(stored.created[1]!.options.disallowedTools).toEqual(expect.arrayContaining(["Agent", "Task"]));
+    const switchable = CLAUDE_NATIVE_TOOLS.map((tool) => tool.name);
+    expect(switchable).not.toContain("Agent");
+    expect(switchable).not.toContain("Task");
+    // The rest of the Agents group stays the user's to switch: only the subagent tool left the list.
+    expect(switchable).toEqual(expect.arrayContaining(["SendMessage", "Skill"]));
+  });
+
   it("allows everything in full-access except questions", async () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
@@ -570,6 +593,8 @@ describe("claude driver compaction, limits, rollback", () => {
     // Inclusive fork point: the message before the dropped prompt "two".
     expect(api.forks).toEqual([{ sessionId: "session-1", upToMessageId: "tr-1" }]);
     expect(transport.created[1]!.options.resume).toBe("forked-session");
+    // The rebuilt query keeps the always-blocked tools out, under both subagent names.
+    expect(transport.created[1]!.options.disallowedTools).toEqual(expect.arrayContaining(["Agent", "Task"]));
     expect(driver.resumeCursor("thread-1")).toBe("forked-session");
     expect(snapshot.turns).toHaveLength(0);
 

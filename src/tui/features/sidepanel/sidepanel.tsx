@@ -342,10 +342,11 @@ export function AgentsTab({
           );
         })
       )}
-      <Heading text={t("side.subagents_in_this_thread_7d16")} meta={subagents.length === 0 ? t("side.noneYet") : `${subagents.length}`} />
-      {subagents.length === 0 ? (
-        <Empty glyph="○" text={t("side.the_providers_own_subagents_a1b3")} />
-      ) : (
+      {/* Moxen blocks Claude's native subagents, so the section only appears
+          for subagents a thread actually has (another provider's, or an older
+          thread's): an empty one would advertise a tool Moxen turns off. */}
+      {subagents.length === 0 ? null : <Heading text={t("side.subagents_in_this_thread_7d16")} meta={`${subagents.length}`} />}
+      {subagents.length === 0 ? null : (
         subagents.map((agent) => {
           const took = agent.stoppedAt === null ? null : Math.max(1000, Date.parse(agent.stoppedAt) - Date.parse(agent.at));
           const state = agent.running ? formatDuration(Math.max(1000, now - Date.parse(agent.at))) : took === null || !Number.isFinite(took) ? t("side.done") : t("side.doneIn", { time: formatDuration(took) });

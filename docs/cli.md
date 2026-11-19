@@ -246,6 +246,7 @@ provider (`providers.<claude|opencode|codex>.…`):
   covered, since they are the tools whose options Moxen knows; any other search server is left to the model.
 - `disabledNativeTools`: the provider's own tools to switch off, comma-separated (`WebSearch,WebFetch` for Claude
   Code; `websearch,webfetch` for OpenCode). Claude Code drops them from the model's list when the session starts.
+  Its native subagent tool (both names, `Agent` and `Task`) is always off and is not among them; a stored `Agent` or `Task` entry changes nothing.
   OpenCode reads them when its server starts and takes them out of the model's list. A change waits until nothing runs on that server (no turn, background
   command or subagent, nothing waiting on you), then restarts it; the next message meets the new one.
 

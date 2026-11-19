@@ -6,10 +6,12 @@
  * `moxen config` offer; a name that is not in it is passed through as typed,
  * because the providers add tools faster than this table does.
  *
- * What is left out on purpose: the tools moxen's own settings already own
- * (the to-do list's `todos`, plan mode's enter and exit), and OpenCode's
- * session, worktree and browser utilities, which ask for no permission and so
- * have nothing to deny.
+ * What is left out on purpose: the tools Moxen's own settings already own
+ * (the to-do list's `todos`, plan mode's enter and exit), Claude Code's native
+ * subagent tool (both names, `Agent` and `Task`, blocked in every
+ * Moxen-started session so there is nothing to switch), and OpenCode's session,
+ * worktree and browser utilities, which ask for no permission and so have
+ * nothing to deny.
  */
 import { CliError } from "./errors.js";
 
@@ -40,7 +42,6 @@ export const CLAUDE_NATIVE_TOOLS: readonly NativeTool[] = [
   { name: "Monitor", label: "Monitor", group: "Commands", summary: "Runs a command in the background and streams its output." },
   { name: "WebSearch", label: "Web search", group: "Web", summary: "Anthropic's web search." },
   { name: "WebFetch", label: "Web fetch", group: "Web", summary: "Fetches a URL and answers a prompt about it." },
-  { name: "Agent", label: "Subagents", group: "Agents", summary: "Spawns a subagent. Moxen's Agents tab reads these." },
   { name: "SendMessage", label: "Send message", group: "Agents", summary: "Messages another agent or session." },
   { name: "Skill", label: "Skills", group: "Agents", summary: "Loads a skill." },
   { name: "AskUserQuestion", label: "Ask a question", group: "Interaction", summary: "Asks you multiple-choice questions." },
