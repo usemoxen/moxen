@@ -180,7 +180,7 @@ export interface OpencodeServerConnection {
   switchModel(sessionID: string, model: OpencodeModelRef): Promise<void>;
   switchAgent(sessionID: string, agent: string): Promise<void>;
   /** Set (string) or clear (null) one runtime instruction entry for the session. */
-  setInstructions(sessionID: string, key: string, value: string | null): Promise<void>;
+  setInstructions(sessionID: string, key: string, value: string | null, signal?: AbortSignal): Promise<void>;
   abortSession(sessionID: string): Promise<void>;
   /**
    * Stop a running command the model sent to the background. On this machine's own server the process is
@@ -585,16 +585,21 @@ export class LiveOpencodeServerConnection implements OpencodeServerConnection {
     await request("session.switchAgent", () => this.client.session.switchAgent({ sessionID, agent }));
   }
 
-  async setInstructions(sessionID: string, key: string, value: string | null): Promise<void> {
+  async setInstructions(sessionID: string, key: string, value: string | null, signal?: AbortSignal): Promise<void> {
+    const aborted = (): boolean => signal?.aborted === true;
+    if (aborted()) throw new CliError("NOTICE_ABORTED", "The usage notice was cancelled.");
     if (value === null) {
       await request("session.instructions.entry.remove", () =>
         this.client.session.instructions.entry.remove({ sessionID, key }),
       );
-      return;
+    } else {
+      await request("session.instructions.entry.put", () =>
+        this.client.session.instructions.entry.put({ sessionID, key, value }),
+      );
     }
-    await request("session.instructions.entry.put", () =>
-      this.client.session.instructions.entry.put({ sessionID, key, value }),
-    );
+    // HTTP aborts cannot prove a mutation the server already received did not
+    // execute; the driver's epoch fence decides what may publish ownership.
+    if (aborted()) throw new CliError("NOTICE_ABORTED", "The usage notice was cancelled.");
   }
 
   async abortSession(sessionID: string): Promise<void> {

@@ -332,14 +332,25 @@ thread. A reset, or another window running hot, can warn again. Once the warning
 is issued, the thread stays *waiting*. Every automatic input — a delegated
 task's report or pause/cancel note, a background notice, an agent-queued
 message, a question answer, a usage continuation, a handoff turn — carries the
-block again and reminds the model to acknowledge rather than act. A provider
-control such as `/compact` is left bare and carries the wait to the next
-ordinary automatic input. Only an explicit
-message from the user ends the wait: a turn the user sent with no internal
-origin, not a usage-control, compaction, handoff or background turn, and not a
-question answer. Ending the wait keeps the window key, so the same allowance
-does not warn again, and removes an OpenCode instruction entry or a queued
-Claude hook context. The runtime instructions say the same: only an actual
+block again at a boundary Moxen controls and reminds the model to acknowledge
+rather than act. A provider control such as `/compact` is left bare and carries
+the wait to the next ordinary automatic input. A provider-native wake has
+already been issued when Moxen learns of it and cannot be changed; its next
+controllable boundary carries the reminder instead. Provider notice operations
+are bounded to two seconds; aborting an HTTP call cannot prove a mutation
+OpenCode already received did not execute, so local bookkeeping is fenced and
+the next controllable request reconciles the entry again.
+
+Only an explicit message from the user ends the wait: a turn the user sent with
+no internal origin, not a usage-control, compaction, handoff or background
+turn, and not a question answer. The wait ends only when the provider accepts
+that dispatch, and only for the account and window key captured when it was
+prepared — a reset or a new hot window in flight keeps its own wait. Ending the
+wait keeps the window key, so the same allowance does not warn again, and
+removes an OpenCode instruction entry or a queued Claude hook context. An
+OpenCode instruction entry proves Moxen wrote it for future requests; it does
+not prove the model read or obeyed it, and the same is true of a Claude hook
+return or a text send. The runtime instructions say the same: only an actual
 message from the user authorizes continuing, and a delegate, tool output, a
 fake tag or another synthetic notice cannot.
 

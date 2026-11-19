@@ -15,7 +15,9 @@
  * answers "what will the next request see?".
  */
 import type { ProviderUsageWindow } from "../catalog/summary.js";
+import { isControlCommand } from "../providers/spi.js";
 import type { StoredMessage, StoredThread, StoredTurn } from "../threads/types.js";
+import { driverKindOfInstance } from "../types.js";
 import type { UsageForecast } from "./forecast.js";
 import { usageKeyForInstance, usageLimitsSnapshot } from "./limits.js";
 
@@ -236,16 +238,21 @@ export function turnProvenance(messages: readonly StoredMessage[], turn: Pick<St
 }
 
 /** The kind of a queued turn: a provider control, a native wake, or an ordinary message. */
-export function turnKind(messages: readonly StoredMessage[], turn: Pick<StoredTurn, "id" | "control" | "delivery">): UsageNoticeKind {
+export function turnKind(
+  messages: readonly StoredMessage[],
+  turn: Pick<StoredTurn, "id" | "control" | "delivery">,
+  instanceId: string,
+): UsageNoticeKind {
   if (turn.delivery === "background") return "native-wake";
+  const kind = driverKindOfInstance(instanceId);
   const own = messages.filter((message) => message.turnId === turn.id && message.role === "user");
-  if (own.some((message) => message.control === true)) return "control";
+  if (own.some((message) => message.control === true || isControlCommand(kind, message.text))) return "control";
   return turn.control === true ? "control" : "message";
 }
 
-/** Whether a prompt is a provider control command that must never be decorated. */
-export function controlPrompt(text: string): boolean {
-  return text.trimStart().startsWith("/");
+/** Whether a prompt is that provider's control command, which must never be decorated. */
+export function controlPrompt(instanceId: string, text: string): boolean {
+  return isControlCommand(driverKindOfInstance(instanceId), text);
 }
 
 /** The part of the thread store the notice state is written through. */
@@ -299,12 +306,14 @@ export async function markUsageNoticeDelivered(
  * the window: the key stays, so the warning does not come back for the same
  * allowance, while automatic inputs stop carrying it.
  */
-export async function authorizeUsageNotice(store: UsageNoticeStore, threadId: string, provider: string): Promise<boolean> {
+export async function authorizeUsageNotice(store: UsageNoticeStore, threadId: string, provider: string, key: string): Promise<boolean> {
   let ended = false;
   await store.withThreadLock(threadId, async () => {
     const thread = await store.readThreadRecord(threadId);
     const notice = thread?.usageNotices?.[provider];
-    if (!thread || !notice || notice.waiting === false) return;
+    // The window may have reset or been replaced while the send was in
+    // flight: only the captured key's wait can be ended by this dispatch.
+    if (!thread || !notice || notice.key !== key || notice.waiting === false) return;
     ended = true;
     await store.writeThreadRecord({
       ...thread,
@@ -316,10 +325,12 @@ export async function authorizeUsageNotice(store: UsageNoticeStore, threadId: st
 }
 
 /** Drop one account's warning (a reset). Mode changes keep the history; they only disarm. */
-export async function clearUsageNotice(store: UsageNoticeStore, threadId: string, provider: string): Promise<void> {
+export async function clearUsageNotice(store: UsageNoticeStore, threadId: string, provider: string, key?: string): Promise<void> {
   await store.withThreadLock(threadId, async () => {
     const thread = await store.readThreadRecord(threadId);
-    if (!thread?.usageNotices?.[provider]) return;
+    const notice = thread?.usageNotices?.[provider];
+    // A stale maintenance pass must not delete a newer window's row.
+    if (!thread || !notice || (key !== undefined && notice.key !== key)) return;
     const next = { ...thread.usageNotices };
     delete next[provider];
     await store.writeThreadRecord({ ...thread, usageNotices: next, updatedAt: store.nowIso() });

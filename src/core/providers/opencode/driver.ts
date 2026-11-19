@@ -40,6 +40,8 @@ import type {
   BackgroundTaskSummary,
   ContextBreakdown,
   ContextWindowUsage,
+  NoticeReconcileOutcome,
+  NoticeReconcileRequest,
   ProviderAdapter,
   ProviderAdapterCapabilities,
   ProviderApprovalDecision,
@@ -231,6 +233,10 @@ interface OpenCodeSession {
   backgroundShells?: Map<string, { readonly command: string; readonly startedAt: string }>;
   /** Every message id whose parts this session has handled: late updates to a finished message are not a new run. */
   seenMessageIds?: Set<string>;
+  /** The physical `moxen-usage-notice` entry: unknown until a request reconciles it. */
+  noticeSlot: "unknown" | "empty" | { readonly account: string; readonly key: string; readonly attemptId: string };
+  /** Fences a timed-out notice mutation so its late completion cannot publish ownership. */
+  noticeEpoch: number;
   startedAt: string;
 }
 
@@ -1252,6 +1258,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         waiters: new Map(),
         parked: new Map(),
         context: null,
+        noticeSlot: "unknown",
+        noticeEpoch: 0,
         startedAt: new Date().toISOString(),
       };
       // A stop that gave up waiting abandons the start: tear down instead of
@@ -2582,18 +2590,43 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    */
   readonly reconcileNotice = (
     threadId: ThreadId,
-    notice: { key: string; attemptId: string; text: string } | null,
-  ): Effect.Effect<"armed" | "issued" | "cleared", CliError> =>
+    request: NoticeReconcileRequest,
+    signal?: AbortSignal,
+  ): Effect.Effect<NoticeReconcileOutcome, CliError> =>
     this.attempt("OPENCODE_NOTICE_FAILED", `Could not reconcile a usage notice on thread ${threadId}`, async () => {
       const session = this.requireSession(threadId);
       if (session.closed) throw new CliError("OPENCODE_NOT_STARTED", `No live OpenCode session exists for thread ${threadId}.`, { details: { threadId } });
+      const aborted = (): boolean => signal?.aborted === true;
+      if (aborted()) throw new CliError("NOTICE_ABORTED", "The usage notice was cancelled.");
       const connection = await this.connectionFor(session);
-      if (notice === null) {
-        await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, null);
-        return "cleared" as const;
+      if (aborted()) throw new CliError("NOTICE_ABORTED", "The usage notice was cancelled.");
+      const epoch = ++session.noticeEpoch;
+      const onAbort = (): void => {
+        // The request may already be on the wire; the slot is no longer known.
+        session.noticeSlot = "unknown";
+        session.noticeEpoch += 1;
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        if (request.kind === "clear") {
+          const owner = session.noticeSlot;
+          if (request.conditional && owner === "empty") return "skipped" as const;
+          if (request.conditional && owner === "unknown" && (request.account !== undefined || request.key !== undefined)) return "skipped" as const;
+          if (request.conditional && typeof owner === "object"
+            && (request.account !== undefined || request.key !== undefined)
+            && (owner.account !== request.account || owner.key !== request.key)) return "skipped" as const;
+          await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, null, signal);
+          if (aborted() || session.noticeEpoch !== epoch) return "skipped" as const;
+          session.noticeSlot = "empty";
+          return "cleared" as const;
+        }
+        await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, request.text, signal);
+        if (aborted() || session.noticeEpoch !== epoch) return "skipped" as const;
+        session.noticeSlot = { account: request.account, key: request.key, attemptId: request.attemptId };
+        return "issued" as const;
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
       }
-      await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, notice.text);
-      return "issued" as const;
     });
 
   /** Fail every open turn on one server: a fault with no session to blame. */

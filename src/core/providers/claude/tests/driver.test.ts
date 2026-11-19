@@ -77,7 +77,10 @@ describe("claude driver turns", () => {
     const transport = new FakeTransport([[initMessage()]]);
     const driver = new ClaudeDriver({ transport });
     await Effect.runPromise(driver.startSession(START));
-    const result = await Effect.runPromise(driver.reconcileNotice(START.threadId, { key: "codex:session@x", attemptId: "a1", text: "<moxen-usage-notice>stop safely</moxen-usage-notice>" }));
+    const arm = (key: string, attemptId: string, text: string) =>
+      Effect.runPromise(driver.reconcileNotice(START.threadId, { kind: "arm", account: "codex", key, attemptId, text }));
+    const clear = () => Effect.runPromise(driver.reconcileNotice(START.threadId, { kind: "clear", conditional: false }));
+    const result = await arm("codex:session@x", "a1", "<moxen-usage-notice>stop safely</moxen-usage-notice>");
     expect(result).toBe("armed");
     // Nothing entered the conversation as a user message, so there is no unconfirmed steer to turn into a warning-only turn.
     expect(transport.created[0]!.prompts).toEqual([]);
@@ -90,14 +93,17 @@ describe("claude driver turns", () => {
     expect(await hook!(hookInput)).toMatchObject({
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "<moxen-usage-notice>stop safely</moxen-usage-notice>" },
     });
-    // The same attempt is never issued twice; a new attempt is.
-    expect(await Effect.runPromise(driver.reconcileNotice(START.threadId, { key: "codex:session@x", attemptId: "a1", text: "again" }))).toBe("issued");
+    // The composite (key, attempt) is the consume identity: the same key and
+    // attempt is never issued twice, but a new key on the same attempt is.
+    expect(await arm("codex:session@x", "a1", "again")).toBe("issued");
     expect(await hook!(hookInput)).toEqual({});
-    await Effect.runPromise(driver.reconcileNotice(START.threadId, { key: "codex:session@x", attemptId: "a2", text: "second" }));
-    expect(await hook!(hookInput)).toMatchObject({ hookSpecificOutput: { additionalContext: "second" } });
+    expect(await arm("codex:session@k2", "a1", "k2")).toBe("armed");
+    expect(await hook!(hookInput)).toMatchObject({ hookSpecificOutput: { additionalContext: "k2" } });
+    expect(await arm("codex:session@k2", "a1", "k2 replay")).toBe("issued");
+    expect(await hook!(hookInput)).toEqual({});
     // A cleared warning never reaches a request either.
-    await Effect.runPromise(driver.reconcileNotice(START.threadId, { key: "codex:session@y", attemptId: "a3", text: "third" }));
-    await Effect.runPromise(driver.reconcileNotice(START.threadId, null));
+    await arm("codex:session@y", "a3", "third");
+    await clear();
     expect(await hook!(hookInput)).toEqual({});
   });
 

@@ -42,6 +42,8 @@ import type {
   BackgroundTaskSummary,
   ContextBreakdown,
   ContextWindowUsage,
+  NoticeReconcileOutcome,
+  NoticeReconcileRequest,
   ProviderImage,
   ProviderAdapter,
   ProviderAdapterCapabilities,
@@ -217,7 +219,7 @@ interface ClaudeSession {
    * `additionalContext`, keyed by its delivery attempt. Replaced by a newer
    * warning and cleared when the user authorizes continuing.
    */
-  runtimeNotice: { key: string; attemptId: string; text: string } | null;
+  runtimeNotice: { account: string; key: string; attemptId: string; text: string } | null;
   /** Attempts this session already issued: a retry of the same attempt must not deliver twice. */
   consumedNoticeAttempts: Set<string>;
   resumeSessionId: string | null;
@@ -651,20 +653,26 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    */
   readonly reconcileNotice = (
     threadId: ThreadId,
-    notice: { key: string; attemptId: string; text: string } | null,
-  ): Effect.Effect<"armed" | "issued" | "cleared", CliError> =>
+    request: NoticeReconcileRequest,
+    signal?: AbortSignal,
+  ): Effect.Effect<NoticeReconcileOutcome, CliError> =>
     this.attempt("CLAUDE_NOTICE_FAILED", `Could not reconcile a usage notice on thread ${threadId}`, async () => {
       const session = this.requireSession(threadId);
       if (session.closed) throw new CliError("CLAUDE_NOT_STARTED", `No live Claude session exists for thread ${threadId}.`, { details: { threadId } });
-      if (notice === null) {
+      if (signal?.aborted === true) throw new CliError("NOTICE_ABORTED", "The usage notice was cancelled.");
+      if (request.kind === "clear") {
+        if (request.conditional && session.runtimeNotice !== null
+          && (request.account !== undefined || request.key !== undefined)
+          && (session.runtimeNotice.account !== request.account || session.runtimeNotice.key !== request.key)) return "skipped" as const;
         session.runtimeNotice = null;
         return "cleared" as const;
       }
-      if (session.consumedNoticeAttempts.has(notice.attemptId)) {
+      const composite = `${request.key}\0${request.attemptId}`;
+      if (session.consumedNoticeAttempts.has(composite)) {
         session.runtimeNotice = null;
         return "issued" as const;
       }
-      session.runtimeNotice = { key: notice.key, attemptId: notice.attemptId, text: notice.text };
+      session.runtimeNotice = { account: request.account, key: request.key, attemptId: request.attemptId, text: request.text };
       return "armed" as const;
     });
 
@@ -2206,8 +2214,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
             const notice = session.runtimeNotice;
             if (notice === null) return {};
             session.runtimeNotice = null;
-            if (session.consumedNoticeAttempts.has(notice.attemptId)) return {};
-            session.consumedNoticeAttempts.add(notice.attemptId);
+            if (session.consumedNoticeAttempts.has(`${notice.key}\0${notice.attemptId}`)) return {};
+            session.consumedNoticeAttempts.add(`${notice.key}\0${notice.attemptId}`);
             this.publish({
               type: "usage.notice.issued", provider: "claude", threadId: session.threadId,
               key: notice.key, attemptId: notice.attemptId,

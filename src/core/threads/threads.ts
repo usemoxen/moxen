@@ -14,11 +14,13 @@ import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
+import { driverKindOfInstance } from "../types.js";
 import type {
   InteractionMode,
   ModelSelection,
   RuntimeMode,
 } from "../types.js";
+import { isControlCommand } from "../providers/spi.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
 import type {
@@ -1002,6 +1004,8 @@ export async function redeliverUnconfirmedSteers(
       prompt: text,
       delivery: "queue",
       ...(original?.origin ? { origin: original.origin } : {}),
+      ...(original?.automatic === true ? { automatic: true as const } : {}),
+      ...(original?.control === true ? { control: true as const } : {}),
       ...(original?.notification ? { notification: original.notification } : {}),
       ...(uploads.length > 0 ? { attachments: uploads } : {}),
       ...(wakeSettled ? { wakeSettled: true } : {}),
@@ -1236,9 +1240,9 @@ function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): 
  * the folded messages ride the same reset. Any other queue-carrying turn (a
  * wake-up, a handoff, a held entry) keeps its own turn, as before.
  */
-async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode): Promise<void> {
+async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode, baseModel: ModelSelection): Promise<void> {
   if (next.queue && next.scheduleReason !== "usage-reset") return;
-  const batch = turns.filter(
+  const candidates = turns.filter(
     (turn) =>
       turn.id !== next.id &&
       turn.status === "queued" &&
@@ -1249,9 +1253,19 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
       waitingInteractionMode(turn, threadMode) === waitingInteractionMode(next, threadMode) &&
       sameModel(turn, next),
   );
+  // No candidate means nothing to batch: do not read the message ledger here
+  // (a recovery read failure is the recovery's to observe).
+  if (candidates.length === 0) return;
+  const messages = await store.readMessages(threadId);
+  const isControl = (turn: StoredTurn): boolean => {
+    const kind = driverKindOfInstance((turn.modelSelection ?? baseModel).instanceId);
+    return messages.some((message) => message.turnId === turn.id && (message.control === true || isControlCommand(kind, message.text)));
+  };
+  // A provider control stays standalone, including from other controls.
+  if (isControl(next)) return;
+  const batch = candidates.filter((turn) => !isControl(turn));
   if (batch.length === 0) return;
   const folded = new Set(batch.map((turn) => turn.id));
-  const messages = await store.readMessages(threadId);
   await store.rewriteLedger(threadId, "messages", messages.map((message) => (folded.has(message.turnId) ? { ...message, turnId: next.id } : message)));
   await store.rewriteLedger(threadId, "turns", turns.filter((turn) => !folded.has(turn.id)));
   await store.appendLedger(threadId, "activity", {
@@ -1381,14 +1395,14 @@ async function cancelStaleContinueLocked(store: ThreadStore, threadId: string, t
   store.emit(threadId, "turn-interrupted");
 }
 
-async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<void> {
+async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<string | null> {
   const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
   const pause = thread.usagePause;
-  if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return;
+  if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return null;
   let turns = await store.readTurns(threadId);
   // A live turn blocks promotion: a running one, an ownerless one, or one
   // with a status no build writes. So does a turns ledger hiding rows.
-  if (liveTurn(turns) || hiddenTurnsProblem(store, threadId)) return;
+  if (liveTurn(turns) || hiddenTurnsProblem(store, threadId)) return null;
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
   const instant = Date.parse(now);
   if (admittedId === undefined) {
@@ -1437,11 +1451,11 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // or settle.
     await holdQueuedForAdmission(store, threadId, instant);
   }
-  if (!next) return;
+  if (!next) return null;
   if (pause && pause.recoveryTurnId === next.id) {
     await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
   }
-  await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode);
+  await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode, thread.modelSelection);
   await store.updateTurn(threadId, next.id, { status: "running", interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now, ...(next.heldAtSettle ? { heldAtSettle: undefined } : {}) });
   await store.appendLedger(threadId, "activity", {
     id: store.newId(),
@@ -1452,6 +1466,7 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     createdAt: now,
   });
   store.emit(threadId, "turn-promoted");
+  return next.id;
 }
 
 /**
@@ -1541,7 +1556,7 @@ async function finishTurn(
   rawTurnId: string,
   status: "completed" | "failed",
   input: FinishTurnInput = {},
-): Promise<{ thread: StoredThread; turn: StoredTurn }> {
+): Promise<{ thread: StoredThread; turn: StoredTurn; promotedTurnId: string | null }> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId.trim();
   if (!turnId) {
@@ -1597,11 +1612,11 @@ async function finishTurn(
       summary: status === "failed" ? (input.error ?? turnId) : turnId,
       createdAt: now,
     });
-    await promoteQueuedLocked(store, threadId, now);
+    const promotedTurnId = await promoteQueuedLocked(store, threadId, now);
     const next = { ...thread, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, status === "completed" ? "turn-completed" : "turn-failed");
-    return { thread: next, turn: updated };
+    return { thread: next, turn: updated, promotedTurnId };
   });
 }
 
@@ -1621,8 +1636,25 @@ export async function failTurn(
   threadId: string,
   turnId: string,
   input: FinishTurnInput = {},
-): Promise<{ thread: StoredThread; turn: StoredTurn }> {
+): Promise<{ thread: StoredThread; turn: StoredTurn; promotedTurnId: string | null }> {
   return await finishTurn(store, threadId, turnId, "failed", input);
+}
+
+/**
+ * Fail a turn whose runner never took it (a failed session start or notice
+ * preparation) and hand back the promotion the failure actually made. The
+ * promotion is claimed and requeued for the admission path; a runner that
+ * already took it wins.
+ */
+export async function failUnstartedTurn(
+  store: ThreadStore,
+  threadId: string,
+  turnId: string,
+  input: FinishTurnInput = {},
+): Promise<{ thread: StoredThread; turn: StoredTurn; promotedTurnId: string | null }> {
+  const failed = await failTurn(store, threadId, turnId, input);
+  if (failed.promotedTurnId !== null) await holdStrandedPromotions(store, threadId, new Set([failed.promotedTurnId]));
+  return failed;
 }
 
 export interface InterruptTurnResult {

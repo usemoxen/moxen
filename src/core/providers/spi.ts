@@ -217,6 +217,22 @@ export function isCompactCommand(prompt: string): boolean {
   return prompt.trim() === "/compact";
 }
 
+/** `/compact`, alone or with what the summary should pay attention to (Harness and Claude). */
+export function isManualCompactionCommand(prompt: string): boolean {
+  return /^\/compact(?:\s+[\s\S]*)?$/.test(prompt.trim());
+}
+
+/**
+ * Whether a prompt is a provider control command, by that provider's own
+ * grammar: Codex and OpenCode accept the bare `/compact`, Claude and the
+ * Harness also accept a focus. No other slash-led text is a control.
+ */
+export function isControlCommand(kind: ProviderDriverKind | null, prompt: string): boolean {
+  if (kind === "codex" || kind === "opencode") return isCompactCommand(prompt);
+  if (kind === "claude" || kind === "harness") return isManualCompactionCommand(prompt);
+  return false;
+}
+
 /**
  * One `awaitTurn` caller aborted: drop only its waiter, so the turn's other
  * waiters still settle. Removing the whole list (as aborting used to) rejects
@@ -567,6 +583,25 @@ export interface ProviderSessionTitles {
   readonly regenerateSessionTitle?: (cursor: string, workingDirectory: string) => Promise<string | null>;
 }
 
+/** One runtime-context warning reconciliation. */
+export type NoticeReconcileRequest =
+  | {
+    readonly kind: "arm";
+    readonly account: string;
+    readonly key: string;
+    readonly attemptId: string;
+    readonly text: string;
+  }
+  | {
+    /** Required before a controllable request, or conditional on the current owner for maintenance. */
+    readonly kind: "clear";
+    readonly conditional: boolean;
+    readonly account?: string;
+    readonly key?: string;
+  };
+
+export type NoticeReconcileOutcome = "armed" | "issued" | "cleared" | "skipped";
+
 export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles {
   readonly provider: ProviderDriverKind;
   readonly capabilities: ProviderAdapterCapabilities;
@@ -619,8 +654,9 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
    */
   readonly reconcileNotice?: (
     threadId: ThreadId,
-    notice: { readonly key: string; readonly attemptId: string; readonly text: string } | null,
-  ) => Effect.Effect<"armed" | "issued" | "cleared", TError>;
+    request: NoticeReconcileRequest,
+    signal?: AbortSignal,
+  ) => Effect.Effect<NoticeReconcileOutcome, TError>;
 
   /**
    * A steer handed to the provider's running turn that the provider has not

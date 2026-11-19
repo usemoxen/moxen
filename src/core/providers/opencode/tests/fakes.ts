@@ -247,7 +247,8 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
     this.calls.push({ method: "session.switchAgent", args: { sessionID, agent } });
   }
 
-  async setInstructions(sessionID: string, key: string, value: string | null): Promise<void> {
+  async setInstructions(sessionID: string, key: string, value: string | null, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted === true) throw new Error("aborted");
     this.calls.push({ method: "session.instructions", args: { sessionID, key, value } });
     this.failChecked("session.instructions");
   }

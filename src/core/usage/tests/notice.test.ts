@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildRuntimeInstructions, MESSAGES_GUIDANCE } from "../../threads/instructions.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../limits.js";
+import { isControlCommand } from "../../providers/spi.js";
 import {
+  controlPrompt,
   planUsageNoticeDispatch,
+  turnKind,
   turnProvenance,
   USAGE_NOTICE_TAG,
   usageNoticeKey,
@@ -126,13 +129,29 @@ describe("the model-facing usage notice", () => {
   it("reads batch provenance from every message: any genuine user message makes it explicit", () => {
     const user = { turnId: "t", role: "user", text: "of course", automatic: false } as never;
     const task = { turnId: "t", role: "user", text: "a task settled", automatic: true, origin: "task-notification" } as never;
-    const control = { turnId: "t", role: "user", text: "/compact", automatic: true, control: true } as never;
     expect(turnProvenance([task, user], { id: "t" })).toBe("explicit");
-    expect(turnProvenance([task, control], { id: "t" })).toBe("automatic");
     expect(turnProvenance([user], { id: "t" })).toBe("explicit");
     // Older messages without the flag fall back to their internal origin.
     expect(turnProvenance([{ turnId: "t", role: "user", text: "x", origin: "task-notification" } as never], { id: "t" })).toBe("automatic");
     expect(turnProvenance([{ turnId: "t", role: "user", text: "x" } as never], { id: "t" })).toBe("explicit");
+  });
+
+  it("recognises a control only in the provider's own grammar, never a path-like message", () => {
+    expect(isControlCommand("codex", "/compact")).toBe(true);
+    expect(isControlCommand("codex", "/compact focus")).toBe(false);
+    expect(isControlCommand("opencode", "/compact")).toBe(true);
+    expect(isControlCommand("opencode", "/compact focus")).toBe(false);
+    expect(isControlCommand("claude", "/compact focus")).toBe(true);
+    expect(isControlCommand("harness", "/compact focus")).toBe(true);
+    for (const kind of ["codex", "opencode", "claude", "harness"] as const) {
+      expect(isControlCommand(kind, "/Users/aaron/project needs checking")).toBe(false);
+    }
+    expect(controlPrompt("codex", "/Users/aaron/project needs checking")).toBe(false);
+    const legacy = { turnId: "t", role: "user", text: "/compact", origin: "task-notification" } as never;
+    expect(turnKind([legacy], { id: "t", delivery: "queued" }, "codex")).toBe("control");
+    expect(turnKind([{ turnId: "t", role: "user", text: "/Users/aaron/project needs checking" } as never], { id: "t", delivery: "queued" }, "codex")).toBe("message");
+    // An explicit flag still wins over text.
+    expect(turnKind([{ turnId: "t", role: "user", text: "plain", control: true } as never], { id: "t", delivery: "queued" }, "codex")).toBe("control");
   });
 
   it("puts the block ahead of the typed prompt without changing it", () => {
