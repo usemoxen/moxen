@@ -3557,14 +3557,93 @@ interface ReviewVerdictPin {
   readonly model: string | null;
 }
 
+/** One finished turn of a thread. */
+interface FinishedTurn {
+  readonly turnId: string;
+  /** Its final assistant message; null when it said nothing. */
+  readonly report: string | null;
+  readonly model: string | null;
+  /** Whether it is the thread's first turn — the one that carried the hand-off document. */
+  readonly first: boolean;
+}
+
 /** A thread's own settled turns, newest first. */
 interface SettledReview {
   /** The thread finished at least one turn, so its own report is what the parent reads. */
   readonly settled: boolean;
   /** The newest finished turn whose final message carries a verdict. */
   readonly pinned: ReviewVerdictPin | null;
-  /** The newest finished turn's final message, the model that ran it, and whether it is the thread's first turn. */
-  readonly latest: { readonly turnId: string; readonly report: string | null; readonly model: string | null; readonly first: boolean } | null;
+  /** Every finished turn, newest first. */
+  readonly completed: readonly FinishedTurn[];
+  /** The newest finished turn. */
+  readonly latest: FinishedTurn | null;
+}
+
+/**
+ * How a hand-off acknowledgement opens: the model confirming it has the
+ * document and will continue, before it has reviewed anything.
+ */
+const ACKNOWLEDGEMENT_OPENERS = [
+  "acknowledged",
+  "acknowledgement",
+  "acknowledgment",
+  "handoff received",
+  "hand-off received",
+  "received the handoff",
+  "received the hand-off",
+  "got it",
+  "understood",
+  "on it",
+  "will do",
+];
+
+/**
+ * The words a review report uses to state what it found. An acknowledgement
+ * that carries one is not an acknowledgement: it already said something about
+ * the target, so the parent must judge it.
+ */
+const FINDING_WORDS =
+  /\b(?:finding|findings|regression|regressions|bug|bugs|issue|issues|defect|defects|blocker|blockers|severity|vulnerabilit(?:y|ies)|nit|nits|problem|problems|broken|failing|fails|failed|failure|failures|error|errors|risk|risks|proof|sequence)\b/iu;
+
+/**
+ * Whether a reply only acknowledges the hand-off: empty, or opening with one
+ * of a few acknowledgement phrases and stating no finding and no verdict. The
+ * check is deliberately narrow — anything else is a report, however short,
+ * and is judged as one — so "Found a regression." is never mistaken for
+ * "Acknowledged.".
+ */
+function acknowledged(report: string | null): boolean {
+  const said = (report ?? "").trim().toLowerCase();
+  if (said === "") return true;
+  if (FINDING_WORDS.test(said) || /verdict\s*:/u.test(said)) return false;
+  return ACKNOWLEDGEMENT_OPENERS.some((opener) => {
+    if (!said.startsWith(opener)) return false;
+    const next = said.charAt(opener.length);
+    return next === "" || !/[\p{L}\p{N}]/u.test(next);
+  });
+}
+
+/**
+ * Whether the thread did nothing but acknowledge the hand-off: every finished
+ * turn is an acknowledgement and none of them used a tool. `openingOnly`
+ * restricts it to the thread's first turn, the one the hand-off document
+ * opened — a later one-line reply is a report, however short.
+ */
+async function handoffOnly(
+  ctx: OperationContext,
+  threadId: string,
+  settled: SettledReview,
+  openingOnly: boolean,
+): Promise<boolean> {
+  const turns = openingOnly ? settled.completed.slice(0, 1) : settled.completed;
+  if (turns.length === 0 || (openingOnly && turns[0]!.first !== true)) return false;
+  if (!turns.every((turn) => acknowledged(turn.report))) return false;
+  const worked = new Set(
+    (await ctx.store.readActivities(threadId).catch(() => [] as StoredActivity[]))
+      .filter((activity) => activity.kind.startsWith("tool-call."))
+      .map((activity) => activity.turnId),
+  );
+  return turns.every((turn) => !worked.has(turn.turnId));
 }
 
 /**
@@ -3600,19 +3679,25 @@ async function reviewLineage(
   return null;
 }
 
-/** A pinned review as a settled verdict, or null when it settled none. */
-function pinnedVerdict(review: NonNullable<StoredDelegation["review"]>): ReviewVerdictPin | null {
+/**
+ * A pinned review as a settled verdict. Attribution prefers the model the pin
+ * recorded, then the reviewer's delegation snapshot on the row that holds it;
+ * older rows recorded neither, and are left unknown rather than borrowing a
+ * later thread's model.
+ */
+function pinnedVerdict(review: NonNullable<StoredDelegation["review"]>, row: StoredDelegation): ReviewVerdictPin | null {
   return review.verdict !== null && review.report !== null
-    ? { verdict: review.verdict, report: review.report, model: review.model ?? null }
+    ? { verdict: review.verdict, report: review.report, model: review.model ?? row.modelSnapshot?.child ?? null }
     : null;
 }
 
 /**
  * The verdict a review settled with before this thread, newest incarnation
  * first: the pin its row holds, else the newest verdict its own turns settled
- * with (a continue can land before anything pinned it). The first incarnation
- * that settled a report decides — a pin without a verdict means the review
- * really ended without one, never that an older verdict comes back.
+ * with (a continue can land before anything pinned it). An incarnation that
+ * only acknowledged the hand-off is skipped, and so is one that settled
+ * nothing yet; one that settled a real report decides, even without a verdict
+ * — the review really ended without one, never back to an older verdict.
  */
 async function carriedReview(
   ctx: OperationContext,
@@ -3621,28 +3706,16 @@ async function carriedReview(
 ): Promise<ReviewVerdictPin | null> {
   for (const entry of chain) {
     if (entry.childThreadId === child.id) continue;
-    if (entry.review !== undefined) return pinnedVerdict(entry.review);
+    if (entry.review !== undefined) return pinnedVerdict(entry.review, entry);
     const settled = await settledReview(ctx, entry.childThreadId);
-    if (settled.pinned !== null) return settled.pinned;
-    if (settled.settled) return null;
+    if (settled.pinned !== null) {
+      return { ...settled.pinned, model: settled.pinned.model ?? entry.modelSnapshot?.child ?? null };
+    }
+    if (!settled.settled) continue;
+    if (await handoffOnly(ctx, entry.childThreadId, settled, false)) continue;
+    return null;
   }
   return null;
-}
-
-/**
- * A continued thread's opening turn can be nothing but the model answering
- * the hand-off document: no tool work, and one plain line or none at all. It
- * reviewed nothing, so the verdict the task settled with still stands. A turn
- * that used a tool, or wrote more than one line, owes its own verdict.
- */
-async function bootstrapOnly(
-  ctx: OperationContext,
-  threadId: string,
-  latest: NonNullable<SettledReview["latest"]>,
-): Promise<boolean> {
-  if (latest.report !== null && latest.report.trim().split(/\r?\n/u).length > 1) return false;
-  const activities = await ctx.store.readActivities(threadId).catch(() => [] as StoredActivity[]);
-  return !activities.some((activity) => activity.turnId === latest.turnId && activity.kind.startsWith("tool-call."));
 }
 
 /**
@@ -3670,18 +3743,25 @@ async function reviewFactsForTask(
   const snapshot = row?.modelSnapshot;
   const parentModel = snapshot?.parent ?? (parent === null ? null : modelOf(parent.modelSelection));
   const own = await settledReview(ctx, child.id);
-  // A bootstrap-only opening turn did not review anything, so the verdict the
-  // task carried still stands; any other settled turn is what the parent reads.
-  const bootstrap = own.settled && own.latest !== null ? await bootstrapOnly(ctx, child.id, own.latest) : false;
+  // Only a thread's opening hand-off turn can be nothing but an acknowledgement;
+  // any other finished turn is a report, however short. A thread that only
+  // acknowledged reviewed nothing, so the verdict it carried still stands.
+  const bootstrap = await handoffOnly(ctx, child.id, own, true);
   const carried = own.settled && !bootstrap ? null : await carriedReview(ctx, lineage.chain, child);
   if (task.status === "running") {
     const report = carried?.report ?? null;
     const childModel = carried?.model ?? snapshot?.child ?? modelOf(child.modelSelection);
     return { ...reviewFactsOf({ finished: false, interactionMode: "review", report, childModel, parentModel })!, report };
   }
-  const pinned = own.pinned ?? carried;
+  const pinned = own.pinned !== null
+    ? { ...own.pinned, model: own.pinned.model ?? snapshot?.child ?? null }
+    : carried;
   const report = pinned?.report ?? task.summary;
-  const childModel = pinned?.model ?? own.latest?.model ?? snapshot?.child ?? modelOf(child.modelSelection);
+  // The model that produced the report being shown — never this thread's own
+  // model when the verdict came from an earlier incarnation.
+  const childModel = pinned === null
+    ? own.latest?.model ?? snapshot?.child ?? modelOf(child.modelSelection)
+    : pinned.model;
   const facts = reviewFactsOf({ finished: true, interactionMode: "review", report, childModel, parentModel })!;
   const owned = row ?? null;
   if (owned !== null && (owned.review?.verdict !== facts.verdict || owned.review?.report !== report || (owned.review?.model ?? null) !== childModel)) {
@@ -3693,8 +3773,8 @@ async function reviewFactsForTask(
 /**
  * A thread's own settled turns: whether any turn finished, the newest one
  * whose final message carries a verdict (a conversational follow-up settles
- * without one, so the search walks past it to the settled review), and the
- * newest finished turn's final message.
+ * without one, so the search walks past it to the settled review), and every
+ * finished turn with its final message.
  */
 async function settledReview(
   ctx: OperationContext,
@@ -3710,22 +3790,20 @@ async function settledReview(
   for (const message of messages) {
     if (message.role === "assistant" && message.text.trim().length > 0) finals.set(message.turnId, message.text);
   }
-  let settled = false;
+  const completed: FinishedTurn[] = [];
   let pinned: ReviewVerdictPin | null = null;
-  let latest: SettledReview["latest"] = null;
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index]!;
     if (turn.status !== "completed") continue;
-    settled = true;
     const report = finals.get(turn.id) ?? null;
     const model = turn.modelSelection ? `${turn.modelSelection.instanceId}/${turn.modelSelection.model}` : null;
-    latest ??= { turnId: turn.id, report, model, first: index === 0 };
+    completed.push({ turnId: turn.id, report, model, first: index === 0 });
     if (pinned === null) {
       const verdict = reviewVerdictOf(report);
       if (verdict !== null && report !== null) pinned = { verdict, report, model };
     }
   }
-  return { settled, pinned, latest };
+  return { settled: completed.length > 0, pinned, completed, latest: completed[0] ?? null };
 }
 
 /** One task's settled facts: status, time, model, branch, headline, and what it changed. */

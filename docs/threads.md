@@ -120,20 +120,26 @@ When the reviewer runs on the same model as the delegating thread, both say so: 
 warning, not a refusal. The parent side of that comparison is the model
 recorded when the task was delegated, so a parent that moves on cannot
 rewrite it; the reviewer side is the model that produced the report being
-shown, so a continuation on another model is compared as it actually ran.
-The settled verdict is pinned on the delegation with that model: a
-conversational follow-up turn cannot rewrite it, while a follow-up that
-settles with its own verdict re-pins. Continuing a review child starts the
-new thread in Build, with a ledger note saying Review was reset. The task
-stays a review: the verdict, the same-model warning and the missing-verdict
-warning follow the task's delegation lineage — the hand-offs it went
-through, so a second continuation reads the one in between rather than
-the original — rather than the new thread's Build mode, and its
-notification and `task_status` keep them. A continuation whose opening
-turn only answers the hand-off document keeps the carried verdict: it used
-no tool and wrote one plain line or nothing, so it reviewed nothing. Once
-a turn did tool work, or wrote more than one line, its report is what the
-parent judges, and a missing trailing verdict is called out again.
+shown — recorded with the verdict, or the reviewer's delegation-time model
+when the report predates that record — so a continuation on another model
+is compared as it actually ran, and a hand-off acknowledgement's model is
+never used for it. The settled verdict is pinned on the delegation with
+that model: a conversational follow-up turn cannot rewrite it, while a
+follow-up that settles with its own verdict re-pins. Continuing a review
+child starts the new thread in Build, with a ledger note saying Review was
+reset. The task stays a review: the verdict, the same-model warning and the
+missing-verdict warning follow the task's delegation lineage — the
+hand-offs it went through, so a second continuation reads the one in
+between rather than the original — rather than the new thread's Build mode,
+and its notification and `task_status` keep them. A continuation whose
+opening turn only acknowledges the hand-off keeps the carried verdict: it
+used no tool, and its reply is empty, or opens with an acknowledgement such
+as `Acknowledged.` and states no finding or verdict — so it reviewed
+nothing. Any later turn, and any turn that used a tool or said anything
+else — "Found a regression." included — is a report the parent judges, and
+a missing trailing verdict is called out again. A hand-off that only
+acknowledged is passed over the same way when a second hand-off looks back
+for the verdict the task settled with.
 
 On the CLI, `moxen threads delegate --thread <id> --prompt <task> --mode research`
 starts one researcher. Adding `--research-size 2,1` supplies the user's size and

@@ -394,6 +394,129 @@ describe("continuing a review thread", () => {
     expect(taskNotificationText([notified])).toContain("Review verdict: FIX FIRST");
   });
 
+  it("warns when a one-line opening report carries no standalone verdict line", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [turn] = await w.store.readTurns(continued.threadId);
+    // A substantive report, not an acknowledgement: it ends with a line whose
+    // verdict words are not a verdict of their own.
+    await completeTurn(w.store, continued.threadId, turn!.id, { text: "Found a regression. VERDICT: FIX FIRST" });
+
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: null });
+    expect(notified.review?.note).toContain("no VERDICT");
+    expect(taskNotificationText([notified])).toContain("Review verdict: none — this is not a finished review");
+    expect(taskNotificationText([notified])).not.toContain("Review verdict: FIX FIRST");
+  });
+
+  it("warns when a one-line opening turn reports a finding instead of acknowledging", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [turn] = await w.store.readTurns(continued.threadId);
+    await completeTurn(w.store, continued.threadId, turn!.id, { text: "Found a regression; the review is complete." });
+
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: null });
+    expect(notified.review?.note).toContain("no VERDICT");
+    expect(taskNotificationText([notified])).toContain("Review verdict: none — this is not a finished review");
+  });
+
+  it("warns when an acknowledgement also states a finding", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [turn] = await w.store.readTurns(continued.threadId);
+    // The opener does not make it an acknowledgement: it already reported.
+    await completeTurn(w.store, continued.threadId, turn!.id, { text: "Acknowledged. The regression is in login.tsx." });
+
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: null });
+    expect(notified.review?.note).toContain("no VERDICT");
+  });
+
+  it("warns when the report arrives on a later turn, after an opening acknowledgement", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [opening] = await w.store.readTurns(continued.threadId);
+    await completeTurn(w.store, continued.threadId, opening!.id, { text: "Acknowledged." });
+    // The carried verdict stands only for the opening turn: the next report is
+    // the parent's to judge, however short.
+    const second = (await sendTurn(w.store, continued.threadId, { prompt: "What did you find?" })).turn;
+    await completeTurn(w.store, continued.threadId, second.id, { text: "Found a regression; the review is complete." });
+
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: null });
+    expect(notified.review?.note).toContain("no VERDICT");
+  });
+
+  it("keeps an unpinned verdict across two hand-offs that only acknowledged", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    // Nothing reads the task between these hand-offs, so no row is pinned:
+    // the verdict lives only in the original review's settled turn.
+    const first = await continueThread(w.ctx, { threadId: child.id });
+    const [firstOpening] = await w.store.readTurns(first.threadId);
+    await completeTurn(w.store, first.threadId, firstOpening!.id, { text: "Acknowledged." });
+    const second = await continueThread(w.ctx, { threadId: first.threadId });
+    const [secondOpening] = await w.store.readTurns(second.threadId);
+    await completeTurn(w.store, second.threadId, secondOpening!.id, { text: "Acknowledged." });
+    expect((await w.store.readDelegations()).every((row) => row.review === undefined)).toBe(true);
+
+    const described = await describeTask(w.ctx, parent.id, child.id);
+    expect(described.review).toMatchObject({ verdict: "MERGE", sameModel: false });
+    const notified = (await taskNotificationOf(w.ctx, second.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: "MERGE" });
+  });
+
+  it("attributes a legacy pin to the reviewer's model, not the acknowledgement's", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", instanceId: "codex", model: "other-model" });
+    const now = new Date().toISOString();
+    const report = "One nit in the login form.\n\nVERDICT: MERGE";
+    // A row written before the pin recorded its model, so only the delegation
+    // snapshot says who reviewed.
+    await w.store.appendDelegation({
+      id: "d1", parentThreadId: parent.id, childThreadId: child.id, prompt: "Review it", status: "running", notify: true,
+      modelSnapshot: { parent: "opencode/gpt-5.6-sol", child: "codex/other-model" },
+      review: { verdict: "MERGE", report }, createdAt: now, updatedAt: now,
+    });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: report });
+
+    // The continuation runs on the parent's own model and only acknowledges,
+    // so the report shown is still the reviewer's, on the reviewer's model.
+    const continued = await continueThread(w.ctx, {
+      threadId: child.id,
+      modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
+    });
+    const [opening] = await w.store.readTurns(continued.threadId);
+    await completeTurn(w.store, continued.threadId, opening!.id, { text: "Acknowledged." });
+
+    const described = await describeTask(w.ctx, parent.id, child.id);
+    expect(described.review).toMatchObject({ verdict: "MERGE", sameModel: false });
+    const row = (await w.store.readDelegations()).find((candidate) => candidate.childThreadId === continued.threadId);
+    expect(row?.review?.model).toBe("codex/other-model");
+  });
+
   it("compares the model that produced the verdict, not the one the task was delegated on", async () => {
     const w = await reviewWorld();
     const parent = await w.make("orchestrator");
