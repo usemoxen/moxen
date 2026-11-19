@@ -100,6 +100,34 @@ describe("toThreadEnvelope", () => {
     expect(worktree.latestTurn).toBeNull();
   });
 
+  it("numbers checkpoints by turns that ran, not by rows still waiting in the queue", () => {
+    const projected = toThreadEnvelope(
+      thread(),
+      [
+        turn({ id: "t1", createdAt: "2026-11-19T00:00:00.000Z" }),
+        // Queued before the second real turn but run after it.
+        turn({ id: "q", status: "queued", delivery: "queued", createdAt: "2026-11-19T00:05:00.000Z", scheduledFor: "2026-11-19T00:20:00.000Z", completedAt: null }),
+        turn({ id: "t3", createdAt: "2026-11-19T00:09:00.000Z", startedAt: "2026-11-19T00:09:00.000Z" }),
+      ],
+      {
+        checkpoints: [
+          { id: "c1", threadId: "thread-1", turnId: "t1", status: "available", ref: "a", baseRef: "b", createdAt: "2026-11-19T00:00:00.000Z" },
+          { id: "c3", threadId: "thread-1", turnId: "t3", status: "available", ref: "c", baseRef: "d", createdAt: "2026-11-19T00:09:00.000Z" },
+        ],
+      },
+    );
+    // Two turns have run: the queued message is not a turn a reader has seen.
+    expect(projected.checkpoints?.map((row) => row.checkpointTurnCount)).toEqual([1, 2]);
+  });
+
+  it("keeps the last turn that ran as latest when a queued message is taken back before it runs", () => {
+    const projected = toThreadEnvelope(thread(), [
+      turn({ id: "t1", createdAt: "2026-11-19T00:00:00.000Z" }),
+      turn({ id: "q", status: "interrupted", delivery: "queued", createdAt: "2026-11-19T00:05:00.000Z", scheduledFor: "2026-11-19T00:20:00.000Z", updatedAt: "2026-11-19T00:17:00.000Z", completedAt: "2026-11-19T00:17:00.000Z" }),
+    ]);
+    expect(projected.latestTurn).toMatchObject({ turnId: "t1", state: "completed" });
+  });
+
   it("attaches ledgers with checkpoint turn counts", () => {
     const projected = toThreadEnvelope(
       thread(),

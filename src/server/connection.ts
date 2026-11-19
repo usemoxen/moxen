@@ -166,7 +166,7 @@ import {
   type OperationContext,
   type StartedTurn,
 } from "../core/threads/operations.js";
-import { toThreadEnvelope } from "../core/threads/project.js";
+import { ranTurns, toThreadEnvelope } from "../core/threads/project.js";
 import { backfillNativeSubagents, subagentTranscript } from "../core/threads/subagents.js";
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
 import { isKnownTurnStatus } from "../core/threads/problems.js";
@@ -2239,7 +2239,7 @@ export class DirectConnection implements ClientApi {
       store.readTurns(threadId).catch(() => []),
       store.readCheckpoints(threadId).catch(() => []),
     ]);
-    const turn = turns[toTurnCount - 1];
+    const turn = ranTurns(turns)[toTurnCount - 1];
     if (!turn) return null;
     const checkpoint = checkpoints.find((row) => row.turnId === turn.id);
     if (!checkpoint || checkpoint.status !== "available" || !checkpoint.ref || !checkpoint.baseRef) return null;

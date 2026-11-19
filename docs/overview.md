@@ -193,7 +193,9 @@ no data, which is not the same as unlimited.
 
 `thread_read` never floods the caller's context: it returns an outline (one
 line per turn, newest first), then the turns asked for (each tool call one
-line, numbered `12.3`), then one tool call in full, in pages. An answer is
+line, numbered `12.3`), then one tool call in full, in pages. Turns are
+numbered by the order they ran: a queued message that has not run, or was
+taken back before it ran, is not one of them. An answer is
 held to 16 K characters, at most 40 K, and to about 5% of the caller's free
 context, so a caller that is nearly full gets only the outline and is told
 why. Every cut names the call that fetches the rest, and the thread's text

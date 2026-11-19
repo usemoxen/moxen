@@ -42,7 +42,9 @@ process running it (pid and host). If that process dies mid-turn — a
 crashed server, a killed CLI, a TUI closed during a turn — nothing would
 ever settle it, so the next operation that touches the thread interrupts
 the orphaned turn and runs the one queued behind it. A turn owned on
-another host is never judged.
+another host is never judged. A running turn that a server shutdown stops
+is recorded interrupted with that reason, and so is one a settle ends, so a
+ledger never leaves an unexplained stop.
 
 A queued message outlives the settle it was waiting for when the thread
 cannot take it: a snoozed thread, or a provider whose allowance is
@@ -1332,7 +1334,11 @@ the file, and writes its replacement too.
 ## Revert
 
 Revert rolls back every provider that saw a dropped turn, then cuts the
-ledger. Files stay as they are unless asked back too (`--restore-files`),
+ledger. Turns are counted in the order they ran, as every other reader
+numbers them; a message that never ran is not counted: an interrupted one
+is left in the ledger, and a terminal one that never reached the provider
+has no prompt or snapshot to roll back.
+Files stay as they are unless asked back too (`--restore-files`),
 in which case the worktree returns to the first dropped turn's snapshot
 and the replaced state is pinned under a `revert-*` ref to undo by.
 

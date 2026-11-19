@@ -711,12 +711,14 @@ async function interruptTurnLocked(
   turn: StoredTurn,
   now: string,
   usagePause?: StoredTurn["usagePause"],
+  reason?: string,
 ): Promise<StoredTurn> {
   store.abortRunning(turn.id);
   store.untrackRunning(turn.id);
   const updated = await store.updateTurn(thread.id, turn.id, {
     status: "interrupted",
     ...(usagePause ? { usagePause } : {}),
+    ...(reason ? { error: reason } : {}),
     updatedAt: now,
     completedAt: now,
   });
@@ -725,7 +727,7 @@ async function interruptTurnLocked(
     threadId: thread.id,
     turnId: turn.id,
     kind: "turn.interrupted",
-    summary: turn.id,
+    summary: reason ?? turn.id,
     // A queued or scheduled message taken back before it ran: clients drop
     // it from the transcript rather than show a turn that never happened.
     ...(turn.status === "queued" ? { payload: { beforeStart: true } } : {}),
@@ -1627,6 +1629,7 @@ export async function interruptTurn(
   rawThreadId: string,
   rawTurnId?: string,
   usagePause?: StoredTurn["usagePause"],
+  options: { readonly reason?: string } = {},
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId?.trim() || undefined;
@@ -1657,7 +1660,7 @@ export async function interruptTurn(
     // it (which claims the turn below before its session starts). Read before
     // the interrupt releases the claim.
     const hasRunner = store.isTracked(target.id);
-    const updated = await interruptTurnLocked(store, thread, target, now, usagePause);
+    const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason);
     if (hasRunner) {
       await promoteQueuedLocked(store, threadId, now);
     } else {
@@ -1739,7 +1742,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
         // Every live turn, queued ones included: a queue left behind would start the moment the settled thread woke.
         for (const turn of await store.readTurns(entry.id)) {
           if (turn.status === "running" || turn.status === "queued" || !isKnownTurnStatus(turn.status)) {
-            await interruptTurnLocked(store, entry.thread, turn, now);
+            await interruptTurnLocked(store, entry.thread, turn, now, undefined, "The thread was settled, stopping its work.");
           }
         }
         const index = members.findIndex((member) => member.id === entry.id);
