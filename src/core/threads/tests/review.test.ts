@@ -3,13 +3,18 @@
  * review must end with, what the parent is told about a review task, and
  * the procedure the mode carries.
  */
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { testHarness } from "../../testing/harness.js";
 import { modeChange, modeInstructionKey, modeProcedure, PROCEDURE_MODES } from "../modes.js";
 import { reviewFactsOf, reviewVerdictOf, taskNotificationText, type TaskNotification } from "../notify.js";
-import { continueThread, delegate, describeTask, taskNotificationOf, type OperationContext } from "../operations.js";
-import { createThread, sendTurn, completeTurn } from "../threads.js";
+import { continueThread, delegate, describeTask, prepareQueuedHandoff, taskNotificationOf, type OperationContext } from "../operations.js";
+import { parseQueuePolicy } from "../queue.js";
+import { REVIEW_HANDOFF_ACK, REVIEW_HANDOFF_INSTRUCTION } from "../reviewtask.js";
+import { createThread, sendTurn, completeTurn, failTurn } from "../threads.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { TurnDriver } from "../execute.js";
 
@@ -260,6 +265,42 @@ describe("a finished review task", () => {
 });
 
 describe("continuing a review thread", () => {
+  it("asks a continued review for the exact acknowledgement on every hand-off path", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const manual = await continueThread(w.ctx, { threadId: child.id });
+    const scheduledChild = await w.make("review shipped", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, scheduledChild.id, "One nit in the login form.\n\nVERDICT: MERGE");
+    const scheduled = await continueThread(w.ctx, {
+      threadId: scheduledChild.id,
+      scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+
+    const queuedChild = await w.make("review billing", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, queuedChild.id, "One nit in the login form.\n\nVERDICT: MERGE");
+    const queued = (await sendTurn(w.store, queuedChild.id, { prompt: "Hand off", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+    await prepareQueuedHandoff(w.ctx, queuedChild.id, queued.id, Date.now());
+    const stored = (await w.store.readTurns(queuedChild.id)).find((turn) => turn.id === queued.id)!.handoff!.destinationThreadId;
+
+    for (const threadId of [manual.threadId, scheduled.threadId, stored]) {
+      const prompt = (await w.store.readMessages(threadId)).find((message) => message.role === "user")!.text;
+      expect(prompt, threadId).toContain(REVIEW_HANDOFF_INSTRUCTION);
+      const [opening] = await w.store.readTurns(threadId);
+      expect(opening?.reviewHandoff, threadId).toBe(true);
+    }
+
+    // An ordinary continuation gets no review instruction and no flag.
+    const build = await w.make("build it");
+    await finishChild(w, parent.id, build.id, "Done.");
+    const plain = await continueThread(w.ctx, { threadId: build.id });
+    const plainPrompt = (await w.store.readMessages(plain.threadId)).find((message) => message.role === "user")!.text;
+    expect(plainPrompt).not.toContain(REVIEW_HANDOFF_INSTRUCTION);
+    expect((await w.store.readTurns(plain.threadId))[0]?.reviewHandoff).toBeUndefined();
+  });
+
   it("never keeps Review as a staying mode, and says so in the ledger", async () => {
     const w = await reviewWorld();
     const child = await w.make("review login", { interactionMode: "review" });
@@ -314,7 +355,7 @@ describe("continuing a review thread", () => {
     expect(taskNotificationText([notified])).toContain("Review verdict: none — this is not a finished review");
   });
 
-  it("keeps the carried verdict when the opening turn completes with no report", async () => {
+  it("clears the carried verdict when the opening turn completes with no report", async () => {
     const w = await reviewWorld();
     const parent = await w.make("orchestrator");
     const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
@@ -322,9 +363,26 @@ describe("continuing a review thread", () => {
 
     const continued = await continueThread(w.ctx, { threadId: child.id });
     const [turn] = await w.store.readTurns(continued.threadId);
-    // The hand-off turn ends with no assistant text and no tool work: it
-    // reviewed nothing, so the verdict the task settled with still stands.
+    // Only the exact acknowledgement token keeps the carried verdict: a
+    // completed turn that said nothing did not acknowledge anything.
     await completeTurn(w.store, continued.threadId, turn!.id);
+
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: null });
+    expect(notified.review?.note).toContain("no VERDICT");
+    expect(taskNotificationText([notified])).toContain("Review verdict: none — this is not a finished review");
+  });
+
+  it("keeps the carried verdict when the opening turn replies with the exact acknowledgement token", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [turn] = await w.store.readTurns(continued.threadId);
+    // The token alone, with whitespace around it, is the one acknowledgement.
+    await completeTurn(w.store, continued.threadId, turn!.id, { text: `  ${REVIEW_HANDOFF_ACK}\n` });
 
     const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
     expect(notified.review).toMatchObject({ verdict: "MERGE", sameModel: false });
@@ -333,7 +391,31 @@ describe("continuing a review thread", () => {
     expect((await describeTask(w.ctx, parent.id, child.id)).review).toMatchObject({ verdict: "MERGE" });
   });
 
-  it("keeps the carried verdict when the opening turn only acknowledges the hand-off", async () => {
+  it("clears the carried verdict for acknowledgement-like prose instead of the token", async () => {
+    for (const prose of [
+      "Acknowledged. I will check the reported issue next.",
+      "Got it. The admin endpoint accepts ordinary users.",
+      `${REVIEW_HANDOFF_ACK}. I will check next.`,
+      `\`\`\`\n${REVIEW_HANDOFF_ACK}\n\`\`\``,
+    ]) {
+      const w = await reviewWorld();
+      const parent = await w.make("orchestrator");
+      const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+      await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+      const continued = await continueThread(w.ctx, { threadId: child.id });
+      const [turn] = await w.store.readTurns(continued.threadId);
+      await completeTurn(w.store, continued.threadId, turn!.id, { text: prose });
+
+      // Prose that is not exactly the token is a report: it clears the
+      // carried MERGE and is called out for having no verdict line.
+      const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+      expect(notified.review, prose).toMatchObject({ verdict: null });
+      expect(notified.review?.note, prose).toContain("no VERDICT");
+    }
+  });
+
+  it("keeps a non-English report that ends with a verdict", async () => {
     const w = await reviewWorld();
     const parent = await w.make("orchestrator");
     const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
@@ -341,13 +423,10 @@ describe("continuing a review thread", () => {
 
     const continued = await continueThread(w.ctx, { threadId: child.id });
     const [turn] = await w.store.readTurns(continued.threadId);
-    await completeTurn(w.store, continued.threadId, turn!.id, {
-      text: "Handoff received; I will review the remaining changes next.",
-    });
+    await completeTurn(w.store, continued.threadId, turn!.id, { text: "Un hallazgo: el formulario envía dos veces.\n\nVERDICT: FIX FIRST" });
 
     const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
-    expect(notified.review).toMatchObject({ verdict: "MERGE", sameModel: false });
-    expect(taskNotificationText([notified])).toContain("Review verdict: MERGE");
+    expect(notified.review).toMatchObject({ verdict: "FIX FIRST" });
   });
 
   it("still warns when the opening turn did tool work and ended without a verdict", async () => {
@@ -362,11 +441,33 @@ describe("continuing a review thread", () => {
       id: "tool-row", threadId: continued.threadId, turnId: turn!.id, kind: "tool-call.completed",
       summary: "Read login.tsx", payload: {}, createdAt: w.store.nowIso(),
     });
-    await completeTurn(w.store, continued.threadId, turn!.id, { text: "Read the login form; full report above." });
+    await completeTurn(w.store, continued.threadId, turn!.id, { text: REVIEW_HANDOFF_ACK });
 
-    // Tool work means the turn did review: a one-line answer with no verdict
-    // is not a hand-off acknowledgement, and is called out as unfinished.
+    // The token is not an acknowledgement when the turn used a tool: it
+    // reviewed, and a report with no verdict is called out as unfinished.
     const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: null, sameModel: false });
+    expect(notified.review?.note).toContain("no VERDICT");
+  });
+
+  it("clears the carried verdict when the opening turn fails after tool work", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [turn] = await w.store.readTurns(continued.threadId);
+    await w.store.appendLedger(continued.threadId, "activity", {
+      id: "tool-row", threadId: continued.threadId, turnId: turn!.id, kind: "tool-call.completed",
+      summary: "Read login.tsx", payload: {}, createdAt: w.store.nowIso(),
+    });
+    // A failed opening never acknowledges, even with no text and even though
+    // the marker is what the prompt asked for on success.
+    await failTurn(w.store, continued.threadId, turn!.id, { error: "the provider stopped" });
+
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.status).toBe("failed");
     expect(notified.review).toMatchObject({ verdict: null, sameModel: false });
     expect(notified.review?.note).toContain("no VERDICT");
   });
@@ -453,7 +554,7 @@ describe("continuing a review thread", () => {
 
     const continued = await continueThread(w.ctx, { threadId: child.id });
     const [opening] = await w.store.readTurns(continued.threadId);
-    await completeTurn(w.store, continued.threadId, opening!.id, { text: "Acknowledged." });
+    await completeTurn(w.store, continued.threadId, opening!.id, { text: REVIEW_HANDOFF_ACK });
     // The carried verdict stands only for the opening turn: the next report is
     // the parent's to judge, however short.
     const second = (await sendTurn(w.store, continued.threadId, { prompt: "What did you find?" })).turn;
@@ -464,21 +565,23 @@ describe("continuing a review thread", () => {
     expect(notified.review?.note).toContain("no VERDICT");
   });
 
-  it("keeps an unpinned verdict across two hand-offs that only acknowledged", async () => {
+  it("keeps the carried verdict across two hand-offs that only acknowledged", async () => {
     const w = await reviewWorld();
     const parent = await w.make("orchestrator");
     const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
     await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
 
-    // Nothing reads the task between these hand-offs, so no row is pinned:
-    // the verdict lives only in the original review's settled turn.
+    // Nothing reads the task between these hand-offs; the verdict is carried
+    // by the settled rows themselves, not by anything a status read pinned.
     const first = await continueThread(w.ctx, { threadId: child.id });
     const [firstOpening] = await w.store.readTurns(first.threadId);
-    await completeTurn(w.store, first.threadId, firstOpening!.id, { text: "Acknowledged." });
+    await completeTurn(w.store, first.threadId, firstOpening!.id, { text: REVIEW_HANDOFF_ACK });
     const second = await continueThread(w.ctx, { threadId: first.threadId });
     const [secondOpening] = await w.store.readTurns(second.threadId);
-    await completeTurn(w.store, second.threadId, secondOpening!.id, { text: "Acknowledged." });
-    expect((await w.store.readDelegations()).every((row) => row.review === undefined)).toBe(true);
+    await completeTurn(w.store, second.threadId, secondOpening!.id, { text: REVIEW_HANDOFF_ACK });
+    // The outcome travelled with each row; no read rewrote it.
+    const live = (await w.store.readDelegations()).find((row) => row.childThreadId === second.threadId);
+    expect(live?.review).toMatchObject({ verdict: "MERGE", threadId: child.id });
 
     const described = await describeTask(w.ctx, parent.id, child.id);
     expect(described.review).toMatchObject({ verdict: "MERGE", sameModel: false });
@@ -509,12 +612,170 @@ describe("continuing a review thread", () => {
       modelSelection: { instanceId: "opencode", model: "gpt-5.6-sol" },
     });
     const [opening] = await w.store.readTurns(continued.threadId);
-    await completeTurn(w.store, continued.threadId, opening!.id, { text: "Acknowledged." });
+    await completeTurn(w.store, continued.threadId, opening!.id, { text: REVIEW_HANDOFF_ACK });
 
     const described = await describeTask(w.ctx, parent.id, child.id);
     expect(described.review).toMatchObject({ verdict: "MERGE", sameModel: false });
     const row = (await w.store.readDelegations()).find((candidate) => candidate.childThreadId === continued.threadId);
     expect(row?.review?.model).toBe("codex/other-model");
+  });
+
+  it("writes the newest verdict to the row at settle, before any read or hand-off", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+    const recheck = (await sendTurn(w.store, child.id, { prompt: "Re-check after the fix." })).turn;
+    await completeTurn(w.store, child.id, recheck.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+
+    // The decision is durable at settle: no status read or notification has
+    // run, and the row already holds the newer verdict and its source turn.
+    const before = (await w.store.readDelegations()).find((row) => row.childThreadId === child.id);
+    expect(before?.review).toMatchObject({ verdict: "FIX FIRST", threadId: child.id, turnId: recheck.id });
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const live = (await w.store.readDelegations()).find((row) => row.childThreadId === continued.threadId);
+    // The hand-off copied it before anything could read the old value, so a
+    // status poll after it cannot change the outcome.
+    expect(live?.review).toMatchObject({ verdict: "FIX FIRST", threadId: child.id, turnId: recheck.id });
+    expect((await describeTask(w.ctx, parent.id, child.id)).review).toMatchObject({ verdict: "FIX FIRST" });
+  });
+
+  it("reconciles a decision the row missed before a hand-off", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    const merge = "One nit in the login form.\n\nVERDICT: MERGE";
+    await finishChild(w, parent.id, child.id, merge);
+    const recheck = (await sendTurn(w.store, child.id, { prompt: "Re-check after the fix." })).turn;
+    await completeTurn(w.store, child.id, recheck.id, { text: "Re-checked.\n\nVERDICT: FIX FIRST" });
+    const [first] = await w.store.readTurns(child.id);
+
+    // A crash between the terminal turn write and the row write leaves the
+    // row holding the earlier verdict; the turn ledger already says FIX FIRST.
+    const row = (await w.store.readDelegations()).find((candidate) => candidate.childThreadId === child.id)!;
+    await w.store.updateDelegation(row.id, {
+      review: { verdict: "MERGE", report: merge, model: "opencode/other-model", threadId: child.id, turnId: first!.id },
+    });
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const live = (await w.store.readDelegations()).find((candidate) => candidate.childThreadId === continued.threadId);
+    expect(live?.review).toMatchObject({ verdict: "FIX FIRST", threadId: child.id, turnId: recheck.id });
+  });
+
+  it("carries a no-verdict report through the next hand-off, with or without a status poll", async () => {
+    for (const poll of [false, true]) {
+      const w = await reviewWorld();
+      const parent = await w.make("orchestrator");
+      const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+      await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+      const first = await continueThread(w.ctx, { threadId: child.id });
+      const [opening] = await w.store.readTurns(first.threadId);
+      await completeTurn(w.store, first.threadId, opening!.id, { text: REVIEW_HANDOFF_ACK });
+      const report = (await sendTurn(w.store, first.threadId, { prompt: "What did you find?" })).turn;
+      await completeTurn(w.store, first.threadId, report.id, { text: "Found a regression; the review is complete." });
+      if (poll) expect((await describeTask(w.ctx, parent.id, child.id)).review?.verdict).toBeNull();
+
+      // The no-verdict outcome is what the next hand-off carries; an older
+      // MERGE cannot come back, whether or not status was read in between.
+      const second = await continueThread(w.ctx, { threadId: first.threadId });
+      const live = (await w.store.readDelegations()).find((row) => row.childThreadId === second.threadId);
+      expect(live?.review, `poll=${poll}`).toMatchObject({ verdict: null, threadId: first.threadId, turnId: report.id });
+      const [nextOpening] = await w.store.readTurns(second.threadId);
+      await completeTurn(w.store, second.threadId, nextOpening!.id, { text: REVIEW_HANDOFF_ACK });
+      const described = await describeTask(w.ctx, parent.id, child.id);
+      expect(described.review?.verdict, `poll=${poll}`).toBeNull();
+      expect(described.review?.note, `poll=${poll}`).toContain("no VERDICT");
+    }
+  });
+
+  it("leaves an unattributed legacy pin unknown while running and after the marker", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    // The continuation runs on the parent's own model: if the pin's unknown
+    // author were guessed from it, the warning would be wrong.
+    const child = await w.make("review login", { interactionMode: "review", model: "gpt-5.6-sol" });
+    const now = new Date().toISOString();
+    const report = "One nit in the login form.\n\nVERDICT: MERGE";
+    await w.store.appendDelegation({
+      id: "d1", parentThreadId: parent.id, childThreadId: child.id, prompt: "Review it", status: "running", notify: true,
+      review: { verdict: "MERGE", report }, createdAt: now, updatedAt: now,
+    });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: report });
+    // Rewind to the shape a store from before durable outcomes has: no
+    // recorded decision on the turn, and a pin with no model or source ids.
+    const turns = await w.store.readTurns(child.id);
+    await w.store.rewriteLedger(child.id, "turns", turns.map((turn) => {
+      if (turn.id !== reviewed.id) return turn;
+      const { reviewDecision: _decision, ...legacyTurn } = turn;
+      return { ...legacyTurn, modelSelection: null };
+    }));
+    const stored = (await w.store.readDelegations()).find((row) => row.id === "d1")!;
+    const { reviewTask: _reviewTask, ...legacyRow } = stored;
+    await writeFile(path.join(w.root, "delegations.jsonl"), `${JSON.stringify({ ...legacyRow, review: { verdict: "MERGE", report } })}\n`, "utf8");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    expect((await describeTask(w.ctx, parent.id, child.id)).review).toMatchObject({ verdict: "MERGE", sameModel: null });
+
+    const [opening] = await w.store.readTurns(continued.threadId);
+    await completeTurn(w.store, continued.threadId, opening!.id, { text: REVIEW_HANDOFF_ACK });
+    const described = await describeTask(w.ctx, parent.id, child.id);
+    expect(described.review).toMatchObject({ verdict: "MERGE", sameModel: null });
+    const live = (await w.store.readDelegations()).find((row) => row.childThreadId === continued.threadId);
+    expect(live?.review?.model ?? null).toBeNull();
+  });
+
+  it("does not read an earlier transcript as the hand-off chain grows", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const predecessors = new Set<string>();
+    let current = child.id;
+    for (let hop = 0; hop < 8; hop += 1) {
+      predecessors.add(current);
+      const next = await continueThread(w.ctx, { threadId: current });
+      const [opening] = await w.store.readTurns(next.threadId);
+      await completeTurn(w.store, next.threadId, opening!.id, { text: REVIEW_HANDOFF_ACK });
+      current = next.threadId;
+    }
+
+    const read: string[] = [];
+    const messages = w.store.readMessages.bind(w.store);
+    w.store.readMessages = async (threadId: string) => {
+      read.push(threadId);
+      return await messages(threadId);
+    };
+    try {
+      const described = await describeTask(w.ctx, parent.id, child.id);
+      expect(described.review).toMatchObject({ verdict: "MERGE" });
+    } finally {
+      w.store.readMessages = messages;
+    }
+    // The live thread's own transcript is read; none of its ancestors' is.
+    expect(read.filter((threadId) => predecessors.has(threadId))).toEqual([]);
+  });
+
+  it("ignores the acknowledgement token on a later turn", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [opening] = await w.store.readTurns(continued.threadId);
+    await completeTurn(w.store, continued.threadId, opening!.id, { text: REVIEW_HANDOFF_ACK });
+    const later = (await sendTurn(w.store, continued.threadId, { prompt: "Anything else?" })).turn;
+    await completeTurn(w.store, continued.threadId, later.id, { text: REVIEW_HANDOFF_ACK });
+
+    // Only the opening hand-off turn can acknowledge; a later token is a
+    // report with no verdict line.
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: null });
+    expect(notified.review?.note).toContain("no VERDICT");
   });
 
   it("compares the model that produced the verdict, not the one the task was delegated on", async () => {

@@ -805,7 +805,39 @@ export class ThreadStore {
 
   async appendDelegation(delegation: StoredDelegation): Promise<void> {
     await this.assertStoreWriteable();
-    await appendFile(this.delegationsFile(), `${JSON.stringify(delegation)}\n`, "utf8");
+    // Under the ledger lock: a rewrite reads the file and replaces it, so an
+    // append landing between that read and the write would be dropped.
+    await this.withThreadLock("!delegations", async () => {
+      await appendFile(this.delegationsFile(), `${JSON.stringify(delegation)}\n`, "utf8");
+    });
+  }
+
+  /**
+   * Insert a hand-off's destination row and mark the source row `continuedIn`
+   * in one locked file replacement. The rows are the same task, so a reader
+   * must see the source before the transfer or the destination after it,
+   * never a source that still looks live beside its successor.
+   */
+  async transferDelegation(
+    sourceChildId: string,
+    destination: StoredDelegation,
+    sourcePatch: Partial<StoredDelegation> = {},
+  ): Promise<StoredDelegation | null> {
+    return await this.withThreadLock("!delegations", async () => {
+      const all = await this.readDelegations();
+      const source = all.find((row) => row.childThreadId === sourceChildId && row.continuedIn === undefined);
+      if (!source || all.some((row) => row.childThreadId === destination.childThreadId)) return null;
+      const transferred: StoredDelegation = {
+        ...source,
+        ...sourcePatch,
+        id: source.id,
+        continuedIn: destination.childThreadId,
+        updatedAt: this.nowIso(),
+      };
+      const next = [...all.map((row) => (row.id === source.id ? transferred : row)), destination];
+      await this.writeDelegationRows(next);
+      return transferred;
+    });
   }
 
   async updateDelegation(

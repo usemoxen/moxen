@@ -21,6 +21,7 @@ import type {
 } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
+import { commitReviewDecision, settleReviewDecision } from "./reviewtask.js";
 import type {
   CreateThreadInput,
   ReadView,
@@ -649,6 +650,7 @@ export async function sendTurn(
       runtimeMode,
       interactionMode,
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
+      ...(input.reviewHandoff === true ? { reviewHandoff: true as const } : {}),
       modelSelection,
       parentTurnId: delivery === "restart" && running ? running.id : null,
       ...(holdUntil !== null
@@ -715,10 +717,22 @@ async function interruptTurnLocked(
 ): Promise<StoredTurn> {
   store.abortRunning(turn.id);
   store.untrackRunning(turn.id);
+  // A running turn interrupted is a real review attempt: a failed or stopped
+  // opening never acknowledges, and a tool-using one is no exception. A
+  // message taken back before it started is not an attempt at all.
+  const review = await settleReviewDecision({
+    store,
+    thread,
+    turn,
+    turns: await store.readTurns(thread.id),
+    status: "interrupted",
+    attempted: turn.status === "running",
+  });
   const updated = await store.updateTurn(thread.id, turn.id, {
     status: "interrupted",
     ...(usagePause ? { usagePause } : {}),
     ...(reason ? { error: reason } : {}),
+    ...(review !== null ? { reviewDecision: review.decision } : {}),
     updatedAt: now,
     completedAt: now,
   });
@@ -739,6 +753,7 @@ async function interruptTurnLocked(
       details: { threadId: thread.id, turnId: turn.id },
     });
   }
+  if (review !== null) await commitReviewDecision(store, review, thread.id, turn.id);
   return updated;
 }
 
@@ -911,10 +926,19 @@ export async function reconcileOrphanedTurn(
     if (!thread || !running || !isOrphaned(store, running)) return null;
     const now = store.nowIso();
     const pid = running.owner?.pid;
+    const review = await settleReviewDecision({
+      store,
+      thread,
+      turn: running,
+      turns: await store.readTurns(threadId),
+      status: "interrupted",
+      attempted: true,
+    });
     const interrupted =
       (await store.updateTurn(threadId, running.id, {
         status: "interrupted",
         error: `The process running this turn (pid ${pid}) exited before it finished.`,
+        ...(review !== null ? { reviewDecision: review.decision } : {}),
         updatedAt: now,
         completedAt: now,
       })) ?? running;
@@ -926,6 +950,7 @@ export async function reconcileOrphanedTurn(
       summary: `Turn ${running.id} was interrupted: its process (pid ${pid}) exited mid-turn.`,
       createdAt: now,
     });
+    if (review !== null) await commitReviewDecision(store, review, threadId, running.id);
     await promoteQueuedLocked(store, threadId, now);
     const promoted = (await store.readTurns(threadId)).find(
       (turn) => turn.status === "running" && turn.id !== running.id && !store.isTracked(turn.id),
@@ -1543,7 +1568,8 @@ async function finishTurn(
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
-    const turn = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+    const turns = await store.readTurns(threadId);
+    const turn = turns.find((candidate) => candidate.id === turnId);
     if (!turn) {
       throw new CliError("TURN_NOT_FOUND", `No turn exists with id ${turnId}.`, {
         exitCode: 3,
@@ -1567,12 +1593,23 @@ async function finishTurn(
       });
     }
     store.untrackRunning(turnId);
+    // A review task decides here, before the turn is written: the decision
+    // rides on the terminal turn update, and the delegation row follows it.
+    const review = await settleReviewDecision({
+      store,
+      thread,
+      turn,
+      turns,
+      status,
+      attempted: true,
+    });
     const updated = await store.updateTurn(threadId, turnId, {
       status,
       ...(status === "failed" && input.error !== undefined ? { error: input.error } : {}),
       ...(input.usage !== undefined ? { usage: input.usage } : {}),
       ...(input.turnOutputTokens !== undefined ? { turnOutputTokens: input.turnOutputTokens } : {}),
       ...(input.generation !== undefined ? { generation: input.generation } : {}),
+      ...(review !== null ? { reviewDecision: review.decision } : {}),
       updatedAt: now,
       completedAt: now,
     });
@@ -1590,6 +1627,7 @@ async function finishTurn(
       summary: status === "failed" ? (input.error ?? turnId) : turnId,
       createdAt: now,
     });
+    if (review !== null) await commitReviewDecision(store, review, threadId, turnId);
     await promoteQueuedLocked(store, threadId, now);
     const next = { ...thread, updatedAt: now };
     await store.writeThreadRecord(next);

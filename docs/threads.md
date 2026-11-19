@@ -120,26 +120,37 @@ When the reviewer runs on the same model as the delegating thread, both say so: 
 warning, not a refusal. The parent side of that comparison is the model
 recorded when the task was delegated, so a parent that moves on cannot
 rewrite it; the reviewer side is the model that produced the report being
-shown — recorded with the verdict, or the reviewer's delegation-time model
-when the report predates that record — so a continuation on another model
-is compared as it actually ran, and a hand-off acknowledgement's model is
-never used for it. The settled verdict is pinned on the delegation with
-that model: a conversational follow-up turn cannot rewrite it, while a
-follow-up that settles with its own verdict re-pins. Continuing a review
-child starts the new thread in Build, with a ledger note saying Review was
-reset. The task stays a review: the verdict, the same-model warning and the
-missing-verdict warning follow the task's delegation lineage — the
-hand-offs it went through, so a second continuation reads the one in
-between rather than the original — rather than the new thread's Build mode,
-and its notification and `task_status` keep them. A continuation whose
-opening turn only acknowledges the hand-off keeps the carried verdict: it
-used no tool, and its reply is empty, or opens with an acknowledgement such
-as `Acknowledged.` and states no finding or verdict — so it reviewed
-nothing. Any later turn, and any turn that used a tool or said anything
-else — "Found a regression." included — is a report the parent judges, and
-a missing trailing verdict is called out again. A hand-off that only
-acknowledged is passed over the same way when a second hand-off looks back
-for the verdict the task settled with.
+shown, so a continuation on another model is compared as it actually ran.
+Continuing a review child starts the new thread in Build, with a ledger note
+saying Review was reset. The task stays a review: its notification and
+`task_status` keep the review facts, read from the task's own settled
+outcome rather than the new thread's Build mode.
+
+The outcome is written when a turn settles — on the terminal turn and on the
+delegation — and each hand-off copies it: the newest trailing verdict
+(explicitly none when the report carried none), the report, the model that
+produced it, and the turn it settled in. Until an incarnation settles a
+verdict of its own, a real attempt without one replaces the carried outcome,
+so a later hand-off cannot resurrect an older verdict; after it has its own
+verdict, ordinary verdictless follow-ups leave it pinned, and a newer
+trailing verdict always replaces it. A status read never pins or changes it,
+and a hand-off reconciles a decision recorded on the turn but not yet on the
+row, so a crash cannot lose one. The continued thread's opening prompt says
+how to decline: if it only acknowledges the hand-off and does no review work
+or tool calls, it replies with exactly `MOXEN_REVIEW_HANDOFF_ACK` and nothing
+else; otherwise it does the work and ends with a verdict. Only that exact
+token, as the whole final reply of a completed opening turn that used no tool,
+leaves the carried verdict alone. Fenced, quoted, translated or padded
+replies, empty replies, tokens on later turns, and failed or interrupted
+turns are reports, and a report with no trailing verdict is called out as not
+a finished review. A non-English report follows the same rule and ends with
+either unchanged verdict line.
+
+A review row written before outcomes were durable is seeded once from its own
+legacy chain, oldest incarnation first: its newest settled verdict wins over
+the old pin, located by exact report match where possible. Its provenance is
+the pin's recorded model, then the delegation snapshot on the row that held
+the pin, otherwise unknown — never the model of a later continuation.
 
 On the CLI, `moxen threads delegate --thread <id> --prompt <task> --mode research`
 starts one researcher. Adding `--research-size 2,1` supplies the user's size and

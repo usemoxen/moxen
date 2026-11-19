@@ -7,7 +7,7 @@ import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, continueOwnThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, continueOwnThread, cancelTask, describeTask, delegate, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, recoverTaskNotifications, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { StoredThread } from "../types.js";
@@ -1031,5 +1031,84 @@ describe("a manual continue with an active turn (MXN-372)", () => {
         if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
       }
     }
+  });
+});
+
+describe("a task's notices after hand-offs (MXN-389)", () => {
+  it("drops a superseded child's queued settle and reports the successor to the new parent", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d1", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const done = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, done.id, { text: "Done." });
+
+    // The settle is batched for the old parent, durably.
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    // The child hands off, then the orchestrator hands off too, taking both
+    // rows to the new parent.
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    const nextParent = await continueThread(w.ctx, { threadId: parent.id });
+    const successorTurn = (await w.store.readTurns(successor.threadId))[0]!;
+    await completeTurn(w.store, successor.threadId, successorTurn.id, { text: "Done after the handoff." });
+    await queueTaskNotification(w.ctx, nextParent.threadId, successor.threadId);
+
+    // A restart replays both durable batches: the old parent hears nothing
+    // about the superseded child, and the new parent hears the successor once.
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTaskNotifications(w.ctx, nextParent.threadId);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    const heard = await notificationsIn(w, nextParent.threadId);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain(`taskId ${successor.threadId}`);
+    // The successor's own notice names the original task as its origin; no
+    // second notice is delivered for the superseded child itself.
+    expect(heard[0]).not.toContain(`(taskId ${child.id}`);
+  }, 30_000);
+});
+
+describe("a long continuation chain (MXN-389)", () => {
+  it("resolves a task by its original id through more than twenty hand-offs", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const threads = [];
+    for (let index = 0; index <= 20; index += 1) threads.push(await w.make(`link ${index}`));
+    const now = new Date().toISOString();
+    for (let index = 0; index <= 20; index += 1) {
+      await w.store.appendDelegation({
+        id: `d${index}`,
+        parentThreadId: parent.id,
+        childThreadId: threads[index]!.id,
+        prompt: "work",
+        status: "running",
+        ...(index < 20 ? { continuedIn: threads[index + 1]!.id } : {}),
+        ...(index === 0 ? { idempotencyKey: "retry-key" } : {}),
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    // task_status by the original id reads the final child.
+    expect((await describeTask(w.ctx, parent.id, threads[0]!.id)).child.id).toBe(threads[20]!.id);
+    // Task control reaches it too.
+    expect((await cancelTask(w.ctx, parent.id, threads[0]!.id)).child.id).toBe(threads[20]!.id);
+    // An idempotent delegation retry answers with the task as it stands.
+    expect((await delegate(w.ctx, { parentThreadId: parent.id, task: "work", idempotencyKey: "retry-key" })).child.id).toBe(threads[20]!.id);
+
+    // A cycle and a missing successor terminate without exposing an
+    // intermediate, superseded child.
+    await w.store.updateDelegation("d20", { continuedIn: threads[0]!.id });
+    await expect(describeTask(w.ctx, parent.id, threads[0]!.id)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    // Removing the cycle leaves a missing successor, which also terminates.
+    const rows = await w.store.readDelegations();
+    await writeFile(path.join(w.root, "delegations.jsonl"), rows.map((row) => {
+      if (row.id !== "d20") return JSON.stringify(row);
+      const { continuedIn: _cycle, ...rest } = row;
+      return JSON.stringify(rest);
+    }).join("\n") + "\n", "utf8");
+    await w.store.updateDelegation("d19", { continuedIn: "gone-thread" });
+    await expect(describeTask(w.ctx, parent.id, threads[0]!.id)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 });
