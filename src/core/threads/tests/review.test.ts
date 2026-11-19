@@ -272,6 +272,46 @@ describe("continuing a review thread", () => {
     expect(note?.summary).toContain("Build");
   });
 
+  it("keeps the review and its settled verdict on the continued task", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    expect((await w.store.readThreadRecord(continued.threadId))?.interactionMode).toBe("default");
+
+    // The new thread reads as Build, but the task is the review that settled
+    // in it: task_status and the notification keep its verdict, from the
+    // task's delegation lineage rather than the live thread's mode.
+    const described = await describeTask(w.ctx, parent.id, child.id);
+    expect(described.review).toMatchObject({ verdict: "MERGE", sameModel: false });
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: "MERGE", sameModel: false });
+    expect(taskNotificationText([notified])).toContain("Review verdict: MERGE");
+  });
+
+  it("warns when the continued review's own report ends without a verdict", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [turn] = await w.store.readTurns(continued.threadId);
+    await completeTurn(w.store, continued.threadId, turn!.id, { text: "Carried the review on. The full report is delivered above." });
+
+    // Once the continuation has settled its own report, that report is what
+    // the parent judges: a missing trailing verdict is still called out.
+    const described = await describeTask(w.ctx, parent.id, child.id);
+    expect(described.review?.verdict).toBeNull();
+    expect(described.review?.note).toContain("no VERDICT");
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: null, sameModel: false });
+    expect(notified.review?.note).toContain("no VERDICT");
+    expect(taskNotificationText([notified])).toContain("Review verdict: none — this is not a finished review");
+  });
+
   it("resets an explicitly carried review mode too, such as a queued one-off", async () => {
     const w = await reviewWorld();
     const thread = await w.make("plain build");

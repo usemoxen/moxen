@@ -122,7 +122,12 @@ task was delegated, so a parent that moves on cannot rewrite it. The
 settled verdict is pinned on the delegation: a conversational follow-up
 turn cannot rewrite it, while a follow-up that settles with its own verdict
 re-pins. Continuing a review child starts the new thread in Build, with a
-ledger note saying Review was reset.
+ledger note saying Review was reset. The task stays a review: the verdict,
+the same-model warning and the missing-verdict warning follow the task's
+delegation lineage rather than the new thread's Build mode, and its
+notification and `task_status` keep them. Once the continuation settles a
+report of its own, that report is what the parent judges, and a missing
+trailing verdict is called out again.
 
 On the CLI, `moxen threads delegate --thread <id> --prompt <task> --mode research`
 starts one researcher. Adding `--research-size 2,1` supplies the user's size and
