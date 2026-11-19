@@ -124,6 +124,9 @@ pub struct Workspace {
     /// Role transcript tool rows opened in the run view, by lead, role,
     /// agent and step.
     pub run_expanded: HashSet<(ThreadId, ResearchRole, usize, usize)>,
+    /// The run view's chip or column header the pointer is over, whose tip
+    /// shows (`research_view::run_tip`).
+    pub run_hover: Option<crate::research_view::RunHover>,
     /// The size picker's state, by thread: the proposal it answers and its state.
     pub picker: HashMap<ThreadId, (String, PickerState)>,
     /// Runs of steps the user flipped from their default (folded unless last), by thread and first step.
@@ -561,6 +564,7 @@ impl Workspace {
             run_role: HashMap::new(),
             run_picks: HashMap::new(),
             run_expanded: HashSet::new(),
+            run_hover: None,
             picker: HashMap::new(),
             action_model: None,
             action_input,

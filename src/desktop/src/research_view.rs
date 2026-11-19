@@ -837,6 +837,64 @@ fn role_rows(
     body.into_any_element()
 }
 
+/// The run view's top padding, the title row's height and the gaps around it.
+/// A roster chip's tip sits in the padding above the title, so it covers
+/// neither the switcher nor the title and phase label.
+const RUN_PAD_TOP: f32 = 34.;
+const RUN_TITLE_HEIGHT: f32 = 20.;
+const RUN_GAP: f32 = 10.;
+const RUN_TIP_GAP: f32 = 2.;
+/// A column header's height (its tip opens right under it).
+const RUN_COLUMN_HEAD: f32 = 22.;
+
+/// What the pointer is over in a run view, by lead thread: the tip it shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RunHover {
+    /// A roster chip: role and agent index.
+    Chip(ThreadId, ResearchRole, usize),
+    /// A column header.
+    Column(ThreadId, ResearchRole),
+}
+
+/// The tip's own box, in the tooltip's look: a window tooltip opens at the
+/// pointer and hangs over the text under it, so the run view draws its own
+/// where nothing is underneath.
+fn tip_box(text: SharedString) -> Div {
+    div()
+        .absolute()
+        .flex()
+        .child(ui::Tooltip(text, None).body())
+}
+
+/// A roster chip's tip: above the title row, in the view's top padding,
+/// aligned with the chip's left edge, or its right edge for the chips toward
+/// the row's end (`from_right`) so the tip never runs under the inspector.
+/// `lift` is the chip's offset from the roster's top.
+fn chip_tip(text: SharedString, lift: f32, from_right: bool) -> AnyElement {
+    let tip = tip_box(text);
+    if from_right {
+        tip.right_0()
+    } else {
+        tip.left_0()
+    }
+    .bottom(relative(1.))
+    .mb(px(lift + RUN_GAP + RUN_TITLE_HEIGHT + RUN_TIP_GAP))
+    .into_any_element()
+}
+
+/// A column header's key hints: under the header, inside the column's own
+/// width (the text wraps there), so it never reaches the next column.
+fn column_tip(text: SharedString) -> AnyElement {
+    div()
+        .absolute()
+        .top(px(RUN_COLUMN_HEAD))
+        .left(px(8.))
+        .right(px(8.))
+        .flex()
+        .child(ui::Tooltip(text, None).body().w_full())
+        .into_any_element()
+}
+
 fn column_title(summary: &RunSummary, agent: &RunAgent) -> String {
     format!("{} {}", agent_title(summary, agent), agent.state.glyph())
 }
@@ -844,7 +902,7 @@ fn column_title(summary: &RunSummary, agent: &RunAgent) -> String {
 /// The research run in place of the lead's chat: a header, a roster with one
 /// glyph per agent, and the researcher, critic and finalizer columns. The
 /// columns share the reading column's width equally, divided by rules, and
-/// fill its height; the key hints live in the column headers' tooltips. At
+/// fill its height; the key hints show in a tip under the hovered column header. At
 /// narrow widths the stage strip is the column switcher and only the focused
 /// column draws.
 pub fn run_view(
@@ -892,7 +950,9 @@ pub fn run_view(
                 .child(
                     div()
                         .id(("run-role", role as usize))
-                        .control(format!("Show the {} column", role.label()))
+                        // The label says what it does; a tooltip would only
+                        // hang over the switcher row and the column header.
+                        .plain_control()
                         .text_size(px(13.))
                         .text_color(if focus == role {
                             color("ink")
@@ -908,7 +968,27 @@ pub fn run_view(
                 .children(agents.iter().enumerate().map(|(at, agent)| {
                     div()
                         .id(("run-agent", role as usize * 16 + at))
-                        .control(format!("Show {}", agent_title(summary, agent)))
+                        .plain_control()
+                        .relative()
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            let here = RunHover::Chip(lead, focus_role, at);
+                            if *hovered {
+                                this.run_hover = Some(here);
+                            } else if this.run_hover == Some(here) {
+                                this.run_hover = None;
+                            }
+                            cx.notify();
+                        }))
+                        .when(
+                            w.run_hover == Some(RunHover::Chip(lead, focus_role, at)),
+                            |s| {
+                                s.child(chip_tip(
+                                    format!("Show {}", agent_title(summary, agent)).into(),
+                                    if narrow { 2. } else { 0. },
+                                    narrow && focus_role != ResearchRole::Researcher,
+                                ))
+                            },
+                        )
                         .px(px(3.))
                         .text_size(px(13.))
                         .text_color(if shown == at {
@@ -949,7 +1029,7 @@ pub fn run_view(
         .flex_col()
         .items_center()
         .px(px(28.))
-        .pt(px(28.))
+        .pt(px(RUN_PAD_TOP))
         .pb(px(18.))
         .child(
             div()
@@ -959,12 +1039,14 @@ pub fn run_view(
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .gap(px(10.))
+                .gap(px(RUN_GAP))
                 .child(
                     div()
                         .flex()
                         .items_baseline()
                         .justify_between()
+                        .gap(px(16.))
+                        .h(px(RUN_TITLE_HEIGHT))
                         .child(
                             div()
                                 .flex_1()
@@ -980,6 +1062,8 @@ pub fn run_view(
                         )
                         .child(
                             div()
+                                .flex_none()
+                                .whitespace_nowrap()
                                 .text_size(px(13.))
                                 .text_color(color(phase_color))
                                 .child(format!(
@@ -1055,6 +1139,7 @@ pub fn run_view(
                                 .flex_1()
                                 .min_w_0()
                                 .min_h_0()
+                                .relative()
                                 .when(at > 0, |s| s.border_l_1().border_color(color("rule")))
                                 .child(
                                     div()
@@ -1066,14 +1151,20 @@ pub fn run_view(
                                         .pl(px(12.))
                                         .pr(px(12.))
                                         .pt(px(2.))
-                                        // The run's key hints live in the column
-                                        // headers' tooltips, clear of the text.
-                                        .tooltip(|_, cx| {
-                                            cx.new(|_| {
-                                                ui::Tooltip(message("run.keys").into(), None)
-                                            })
-                                            .into()
-                                        })
+                                        // The run's key hints show in a tip under
+                                        // the header, inside the column.
+                                        .h(px(RUN_COLUMN_HEAD))
+                                        .on_hover(cx.listener(
+                                            move |this, hovered: &bool, _, cx| {
+                                                let here = RunHover::Column(lead, role);
+                                                if *hovered {
+                                                    this.run_hover = Some(here);
+                                                } else if this.run_hover == Some(here) {
+                                                    this.run_hover = None;
+                                                }
+                                                cx.notify();
+                                            },
+                                        ))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.run_role.insert(lead, role);
                                             cx.notify();
@@ -1113,6 +1204,9 @@ pub fn run_view(
                                         .text_color(color("ink-2"))
                                         .child(footer),
                                 )
+                                .when(w.run_hover == Some(RunHover::Column(lead, role)), |s| {
+                                    s.child(column_tip(message("run.keys").into()))
+                                })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.run_role.insert(lead, role);
                                     cx.notify();
