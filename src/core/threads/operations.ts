@@ -65,6 +65,7 @@ import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, 
 import { driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
+import { markUsageNoticeDelivered, pendingUsageNotice, usageNoticeText, withUsageNotice } from "../usage/notice.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
@@ -220,6 +221,26 @@ async function withUsageProtectionContext(ctx: OperationContext, thread: StoredT
   if (!tasks.length) return prompt;
   const notes = tasks.map(({ payload }) => ({ taskId: payload!.taskId, description: payload!.description, status: payload!.status, output: Array.isArray(payload!.output) ? payload!.output.slice(-40) : null }));
   return `${prompt}\n\nUsage protection stopped or detached background work. Check it again before relying on its result or restarting it. Detached means the stop was not confirmed; it may still be running. The last 40 output lines follow; the thread keeps the full captured output:\n${notes.map((note) => JSON.stringify(note)).join("\n")}`;
+}
+
+/**
+ * A usage notice the conversation still owes, ahead of the provider's prompt
+ * and the step that records it read. The typed transcript keeps its own text;
+ * a held thread and a notice whose window reset carry none.
+ */
+function usageNoticePrompt(
+  ctx: OperationContext,
+  thread: StoredThread,
+  modelSelection: ModelSelection,
+  prompt: string,
+): { prompt: string; deliver: (() => Promise<void>) | null } {
+  if (ctx.config.usageProtection !== "notify") return { prompt, deliver: null };
+  const notice = pendingUsageNotice(thread, modelSelection.instanceId);
+  if (notice === null) return { prompt, deliver: null };
+  return {
+    prompt: withUsageNotice(prompt, notice),
+    deliver: () => markUsageNoticeDelivered(ctx.store, thread.id, notice.key, "prompt"),
+  };
 }
 
 /** What to record once the provider answered a prompt `promptWithUpdate` built. */
@@ -504,13 +525,14 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // Rule files edited while the session lived: a patch ahead of the prompt, like a fresh send.
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
     const images = await imagesOf(message.attachments);
-    const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
+    const notice = usageNoticePrompt(ctx, thread, selection, withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup), rules?.text ?? null));
+    const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : []), ...(notice.deliver ? [notice.deliver] : [])];
     void executeTurn({
       store,
       driver,
       threadId,
       storeTurnId: turn.id,
-      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup), rules?.text ?? null),
+      prompt: notice.prompt,
       ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
       ...(setup.fresh ? { freshConversation: true } : {}),
       interactionMode: turn.interactionMode,
@@ -2219,7 +2241,10 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
     const text = imageMention(input.driverPrompt ?? input.prompt.trim(), uploads.map((upload) => upload.name));
-    return { ...sent, run: null, steerDelivered: await deliverSteer(driver, thread.id, text, providerImages(uploads), sent.messageId) };
+    const notice = ctx.config.usageProtection === "notify" ? pendingUsageNotice(sent.thread, (input.modelSelection ?? sent.thread.modelSelection).instanceId) : null;
+    const steered = await deliverSteer(driver, thread.id, notice ? withUsageNotice(text, notice) : text, providerImages(uploads), sent.messageId);
+    if (steered && notice) await markUsageNoticeDelivered(ctx.store, thread.id, notice.key, "steer").catch(() => undefined);
+    return { ...sent, run: null, steerDelivered: steered };
   }
   if (sent.turn.status === "queued" && typeof sent.turn.scheduledFor === "string") {
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
@@ -2315,7 +2340,9 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   await driver.updateNativeTools?.(sent.thread.id, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
   // Rule files edited while the session lived: a patch ahead of the prompt (Claude; see `rulefiles.ts`).
   const rules: PendingRuleUpdate | null = await pendingRuleUpdate(driver, sent.thread.id, driverKey(turnModel.instanceId), sent.thread.env.path).catch(() => null);
-  const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
+  const noticePrompt = withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null);
+  const notice = input.usageControl === true ? { prompt: noticePrompt, deliver: null } : usageNoticePrompt(ctx, sent.thread, turnModel, noticePrompt);
+  const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : []), ...(notice.deliver ? [notice.deliver] : [])];
   let run: Promise<void>;
   try {
     run = executeTurn({
@@ -2323,7 +2350,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       driver,
       threadId: thread.id,
       storeTurnId: sent.turn.id,
-      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
+      prompt: notice.prompt,
       ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
       ...(setup.fresh ? { freshConversation: true } : {}),
       ...(images.length > 0 ? { images } : {}),

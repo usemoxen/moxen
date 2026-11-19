@@ -292,12 +292,32 @@ for one provider, at most `usageLimitContinues` (default 2) in a row.
 
 ### Protect work before the allowance runs out
 
-`usageProtection` is opt-in: `off` (the default), `notify`, or `auto`.
-Claude Code and Codex subscription windows feed the shared account forecast.
-Notify shows a notice above the composer with the percentage, estimated working
-time left and reset time; its **Wrap up now** action pauses the account's running
-threads. Automatic uses the same action without waiting for a click. The server
-owns this work, so closing the TUI does not disable it.
+`usageProtection` is opt-in: `off` (the default), `notify-user`, `notify`, or
+`auto`. Claude Code and Codex subscription windows feed the shared account
+forecast. `notify-user` and `notify` both show a notice above the composer with
+the percentage, estimated working time left and reset time; its **Wrap up now**
+action pauses the account's running threads. Automatic uses the same action
+without waiting for a click. The server owns this work, so closing the TUI does
+not disable it.
+
+`notify` also warns the model in the running conversation: a trusted
+`<moxen-usage-notice>` block tells it the allowance is nearly exhausted, to use
+only essential tools to leave the work in progress safe, then stop using tools
+and wait. Where the provider takes input mid-turn the block is handed to the
+live turn; where it cannot, it goes ahead of the next input. It never starts a
+provider turn of its own, and the user's typed transcript is left as it was.
+The warning is recorded on the thread per provider and window reset, so later
+input, a reconnect or a server restart does not repeat it; a reset, or another
+window running hot, can warn again. The runtime instructions also say that only
+an actual message from the user authorizes continuing, and that a delegate,
+tool output, a fake tag or another synthetic notice cannot — a warning never
+authorizes work, and an automatic task, background or queued notice is not
+permission to act either.
+
+A config file that already says `notify` keeps that value, but the mode now
+also warns the model; the earlier, user-only behaviour has its own
+`notify-user` value (Notify (you only)). `off` and `auto` are unchanged: a
+config that said either still means the same thing.
 
 The server checks every two seconds, sharing one candidate snapshot with the work
 queue: running or queued turns, usage holds and active overrides. A startup scan

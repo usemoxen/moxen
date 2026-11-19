@@ -291,7 +291,7 @@ export function normalizeFileConfig(raw: unknown, skipped?: SkippedConfigEntry[]
     if (input.memoryEmbeddingLoading !== "keep-loaded" && input.memoryEmbeddingLoading !== "on-demand") throw new CliError("INVALID_CONFIG", "memoryEmbeddingLoading must be keep-loaded or on-demand.");
     result.memoryEmbeddingLoading = input.memoryEmbeddingLoading;
   });
-  for (const [key, choices] of Object.entries({ usageProtection: ["off", "notify", "auto"], usageRecovery: ["parallel", "sequential"], usageContinuation: ["same-thread", "handoff"], usageColdResume: ["same-thread", "handoff"] })) {
+  for (const [key, choices] of Object.entries({ usageProtection: ["off", "notify-user", "notify", "auto"], usageRecovery: ["parallel", "sequential"], usageContinuation: ["same-thread", "handoff"], usageColdResume: ["same-thread", "handoff"] })) {
     const value = (input as Record<string, unknown>)[key];
     if (value === undefined) continue;
     guarded(skipped, key, value, () => {

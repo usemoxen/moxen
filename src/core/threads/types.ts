@@ -12,6 +12,7 @@ import type { ModelRequest } from "../catalog/selection.js";
 import type { ReviewVerdict, TaskNotification } from "./notify.js";
 import type { QueuePolicy } from "./queue.js";
 import type { UsageProtectionOverride } from "../usage/limits.js";
+import type { UsageNoticeState } from "../usage/notice.js";
 import type {
   InteractionMode,
   ModelSelection,
@@ -110,6 +111,8 @@ export interface StoredThread {
   /** Durable account-quota queue. Only its coordinator may run while held. */
   readonly usagePause?: UsagePause | null;
   readonly usageProtectionOverride?: UsageProtectionOverride | null;
+  /** The model-facing usage warning this conversation was given, or still owes (`usage/notice.ts`). */
+  readonly usageNotice?: UsageNoticeState | null;
   readonly id: string;
   /** Internal tool tasks stay addressable by id but do not appear in thread lists. */
   readonly hidden?: boolean;

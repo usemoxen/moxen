@@ -23,6 +23,7 @@ import type { BackgroundTaskSummary, RateLimitWindow } from "../providers/spi.js
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
+import { markUsageNoticeDelivered, pendingUsageNotice, withUsageNotice } from "../usage/notice.js";
 import type { McpServerSpec } from "../mcp.js";
 
 import { CodexDriver } from "../providers/codex/driver.js";
@@ -622,14 +623,20 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // so only an edit landing mid-turn waits one extra turn. Rule files need
     // no setup, so they do refresh above.
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
+    const notice = pendingUsageNotice(thread, selection.instanceId);
     claimed = null;
     void executeTurn({
       store,
       driver,
       threadId,
       storeTurnId: next.id,
-      prompt: withRuleUpdate(prompt.text, rules?.text ?? null),
-      ...(rules ? { afterAnswer: async () => rules.commit() } : {}),
+      prompt: withRuleUpdate(notice ? withUsageNotice(prompt.text, notice) : prompt.text, rules?.text ?? null),
+      ...(rules || notice
+        ? { afterAnswer: async () => {
+          await rules?.commit();
+          if (notice) await markUsageNoticeDelivered(store, threadId, notice.key, "prompt");
+        } }
+        : {}),
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
       interactionMode: next.interactionMode,

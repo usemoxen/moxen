@@ -9,6 +9,7 @@ import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/qu
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
 import { UsageForecaster, type UsageForecast } from "./forecast.js";
+import { markUsageNoticeDelivered, usageNoticeKey, usageNoticeStale, usageNoticeText, usageNoticeWindows, type UsageNoticeState } from "./notice.js";
 import { modelPriceFor, usageCost } from "./prices.js";
 
 const wrapUpPrompt = (reason: string, resume: string) => `${reason} Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. ${resume} Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.`;
@@ -395,7 +396,7 @@ export class UsageProtection {
   }
 
   private async refresh(ctx: OperationContext, now: number, rows: UsageRow[]): Promise<void> {
-    this.enabled = ctx.config.usageProtection === "notify" || ctx.config.usageProtection === "auto";
+    this.enabled = ctx.config.usageProtection === "notify-user" || ctx.config.usageProtection === "notify" || ctx.config.usageProtection === "auto";
     if (this.enabled || rows.some(({ thread }) => thread.usagePause)) {
       for (const { thread, turns } of rows) {
         if (thread.archivedAt || !openTurn(turns) || this.contexts.has(thread.id)) continue;
@@ -473,11 +474,85 @@ export class UsageProtection {
       !thread.archivedAt && thread.usagePause ? [{ ...thread.usagePause, threadId: thread.id, title: thread.title }] : []).sort((a, b) => a.order - b.order) };
   }
 
+  /**
+   * Warn the model where Notify says to. A running conversation gets the
+   * trusted block at its next step (a steer), and a provider that cannot take
+   * one owes it to the next input instead — never a turn of its own just to
+   * deliver a warning. The record on the thread makes the warning one per
+   * provider and window reset, across later input, reconnect and restart.
+   */
+  private async notifyModel(ctx: OperationContext, rows: UsageRow[], now: number): Promise<void> {
+    const notify = ctx.config.usageProtection === "notify";
+    for (const row of rows) {
+      let current = row.thread.usageNotice;
+      if (!notify) {
+        // Off, Notify (you only) and Automatic do not carry a model notice:
+        // drop one raised before the setting changed, so no later input does.
+        if (current) await this.writeNotice(ctx, row.thread.id, null);
+        continue;
+      }
+      if (current && usageNoticeStale(current, now)) {
+        await this.writeNotice(ctx, row.thread.id, null);
+        current = null;
+      }
+      const thread = row.thread;
+      if (thread.archivedAt || thread.deletedAt || thread.settledAt || thread.usagePause) continue;
+      const turn = openTurn(row.turns);
+      if (!turn) continue;
+      const selection = turn.modelSelection ?? thread.modelSelection;
+      const provider = usageKeyForInstance(selection.instanceId);
+      const hot = this.snapshot.forecasts.filter((forecast) => forecast.provider === provider && forecast.shouldWrap);
+      if (hot.length === 0) continue;
+      const windows = usageNoticeWindows(hot);
+      const key = usageNoticeKey(provider, windows);
+      if (current && current.provider === provider && current.key === key) {
+        if (current.delivered === null) await this.deliverNotice(ctx, row, selection, current);
+        continue;
+      }
+      const notice: UsageNoticeState = { key, provider, windows, delivered: null, raisedAt: ctx.store.nowIso() };
+      await this.writeNotice(ctx, row.thread.id, notice);
+      await this.deliverNotice(ctx, row, selection, notice);
+    }
+  }
+
+  private async writeNotice(ctx: OperationContext, threadId: string, notice: UsageNoticeState | null): Promise<void> {
+    await ctx.store.withThreadLock(threadId, async () => {
+      const thread = await ctx.store.readThreadRecord(threadId);
+      if (!thread || thread.deletedAt || thread.archivedAt) return;
+      const current = thread.usageNotice ?? null;
+      if (notice === null ? current === null : current?.key === notice.key && current.delivered === notice.delivered) return;
+      await ctx.store.writeThreadRecord({ ...thread, usageNotice: notice, updatedAt: ctx.store.nowIso() });
+    });
+  }
+
+  private async deliverNotice(ctx: OperationContext, row: UsageRow, selection: { instanceId: string }, notice: UsageNoticeState): Promise<void> {
+    // The person is answering an approval or a question: their message is
+    // the next input, and the notice rides it rather than interrupting.
+    if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) return;
+    const driver = ctx.driverFor(selection.instanceId);
+    if (!driver.steerTurn) return;
+    const live = await Effect.runPromise(driver.hasSession(row.thread.id)).catch(() => false);
+    if (!live) return;
+    if (usageNoticeStale(notice, Date.now())) {
+      await this.writeNotice(ctx, row.thread.id, null);
+      return;
+    }
+    // A resolved steer is the handoff. There is no ledger message to confirm
+    // or redeliver, on purpose: a warning must never become a provider turn
+    // of its own, so one the provider let go waits for the next input instead.
+    const accepted = await Effect.runPromise(driver.steerTurn(row.thread.id, usageNoticeText(notice))).then(
+      () => true,
+      () => false,
+    );
+    if (accepted) await markUsageNoticeDelivered(ctx.store, row.thread.id, notice.key, "steer").catch(() => undefined);
+  }
+
   private async step(now: number): Promise<void> {
     const ctx = await this.context();
     if (this.closed) return;
     let rows = await this.rows(ctx, now);
     await this.refresh(ctx, now, rows);
+    await this.notifyModel(ctx, rows, now);
     let changed = false;
     for (const { thread } of rows) {
       if (!thread.archivedAt && thread.usagePause?.phase === "wrapping" && thread.usagePause.provider === "claude" && this.nativeWrap.has(thread.id)) {
