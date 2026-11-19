@@ -75,6 +75,16 @@ export function ranTurns(turns: readonly StoredTurn[]): StoredTurn[] {
   return turns.filter(turnRan).sort((left, right) => runAt(left) - runAt(right));
 }
 
+/**
+ * Each turn that ran, by id, to the ordinal every reader numbers it with
+ * (1-based, `ranTurns` order). One projection for checkpoint counts, the
+ * Markdown export and a handoff document, so none of them can number a row
+ * that never ran or miss a turn whose checkpoint write failed.
+ */
+export function turnOrdinals(turns: readonly StoredTurn[]): Map<string, number> {
+  return new Map(ranTurns(turns).map((turn, index) => [turn.id, index + 1] as const));
+}
+
 function latestMeaningfulTurn(turns: StoredTurn[]): StoredTurn | null {
   return ranTurns(turns).at(-1) ?? null;
 }
@@ -164,19 +174,20 @@ export interface ProjectThreadInput {
   readonly plans?: ProposedPlanEnvelope[] | undefined;
   /** The delegating thread, when this one is a delegated task. */
   readonly parentThreadId?: string | undefined;
+  /** Include the canonical turn ordinals (turn id → run order) in the envelope. */
+  readonly turnOrdinals?: boolean | undefined;
 }
 
 /** Ledger-local projection into the envelope thread shape. */
 export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], input: ProjectThreadInput = {}): ThreadEnvelope {
   const running = turns.find((turn) => turn.status === "running") ?? null;
   const latestUser = [...(input.messages ?? [])].reverse().find((message) => message.role === "user") ?? null;
-  const ran = ranTurns(turns);
   // `checkpointTurnCount` is how many turns the thread had once this one
   // finished — 1-based, as every consumer reads it (the TUI's revert target
   // is `count - 1`; `turnDiff(threadId, count)` reads `ranTurns()[count - 1]`).
   // Only turns that ran count: a queued or never-started message is not one of
   // them, so adding one cannot renumber checkpoints of turns already seen.
-  const turnCount = new Map(ran.map((turn, index) => [turn.id, index + 1] as const));
+  const ordinals = turnOrdinals(turns);
   const queued = turns
     .filter((turn) => turn.status === "queued")
     .map((turn) => ({
@@ -219,9 +230,10 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     ...(input.messages ? { messages: input.messages.map(toMessageEnvelope) } : {}),
     ...(input.activities ? { activities: input.activities.map(toActivityEnvelope) } : {}),
     ...(input.checkpoints
-      ? { checkpoints: input.checkpoints.map((checkpoint) => toCheckpointEnvelope(checkpoint, turnCount.get(checkpoint.turnId) ?? 0)) }
+      ? { checkpoints: input.checkpoints.map((checkpoint) => toCheckpointEnvelope(checkpoint, ordinals.get(checkpoint.turnId) ?? 0)) }
       : {}),
     proposedPlans: input.plans ?? [],
+    ...(input.turnOrdinals ? { turnOrdinals: Object.fromEntries(ordinals) } : {}),
     turnModelSelections: Object.fromEntries(
       turns.flatMap((turn) => (turn.modelSelection ? [[turn.id, turn.modelSelection] as const] : [])),
     ),

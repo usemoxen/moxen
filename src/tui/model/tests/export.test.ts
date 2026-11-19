@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { defaultExportFilename, exportToolLine, formatThreadExport } from "../export.js";
+import { countExportedTurns, defaultExportFilename, exportToolLine, formatThreadExport, turnOrdinalResolver } from "../export.js";
 import type { TimelineEntry } from "../thread.js";
 import type { TurnGroup } from "../turns.js";
 import type { ThreadEnvelope } from "../../../core/types.js";
@@ -256,6 +256,49 @@ describe("formatThreadExport", () => {
     expect(markdown).not.toContain("## T3 ·");
     expect(markdown).not.toContain("## T4 ·");
     expect(markdown).toContain("- turns: 2 ·");
+  });
+
+  /**
+   * MXN-382: a completed turn whose checkpoint row is missing (legacy data, or
+   * the checkpoint append failure execute.ts swallows) still ran. Export used
+   * checkpoint rows alone, so it left that turn unnumbered and numbered the
+   * running turn as T1 while thread_read counted two.
+   */
+  it("numbers a turn that ran from the server's ordinals even without a checkpoint row", () => {
+    const detail = {
+      ...thread,
+      checkpoints: [],
+      turnOrdinals: { "turn-1": 1, "turn-2": 2 },
+      session: { status: "running", activeTurnId: "turn-2" },
+    } as unknown as ThreadEnvelope;
+    const groups = [
+      group({ id: "turn-1", turnId: "turn-1", prompts: [userEntry("m1", "turn-1", "first real")], reply: assistantEntry("m2", "turn-1", "done one") }),
+      group({ id: "turn-2", turnId: "turn-2", prompts: [userEntry("m3", "turn-2", "second real")], live: assistantEntry("m4", "turn-2", "working") }),
+    ];
+    const markdown = formatThreadExport({
+      thread: detail,
+      threadId: detail.id,
+      project: null,
+      groups,
+      plan: null,
+      pending: [],
+      contextUsage: null,
+      exportedAt: "2026-09-16T03:00:00.000Z",
+    });
+    expect(markdown).toContain("## T1 · first real · turn-1");
+    expect(markdown).toContain("## T2 · second real · turn-2");
+    expect(markdown).toContain("- turns: 2 ·");
+  });
+
+  it("counts canonical turns for the export's toast, not transcript groups", () => {
+    const detail = { ...thread, turnOrdinals: { "turn-1": 1, "turn-2": 2 } } as unknown as ThreadEnvelope;
+    const groups = [
+      group({ id: "turn-1", turnId: "turn-1" }),
+      group({ id: "turn-2", turnId: "turn-2" }),
+      group({ id: "turn-failed", turnId: "turn-failed" }),
+      group({ id: "turn-system", turnId: "turn-system" }),
+    ];
+    expect(countExportedTurns(groups, turnOrdinalResolver(detail, detail.turnOrdinals))).toBe(2);
   });
 
   it("never truncates message bodies — long replies stay complete", () => {

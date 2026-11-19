@@ -15,7 +15,7 @@
  * for recent turns, where the detail is; older turns shrink to a line each
  * so a long thread still fits a context window.
  */
-import { ranTurns } from "./project.js";
+import { ranTurns, turnOrdinals } from "./project.js";
 import type { ThreadStore } from "./store.js";
 import type { StoredActivity, StoredMessage, StoredThread, StoredTurn } from "./types.js";
 
@@ -52,13 +52,15 @@ function toolLines(activities: readonly StoredActivity[]): string[] {
 
 interface TurnBlock {
   readonly turn: StoredTurn;
+  /** The canonical ordinal of this turn, from `ranTurns` before any filtering. */
+  readonly ordinal: number;
   readonly prompts: readonly StoredMessage[];
   readonly replies: readonly StoredMessage[];
   readonly tools: readonly string[];
 }
 
-function verbatim(block: TurnBlock, index: number): string {
-  const lines: string[] = [`### Turn ${index + 1}${block.turn.status === "completed" ? "" : ` (${block.turn.status})`}`];
+function verbatim(block: TurnBlock): string {
+  const lines: string[] = [`### Turn ${block.ordinal}${block.turn.status === "completed" ? "" : ` (${block.turn.status})`}`];
   for (const prompt of block.prompts) lines.push("", "**User:**", "", prompt.text.trim());
   if (block.tools.length > 0) {
     lines.push("", "**Work:**");
@@ -70,11 +72,11 @@ function verbatim(block: TurnBlock, index: number): string {
   return lines.join("\n");
 }
 
-function summarized(block: TurnBlock, index: number): string {
+function summarized(block: TurnBlock): string {
   const asked = block.prompts[0] ? oneLine(block.prompts[0].text, 120) : "(no prompt)";
   const answered = block.replies.at(-1) ? oneLine(block.replies.at(-1)!.text, 120) : block.turn.status;
   const work = block.tools.length > 0 ? ` · ${block.tools.length} tool call${block.tools.length === 1 ? "" : "s"}` : "";
-  return `- Turn ${index + 1}: asked "${asked}" → ${answered}${work}`;
+  return `- Turn ${block.ordinal}: asked "${asked}" → ${answered}${work}`;
 }
 
 /** The latest checklist the thread was working through, if any. */
@@ -130,10 +132,33 @@ function countedTurns(turns: readonly StoredTurn[]): StoredTurn[] {
 /**
  * An entry the handoff path settled here: its request moved to another thread
  * (prepared, or failed preparing), so it is neither history nor pending work
- * in this document. An entry still queued has not moved yet and stays pending.
+ * in this document. An entry still queued has not moved yet and stays pending
+ * — even after an earlier attempt failed — so restoring it and releasing it
+ * carries the same request into the next handoff instead of dropping it.
+ * `handoffFailed` only keeps a historical row (one that never ran) out of the
+ * document once it is no longer queued.
  */
 function leftForAnotherThread(turn: StoredTurn): boolean {
-  return turn.handoffFailed === true || (turn.handoff !== undefined && turn.status !== "queued");
+  if (turn.status === "queued") return false;
+  return turn.handoffFailed === true || turn.handoff !== undefined;
+}
+
+/**
+ * Whether this row is a request still waiting to be sent, so the document
+ * lists it as work to do: not a turn that ran (dispatch evidence), not one the
+ * handoff path settled here (disposition), and — when the handoff names the
+ * entry it is carrying — that entry (ownership). The three stay separate
+ * predicates so another branch can add its own filter without renumbering
+ * anything.
+ */
+function pendingRequest(turn: StoredTurn, counted: ReadonlySet<string>, options: HandoffOptions): boolean {
+  return (
+    !counted.has(turn.id) &&
+    !turn.queue?.summaryFor &&
+    !leftForAnotherThread(turn) &&
+    !(options.preferModelSummary && turn.scheduledFor) &&
+    (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id))
+  );
 }
 
 export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
@@ -148,11 +173,16 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
 
   // Numbered from the run order, like thread_read, checkpoints and revert: an
   // entry handed off to a new thread does not take a number from a turn that
-  // ran after it.
+  // ran after it. The ordinal is attached before the model-summary turn is
+  // dropped from the conversation, so a real turn after it keeps the number
+  // every reader gives it.
+  const ordinals = turnOrdinals(turns);
+  const runCount = ordinals.size;
   const history = countedTurns(turns);
   const counted = new Set(history.map((turn) => turn.id));
   const blocks: TurnBlock[] = history.map((turn) => ({
     turn,
+    ordinal: ordinals.get(turn.id)!,
     prompts: messages.filter((message) => message.turnId === turn.id && message.role === "user"),
     replies: messages.filter((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0),
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
@@ -160,14 +190,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   // What never ran here is a request still to do, not delivered history. The
   // entry this handoff is carrying is still queued, so it stays listed.
   const unsent = turns
-    .filter(
-      (turn) =>
-        !counted.has(turn.id) &&
-        !turn.queue?.summaryFor &&
-        !leftForAnotherThread(turn) &&
-        !(options.preferModelSummary && turn.scheduledFor) &&
-        (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)),
-    )
+    .filter((turn) => pendingRequest(turn, counted, options))
     .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary"));
 
   // Files the thread changed, summed across every turn's checkpoint.
@@ -196,7 +219,9 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     `- Working directory: ${where}`,
     ...(options.projectTitle ? [`- Project: ${options.projectTitle}`] : []),
     `- Model it ran on: ${thread.modelSelection.instanceId}/${thread.modelSelection.model}`,
-    `- Turns so far: ${blocks.length}`,
+    // The thread's real run count, not just the conversation blocks shown:
+    // the handoff's own model-summary turn ran but is not conversation.
+    `- Turns so far: ${runCount}${blocks.length === runCount ? "" : ` (${blocks.length} in this record)`}`,
     "",
     "## Where it stopped",
     "",
@@ -235,8 +260,8 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   // document fits: the latest turns are where the unfinished work is.
   let verbatimFrom = Math.max(0, blocks.length - VERBATIM_TURNS);
   const render = (): string => {
-    const older = blocks.slice(0, verbatimFrom).map((block, index) => summarized(block, index));
-    const recent = blocks.slice(verbatimFrom).map((block, index) => verbatim(block, verbatimFrom + index));
+    const older = blocks.slice(0, verbatimFrom).map((block) => summarized(block));
+    const recent = blocks.slice(verbatimFrom).map((block) => verbatim(block));
     const conversation = [
       "",
       "## Conversation",

@@ -788,6 +788,9 @@ export function App({
     plan: exportPlan,
     pending: exportPending,
     contextUsage: threadState.contextUsage,
+    // The detail snapshot carries the server's canonical turn ordinals; the
+    // shell's list envelope (used for identity and metadata) has none.
+    turnOrdinals: threadState.thread?.turnOrdinals ?? null,
     // A remote project's folder is on the server: export here, to the launch folder, instead.
     exportDir: remote ? null : (exportProject?.workspaceRoot ?? null),
     fallbackDir: cwd,

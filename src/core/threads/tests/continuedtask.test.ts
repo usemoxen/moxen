@@ -1086,6 +1086,93 @@ describe("the queue pass's handoff preparation (MXN-382)", () => {
     expect((await w.store.readTurns(after.handoff!.destinationThreadId)).map((turn) => turn.queue?.requestId)).toEqual([`handoff:${after.handoff!.requestId}`]);
   });
 
+  /**
+   * MXN-382: a destination's turn row is written before its prompt, so the
+   * row alone only proves a reservation. The catch reconciled delivery from
+   * it and completed the source with nothing in the new thread.
+   */
+  it("does not complete a handoff whose destination turn was written without its prompt", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const realAppend = w.store.appendLedger.bind(w.store);
+    let failed = false;
+    w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+      if (!failed && threadId !== source.id && name === "messages") {
+        failed = true;
+        throw new Error("injected prompt failure");
+      }
+      return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+    };
+    try {
+      await runWorkQueue(w.ctx);
+    } finally {
+      w.store.appendLedger = realAppend;
+    }
+
+    const after = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(after.status).toBe("queued");
+    expect(after.handoffFailed).toBeUndefined();
+    const destinationId = after.handoff!.destinationThreadId;
+    expect((await w.store.readTurns(destinationId)).map((turn) => turn.queue?.requestId)).toEqual([`handoff:${after.handoff!.requestId}`]);
+    expect(await w.store.readMessages(destinationId)).toEqual([]);
+
+    // The next pass repairs the same reservation and only then settles the
+    // source: one destination turn, now with its prompt.
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
+    const settled = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(settled.status).toBe("completed");
+    expect(settled.handoffFailed).toBeUndefined();
+    const destinationTurns = await w.store.readTurns(destinationId);
+    expect(destinationTurns).toHaveLength(1);
+    const prompt = (await w.store.readMessages(destinationId)).find((message) => message.turnId === destinationTurns[0]!.id);
+    expect(prompt?.role).toBe("user");
+    expect(prompt?.text).toContain("# Continuing: solo");
+  });
+
+  /**
+   * MXN-382: after a failed attempt the source row keeps `handoffFailed`. The
+   * handoff document excluded it even once it was queued again and explicitly
+   * the entry being carried, so the restored request vanished from the new
+   * thread's opening prompt.
+   */
+  it("carries a restored request into the next handoff after an earlier attempt failed", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const realAppend = w.store.appendLedger.bind(w.store);
+    let failed = false;
+    w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+      if (!failed && threadId !== source.id && name === "turns") {
+        failed = true;
+        throw new Error("injected turn failure");
+      }
+      return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+    };
+    try {
+      await runWorkQueue(w.ctx);
+    } finally {
+      w.store.appendLedger = realAppend;
+    }
+    const failedTurn = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(failedTurn.status).toBe("failed");
+    expect(failedTurn.handoffFailed).toBe(true);
+
+    await editWorkQueue(w.ctx, source.id, entry.id, "restore");
+    await editWorkQueue(w.ctx, source.id, entry.id, "release");
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
+
+    const settled = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(settled.status).toBe("completed");
+    const destinationPrompt = (await w.store.readMessages(settled.handoff!.destinationThreadId)).find((message) => message.role === "user")!;
+    expect(destinationPrompt.text).toContain("The user queued these and they were never sent");
+    expect(destinationPrompt.text).toContain("1. Handoff");
+  });
+
   it("reconciles a landed handoff instead of failing it when the source completion write fails", async () => {
     const w = await world();
     const source = await w.make("solo");

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildHandoff, continuedTitle } from "../handoff.js";
 import { parseQueuePolicy } from "../queue.js";
 import { openThreadStore } from "../store.js";
-import { completeTurn, createThread, failTurn, sendTurn } from "../threads.js";
+import { completeTurn, createThread, failTurn, promoteDueScheduledTurn, sendTurn } from "../threads.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -180,6 +180,34 @@ describe("buildHandoff", () => {
     expect(doc).not.toContain("failed then edited");
     expect(doc).toContain("### Turn 1\n\n**User:**\n\nfirst real");
     expect(doc).toContain("### Turn 2\n\n**User:**\n\nsecond real");
+  });
+
+  /**
+   * MXN-382: the handoff drops its own model-summary turn from the document.
+   * It filtered before numbering, so a real turn after the summary took the
+   * summary's place (ordinal 3 shown as 2) while thread_read counted three.
+   */
+  it("keeps the canonical ordinal of a turn after the model-summary turn", async () => {
+    const { store, threadId } = await thread();
+    const first = await sendTurn(store, threadId, { prompt: "first real" });
+    await completeTurn(store, threadId, first.turn.id, { text: "done one" });
+    // A completed handoff-summary turn: it ran (and numbers), but is plumbing
+    // for the handoff, not conversation.
+    const summary = await sendTurn(store, threadId, {
+      prompt: "write a handoff summary",
+      queue: { ...parseQueuePolicy({ conditions: [], sequential: false }), requestId: "summary:r1", summaryFor: first.turn.id },
+    });
+    await promoteDueScheduledTurn(store, threadId, summary.turn.id, true);
+    await completeTurn(store, threadId, summary.turn.id, { text: "the summary" });
+    const third = await sendTurn(store, threadId, { prompt: "third real" });
+    await completeTurn(store, threadId, third.turn.id, { text: "done three" });
+
+    const doc = await buildHandoff(store, threadId);
+    expect(doc).toContain("### Turn 1\n\n**User:**\n\nfirst real");
+    expect(doc).toContain("### Turn 3\n\n**User:**\n\nthird real");
+    expect(doc).not.toContain("### Turn 2");
+    // The run count is the thread's, not the number of blocks shown.
+    expect(doc).toContain("- Turns so far: 3 (2 in this record)");
   });
 });
 
