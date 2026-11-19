@@ -69,7 +69,7 @@ import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn,
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
-import { toThreadEnvelope } from "./project.js";
+import { ranTurns, toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
 import { readThread, threadStatus } from "./threads.js";
 import {
@@ -2406,7 +2406,17 @@ export interface RevertOptions {
 }
 
 /**
- * Revert a thread's conversation so its first `keepTurns` turns remain.
+ * Whether a turn reached the provider: a promoted turn records `startedAt`,
+ * and a turn that ran at once is not `queued` delivery. A message that never
+ * left the queue carries no provider prompts and no checkpoint.
+ */
+function startedTurn(turn: StoredTurn): boolean {
+  return turn.delivery !== "queued" || turn.startedAt !== undefined;
+}
+
+/**
+ * Revert a thread's conversation so its first `keepTurns` turns remain, in the
+ * order they ran (the same numbering `checkpointTurnCount` and `turnDiff` use).
  * Files are left as they are unless `restoreFiles` asks for them too; the
  * checkpoints stay available to diff against either way.
  *
@@ -2416,6 +2426,11 @@ export interface RevertOptions {
  * received, which a steer makes more than one per turn — and only then is
  * the ledger cut. A provider that cannot roll back would refuse the
  * whole revert before anything changes.
+ *
+ * A message that never ran is not one of the turns being counted: an
+ * interrupted-before-start row is left in the ledger, and a terminal row
+ * that never reached the provider contributes no prompts and no file
+ * snapshot.
  */
 export async function revertThread(
   ctx: OperationContext,
@@ -2446,13 +2461,19 @@ export async function revertThread(
       details: { threadId },
     });
   }
-  const removed = turns.slice(keepTurns);
-  if (removed.length === 0) return { threadId, keptTurns: turns.length, removedTurns: 0, providers: [] };
+  const ran = ranTurns(turns);
+  const removed = ran.slice(keepTurns);
+  if (removed.length === 0) {
+    // The turns that ran are all kept; a queued or cancelled-before-start row
+    // is not a turn and stays as it is.
+    return { threadId, keptTurns: Math.min(keepTurns, ran.length), removedTurns: 0, providers: [] };
+  }
 
   // What each provider saw of the dropped turns, in prompts.
   const messages = await store.readMessages(threadId);
   const byDriver = new Map<string, { instanceId: string; selection: ModelSelection; prompts: number }>();
   for (const turn of removed) {
+    if (!startedTurn(turn)) continue;
     const selection = turn.modelSelection ?? thread.modelSelection;
     const key = driverKey(selection.instanceId);
     const prompts = messages.filter((message) => message.turnId === turn.id && message.role === "user").length || 1;
@@ -2460,13 +2481,15 @@ export async function revertThread(
     entry.prompts += prompts;
     byDriver.set(key, entry);
   }
-  // The files' target: the worktree as it was before the first dropped turn.
-  // Checked before anything changes, so a revert that cannot restore files
-  // leaves the conversation alone too.
+  // The files' target: the worktree as it was before the first dropped turn
+  // that reached the provider. A never-started row has no snapshot to name.
+  const firstStarted = removed.find(startedTurn) ?? null;
   const filesTarget =
     options.restoreFiles === true
-      ? ((await store.readCheckpoints(threadId)).find((checkpoint) => checkpoint.turnId === removed[0]!.id && checkpoint.baseRef)?.baseRef ?? null)
+      ? ((await store.readCheckpoints(threadId)).find((checkpoint) => checkpoint.turnId === firstStarted?.id && checkpoint.baseRef)?.baseRef ?? null)
       : null;
+  // Checked before anything changes, so a revert that cannot restore files
+  // leaves the conversation alone too.
   if (options.restoreFiles === true && filesTarget === null) {
     throw new CliError(
       "REVERT_FILES_UNAVAILABLE",
