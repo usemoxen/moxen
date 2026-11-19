@@ -1058,8 +1058,11 @@ entry's `error` rather than a failed call, so it never stops the others. A
 repeated id stops once, in order. When the parent itself is missing, the
 call fails as the single form does instead of reporting one error per id.
 A task it stopped keeps reading `cancelled` once the interrupted turn
-settles; only fresh work on the task (`task_send` with `wake: true`, say)
-replaces the mark with the new outcome.
+settles. Fresh work replaces the mark with its own outcome: a `task_send`
+with `wake: true`, or a message already queued behind the cancelled turn,
+once that turn settles. A cancel that arrives as the task finishes stops
+nothing: the reply reports how the task ended, with `cancelRequested: false`,
+and leaves the task as it was.
 
 ### Settling a delegated task (`task_settle`)
 

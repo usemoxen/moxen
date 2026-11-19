@@ -519,6 +519,10 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       workingDirectory: thread.env.path,
       ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
       ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
+      // Fresh work settling clears a cancelled mark, so task_status reads the
+      // new outcome instead of the old cancellation — per turn, with its own
+      // id, so a promoted turn's settle counts for that turn.
+      onTurnSettled: (settledTurnId) => clearCancelledOnSettle(ctx, threadId, settledTurnId),
     })
       // A delegated task resumed after a usage limit (or recovered after a crash)
       // still owes its parent the report when it finally ends.
@@ -528,9 +532,6 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
         // This thread's own recovery may have released task notices queued
         // while it could not receive them: they go out now, together.
         await flushTaskNotifications(ctx, threadId).catch(() => undefined);
-        // Fresh work settling clears a cancelled mark, so task_status reads
-        // the new outcome instead of the old cancellation.
-        await clearCancelledOnSettle(ctx, threadId, turn.id).catch(() => undefined);
       })
       .catch(() => undefined);
   } catch (cause) {
@@ -1050,15 +1051,33 @@ async function reviveCancelledDelegation(ctx: OperationContext, threadId: string
 /**
  * A cancelled mark reflects no live work, so fresh work settling clears it
  * and `task_status` reads the new outcome instead of the old cancellation.
- * The turn an explicit cancel stopped is the exception: its own settle lands
- * after the mark was written, and it is the cancel, not fresh work.
- * Runs after every turn started here or admitted from the queue.
+ * Two settles never do: the turn an explicit cancel stopped (its settle lands
+ * after the mark was written, and it is the cancel, not fresh work), and a
+ * turn older than the one the mark names (a slower runner from before the
+ * cancel must not erase a newer cancellation). Runs per turn, with the turn
+ * that actually settled, including a queued turn promoted by another.
  */
 async function clearCancelledOnSettle(ctx: OperationContext, threadId: string, settledTurnId: string): Promise<void> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   const row = rows.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
   if (!row || row.status !== "cancelled" || row.cancelledTurnId === settledTurnId) return;
-  if (await taskHasSettledForGood(ctx, threadId)) await ctx.store.updateDelegation(row.id, { status: "running" }).catch(() => null);
+  const cancelledTurnId = row.cancelledTurnId;
+  const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
+  if (cancelledTurnId !== undefined) {
+    const settledAt = turns.findIndex((turn) => turn.id === settledTurnId);
+    const cancelledAt = turns.findIndex((turn) => turn.id === cancelledTurnId);
+    // The ledger is in creation order: a settle at or before the cancelled
+    // turn is not fresh work. A turn missing from it cannot be ordered.
+    if (settledAt >= 0 && cancelledAt >= 0 && settledAt <= cancelledAt) return;
+  }
+  if (!(await taskHasSettledForGood(ctx, threadId))) return;
+  // Compare-and-set: a cancellation written while this ran (a newer one, or
+  // one for the same turn) must survive. The row checked above is the row patched.
+  await ctx.store.updateDelegationIf(
+    row.id,
+    (current) => current.status === "cancelled" && current.cancelledTurnId === cancelledTurnId,
+    { status: "running" },
+  ).catch(() => null);
 }
 
 /**
@@ -2337,7 +2356,10 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       ...(onEvent ? { onEvent } : {}),
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
-    }).then(() => syncResearchRun(ctx, thread.id).catch(() => undefined)).then(() => clearCancelledOnSettle(ctx, thread.id, sent.turn.id)).catch(() => undefined);
+      // Per turn, with its own id: a queued turn this one promotes settles
+      // under the promotion's own hook, not this turn's.
+      onTurnSettled: (settledTurnId) => clearCancelledOnSettle(ctx, thread.id, settledTurnId),
+    }).then(() => syncResearchRun(ctx, thread.id).catch(() => undefined)).catch(() => undefined);
   } catch (cause) {
     // The prompt never reached a runner (a ledger read failed while building
     // it): release the claim rather than leaving the turn tracked forever.
@@ -4571,10 +4593,12 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
   // The turn this call stopped reads as the cancel it ended on, so its own
   // settle leaves the mark: only a turn started afterwards replaces it.
   let cancelledTurnId: string | undefined;
+  let interrupted = false;
   if (isThreadActive(child)) {
     try {
       const stopped = await interruptTurn(ctx.store, child.id);
-      if (stopped.interrupted) cancelledTurnId = stopped.turn?.id ?? child.latestTurn?.turnId;
+      interrupted = stopped.interrupted;
+      if (interrupted) cancelledTurnId = stopped.turn?.id;
     } catch (cause) {
       throw new CliError(
         "TASK_CANCEL_UNSUPPORTED",
@@ -4617,18 +4641,30 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
   if (hadAutoContinue) {
     await noteAutoContinueCancelled(ctx, child.id, opts).catch(() => undefined);
   }
+  const after = await threadWithLedger(ctx.store, child.id);
+  const state = after.latestTurn?.state ?? null;
+  const terminal: CancelledTaskStatus | null =
+    state === "completed" ? "completed"
+    : state === "error" ? "failed"
+    : state === "interrupted" ? "interrupted"
+    : null;
+  // Nothing was interrupted and nothing pending was taken back: the task
+  // ended on its own before the interrupt reached the thread. Say how it
+  // ended and leave the delegation as it was; a cancel that stopped nothing
+  // must not read as the task's outcome.
+  if (!interrupted && !hadAutoContinue && terminal !== null) {
+    return { ...described, task: { ...described.task, status: terminal }, interruptRequested: false, stateAfter: state };
+  }
   if (row.status !== "cancelled" || (cancelledTurnId !== undefined && row.cancelledTurnId !== cancelledTurnId)) {
     await ctx.store.updateDelegation(row.id, {
       status: "cancelled",
       ...(cancelledTurnId === undefined ? {} : { cancelledTurnId }),
     }).catch(() => null);
   }
-  const after = await threadWithLedger(ctx.store, child.id);
-  const state = after.latestTurn?.state ?? null;
   return {
     ...described,
     task: { ...described.task, status: state === "interrupted" ? "interrupted" : "cancel_requested" },
-    interruptRequested: true,
+    interruptRequested: interrupted,
     stateAfter: state,
   };
 }

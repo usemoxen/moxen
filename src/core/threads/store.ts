@@ -812,12 +812,28 @@ export class ThreadStore {
     delegationId: string,
     patch: Partial<StoredDelegation>,
   ): Promise<StoredDelegation | null> {
+    return await this.updateDelegationIf(delegationId, () => true, patch);
+  }
+
+  /**
+   * Patch a delegation row only while it still matches, checked and written
+   * under the one ledger lock: a caller that read the row earlier cannot
+   * overwrite a change that landed in between (a newer cancellation, say).
+   * Null when the row is gone or no longer matches.
+   */
+  async updateDelegationIf(
+    delegationId: string,
+    matches: (current: StoredDelegation) => boolean,
+    patch: Partial<StoredDelegation>,
+  ): Promise<StoredDelegation | null> {
     return await this.withThreadLock("!delegations", async () => {
       const all = await this.readDelegations();
       const index = all.findIndex((delegation) => delegation.id === delegationId);
       if (index < 0) return null;
+      const current = all[index]!;
+      if (!matches(current)) return null;
       const updated: StoredDelegation = {
-        ...all[index]!,
+        ...current,
         ...patch,
         id: delegationId,
         updatedAt: this.nowIso(),

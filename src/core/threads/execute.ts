@@ -506,6 +506,12 @@ export interface ExecuteTurnArgs {
   readonly freshConversation?: boolean;
   /** A usage limit stopped this turn (`resetsAt` when the provider said): the automatic continue hooks in here. */
   readonly onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void;
+  /**
+   * This one turn's settle, with its ledger id, before a queued turn it
+   * promoted is taken: a cancellation check must read the turn that actually
+   * settled, and never clear a mark for a turn it did not.
+   */
+  readonly onTurnSettled?: (storeTurnId: string) => Promise<void>;
   /** Once the turn has settled and any queued turn is under way: where the server hands off or compacts a long thread unasked. */
   readonly afterSettle?: () => Promise<void>;
   /** Each live context reading the turn records while it runs: where the server compacts a thread that crosses its line mid-turn. */
@@ -515,6 +521,7 @@ export interface ExecuteTurnArgs {
 export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
   return trackRun(
     runExecuteTurn(args)
+      .then(() => args.onTurnSettled?.(args.storeTurnId).catch(() => undefined))
       .then(() => runPromotedTurn(args))
       // Never the turn's failure: the turn is settled whatever this does.
       .then(() => args.afterSettle?.().catch(() => undefined)),
@@ -636,6 +643,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       workingDirectory: thread.env.path,
       ...(args.onEvent ? { onEvent: args.onEvent } : {}),
       ...(args.onUsageLimit ? { onUsageLimit: args.onUsageLimit } : {}),
+      ...(args.onTurnSettled ? { onTurnSettled: args.onTurnSettled } : {}),
       ...(args.afterSettle ? { afterSettle: args.afterSettle } : {}),
     });
   } catch {
