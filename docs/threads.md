@@ -480,7 +480,17 @@ re-pointing is one atomic write, so a
 notification deciding mid-transfer sees every row before or every row after
 it; a report queued and fully delivered just before the transfer still
 reaches the old thread — the task's next report, and `task_status` on the
-new parent at any time, cover it. A continued thread
+new parent at any time, cover it. The new thread records from its creation
+that it is still receiving this handoff, and clears that record once its
+predecessor's tasks and waiting notices are its. Until then it cannot be
+continued itself: a reservation on it — the palette action, an agent's
+`thread_continue`, a queued handoff naming its own destination, and a retry
+after a crash alike — is refused with `THREAD_BUSY` carrying the handoff
+contention the queue pass already understands, so the entry stays queued for
+a later pass instead of failing. A crash mid-handoff leaves that record
+behind, and the next start finishes the adoption before it recovers notices,
+so the tasks land on the thread that owns them and not on one that already
+moved on. A continued thread
 starts no new delegations (`THREAD_CONTINUED` names the live thread):
 otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A manual continue needs an idle source: while one of its
@@ -1173,7 +1183,11 @@ A `modelSelection` with `provider`/`model` together is refused.
   speaks in the thread, which resets the count. A user's own palette
   continue never counts. A call retried with the same `idempotencyKey`
   returns the first continuation with a note, even when the new text
-  differs: the first summary is kept.
+  differs: the first summary is kept. It reports that only once the handoff
+  durably finished — its tasks and waiting notices moved and its first turn
+  started; a call that died before that finishes the same reservation with
+  the summary and first message it is retried with, since the first one was
+  never written into the new thread.
 - Mid-turn ordering: the new thread's first turn waits until the source
   thread has nothing running or queued (an entry condition on the calling
   turn plus a thread condition on the source, admitted by the work queue),

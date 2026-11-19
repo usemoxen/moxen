@@ -74,6 +74,8 @@ import type { ThreadStore } from "./store.js";
 import { readThread, threadStatus } from "./threads.js";
 import {
   adoptProviderTitle,
+  adoptionBusyError,
+  continuationClaimLive,
   continuationInFlight,
   createThread,
   continuationBusyError,
@@ -1361,12 +1363,106 @@ function isManualContinue(request: ContinueThreadRequest): boolean {
 }
 
 /**
+ * Whether the handoff out of this thread still has delegated tasks to
+ * re-point at its continuation. Mirrors what `adoptTasks` moves (research
+ * roles stay with their run), so a marker left after the adoption write is
+ * not mistaken for work still to do.
+ */
+async function adoptionOutstanding(store: ThreadStore, sourceId: string): Promise<boolean> {
+  const rows = (await store.readDelegations().catch(() => [] as StoredDelegation[])).filter((row) => row.parentThreadId === sourceId);
+  for (const row of rows) {
+    const child = await store.readThreadRecord(row.childThreadId).catch(() => null);
+    if (child?.researchRole === undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether every notice waiting on the source already belongs to a task that
+ * still reports there: the handoff's move has nothing left to carry. Mirrors
+ * `moveTaskNotifications`' keep rule by resolving each entry's live parent
+ * through the task's own continuation chain, exactly as the move does.
+ */
+async function noticesMovedOut(ctx: OperationContext, sourceId: string): Promise<boolean> {
+  const stored = (await readTaskNotificationBatches(ctx.storeRoot))[sourceId] ?? [];
+  if (stored.length === 0) return true;
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  return stored.every((entry) => {
+    const parent = liveParentOf(rows, entry.child);
+    return parent === undefined || parent === sourceId;
+  });
+}
+
+/**
+ * Clear the receiving marker on a record whose lock the caller already holds,
+ * returning the record as it stands afterwards so no caller writes a copy
+ * taken before the clear back over it.
+ */
+async function clearAdoptionUnderLock(store: ThreadStore, current: StoredThread, from: string): Promise<StoredThread> {
+  if (current.adoptingFrom !== from) return current;
+  const cleared = { ...current, adoptingFrom: null, updatedAt: store.nowIso() };
+  await store.writeThreadRecord(cleared);
+  return cleared;
+}
+
+/** Clear the receiving marker under the destination's own lock. */
+async function clearAdoptionMarker(store: ThreadStore, destinationId: string, from: string): Promise<void> {
+  await store.withThreadLock(destinationId, async () => {
+    const current = await store.readThreadRecord(destinationId);
+    if (current) await clearAdoptionUnderLock(store, current, from);
+  });
+}
+
+/**
+ * Whether a handoff into `destinationId` has durably completed: its adoption
+ * write landed, the notices the source still had are moved, and its first
+ * turn exists. What an idempotent `thread_continue` retry must find before it
+ * may report the earlier call as done.
+ */
+async function continuationSettled(ctx: OperationContext, sourceId: string, destinationId: string): Promise<boolean> {
+  const destination = await ctx.store.readThreadRecord(destinationId).catch(() => null);
+  if (!destination?.continuedFrom || destination.adoptingFrom) return false;
+  if (destination.continuedFrom !== sourceId) return false;
+  if (await adoptionOutstanding(ctx.store, sourceId)) return false;
+  if (!(await noticesMovedOut(ctx, sourceId))) return false;
+  return (await ctx.store.readTurns(destinationId).catch(() => [] as StoredTurn[])).length > 0;
+}
+
+/**
+ * Refuse to reserve a continuation of a thread that is itself still receiving
+ * a handoff: continuing it now would leave its predecessor's tasks owned by a
+ * thread that already moved on. Runs under this thread's own lock and never
+ * writes a record it did not read there: a stale claim on the source is read
+ * as stale (`continuationClaimLive`), not healed from here, because this lock
+ * does not serialize the source's writers. The durable receiving marker is
+ * what survives a crash — the in-process run and the source's live claim only
+ * close the window before it is written. Once the marker is behind us (or the
+ * source is gone) it is cleared here, under this thread's lock.
+ */
+async function refuseWhileAdopting(ctx: OperationContext, live: StoredThread): Promise<StoredThread> {
+  const from = live.adoptingFrom;
+  if (!from) return live;
+  const origin = await ctx.store.readThreadRecord(from).catch(() => null);
+  if (continuationRuns.has(from) || (origin !== null && continuationClaimLive(origin))) throw adoptionBusyError(live.id, from);
+  if (origin !== null && ((await adoptionOutstanding(ctx.store, from)) || !(await noticesMovedOut(ctx, from)))) {
+    throw adoptionBusyError(live.id, from);
+  }
+  return await clearAdoptionUnderLock(ctx.store, live, from);
+}
+
+/**
  * Pick the destination before creating it, persisting a new id on the
  * source under its thread lock. An explicit id (a queued handoff's) is
  * its own reservation; otherwise a usage-recovery reservation wins, then
  * a note an earlier call left, then a fresh id recorded now — so a second
  * overlapping call, or a retry after a crash between reservation and
  * creation, finds the same destination instead of creating another.
+ *
+ * Every path, an explicit id and a usage-recovery reservation included,
+ * refuses a source that is itself still receiving a handoff: the check sits
+ * above those shortcuts, not after them, so a queued or retried handoff
+ * cannot move its predecessor's tasks on. The refusal is classified as
+ * handoff contention, so the queue pass leaves the entry for a later pass.
  *
  * A manual continue refuses a running source inside the same lock, before
  * any note or destination exists: serialized with active-turn admission
@@ -1382,28 +1478,16 @@ function isManualContinue(request: ContinueThreadRequest): boolean {
  * written — so a failed reserve never leaves a registered token or a
  * blocking record behind. Returns the destination.
  */
-async function reserveContinuation(store: ThreadStore, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string, claimToken: string | null): Promise<string> {
+async function reserveContinuation(ctx: OperationContext, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string, claimToken: string | null): Promise<string> {
+  const store = ctx.store;
   const manual = claimToken !== null;
-  if (!manual) {
-    if (request.destinationThreadId) return request.destinationThreadId;
-    if (source.usagePause?.continuedThreadId) return source.usagePause.continuedThreadId;
-  }
   return await store.withThreadLock(source.id, async () => {
     const current = await store.readThreadRecord(source.id);
-    const live = current ?? source;
-    // A thread that is itself still receiving a handoff has not taken over
-    // that handoff's tasks yet: continuing it now would leave them assigned
-    // to a thread that already moved on. Let the incoming adoption commit.
-    if (live.continuedFrom) {
-      const origin = await store.readThreadRecord(live.continuedFrom).catch(() => null);
-      const landing = continuationRuns.has(live.continuedFrom)
-        || (origin !== null && (await continuationInFlight(store, origin)).blocked);
-      if (landing) {
-        throw new CliError("THREAD_BUSY", `Thread ${live.id} is still receiving the handoff from ${live.continuedFrom}. Retry when it lands.`, {
-          exitCode: 4,
-          details: { threadId: live.id, continuedFrom: live.continuedFrom },
-        });
-      }
+    let live = current ?? source;
+    live = await refuseWhileAdopting(ctx, live);
+    if (!manual) {
+      if (request.destinationThreadId) return request.destinationThreadId;
+      if (live.usagePause?.continuedThreadId) return live.usagePause.continuedThreadId;
     }
     if (manual) {
       // Refuse what a send would refuse: read the turns first — a first
@@ -1438,7 +1522,7 @@ async function reserveContinuation(store: ThreadStore, source: StoredThread, req
         updatedAt: store.nowIso(),
       });
       if (live.usagePause?.continuedThreadId) return live.usagePause.continuedThreadId;
-    } else if (current?.usagePause?.continuedThreadId) return current.usagePause.continuedThreadId;
+    }
     const notes = await store.readActivities(source.id);
     const prior = notes.find((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string");
     if (prior) return prior.payload!.threadId as string;
@@ -1587,7 +1671,7 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   const claimToken = isManualContinue(request) ? store.newId() : null;
   if (claimToken !== null) trackContinuation(claimToken);
   try {
-    const destinationId = await reserveContinuation(store, source, request, title, noteSummary, claimToken);
+    const destinationId = await reserveContinuation(ctx, source, request, title, noteSummary, claimToken);
     return await continueThreadReserved(ctx, request, source, title, interactionMode, noteSummary, destinationId);
   } finally {
     // The handoff landed (or failed): the source takes work again. A later
@@ -1643,12 +1727,29 @@ async function continueThreadReserved(
     interactionMode,
     env: source.env,
     continuedFrom: source.id,
+    // Written with the thread itself: until the adoption below commits this
+    // thread still has its predecessor's work to receive, and no continuation
+    // of it may run first (see `refuseWhileAdopting`). A crash here leaves the
+    // marker for startup recovery to finish.
+    adoptingFrom: source.id,
   });
-  if (existing && existing.continuedFrom === undefined) {
-    await store.withThreadLock(existing.id, async () => {
-      const current = await store.readThreadRecord(existing.id);
-      if (current) await store.writeThreadRecord({ ...current, continuedFrom: source.id });
-    });
+  if (existing) {
+    // A destination an earlier attempt left behind (a retry, or a resume
+    // after a crash) carries the same durable marker while this attempt
+    // adopts, so a continue racing the adoption cannot move the tasks on.
+    const outstanding = await adoptionOutstanding(store, source.id);
+    const marking = outstanding && existing.adoptingFrom !== source.id;
+    if (existing.continuedFrom === undefined || marking) {
+      await store.withThreadLock(existing.id, async () => {
+        const current = await store.readThreadRecord(existing.id);
+        if (!current) return;
+        await store.writeThreadRecord({
+          ...current,
+          continuedFrom: current.continuedFrom ?? source.id,
+          ...(outstanding && current.adoptingFrom !== source.id ? { adoptingFrom: source.id } : {}),
+        });
+      });
+    }
   }
   const live = await store.readThreadRecord(source.id);
   // A continuation held for the reset inherits the hold; one starting now does not.
@@ -1702,6 +1803,10 @@ async function continueThreadReserved(
   // Notices already waiting on the old thread belong to the live conversation
   // the tasks just moved to, not to the dormant one.
   await moveTaskNotifications(ctx, source.id);
+  // Tasks and notices are this thread's now: a later continue of it is its
+  // own. Best effort — a lost clear is read as stale by the next reservation
+  // once nothing is left to adopt, and startup recovery redoes the handoff.
+  await clearAdoptionMarker(store, created.id, source.id).catch(() => undefined);
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
@@ -1739,6 +1844,55 @@ async function continueThreadReserved(
   }
   store.emit(source.id, "thread-continued");
   return { threadId: created.id, title, scheduledFor: request.scheduledFor ?? null };
+}
+
+/**
+ * Finish handoffs a crash left half done: every thread still carrying the
+ * receiving marker gets its reservation resumed, earliest lineage first so a
+ * chain adopts in order (P → A before A → B). Idempotent — a resumed handoff
+ * redoes only what is left (a row already re-pointed moves nothing, a moved
+ * notice is gone) and starts the destination's first turn only when it has
+ * none — so running it at startup is always safe. A destination whose source
+ * is gone has nothing to adopt and just loses the marker. Never throws: a
+ * failed resume leaves the marker for the next start, and the thread's own
+ * continuation stays refused until the work lands rather than moving it on.
+ */
+export async function recoverPendingAdoptions(ctx: OperationContext): Promise<void> {
+  const ids = await ctx.store.listThreadIds().catch(() => [] as string[]);
+  const records = new Map<string, StoredThread>();
+  for (const id of ids) {
+    const record = await ctx.store.readThreadRecord(id).catch(() => null);
+    if (record) records.set(id, record);
+  }
+  const lineageDepth = (id: string): number => {
+    let hops = 0;
+    const seen = new Set([id]);
+    let from = records.get(id)?.adoptingFrom;
+    while (typeof from === "string" && !seen.has(from)) {
+      seen.add(from);
+      hops += 1;
+      from = records.get(from)?.adoptingFrom;
+    }
+    return hops;
+  };
+  const pending = [...records.values()].filter((record) => typeof record.adoptingFrom === "string");
+  pending.sort((a, b) => lineageDepth(a.id) - lineageDepth(b.id));
+  for (const destination of pending) {
+    const from = destination.adoptingFrom!;
+    if (!records.has(from)) {
+      await clearAdoptionMarker(ctx.store, destination.id, from).catch(() => undefined);
+      continue;
+    }
+    const open = openTurn(await ctx.store.readTurns(from).catch(() => [] as StoredTurn[])) !== null;
+    await continueThread(ctx, {
+      threadId: from,
+      destinationThreadId: destination.id,
+      automatic: true,
+      // The two threads share a checkout: when the source still has a turn
+      // open, the destination's first turn waits for it through the queue.
+      ...(open ? { queue: parseQueuePolicy({ conditions: [{ type: "thread", threadId: from }], sequential: false }) } : {}),
+    }).catch(() => undefined);
+  }
 }
 
 export interface ContinueOwnThreadRequest {
@@ -1875,7 +2029,12 @@ export async function continueOwnThread(ctx: OperationContext, request: Continue
     const replay = notes.find((activity) => activity.kind === "thread.continued" && activity.payload?.idempotencyKey === key);
     if (replay && typeof replay.payload?.threadId === "string") {
       const destination = await ctx.store.readThreadRecord(replay.payload.threadId);
-      if (destination) {
+      // Only a handoff that durably finished may answer a retry: a crash
+      // between reservation and creation names a thread that was never
+      // created, and one between the adoption and the first turn names a
+      // thread still to finish. Both fall through, so the normal path resumes
+      // the reservation instead of reporting success over an empty thread.
+      if (destination && (await continuationSettled(ctx, callerId, destination.id))) {
         return {
           threadId: destination.id,
           title: destination.title,
@@ -1884,8 +2043,6 @@ export async function continueOwnThread(ctx: OperationContext, request: Continue
           note: `Already continued as ${destination.id} for this key; the first summary was kept.`,
         };
       }
-      // A crash between reservation and creation names a thread that was
-      // never created: fall through and finish the job below.
     }
   }
   const streak = await countConsecutiveAgentContinuations(ctx.store, caller);
@@ -3480,8 +3637,10 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     }
     // A handoff still landing claims this thread: a turn started here would be
     // refused with THREAD_BUSY, so keep the batch durable and try again rather
-    // than consume it with nothing delivered.
-    if (held !== null && (await continuationInFlight(ctx.store, held)).blocked) {
+    // than consume it with nothing delivered. Read-only: this snapshot was
+    // taken under another lock's window, so healing its stale claim here would
+    // rewrite the parent over a concurrent title or mode write.
+    if (held !== null && continuationClaimLive(held)) {
       await acknowledgeTaskNotifications(ctx.storeRoot, parentThreadId, leaving);
       armTaskNotificationFlush(ctx, parentThreadId, mine);
       return;

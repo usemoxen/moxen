@@ -121,6 +121,7 @@ import { onScheduledTurnDue } from "../core/threads/schedule.js";
 import { onThreadFailure } from "../core/threads/failures.js";
 import {
   armPendingScheduledTurns,
+  recoverPendingAdoptions,
   recoverTaskNotifications,
   readWorkQueue,
   editWorkQueue,
@@ -948,10 +949,16 @@ export class DirectConnection implements ClientApi {
     void this.context()
       .then((ctx) => armPendingScheduledTurns(ctx))
       .catch(() => undefined);
-    // A restart inside a task notification's batch window left its batch on
-    // disk: deliver it now, once, rather than losing it.
+    // A crash mid-handoff leaves a destination still receiving its source's
+    // tasks: finish those adoptions first, so a notice whose task just moved
+    // is recovered for the thread that owns it. A restart inside a task
+    // notification's batch window left its batch on disk: deliver it now,
+    // once, rather than losing it.
     void this.context()
-      .then((ctx) => recoverTaskNotifications(ctx))
+      .then(async (ctx) => {
+        await recoverPendingAdoptions(ctx);
+        await recoverTaskNotifications(ctx);
+      })
       .catch(() => undefined);
     // Finished worktree threads give their checkouts and merged branches back: now, then every few hours.
     void this.pruneFinished();

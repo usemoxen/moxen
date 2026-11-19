@@ -291,3 +291,59 @@ describe("a pause notice for a task that moved with its parent", () => {
     expect(delivered[0]).toContain(taskNext.threadId);
   });
 });
+
+describe("a notice a handoff carries", () => {
+  it("keeps its identity from the old parent's batch to the new one's", async () => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const destination = await w.make("continuation");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    await settle(w, child.id, "Build it", "Done.");
+    await hold(w, source.id);
+    await queueTaskNotification(w.ctx, source.id, child.id);
+    const before = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, { id: string; child: string }[]>;
+    expect(before[source.id]).toHaveLength(1);
+    await release(w, source.id);
+
+    // Stop the handoff after its move and before its first turn: the notice
+    // sits in the destination's batch exactly as the move left it.
+    const readTurns = w.store.readTurns.bind(w.store);
+    let arrived!: () => void;
+    const atMove = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    let proceed!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      proceed = resolve;
+    });
+    let armed = true;
+    const spy = vi.spyOn(w.store, "readTurns").mockImplementation(async (threadId, options) => {
+      const turns = await readTurns(threadId, options);
+      if (armed && threadId === destination.id && turns.length === 0) {
+        armed = false;
+        arrived();
+        await gate;
+      }
+      return turns;
+    });
+    const handoff = continueThread(w.ctx, { threadId: source.id, destinationThreadId: destination.id });
+    try {
+      await atMove;
+      const after = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, { id: string; child: string }[]>;
+      expect(after[source.id]).toBeUndefined();
+      expect(after[destination.id]?.map((entry) => entry.child)).toEqual([child.id]);
+      // Identity survives the move, so a replay or a refusal that reads it
+      // later still names the same notice.
+      expect(after[destination.id]?.[0]?.id).toBe(before[source.id]![0]!.id);
+    } finally {
+      proceed();
+      await handoff;
+      spy.mockRestore();
+    }
+    await flushTaskNotifications(w.ctx, destination.id);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, source.id)).toEqual([]);
+    expect(await notificationsIn(w, destination.id)).toHaveLength(1);
+  });
+});
