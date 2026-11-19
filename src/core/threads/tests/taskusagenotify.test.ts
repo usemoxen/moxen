@@ -355,12 +355,12 @@ describe("a parent that cannot receive task notices yet", () => {
     await flushTaskNotifications(w.ctx, parent.id);
     await flushTurnRunners();
     expect(await notificationsIn(w, parent.id)).toEqual([]);
-    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ id: `settle:${child.id}:1`, child: child.id }] });
     // A restart replays the same way: still spent, still nothing goes out.
     await recoverTaskNotifications(w.ctx);
     await flushTurnRunners();
     expect(await notificationsIn(w, parent.id)).toEqual([]);
-    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ id: `settle:${child.id}:1`, child: child.id }] });
   });
 
   it("drops a spent parent's batch at once when the parent is archived or deleted", async () => {
@@ -381,7 +381,7 @@ describe("a parent that cannot receive task notices yet", () => {
 
     await queueTaskNotification(w.ctx, archived.id, archivedChild.id);
     await queueTaskNotification(w.ctx, deleted.id, deletedChild.id);
-    expect(await batchesOf(w)).toEqual({ [archived.id]: [{ child: archivedChild.id }], [deleted.id]: [{ child: deletedChild.id }] });
+    expect(await batchesOf(w)).toEqual({ [archived.id]: [{ id: `settle:${archivedChild.id}:1`, child: archivedChild.id }], [deleted.id]: [{ id: `settle:${deletedChild.id}:1`, child: deletedChild.id }] });
     const now = w.store.nowIso();
     await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(archived.id))!, archivedAt: now, updatedAt: now });
     await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(deleted.id))!, deletedAt: now, updatedAt: now });
@@ -410,7 +410,7 @@ describe("a parent that cannot receive task notices yet", () => {
     await flushTaskNotifications(w.ctx, parent.id);
     await flushTurnRunners();
     expect(await notificationsIn(w, parent.id)).toEqual([]);
-    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ id: `settle:${child.id}:1`, child: child.id }] });
     // Once the allowance is back, the waiting batch still delivers.
     recordUsageWindows("codex", [
       { id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(Date.now() + 3_600_000).toISOString() },

@@ -140,11 +140,12 @@ how to decline: if it only acknowledges the hand-off and does no review work
 or tool calls, it replies with exactly `MOXEN_REVIEW_HANDOFF_ACK` and nothing
 else; otherwise it does the work and ends with a verdict. Only that exact
 token, as the whole final reply of a completed opening turn that used no tool,
-leaves the carried verdict alone. Fenced, quoted, translated or padded
-replies, empty replies, tokens on later turns, and failed or interrupted
-turns are reports, and a report with no trailing verdict is called out as not
-a finished review. A non-English report follows the same rule and ends with
-either unchanged verdict line.
+leaves the carried verdict alone; whitespace around it is ignored. Quoted,
+fenced or translated replies, any reply carrying extra content, empty
+replies, tokens on later turns, and failed or interrupted turns are reports,
+and a report with no trailing verdict is called out as not a finished
+review. A non-English report follows the same rule and ends with either
+unchanged verdict line.
 
 A review row written before outcomes were durable is seeded once from its own
 legacy chain, oldest incarnation first: its newest settled verdict wins over
@@ -507,7 +508,14 @@ transfer still reaches the old thread — the task's next report, and
 a task that has since continued is dropped rather than sent to the old
 parent; when its live continuation has already finished, the notice is
 regenerated for that thread, so a lost callback cannot leave the parent
-with nothing. Task lookup follows the hand-off links with no hop cap — one
+with nothing. Each notice carries an identity — the task, its kind and the
+settle generation — and the message that reports it records that identity,
+so a replayed batch, a moved notice or a regenerated continuation notice is
+delivered once, while a later settle has a new identity and still reports.
+A settle also records its generation on the delegation row, and startup
+recovery sends any generation no notice was queued for, so a process lost
+after a verdict was persisted does not strand it. Task lookup follows the
+hand-off links with no hop cap — one
 pass over an indexed delegation ledger — so a task answers to its original
 id however many times it continued. Delegation ledger writes assume one
 writer per store root: the server that holds `server.lock`

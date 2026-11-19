@@ -247,12 +247,12 @@ describe("usage protection", () => {
       // Held: nothing goes out and no turn starts behind the hold.
       expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
       expect((await w.store.readTurns(parent)).filter((turn) => turn.status === "queued")).toHaveLength(0);
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ id: `settle:${child}:1`, child }] });
       // A restart keeps the held batch without delivering it.
       const store = await openThreadStore(w.root);
       await recoverTaskNotifications({ ...w.ctx, store });
       expect((await store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ id: `settle:${child}:1`, child }] });
       // The user's next message carries the notice with it.
       const user = await startTurn({ ...w.ctx, store }, { threadId: parent, prompt: "continue" });
       await user.run;
@@ -274,8 +274,8 @@ describe("usage protection", () => {
     try {
       await queueTaskNotification(w.ctx, parent, child);
       // Durable before the timer fires: the sidecar names the batch.
-      const persisted = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, { child: string }[]>;
-      expect(persisted[parent]).toEqual([{ child }]);
+      const persisted = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, { id: string; child: string }[]>;
+      expect(persisted[parent]).toEqual([{ id: `settle:${child}:1`, child }]);
       // A restart before the timer fires replays the batch...
       const store = await openThreadStore(w.root);
       const ctx = { ...w.ctx, store };
@@ -304,7 +304,7 @@ describe("usage protection", () => {
       await queueTaskNotification(w.ctx, parent, child);
       await expect(flushTaskNotifications(w.ctx, parent)).rejects.toThrow();
       // At-least-once: the batch is still on disk for the retry, and nothing went out.
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
+      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ id: `settle:${child}:1`, child }] });
       expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
       await updateThreadMeta(w.store, parent, { modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" } });
       await flushTaskNotifications(w.ctx, parent);

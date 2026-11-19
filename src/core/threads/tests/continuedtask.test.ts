@@ -1170,3 +1170,106 @@ describe("a superseded settle and its successor (MXN-389)", () => {
     expect(heard[0]).toContain(`taskId ${successor.threadId}`);
   }, 30_000);
 });
+
+describe("durable settle notices across a restart or hand-off (MXN-389)", () => {
+  /** A review task whose settle notice is batched under its parent, with no callback left to run. */
+  async function settledReview(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, parentId, child.id);
+    return child;
+  }
+
+  it("recovers a settle whose notice was never queued, without the predecessor batch", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReview(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    // Flushing while the successor runs drops the predecessor's settle.
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+
+    // The successor persists its verdict; the process dies before the run
+    // callback queues anything. Reopen: the obligation is on the row.
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+    await recoverTaskNotifications(w.ctx);
+    const heard = await notificationsIn(w, parent.id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain(`taskId ${successor.threadId}`);
+    expect(heard[0]).toContain("Review verdict: FIX FIRST");
+    expect((await describeTask(w.ctx, parent.id, child.id)).review).toMatchObject({ verdict: "FIX FIRST" });
+  }, 30_000);
+
+  it("admits a settle to the parent that owns the task when a hand-off lands first", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReview(w, parent.id);
+    const [reviewed] = await w.store.readTurns(child.id);
+
+    // Pause after the final delegation lookup (the flush's last read of the
+    // parent, before admission), continue the parent, then resume.
+    const realTurns = w.store.readTurns.bind(w.store);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    let parentReads = 0;
+    w.store.readTurns = async (threadId: string) => {
+      const turns = await realTurns(threadId);
+      if (threadId === parent.id) {
+        parentReads += 1;
+        if (parentReads === 2) {
+          entered();
+          await gate;
+        }
+      }
+      return turns;
+    };
+    try {
+      const flushing = flushTaskNotifications(w.ctx, parent.id);
+      await paused;
+      const nextParent = await continueThread(w.ctx, { threadId: parent.id });
+      release();
+      await flushing;
+      await flushTaskNotifications(w.ctx, parent.id);
+      await flushTaskNotifications(w.ctx, nextParent.threadId);
+      expect(await notificationsIn(w, parent.id)).toEqual([]);
+      const heard = await notificationsIn(w, nextParent.threadId);
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toContain(`taskId ${child.id}`);
+    } finally {
+      w.store.readTurns = realTurns;
+    }
+    expect(reviewed).toBeDefined();
+  }, 30_000);
+
+  it("delivers a successor's verdict once when a stale batch is replayed", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReview(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    const nextParent = await continueThread(w.ctx, { threadId: parent.id });
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, nextParent.threadId, successor.threadId);
+    await flushTaskNotifications(w.ctx, nextParent.threadId);
+    expect(await notificationsIn(w, nextParent.threadId)).toHaveLength(1);
+
+    // Replaying the predecessor's stale batch regenerates the successor's
+    // notice; the delivered identity keeps it from posting a second time.
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTaskNotifications(w.ctx, nextParent.threadId);
+    await recoverTaskNotifications(w.ctx);
+    expect(await notificationsIn(w, nextParent.threadId)).toHaveLength(1);
+  }, 30_000);
+});

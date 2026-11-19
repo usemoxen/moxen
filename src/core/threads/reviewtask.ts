@@ -45,6 +45,11 @@ export interface ReviewOutcome extends StoredReviewDecision {
 export interface ReviewTaskFacts {
   /** Whether the delegation is a review at all: the parent reads review facts only then. */
   readonly reviewTask: boolean;
+  /**
+   * The row records outcomes durably (a modern row), so a missing outcome is
+   * authoritative and the transcript must not be parsed again.
+   */
+  readonly durable: boolean;
   /** The newest settled outcome, or null while no report has settled. */
   readonly outcome: ReviewOutcome | null;
 }
@@ -285,7 +290,7 @@ export async function legacyReviewFacts(
       turnId: located?.turnId ?? "",
     };
   }
-  return { reviewTask: true, outcome };
+  return { reviewTask: true, durable: false, outcome };
 }
 
 /**
@@ -307,12 +312,12 @@ export async function reviewFactsFor(
 ): Promise<ReviewTaskFacts> {
   const { row } = input;
   const reviewTask = row?.reviewTask === true || row?.review !== undefined || input.interactionMode === "review";
-  if (!reviewTask || row === null) return { reviewTask, outcome: null };
+  if (!reviewTask || row === null) return { reviewTask, durable: false, outcome: null };
   const local = outcomeFromTurns(input.childTurns, input.childThreadId);
-  if (local !== null) return { reviewTask: true, outcome: local };
+  if (local !== null) return { reviewTask: true, durable: row.reviewTask === true, outcome: local };
   const carried = outcomeFromRow(row);
-  if (carried !== null) return { reviewTask: true, outcome: carried };
-  if (row.reviewTask === true) return { reviewTask: true, outcome: null };
+  if (carried !== null) return { reviewTask: true, durable: true, outcome: carried };
+  if (row.reviewTask === true) return { reviewTask: true, durable: true, outcome: null };
   return await legacyReviewFacts(input.store, row, input.rows);
 }
 

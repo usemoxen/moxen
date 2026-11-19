@@ -336,7 +336,7 @@ export interface StoredMessage {
   /** A message moxen wrote into the thread rather than the user (see `MessageOrigin`). */
   readonly origin?: MessageOrigin;
   /** The origin's structured facts (`task-notification`: the tasks), for a client to draw. */
-  readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  readonly notification?: { readonly tasks: readonly TaskNotification[]; readonly notices?: readonly string[] };
 }
 
 /** Internal inputs: task results, usage reset continuations, answer-panel replies, and a message from the thread that delegated the task. `agent-message` is one an agent queued with `message_queue`, for itself or a task it delegated. */
@@ -427,6 +427,15 @@ export interface StoredDelegation {
   };
   /** This task was delegated as a review, or continues one: the parent reads review facts. */
   readonly reviewTask?: true;
+  /**
+   * The newest settle this task's thread reached, as a count of its turns that
+   * finished. A notification obligation: when it is ahead of
+   * `reportedGeneration`, a settle happened whose notice was never queued, and
+   * startup recovery sends one.
+   */
+  readonly settleGeneration?: number;
+  /** The newest settle generation a notice was queued (or delivered) for. */
+  readonly reportedGeneration?: number;
   readonly status: DelegationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -482,7 +491,7 @@ export interface SendTurnInput {
   readonly continueAttempt?: number;
   /** A message moxen writes itself (with its facts), rather than the user. */
   readonly origin?: MessageOrigin;
-  readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  readonly notification?: { readonly tasks: readonly TaskNotification[]; readonly notices?: readonly string[] };
 }
 
 export type ReadView = "messages" | "turn-items" | "plans" | "checkpoints" | "transfers";

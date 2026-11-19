@@ -22,6 +22,7 @@ import type {
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
 import { commitReviewDecision, settleReviewDecision } from "./reviewtask.js";
+import { markDelegationSettle, settleGenerationOf } from "./delegationnotice.js";
 import type {
   CreateThreadInput,
   ReadView,
@@ -754,6 +755,7 @@ async function interruptTurnLocked(
     });
   }
   if (review !== null) await commitReviewDecision(store, review, thread.id, turn.id);
+  await markDelegationSettle(store, thread.id, settleGenerationOf(await store.readTurns(thread.id).catch(() => [])));
   return updated;
 }
 
@@ -951,6 +953,7 @@ export async function reconcileOrphanedTurn(
       createdAt: now,
     });
     if (review !== null) await commitReviewDecision(store, review, threadId, running.id);
+    await markDelegationSettle(store, threadId, settleGenerationOf(await store.readTurns(threadId).catch(() => [] as StoredTurn[])));
     await promoteQueuedLocked(store, threadId, now);
     const promoted = (await store.readTurns(threadId)).find(
       (turn) => turn.status === "running" && turn.id !== running.id && !store.isTracked(turn.id),
@@ -1628,6 +1631,7 @@ async function finishTurn(
       createdAt: now,
     });
     if (review !== null) await commitReviewDecision(store, review, threadId, turnId);
+    await markDelegationSettle(store, threadId, settleGenerationOf(turns) + 1);
     await promoteQueuedLocked(store, threadId, now);
     const next = { ...thread, updatedAt: now };
     await store.writeThreadRecord(next);

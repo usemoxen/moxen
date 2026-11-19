@@ -326,6 +326,30 @@ describe("continuing a review thread", () => {
     expect(taskNotificationText([notified])).toContain("Review verdict: FIX FIRST");
   });
 
+  it("does not parse interim transcript text when the settled outcome has no report", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: FIX FIRST");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [opening] = await w.store.readTurns(continued.threadId);
+    // A mid-turn note that looks like a verdict is not the completion text.
+    await w.store.appendLedger(continued.threadId, "messages", {
+      id: "interim", threadId: continued.threadId, turnId: opening!.id, role: "assistant",
+      text: "Interim note: I may have to re-check.\n\nVERDICT: MERGE", createdAt: w.store.nowIso(),
+    });
+    await failTurn(w.store, continued.threadId, opening!.id, { error: "the provider stopped" });
+
+    // The failed turn's durable outcome is an explicit no-verdict; the
+    // interim text above must not become the report the parent reads.
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.status).toBe("failed");
+    expect(notified.review).toMatchObject({ verdict: null });
+    expect(notified.review?.note).toContain("no VERDICT");
+    expect(taskNotificationText([notified])).not.toContain("Review verdict: MERGE");
+  });
+
   it("never keeps Review as a staying mode, and says so in the ledger", async () => {
     const w = await reviewWorld();
     const child = await w.make("review login", { interactionMode: "review" });
