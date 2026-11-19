@@ -53,12 +53,16 @@ CREATE TABLE delegations (
   prompt            TEXT NOT NULL,
   created_at        TEXT NOT NULL,
   updated_at        TEXT NOT NULL,
-  rest              TEXT NOT NULL,  -- JSON: modelSnapshot, review, originalText
-  UNIQUE (id)                       -- append order is seq, like the ledgers
+  rest              TEXT NOT NULL   -- JSON: modelSnapshot, review, originalText
+  -- Append order is seq, like the ledgers. id is indexed but not unique:
+  -- a legacy ledger can hold two parseable rows with the same id.
 ) STRICT
 
 -- index delegations_child
 CREATE INDEX delegations_child ON delegations(child_thread_id)
+
+-- index delegations_id
+CREATE INDEX delegations_id ON delegations(id)
 
 -- index delegations_idempotency
 CREATE INDEX delegations_idempotency ON delegations(parent_thread_id, idempotency_key)
@@ -100,9 +104,6 @@ CREATE TABLE quarantine (
 (created by a table constraint)
 
 -- index sqlite_autoindex_checkpoints_1
-(created by a table constraint)
-
--- index sqlite_autoindex_delegations_1
 (created by a table constraint)
 
 -- index sqlite_autoindex_messages_1

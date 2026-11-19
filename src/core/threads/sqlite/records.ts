@@ -11,10 +11,12 @@
  * `~` plus four lowercase hex digits per UTF-16 code unit. SQL NULL stays NULL.
  * The reserved prefix makes the two forms collision-free. Any SQL predicate on
  * an encoded column binds `encodeScalar(value)`, never the raw value. Applied
- * to delegation `idempotency_key`/`base_branch`, thread `model_instance`/
- * `model_id`/`env_path`/`env_branch`, and turn `queue_request_id`/`owner_host`.
- * Generated ids and references, enums, ISO timestamps and JSON columns stay
- * verbatim.
+ * to delegation `idempotency_key`/`base_branch`, thread `project_id`,
+ * `model_instance`/`model_id`/`env_path`/`env_branch`, and turn
+ * `queue_request_id`/`owner_host`, plus message ids (`messages.id` and the
+ * `turns.message_id` that references them — provider ids are concatenated into
+ * them by `noteMessageId`). Generated UUID ids and validated thread ids,
+ * enums, ISO timestamps and JSON columns stay verbatim.
  *
  * Exact display text: title, message text, activity summary and delegation
  * prompt are stored well-formed for display, and the original string is kept
@@ -263,7 +265,7 @@ export function encodeThread(thread: StoredThread): ThreadRow {
 
   return {
     id: thread.id,
-    project_id: thread.projectId,
+    project_id: encodeScalar(thread.projectId),
     title,
     title_source: thread.titleSource ?? "seed",
     hidden: thread.hidden === true ? 1 : 0,
@@ -295,7 +297,7 @@ export function decodeThread(row: ThreadRow): StoredThread {
   const options = (rest.modelSelection as { options?: ModelSelection["options"] } | undefined)?.options;
   return {
     id: row.id,
-    projectId: row.project_id,
+    projectId: decodeScalar(row.project_id),
     title: typeof rest.originalText === "string" ? rest.originalText : row.title,
     ...(row.title_source === "seed" ? {} : { titleSource: row.title_source as NonNullable<StoredThread["titleSource"]> }),
     ...(row.hidden === 0 ? {} : { hidden: true }),
@@ -359,7 +361,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   return {
     id: turn.id,
     thread_id: turn.threadId,
-    message_id: turn.messageId,
+    message_id: encodeScalar(turn.messageId),
     status: turn.status,
     delivery: turn.delivery,
     scheduled_for: turn.scheduledFor ?? null,
@@ -405,7 +407,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
   return {
     id: row.id,
     threadId: row.thread_id,
-    messageId: row.message_id,
+    messageId: decodeScalar(row.message_id),
     status: row.status as StoredTurn["status"],
     delivery: row.delivery as StoredTurn["delivery"],
     ...(row.scheduled_for === null ? {} : { scheduledFor: row.scheduled_for }),
@@ -438,7 +440,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
 export function encodeMessage(message: StoredMessage): MessageRow {
   const body = wellFormed(message.text);
   return {
-    id: message.id,
+    id: encodeScalar(message.id),
     thread_id: message.threadId,
     turn_id: message.turnId,
     role: message.role,
@@ -455,7 +457,7 @@ export function decodeMessage(row: MessageRow): StoredMessage {
   const attachments = parseJson<StoredAttachment[]>(row.attachments);
   const notification = parseJson<NonNullable<StoredMessage["notification"]>>(row.notification);
   return {
-    id: row.id,
+    id: decodeScalar(row.id),
     threadId: row.thread_id,
     turnId: row.turn_id,
     role: row.role as StoredMessage["role"],

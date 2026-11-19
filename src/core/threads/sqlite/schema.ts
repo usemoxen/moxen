@@ -145,9 +145,11 @@ CREATE TABLE delegations (
   prompt            TEXT NOT NULL,
   created_at        TEXT NOT NULL,
   updated_at        TEXT NOT NULL,
-  rest              TEXT NOT NULL,  -- JSON: modelSnapshot, review, originalText
-  UNIQUE (id)                       -- append order is seq, like the ledgers
+  rest              TEXT NOT NULL   -- JSON: modelSnapshot, review, originalText
+  -- Append order is seq, like the ledgers. id is indexed but not unique:
+  -- a legacy ledger can hold two parseable rows with the same id.
 ) STRICT;
+CREATE INDEX delegations_id ON delegations(id);
 CREATE INDEX delegations_parent ON delegations(parent_thread_id, child_thread_id);
 CREATE INDEX delegations_child ON delegations(child_thread_id);
 -- Replay lookup is scoped to the caller's lineage, not global, and a replay

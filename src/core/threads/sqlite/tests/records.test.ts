@@ -41,6 +41,7 @@ import {
 } from "./inserts.js";
 import {
   AT,
+  MODEL,
   activityWithPayload,
   activityWithoutPayload,
   completedTurn,
@@ -55,6 +56,9 @@ import {
   sparseThread,
 } from "./fixtures.js";
 import { insertRow, openForTest, temporaryRoot, underBun } from "./support.js";
+import { openThreadStore } from "../../store.js";
+import { createThread } from "../../threads.js";
+import { noteMessageId } from "../../views.js";
 
 /** A store with both thread fixtures, since every child row needs its thread. */
 function storeWithThreads(): Database {
@@ -274,6 +278,73 @@ describe.skipIf(!underBun)("row round trip", () => {
     expect(delegationRow.prompt).toBe("café \uFFFD");
     expect(JSON.parse(delegationRow.rest).originalText).toBe(cut);
     expect(decodeDelegation(delegationRow).prompt).toBe(cut);
+  });
+
+  it("keeps two delegation rows with the same id in append order", () => {
+    const db = storeWithThreads();
+    // A legacy ledger can hold two parseable rows with the same id; seq is the
+    // identity, and both rows must survive.
+    const first = { ...fullDelegation(), id: "dup", childThreadId: "child-a", createdAt: AT, updatedAt: AT };
+    const second = { ...fullDelegation(), id: "dup", childThreadId: "child-b", createdAt: AT, updatedAt: AT };
+    insertRow(db, INSERT_DELEGATION, encodeDelegation(first));
+    insertRow(db, INSERT_DELEGATION, encodeDelegation(second));
+
+    const rows = db.query<DelegationRow, []>("SELECT * FROM delegations ORDER BY seq").all();
+    expect(rows.map((row) => decodeDelegation(row))).toEqual([first, second]);
+    expect(db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM delegations WHERE id = ?").all("dup")).toEqual([{ count: 2 }]);
+  });
+
+  it("keeps a custom project id and provider message ids exact through the legacy writers", async () => {
+    const root = temporaryRoot("legacy-ids");
+    const legacy = await openThreadStore(root);
+    const projectId = "train\uD83D";
+    const thread = await createThread(legacy, { projectId, title: "Legacy", modelSelection: MODEL });
+    // The real provider-note id: turn id + the provider's own message id.
+    const messageIds = [noteMessageId("turn-1", "\uD800"), noteMessageId("turn-1", "\uD801")];
+    for (const id of messageIds) {
+      await legacy.appendLedger(thread.id, "messages", {
+        id,
+        threadId: thread.id,
+        turnId: "turn-1",
+        role: "assistant",
+        text: "note",
+        createdAt: AT,
+      });
+    }
+    const record = await legacy.readThreadRecord(thread.id);
+    const messages = await legacy.readMessages(thread.id);
+    expect(record?.projectId).toBe(projectId);
+    expect(messages.map((message) => message.id)).toEqual(messageIds);
+
+    const db = openForTest(root);
+    insertRow(db, INSERT_THREAD, encodeThread(record!));
+    for (const message of messages) insertRow(db, INSERT_MESSAGE, encodeMessage(message));
+    const turn = { ...completedTurn(thread.id), id: "turn-1", messageId: messageIds[0]! };
+    insertRow(db, INSERT_TURN, encodeTurn(turn));
+
+    const threadRow = db.query<ThreadRow, [string]>("SELECT * FROM threads WHERE id = ?").get(thread.id)!;
+    expect(threadRow.project_id).not.toBe(projectId);
+    expect(decodeScalar(threadRow.project_id)).toBe(projectId);
+    expect(decodeThread(threadRow).projectId).toBe(projectId);
+    expect(db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM threads WHERE project_id = ?").all(encodeScalar(projectId))).toEqual([
+      { count: 1 },
+    ]);
+    expect(db.query<{ count: number }, [string]>("SELECT count(*) AS count FROM threads WHERE project_id = ?").all(projectId)).toEqual([{ count: 0 }]);
+
+    const rows = db.query<MessageRow, []>("SELECT * FROM messages ORDER BY seq").all();
+    expect(rows.map((row) => decodeMessage(row).id)).toEqual(messageIds);
+    expect(new Set(rows.map((row) => row.id)).size).toBe(2);
+    for (const [index, id] of messageIds.entries()) {
+      expect(decodeScalar(rows[index]!.id)).toBe(id);
+      expect(db.query<{ id: string }, [string]>("SELECT id FROM messages WHERE id = ?").all(encodeScalar(id))).toEqual([{ id: rows[index]!.id }]);
+      // The exact original is not stored raw: a predicate on it finds nothing.
+      expect(db.query<{ id: string }, [string]>("SELECT id FROM messages WHERE id = ?").all(id)).toEqual([]);
+    }
+
+    const turnRow = db.query<TurnRow, [string]>("SELECT * FROM turns WHERE id = ?").get("turn-1")!;
+    expect(decodeTurn(turnRow).messageId).toBe(messageIds[0]);
+    const decodedMessages = rows.map((row) => decodeMessage(row));
+    expect(decodedMessages.find((message) => message.id === decodeTurn(turnRow).messageId)?.id).toBe(messageIds[0]);
   });
 
   it("stores and reads meta values", () => {

@@ -75,11 +75,18 @@ runs in a worker or at idle. A write transaction must not span an `await`.
   a cut-over store directly. `format.ts` still owns `config.json`, which is not
   moving.
 
-Opening order: probe the runtime in memory; check an existing file read-only;
-take the gate; check again in a read transaction; for an existing WAL store
-keep that transaction open while the writable handle is opened and checked
-again under `BEGIN IMMEDIATE`; then apply the pragmas and migrate. Every
-refusal happens before a persistent change.
+Opening order: probe the runtime in memory; check an existing file read-only,
+**before the gate is created**; take the gate; check again in a read
+transaction; for an existing WAL store keep that transaction open while the
+writable handle is opened and checked again under `BEGIN IMMEDIATE`; then apply
+the pragmas and migrate.
+
+What a refusal guarantees: an existing store's main database file and WAL are
+left exactly as they were (SQLite coordination files, `-shm` and an empty WAL,
+may be created or rebuilt). A failure while initializing a store that did not
+exist can leave an empty but valid `store.db` on disk — the migration
+transaction rolls back, so there is no schema or row — and a retry initializes
+it. A hot-journal store is never reopened writable.
 
 ## Pragmas
 
@@ -100,7 +107,9 @@ behind a 1 s transaction failed at 201 ms; with 3000 it succeeded at 1272 ms.
 there.
 
 **Setup is serialized.** `<root>/store.db-open-lock` is opened, given the busy
-timeout, and locked with `BEGIN IMMEDIATE` before any store handle is opened;
+timeout, and locked with `BEGIN IMMEDIATE` before any writable store handle is
+opened; the first read-only preflight runs before the gate, and its handle is
+closed before waiting for it.
 it is rolled back and closed in `finally`. Two processes starting against a
 fresh root initialize one schema instead of racing the DDL. There are no PID
 files and no stale-owner cleanup.
@@ -153,7 +162,7 @@ its own; everything else is one `rest` JSON column, merged back on read in
 | `messages` | `seq`, unique `(thread_id, id)` | turn, role, origin, text + `original_text`, attachments, notification | — |
 | `activities` | `seq`, unique `(thread_id, id)` | turn, kind, summary + `original_summary`, `payload` BLOB + `payload_encoding` | payload JSON text |
 | `checkpoints` | `seq`, unique `(thread_id, id)` | turn, status, ref, base ref, files | — |
-| `delegations` | `seq`, unique `id` | parent, child, status, notify, continue fields, idempotency key, base branch, prompt | model snapshot, review, `originalText` |
+| `delegations` | `seq`, indexed `id` (not unique) | parent, child, status, notify, continue fields, idempotency key, base branch, prompt | model snapshot, review, `originalText` |
 | `meta` | `key` | engine, schema, import state, imported at, source rows | — |
 | `quarantine` | — | at, reason, table, row JSON — rows taken out of the live tables instead of deleted | — |
 
@@ -168,23 +177,35 @@ Indexes: `threads_created`, `threads_project`; `turns_id` (unique),
 `turns_thread`, partial `turns_open` (queued/running) and `turns_due`
 (queued with a time); `messages_thread`, `messages_turn`; `activities_thread`,
 `activities_turn`; `checkpoints_thread`; `delegations_parent`,
-`delegations_child`, and `delegations_idempotency` on
-`(parent_thread_id, idempotency_key)` — a plain lookup index, not a unique
-one. A replay is scoped to the caller's lineage, so two unrelated parents may
-use the same key; and a retry whose first child is gone stores a second row
-for the same parent and key.
+`delegations_child`, `delegations_id`, and `delegations_idempotency` on
+`(parent_thread_id, idempotency_key)` — plain lookup indexes, not uniqueness
+constraints. `delegations.id` is not unique: a legacy ledger can hold two
+parseable rows with the same id and different children, and both are preserved
+in append order (`seq`). The existing JSONL store resolves a by-id update with
+`findIndex` — the **first** row with that id — while `updateDelegations` patches
+every row with it and the idempotency replay scans from the end; a SQLite
+by-id read must match the JSONL choice (first) unless the design changes it.
+The same applies to a replay key: two unrelated parents may use one key, and a
+retry whose first child is gone stores a second row for the same parent and
+key.
 
 **Exact scalar keys.** `encodeScalar`/`decodeScalar` are one reversible TEXT
 codec: a well-formed string that does not start with `~` is stored verbatim; a
 string starting with `~`, or containing a lone surrogate, is stored as `~` plus
 four lowercase hex digits per UTF-16 code unit, so it is collision-free and
 exact. SQL NULL stays NULL. Any predicate on an encoded column binds the
-encoded value. It covers delegation `idempotency_key` and `base_branch`, thread
-`model_instance`, `model_id`, `env_path` and `env_branch`, and turn
-`queue_request_id` and `owner_host`. Generated ids and references, enums, ISO
-timestamps and JSON columns stay verbatim. This is why two replay keys that
-would both become U+FFFD cannot alias, and why `base_branch` matches
-`env_branch` on both sides of a comparison.
+encoded value. It covers delegation `idempotency_key` and `base_branch`; thread
+`project_id`, `model_instance`, `model_id`, `env_path` and `env_branch`; turn
+`queue_request_id`, `owner_host` and `message_id`; and `messages.id`, which a
+provider's own message id is concatenated into (`noteMessageId`), so the two
+sides of that reference are encoded alike. A custom project id is accepted by
+the project registry, so both can carry arbitrary code units. Thread ids stay
+verbatim: the JSONL writer validates them as ASCII (`THREAD_ID`), and a SQLite
+writer must keep doing so. Turn, activity, checkpoint and delegation ids are
+generated UUIDs; enums, ISO timestamps and JSON columns stay verbatim. This is
+why two replay keys, project ids or message ids that would both become U+FFFD
+cannot alias, and why `base_branch` matches `env_branch` on both sides of a
+comparison.
 
 **Exact display text.** Thread titles, message text, activity summaries and
 delegation prompts are stored well-formed for display; when the projection
