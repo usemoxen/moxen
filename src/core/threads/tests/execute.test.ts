@@ -548,6 +548,38 @@ describe("context usage", () => {
     expect(Date.parse(checkpoints[0]!.createdAt)).toBeLessThan(Date.parse(activities[interrupted]!.createdAt));
   });
 
+  /** MXN-374: a server shutdown stops provider runs; the ledger must say why, not only "interrupted". */
+  it("records why a run stopped outside Moxen's interrupt ended the turn", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-shutdown-interrupt-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Shutdown",
+      modelSelection: { instanceId: "claude", model: "m" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    // No interruptTurn: the driver's sessions were stopped (Connection.close on a
+    // server restart), so awaitTurn returns interrupted with the row still running.
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => ({ status: "interrupted", text: "", usage: null, error: null }),
+      streamEvents: Stream.never,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+
+    expect((await store.readTurns(thread.id))[0]).toMatchObject({
+      status: "interrupted",
+      error: "Moxen or the provider stopped this run before it finished.",
+    });
+    expect((await store.readActivities(thread.id)).find((row) => row.kind === "turn.interrupted")?.summary)
+      .toBe("Moxen or the provider stopped this run before it finished.");
+  });
+
   /** MXN-290 review: the outcome is written on timeout when the checkpoint hangs, and a late checkpoint breaks nothing. */
   it("writes the failure outcome even when the checkpoint never resolves", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-checkpoint-hang-"));

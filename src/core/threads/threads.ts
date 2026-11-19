@@ -711,12 +711,14 @@ async function interruptTurnLocked(
   turn: StoredTurn,
   now: string,
   usagePause?: StoredTurn["usagePause"],
+  reason?: string,
 ): Promise<StoredTurn> {
   store.abortRunning(turn.id);
   store.untrackRunning(turn.id);
   const updated = await store.updateTurn(thread.id, turn.id, {
     status: "interrupted",
     ...(usagePause ? { usagePause } : {}),
+    ...(reason ? { error: reason } : {}),
     updatedAt: now,
     completedAt: now,
   });
@@ -725,7 +727,7 @@ async function interruptTurnLocked(
     threadId: thread.id,
     turnId: turn.id,
     kind: "turn.interrupted",
-    summary: turn.id,
+    summary: reason ?? turn.id,
     // A queued or scheduled message taken back before it ran: clients drop
     // it from the transcript rather than show a turn that never happened.
     ...(turn.status === "queued" ? { payload: { beforeStart: true } } : {}),
@@ -1627,6 +1629,7 @@ export async function interruptTurn(
   rawThreadId: string,
   rawTurnId?: string,
   usagePause?: StoredTurn["usagePause"],
+  options: { readonly reason?: string } = {},
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId?.trim() || undefined;
@@ -1657,7 +1660,7 @@ export async function interruptTurn(
     // it (which claims the turn below before its session starts). Read before
     // the interrupt releases the claim.
     const hasRunner = store.isTracked(target.id);
-    const updated = await interruptTurnLocked(store, thread, target, now, usagePause);
+    const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason);
     if (hasRunner) {
       await promoteQueuedLocked(store, threadId, now);
     } else {
@@ -1698,7 +1701,7 @@ export async function threadFamily(store: ThreadStore, threadId: string): Promis
 }
 
 /** Hold every listed thread's lock at once; ids are taken in sorted order, so concurrent family operations cannot deadlock. */
-async function withThreadLocks<T>(store: ThreadStore, ids: readonly string[], run: () => Promise<T>): Promise<T> {
+export async function withThreadLocks<T>(store: ThreadStore, ids: readonly string[], run: () => Promise<T>): Promise<T> {
   const [first, ...rest] = [...ids].sort();
   if (first === undefined) return await run();
   return await store.withThreadLock(first, () => withThreadLocks(store, rest, run));

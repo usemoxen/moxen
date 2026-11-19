@@ -9,7 +9,8 @@ import { testHarness } from "../../testing/harness.js";
 import { driverKindOfInstance } from "../../types.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { UsageProtection } from "../../usage/protection.js";
-import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeThread, unsnoozeThread } from "../threads.js";
+import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeThread, unsnoozeThread, reconcileOrphanedTurn } from "../threads.js";
+import { openThreadStore } from "../store.js";
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
@@ -461,6 +462,38 @@ describe("admission recovers depended-on threads", () => {
     expect((await w.store.readTurns(dependency.id)).map((turn) => turn.status)).toEqual(["interrupted"]);
     expect((await w.store.readTurns(waiter.id)).map((turn) => turn.status)).toEqual(["completed"]);
     expect(w.sent.map((turn) => turn.threadId)).toEqual([waiter.id]);
+  });
+
+  it("does not start a scheduled message early when it recovers the thread", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const running = (await sendTurn(w.store, thread.id, { prompt: "work" })).turn;
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const waiting = (await sendTurn(w.store, thread.id, { prompt: "later", scheduledFor: at })).turn;
+    // The runner's process died (a crashed or restarted server). Recovery runs
+    // whatever waits behind it, but never a message scheduled for later.
+    await w.store.updateTurn(thread.id, running.id, { owner: { pid: await deadPid(), host: os.hostname() } });
+    const recovered = await reconcileOrphanedTurn(w.store, thread.id);
+    expect(recovered?.interrupted.id).toBe(running.id);
+    expect(recovered?.promoted).toBeNull();
+    await settleRuns();
+    const turns = await w.store.readTurns(thread.id);
+    expect(turns.find((turn) => turn.id === running.id)?.status).toBe("interrupted");
+    expect(turns.find((turn) => turn.id === waiting.id)).toMatchObject({ status: "queued", scheduledFor: at });
+    expect(w.sent).toEqual([]);
+  });
+
+  it("does not interrupt a live turn when another connection recovers the thread", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const running = (await sendTurn(w.store, thread.id, { prompt: "work" })).turn;
+    // A reconnect opens another connection over the same store, in this same
+    // server process: its recovery must leave that process's turn alone.
+    const reconnected = await openThreadStore(w.root);
+    expect(await reconcileOrphanedTurn(reconnected, thread.id)).toBeNull();
+    expect(await w.store.readTurns(thread.id)).toEqual([
+      expect.objectContaining({ id: running.id, status: "running", owner: expect.objectContaining({ pid: process.pid }) }),
+    ]);
   });
 
   it("does the same for a thread condition when the dependency goes quiet", async () => {
