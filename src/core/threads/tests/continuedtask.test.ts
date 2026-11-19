@@ -1112,3 +1112,61 @@ describe("a long continuation chain (MXN-389)", () => {
     await expect(describeTask(w.ctx, parent.id, threads[0]!.id)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 });
+
+describe("a superseded settle and its successor (MXN-389)", () => {
+  async function reviewTaskWithSettle(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    // Batched durably for the parent; the successor's own callback is lost.
+    await queueTaskNotification(w.ctx, parentId, child.id);
+    return child;
+  }
+
+  it("regenerates the dropped settle for a successor that already finished", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await reviewTaskWithSettle(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+
+    // No callback queued the successor's notice: replaying the durable batch
+    // must regenerate it instead of dropping the parent's only report.
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, parent.id);
+    const heard = await notificationsIn(w, parent.id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain(`taskId ${successor.threadId}`);
+    expect(heard[0]).toContain("Review verdict: FIX FIRST");
+  }, 30_000);
+
+  it("leaves a successor that is still running to report its own settle", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await reviewTaskWithSettle(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+
+    // The successor has not settled: dropping the superseded settle is right,
+    // and its own settle brings the report.
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, parent.id, successor.threadId);
+    await flushTaskNotifications(w.ctx, parent.id);
+    const heard = await notificationsIn(w, parent.id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain(`taskId ${successor.threadId}`);
+  }, 30_000);
+});

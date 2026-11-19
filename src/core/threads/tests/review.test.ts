@@ -288,9 +288,15 @@ describe("continuing a review thread", () => {
     for (const threadId of [manual.threadId, scheduled.threadId, stored]) {
       const prompt = (await w.store.readMessages(threadId)).find((message) => message.role === "user")!.text;
       expect(prompt, threadId).toContain(REVIEW_HANDOFF_INSTRUCTION);
+      // The token is written bare so a compliant reply matches exactly; a
+      // backticked or quoted token would read as a report.
+      expect(prompt, threadId).toContain(REVIEW_HANDOFF_ACK);
+      expect(prompt, threadId).not.toContain(`\`${REVIEW_HANDOFF_ACK}\``);
       const [opening] = await w.store.readTurns(threadId);
       expect(opening?.reviewHandoff, threadId).toBe(true);
     }
+    expect(REVIEW_HANDOFF_INSTRUCTION).not.toContain(`\`${REVIEW_HANDOFF_ACK}\``);
+    expect(REVIEW_HANDOFF_INSTRUCTION).toMatch(/no quotes, backticks or formatting/u);
 
     // An ordinary continuation gets no review instruction and no flag.
     const build = await w.make("build it");
@@ -299,6 +305,25 @@ describe("continuing a review thread", () => {
     const plainPrompt = (await w.store.readMessages(plain.threadId)).find((message) => message.role === "user")!.text;
     expect(plainPrompt).not.toContain(REVIEW_HANDOFF_INSTRUCTION);
     expect((await w.store.readTurns(plain.threadId))[0]?.reviewHandoff).toBeUndefined();
+  });
+
+  it("reads a report that quotes the acknowledgement token as its own verdict", async () => {
+    const w = await reviewWorld();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("review login", { interactionMode: "review", model: "other-model" });
+    await finishChild(w, parent.id, child.id, "One nit in the login form.\n\nVERDICT: MERGE");
+
+    const continued = await continueThread(w.ctx, { threadId: child.id });
+    const [opening] = await w.store.readTurns(continued.threadId);
+    // The token inside a real report is not an acknowledgement: the trailing
+    // verdict is what the parent reads.
+    await completeTurn(w.store, continued.threadId, opening!.id, {
+      text: `The procedure names ${REVIEW_HANDOFF_ACK} for a hand-off that does no work.\n\nVERDICT: FIX FIRST`,
+    });
+
+    const notified = (await taskNotificationOf(w.ctx, continued.threadId))!;
+    expect(notified.review).toMatchObject({ verdict: "FIX FIRST" });
+    expect(taskNotificationText([notified])).toContain("Review verdict: FIX FIRST");
   });
 
   it("never keeps Review as a staying mode, and says so in the ledger", async () => {

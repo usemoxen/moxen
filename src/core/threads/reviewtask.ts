@@ -28,10 +28,12 @@ export const REVIEW_HANDOFF_ACK = "MOXEN_REVIEW_HANDOFF_ACK";
 
 /**
  * The instruction a continued review's opening prompt carries, after the
- * hand-off document and any opening work request.
+ * hand-off document and any opening work request. The token is written bare:
+ * the matcher accepts exactly that line, so quotes or backticks around it
+ * would make a correct acknowledgement read as a report.
  */
 export const REVIEW_HANDOFF_INSTRUCTION =
-  `If you only acknowledge this hand-off and do no review work or tool calls, reply with exactly \`${REVIEW_HANDOFF_ACK}\` and nothing else. ` +
+  `If you only acknowledge this hand-off and do no review work or tool calls, reply with exactly the single line ${REVIEW_HANDOFF_ACK}, with no quotes, backticks or formatting, and nothing else. ` +
   "Otherwise do the requested work and end your report with `VERDICT: MERGE` or `VERDICT: FIX FIRST`.";
 
 /** A settle-time review outcome with the thread and turn that settled it. */

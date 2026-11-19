@@ -503,7 +503,17 @@ new parent while the old one reads `TASK_NOT_FOUND`. The re-pointing is one
 atomic write, so a notification deciding mid-transfer sees every row before
 or every row after it; a report queued and fully delivered just before the
 transfer still reaches the old thread — the task's next report, and
-`task_status` on the new parent at any time, cover it. A continued thread
+`task_status` on the new parent at any time, cover it. A settle batched for
+a task that has since continued is dropped rather than sent to the old
+parent; when its live continuation has already finished, the notice is
+regenerated for that thread, so a lost callback cannot leave the parent
+with nothing. Task lookup follows the hand-off links with no hop cap — one
+pass over an indexed delegation ledger — so a task answers to its original
+id however many times it continued. Delegation ledger writes assume one
+writer per store root: the server that holds `server.lock`
+(`docs/overview.md`). That process serializes appends, rewrites and the
+one-step hand-off transfer under one ledger lock; two processes on the same
+root could still lose an append. A continued thread
 starts no new delegations (`THREAD_CONTINUED` names the live thread):
 otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A manual continue needs an idle source: while one of its

@@ -3363,6 +3363,25 @@ function routeTaskNotice(rows: readonly StoredDelegation[], childThreadId: strin
   return rows.some((row) => row.childThreadId === childThreadId) ? { kind: "superseded" } : { kind: "unowned" };
 }
 
+/**
+ * The live incarnation a superseded child's settle belongs to, when it has
+ * already finished: the notice is regenerated for it, so a lost callback
+ * cannot leave the parent with nothing. A successor still running or waiting
+ * reports when it settles itself.
+ */
+async function settledSuccessor(
+  ctx: OperationContext,
+  rows: readonly StoredDelegation[],
+  childThreadId: string,
+): Promise<StoredDelegation | null> {
+  const byChild = successorIndex(rows);
+  const start = byChild.get(childThreadId);
+  if (start === undefined) return null;
+  const live = liveSuccessor(byChild, start);
+  if (live === null || live.childThreadId === childThreadId) return null;
+  return (await taskHasSettledForGood(ctx, live.childThreadId)) ? live : null;
+}
+
 /** Deliver a parent's pending notification batch, unless it still cannot receive it. */
 export async function flushTaskNotifications(ctx: OperationContext, parentThreadId: string): Promise<void> {
   await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
@@ -3389,20 +3408,37 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     // even when this thread is held: the batches belong to the live
     // conversation now, not the dormant one. A settle batched for a task that
     // has itself continued is the successor's to report: drop it here, also
-    // when a restart replays the batch.
+    // when a restart replays the batch. When that successor has already
+    // finished, its notice takes the dropped one's place, so a lost callback
+    // cannot leave the parent with nothing.
     const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
     const rerouted: Array<{ readonly parentThreadId: string; readonly entry: PendingTaskNotification }> = [];
     const dropped = new Set<PendingTaskNotification>();
+    const replacements: PendingTaskNotification[] = [];
     for (const entry of entries) {
       const route = routeTaskNotice(rows, entry.child);
       if (route.kind === "live" && route.parentThreadId !== parentThreadId) {
         rerouted.push({ parentThreadId: route.parentThreadId, entry });
-      } else if (route.kind === "superseded" && pendingEntryKind(entry) === "settle") {
-        dropped.add(entry);
+        continue;
       }
+      if (route.kind !== "superseded" || pendingEntryKind(entry) !== "settle") continue;
+      dropped.add(entry);
+      const successor = await settledSuccessor(ctx, rows, entry.child);
+      if (successor === null) continue;
+      if (successor.parentThreadId === parentThreadId) replacements.push({ child: successor.childThreadId });
+      else rerouted.push({ parentThreadId: successor.parentThreadId, entry: { child: successor.childThreadId } });
     }
     for (const moved of rerouted) await enqueueTaskNotification(ctx, moved.parentThreadId, moved.entry);
-    const mine = entries.filter((entry) => !rerouted.some((moved) => moved.entry === entry) && !dropped.has(entry));
+    const seen = new Set<string>();
+    const mine = [
+      ...entries.filter((entry) => !rerouted.some((moved) => moved.entry === entry) && !dropped.has(entry)),
+      ...replacements,
+    ].filter((entry) => {
+      const key = `${entry.child}\u0000${pendingEntryKind(entry)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     if (mine.length === 0) {
       await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
         delete batches[parentThreadId];
@@ -3734,18 +3770,28 @@ export function isStoppedBySettle(child: StoredThread | null, status: TaskNotifi
  */
 async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<void> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
-  // Entry-time routing: a task whose parent continued reports to the new one,
-  // and a task that itself continued has no settle left to deliver here.
+  // Entry-time routing: a task whose parent continued reports to the new one.
+  // A task that itself continued has no settle of its own left to deliver;
+  // its finished successor's notice takes its place.
   const rerouted: Array<{ readonly parentThreadId: string; readonly entry: PendingTaskNotification }> = [];
-  const mine = entries.filter((entry) => {
+  const mine: PendingTaskNotification[] = [];
+  for (const entry of entries) {
     const route = routeTaskNotice(rows, entry.child);
-    if (route.kind === "superseded" && pendingEntryKind(entry) === "settle") return false;
-    if (route.kind === "live" && route.parentThreadId !== parentThreadId) {
-      rerouted.push({ parentThreadId: route.parentThreadId, entry });
-      return false;
+    if (route.kind === "live") {
+      if (route.parentThreadId === parentThreadId) mine.push(entry);
+      else rerouted.push({ parentThreadId: route.parentThreadId, entry });
+      continue;
     }
-    return true;
-  });
+    if (route.kind === "superseded" && pendingEntryKind(entry) === "settle") {
+      const successor = await settledSuccessor(ctx, rows, entry.child);
+      if (successor !== null) {
+        if (successor.parentThreadId === parentThreadId) mine.push({ child: successor.childThreadId });
+        else rerouted.push({ parentThreadId: successor.parentThreadId, entry: { child: successor.childThreadId } });
+      }
+      continue;
+    }
+    mine.push(entry);
+  }
   for (const moved of rerouted) await enqueueTaskNotification(ctx, moved.parentThreadId, moved.entry);
   if (mine.length === 0) return;
   // A task paused by a usage limit has not finished: its parent hears when the resumed run ends instead.
@@ -3808,24 +3854,39 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   );
   // Recheck after the async fact collection: a task may have continued (or
   // its parent moved) while its report was being built, so its settle belongs
-  // to the successor, or to the parent its row names now.
+  // to the successor, or to the parent its row names now. A successor that has
+  // already finished supplies the notice its predecessor's dropped settle
+  // would have carried.
   const after = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   const kept: TaskNotification[] = [];
   for (const task of tasks) {
     const route = routeTaskNotice(after, task.taskId);
-    if (route.kind === "superseded") continue;
+    if (route.kind === "superseded") {
+      const successor = await settledSuccessor(ctx, after, task.taskId);
+      if (successor === null) continue;
+      if (successor.parentThreadId !== parentThreadId) {
+        await enqueueTaskNotification(ctx, successor.parentThreadId, { child: successor.childThreadId });
+        continue;
+      }
+      const replacement = await taskNotificationOf(ctx, successor.childThreadId);
+      if (replacement !== null) kept.push(successor.continuesTaskId ? { ...replacement, continuedFrom: successor.continuesTaskId } : replacement);
+      continue;
+    }
     if (route.kind === "live" && route.parentThreadId !== parentThreadId) {
       await enqueueTaskNotification(ctx, route.parentThreadId, { child: task.taskId });
       continue;
     }
     kept.push(task);
   }
-  const all = [...kept, ...pauseTasks, ...cancelTasks];
-  if (all.length === 0) return;  // A task that ended its turn with background work still running is not
+  const delivered: TaskNotification[] = [];
+  for (const task of kept) if (!delivered.some((other) => other.taskId === task.taskId)) delivered.push(task);
+  const all = [...delivered, ...pauseTasks, ...cancelTasks];
+  if (all.length === 0) return;
+  // A task that ended its turn with background work still running is not
   // done: when that work ends, the provider wakes the task where it can, and
   // the parent hears again once the task next has nothing left to run. Work
   // that never ends wakes nothing, so it sends nothing further and blocks nothing.
-  for (const task of kept) {
+  for (const task of delivered) {
     const row = rows.find(
       (candidate) =>
         candidate.childThreadId === task.taskId &&

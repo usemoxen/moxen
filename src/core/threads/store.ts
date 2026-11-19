@@ -806,7 +806,10 @@ export class ThreadStore {
   async appendDelegation(delegation: StoredDelegation): Promise<void> {
     await this.assertStoreWriteable();
     // Under the ledger lock: a rewrite reads the file and replaces it, so an
-    // append landing between that read and the write would be dropped.
+    // append landing between that read and the write would be dropped. The
+    // lock is per ThreadStore instance; the store's single writer is the
+    // server that holds `server.lock` (docs/overview.md). Two processes on
+    // one root can still lose an append.
     await this.withThreadLock("!delegations", async () => {
       await appendFile(this.delegationsFile(), `${JSON.stringify(delegation)}\n`, "utf8");
     });
