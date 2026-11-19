@@ -48,15 +48,18 @@ export interface MigrateOptions {
 
 /**
  * Bring the database up to the registered schema version, or refuse what is
- * newer. Each step is one write transaction, so a throwing step leaves the
- * database at the version it started from.
+ * newer. Each step is one write transaction, and the version is read again
+ * once the write lock is held: two processes opening a store at once do not
+ * both run the same DDL. The loser sees the committed version and skips the
+ * step the winner already applied; an unexpected or newer version refuses
+ * before any DDL.
  */
 export function migrateStoreSchema(db: Database, options: MigrateOptions = {}): number {
   const migrations = options.migrations ?? MIGRATIONS;
-  const current = readSchemaVersion(db);
-  if (current > SCHEMA_VERSION) throw schemaTooNew(current);
+  const start = readSchemaVersion(db);
+  if (start > SCHEMA_VERSION) throw schemaTooNew(start);
 
-  let version = current;
+  let version = start;
   for (const migration of migrations) {
     if (migration.version <= version) continue;
     // `PRAGMA user_version` cannot be bound, so the integer is interpolated:
@@ -65,29 +68,39 @@ export function migrateStoreSchema(db: Database, options: MigrateOptions = {}): 
     if (!Number.isSafeInteger(migration.version) || migration.version < 1) {
       throw new CliError("INVALID_SCHEMA_MIGRATION", `Schema migration "${migration.name}" has an invalid version: ${String(migration.version)}.`);
     }
-    if (migration.version !== version + 1) {
-      throw new CliError(
-        "FORMAT_MIGRATION_MISSING",
-        `The thread store schema is version ${version}, and this build has no migration to version ${version + 1}.`,
-      );
-    }
+    if (migration.version !== version + 1) throw missingMigration(version);
     // `BEGIN IMMEDIATE`: two processes that open a store at once serialise on
     // the write lock, and the loser honours busy_timeout instead of failing
-    // on a stale read snapshot (MXN-378 §3.2).
+    // on a stale read snapshot (MXN-378 §3.2). The version is re-read inside,
+    // because the read above happened before this connection held the lock.
     const step = db.transaction(() => {
+      const current = readSchemaVersion(db);
+      if (current > SCHEMA_VERSION) throw schemaTooNew(current);
+      if (current >= migration.version) return;
+      if (current !== migration.version - 1) throw missingMigration(current);
       migration.up(db);
       db.exec(`PRAGMA user_version = ${migration.version}`);
     });
     try {
       step.immediate();
     } catch (error) {
+      // A refusal keeps its own code: it is the caller's contract, not a
+      // failed migration.
+      if (error instanceof CliError && (error.code === "FORMAT_TOO_NEW" || error.code === "FORMAT_MIGRATION_MISSING")) throw error;
       throw new CliError(
         "STORE_MIGRATION_FAILED",
         `Schema migration ${migration.version} (${migration.name}) failed and was rolled back: ${error instanceof Error ? error.message : String(error)}`,
         { cause: error },
       );
     }
-    version = migration.version;
+    version = readSchemaVersion(db);
   }
   return version;
+}
+
+function missingMigration(current: number): CliError {
+  return new CliError(
+    "FORMAT_MIGRATION_MISSING",
+    `The thread store schema is version ${current}, and this build has no migration to version ${current + 1}.`,
+  );
 }

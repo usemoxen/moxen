@@ -3,13 +3,26 @@
  *
  * Columns hold what the code filters, sorts or patches on its own; everything
  * else is in `rest` as JSON and merged back here, so no caller has to know
- * which field went where. `decode` materialises the two column defaults the
- * way a reader means them: a thread hidden neither way decodes without
- * `hidden`, one with the seed title source decodes without `titleSource`.
+ * which field went where.
  *
- * Nothing inserts through these yet: the schema issue pins the invariant that
- * `decode(encode(record))` is the record, and the importer and readers land
- * next (see docs/sqlite-store.md).
+ * Canonicalizations, all deliberate and pinned by `tests/records.test.ts`:
+ * - `hidden: false`, `heldAtSettle: false` and `notify: false` decode as
+ *   absent. Readers test `=== true` or truthiness, never `=== false`.
+ * - `titleSource: "seed"` decodes as absent. Absent already reads as the seed
+ *   title source, and readers compare against `"user"`/`"provider"`.
+ * - An explicit `null` for `scheduledFor`, `scheduleReason`, `owner` or
+ *   `baseBranch` decodes as absent. Every reader uses truthiness or optional
+ *   chaining on them, so both forms mean the same thing; only `owner: null`
+ *   is written today (clearing an owner).
+ * - A lone surrogate in free text is stored as U+FFFD (`wellFormed` below):
+ *   SQLite TEXT is UTF-8 and cannot hold one. JSON columns keep them escaped,
+ *   because JSON.stringify does.
+ *
+ * `usagePause` is the exception: it is a JSON column, so absent (SQL NULL) and
+ * an explicit `null` (the JSON text `null`) stay distinct.
+ *
+ * Nothing inserts through these yet: the importer and readers land next (see
+ * docs/sqlite-store.md).
  */
 import { CliError } from "../../errors.js";
 import type { InteractionMode, ModelSelection, RuntimeMode } from "../../types.js";
@@ -34,8 +47,8 @@ export interface ThreadRow {
   hidden: number;
   interaction_mode: string;
   runtime_mode: string;
-  model_instance: string | null;
-  model_id: string | null;
+  model_instance: string;
+  model_id: string;
   env_mode: string;
   env_path: string;
   env_branch: string | null;
@@ -141,6 +154,32 @@ function flag(value: boolean | undefined): number | null {
   return value === undefined ? null : value ? 1 : 0;
 }
 
+/**
+ * A string SQLite can store as UTF-8: each lone surrogate becomes U+FFFD.
+ * Model output sliced by code unit (a summary cut at 120 characters can split
+ * an emoji) can carry one; JSONL escaped it and kept it, SQLite cannot.
+ */
+function wellFormed(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += value[i]! + value[i + 1]!;
+        i += 1;
+      } else {
+        out += "\uFFFD";
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      out += "\uFFFD";
+    } else {
+      out += value[i]!;
+    }
+  }
+  return out;
+}
+
 function required(value: string | null, column: string, row: string): string {
   if (value === null) throw new CliError("INVALID_STORE_ROW", `A ${row} row is missing ${column}; the row cannot be read.`);
   return value;
@@ -171,7 +210,7 @@ export function encodeThread(thread: StoredThread): ThreadRow {
   return {
     id: thread.id,
     project_id: thread.projectId,
-    title: thread.title,
+    title: wellFormed(thread.title),
     title_source: thread.titleSource ?? "seed",
     hidden: thread.hidden === true ? 1 : 0,
     interaction_mode: thread.interactionMode,
@@ -199,8 +238,6 @@ export function encodeThread(thread: StoredThread): ThreadRow {
 
 export function decodeThread(row: ThreadRow): StoredThread {
   const rest = JSON.parse(row.rest) as Record<string, unknown>;
-  const instanceId = required(row.model_instance, "model_instance", "threads");
-  const modelId = required(row.model_id, "model_id", "threads");
   const options = (rest.modelSelection as { options?: ModelSelection["options"] } | undefined)?.options;
   return {
     id: row.id,
@@ -208,7 +245,10 @@ export function decodeThread(row: ThreadRow): StoredThread {
     title: row.title,
     ...(row.title_source === "seed" ? {} : { titleSource: row.title_source as NonNullable<StoredThread["titleSource"]> }),
     ...(row.hidden === 0 ? {} : { hidden: true }),
-    modelSelection: options === undefined ? { instanceId, model: modelId } : { instanceId, model: modelId, options },
+    modelSelection:
+      options === undefined
+        ? { instanceId: row.model_instance, model: row.model_id }
+        : { instanceId: row.model_instance, model: row.model_id, options },
     runtimeMode: row.runtime_mode as RuntimeMode,
     interactionMode: row.interaction_mode as InteractionMode,
     env: { mode: row.env_mode as StoredThread["env"]["mode"], path: row.env_path, branch: row.env_branch },
@@ -349,7 +389,7 @@ export function encodeMessage(message: StoredMessage): MessageRow {
     role: message.role,
     origin: message.origin ?? null,
     created_at: message.createdAt,
-    text: message.text,
+    text: wellFormed(message.text),
     attachments: jsonText(message.attachments),
     notification: jsonText(message.notification),
   };
@@ -377,7 +417,7 @@ export function encodeActivity(activity: StoredActivity): ActivityRow {
     thread_id: activity.threadId,
     turn_id: activity.turnId,
     kind: activity.kind,
-    summary: activity.summary,
+    summary: wellFormed(activity.summary),
     created_at: activity.createdAt,
     payload: activity.payload === undefined ? null : utf8.encode(JSON.stringify(activity.payload)),
     payload_encoding: "json",
@@ -441,7 +481,7 @@ export function encodeDelegation(delegation: StoredDelegation): DelegationRow {
     continues_task_id: delegation.continuesTaskId ?? null,
     idempotency_key: delegation.idempotencyKey ?? null,
     base_branch: delegation.baseBranch ?? null,
-    prompt: delegation.prompt,
+    prompt: wellFormed(delegation.prompt),
     created_at: delegation.createdAt,
     updated_at: delegation.updatedAt,
     rest: JSON.stringify(rest),

@@ -135,6 +135,59 @@ describe.skipIf(!underBun)("row round trip", () => {
     expect(rows.map((row) => decodeDelegation(row))).toEqual([full, sparse]);
   });
 
+  it("keeps a handoff summary's half-step queue order", () => {
+    const db = storeWithThreads();
+    insertRow(db, INSERT_TURN, encodeTurn(queuedTurn()));
+    const row = db.query<TurnRow, []>("SELECT * FROM turns").get()!;
+    expect(decodeTurn(row).queue?.order).toBe(7.5);
+    expect(db.query<{ type: string }, []>("SELECT typeof(queue_order) AS type FROM turns").get()).toEqual({ type: "real" });
+  });
+
+  it("allows one replay key under two parents, and twice for one parent", () => {
+    const db = storeWithThreads();
+    const shared = (id: string, parentThreadId: string) => ({ ...fullDelegation(), id, parentThreadId, idempotencyKey: "shared" });
+    for (const row of [shared("del-a", "thread-1"), shared("del-b", "thread-2"), shared("del-c", "thread-1")]) {
+      insertRow(db, INSERT_DELEGATION, encodeDelegation(row));
+    }
+    expect(db.query<{ count: number }, []>("SELECT count(*) AS count FROM delegations").get()).toEqual({ count: 3 });
+  });
+
+  it("canonicalises explicit nulls, false flags and the seed title source", () => {
+    const db = storeWithThreads();
+
+    const thread = { ...sparseThread(), id: "thread-null", hidden: false, titleSource: "seed" as const };
+    insertRow(db, INSERT_THREAD, encodeThread(thread));
+    const { hidden: _hidden, titleSource: _titleSource, ...expectedThread } = thread;
+    expect(decodeThread(db.query<ThreadRow, [string]>("SELECT * FROM threads WHERE id = ?").get(thread.id)!)).toEqual(expectedThread);
+
+    const turn = { ...completedTurn(thread.id), id: "turn-null", scheduledFor: null, scheduleReason: null, owner: null, heldAtSettle: false };
+    insertRow(db, INSERT_TURN, encodeTurn(turn));
+    const { scheduledFor: _scheduledFor, scheduleReason: _scheduleReason, owner: _owner, heldAtSettle: _heldAtSettle, ...expectedTurn } = turn;
+    expect(decodeTurn(db.query<TurnRow, [string]>("SELECT * FROM turns WHERE id = ?").get(turn.id)!)).toEqual(expectedTurn);
+
+    const delegation = { ...sparseDelegation(), id: "del-null", baseBranch: null, notify: false };
+    insertRow(db, INSERT_DELEGATION, encodeDelegation(delegation));
+    const { baseBranch: _baseBranch, notify: _notify, ...expectedDelegation } = delegation;
+    expect(decodeDelegation(db.query<DelegationRow, [string]>("SELECT * FROM delegations WHERE id = ?").get(delegation.id)!)).toEqual(
+      expectedDelegation,
+    );
+  });
+
+  it("stores free text as well-formed UTF-8 and keeps JSON payloads escaped", () => {
+    const db = storeWithThreads();
+    const cut = "before \uD83D";
+    const message = { ...sparseMessage(), id: "msg-cut", text: cut };
+    // Defined at the writer, not left to SQLite's UTF-8 conversion on read.
+    expect(encodeMessage(message).text).toBe("before \uFFFD");
+    insertRow(db, INSERT_MESSAGE, encodeMessage(message));
+    expect(decodeMessage(db.query<MessageRow, [string]>("SELECT * FROM messages WHERE id = ?").get(message.id)!).text).toBe("before \uFFFD");
+
+    // JSON columns escape a lone surrogate, so they keep it exactly.
+    const activity = { ...activityWithPayload({ note: cut }), id: "act-cut" };
+    insertRow(db, INSERT_ACTIVITY, encodeActivity(activity));
+    expect(decodeActivity(db.query<ActivityRow, [string]>("SELECT * FROM activities WHERE id = ?").get(activity.id)!).payload).toEqual({ note: cut });
+  });
+
   it("stores and reads meta values", () => {
     const db = storeWithThreads();
     insertRow(db, INSERT_META, { key: "engine", value: "sqlite" });

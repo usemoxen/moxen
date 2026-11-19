@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
 
 import type { Database } from "bun:sqlite";
 import { afterEach } from "vitest";
@@ -70,4 +71,36 @@ export function insertRow<R extends object>(db: Database, sql: string, row: R): 
   const params: Record<string, string | number | bigint | boolean | null | Uint8Array> = {};
   for (const [key, value] of Object.entries(row)) params[`$${key}`] = value as string | number | bigint | boolean | null | Uint8Array;
   return Number(db.query(sql).run(params).lastInsertRowid);
+}
+
+/** Wait on a condition rather than a fixed sleep, failing the test with what it waited for. */
+export async function waitFor(check: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}.`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+export interface Child {
+  readonly exited: Promise<number | null>;
+  /** Everything the child has printed to stdout so far. */
+  output(): string;
+  stop(): void;
+}
+
+/**
+ * A real child process running `script` with this runtime (bun, in the test
+ * run). Used where two connections must interleave, which one JS thread
+ * cannot do: a migration race, and a writer that is killed mid-WAL.
+ */
+export function startChild(script: string, args: readonly string[]): Child {
+  const child = spawn(process.execPath, [script, ...args], { stdio: ["ignore", "pipe", "inherit"] });
+  let output = "";
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => {
+    output += chunk;
+  });
+  const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+  return { exited, output: () => output, stop: () => child.kill("SIGKILL") };
 }

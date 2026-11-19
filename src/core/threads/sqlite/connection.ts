@@ -27,9 +27,9 @@ const requireBun = createRequire(import.meta.url);
  * SQLite tests skip there instead of failing to load the file. Production and
  * the Bun run of those tests get the real builtin.
  */
-function createDatabase(file: string): Database {
+function createDatabase(file: string, options: { readonly?: boolean } = {}): Database {
   const { Database: BunDatabase } = requireBun("bun:sqlite") as typeof import("bun:sqlite");
-  return new BunDatabase(file, { create: true });
+  return options.readonly === true ? new BunDatabase(file, { readonly: true }) : new BunDatabase(file, { create: true });
 }
 
 /** The store database's file name under the store root. */
@@ -67,20 +67,24 @@ export interface OpenStoreDatabaseOptions {
 }
 
 /**
- * Open (creating when absent) the store database for `root`: check the
- * runtime and the file's identity, refuse a newer schema, apply the pragmas,
- * then migrate. Every check runs before the first write, so refusing leaves
- * the file as it was.
+ * Open (creating when absent) the store database for `root`: preflight an
+ * existing file read-only, check the runtime and the file's identity, refuse
+ * a newer schema, apply the pragmas, then migrate. Every check runs before
+ * the first write, so refusing leaves the file byte for byte as it was.
  */
 export function openStoreDatabase(root: string, options: OpenStoreDatabaseOptions = {}): Database {
   const file = storeDatabasePath(root);
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  // An existing file is checked through a read-only connection first. A
+  // writable connection that is opened and closed checkpoints the WAL into
+  // the database file, so refusing a newer store through one would rewrite
+  // the very file this build must not touch (MXN-392 review, finding 3).
+  preflightExistingFile(file);
   const db = createDatabase(file);
   try {
-    probeRuntime(db, options.sqliteVersion);
+    probeSqliteRuntime(db, options.sqliteVersion);
     assertMoxenFile(db, file);
-    const schemaVersion = readSchemaVersion(db);
-    if (schemaVersion > SCHEMA_VERSION) throw schemaTooNew(schemaVersion);
+    refuseNewerSchema(readSchemaVersion(db));
     applyPragmas(db, file, options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS);
     migrateStoreSchema(db, options.migrations === undefined ? {} : { migrations: options.migrations });
     return db;
@@ -90,14 +94,37 @@ export function openStoreDatabase(root: string, options: OpenStoreDatabaseOption
   }
 }
 
+function preflightExistingFile(file: string): void {
+  if (!fs.existsSync(file) || fs.statSync(file).size === 0) return;
+  // A hot rollback journal needs SQLite's own recovery, which a read-only
+  // connection cannot perform. Skip the preflight then: recovery either
+  // finishes or undoes an interrupted transaction, so it cannot reveal a
+  // newer committed schema that the file itself does not already hold.
+  if (fs.existsSync(`${file}-journal`)) return;
+  const db = createDatabase(file, { readonly: true });
+  try {
+    assertMoxenFile(db, file);
+    refuseNewerSchema(readSchemaVersion(db));
+  } finally {
+    // Closing a read-only connection never checkpoints the WAL.
+    db.close();
+  }
+}
+
+function refuseNewerSchema(version: number): void {
+  if (version > SCHEMA_VERSION) throw schemaTooNew(version);
+}
+
 /**
  * Refuse a runtime whose SQLite is older than schema v1 needs, instead of
  * failing later with a syntax error somewhere in the DDL. The version check
- * names the floor; the probe proves the features the schema actually uses
- * (STRICT tables, a partial index, JSON1) on a TEMP table that never touches
- * the store's file.
+ * names the floor in both versions; the probe proves the features the schema
+ * actually uses (STRICT tables, a partial index, JSON1) on a TEMP table that
+ * never touches the store's file. A build at or above the floor that lacks a
+ * feature gets its own code: it is not an old version, it is a stripped
+ * SQLite. Exported so a doctor check can run the same probe.
  */
-function probeRuntime(db: Database, reported: string | undefined): void {
+export function probeSqliteRuntime(db: Database, reported?: string): void {
   const loaded = reported ?? db.query<{ version: string }, []>("SELECT sqlite_version() AS version").get()?.version ?? "unknown";
   if (!versionAtLeast(loaded, MINIMUM_SQLITE_VERSION)) {
     throw new CliError(
@@ -116,8 +143,10 @@ function probeRuntime(db: Database, reported: string | undefined): void {
     db.query("SELECT json_extract('{}', '$.a') AS value").get();
   } catch (error) {
     throw new CliError(
-      "SQLITE_TOO_OLD",
-      `This runtime's SQLite ${loaded} cannot run schema v1: ${error instanceof Error ? error.message : String(error)}`,
+      "SQLITE_FEATURES_MISSING",
+      `SQLite ${loaded} cannot run schema v1 even though this build needs only ${MINIMUM_SQLITE_VERSION}: ${
+        error instanceof Error ? error.message : String(error)
+      }. The runtime's SQLite build is missing STRICT tables, a partial index or JSON1.`,
       { cause: error, details: { loaded, needed: MINIMUM_SQLITE_VERSION } },
     );
   } finally {

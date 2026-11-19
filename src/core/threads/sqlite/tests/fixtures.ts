@@ -122,7 +122,9 @@ export function queuedTurn(threadId = "thread-1"): StoredTurn {
     queue: {
       conditions: [{ type: "usage", provider: "claude", window: "session", minimum: 5 }],
       held: true,
-      order: 7,
+      // A model-handoff summary sorts just before the turn it summarises
+      // (operations.ts: `turn.queue.order - 0.5`), so this is a REAL.
+      order: 7.5,
       sequential: false,
       continuation: "model",
       latched: [1, 2],

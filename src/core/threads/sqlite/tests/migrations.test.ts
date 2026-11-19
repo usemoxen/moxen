@@ -3,13 +3,16 @@
  * step is one write transaction, a no-op step proves the loop, and a database
  * newer than this build is refused with the store's own FORMAT_TOO_NEW.
  */
+import { existsSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import type { Database } from "bun:sqlite";
 
 import { MIGRATIONS, SCHEMA_VERSION, migrateStoreSchema, readSchemaVersion, type SchemaMigration } from "../migrations.js";
 import { storeDatabasePath } from "../connection.js";
-import { closeForTest, openForTest, rawForTest, temporaryRoot, underBun } from "./support.js";
+import { closeForTest, openForTest, rawForTest, startChild, temporaryRoot, underBun, waitFor } from "./support.js";
 
 function tableNames(db: Database): string[] {
   return db
@@ -89,6 +92,26 @@ describe.skipIf(!underBun)("schema migrations", () => {
       migrateStoreSchema(db, { migrations: [{ version: 2, name: "out of order", up: () => {} }] }),
     ).toThrow(expect.objectContaining({ code: "FORMAT_MIGRATION_MISSING" }));
     expect(readSchemaVersion(db)).toBe(0);
+  });
+
+  it("lets two migrators race without one re-running a committed step", async () => {
+    const root = temporaryRoot("race");
+    const file = storeDatabasePath(root);
+    const script = path.join(__dirname, "fixtures", "migration-racer.ts");
+    const children = ["0", "1"].map((id) => startChild(script, [file, root, id]));
+    try {
+      await waitFor(() => children.every((_, index) => existsSync(path.join(root, `${index}.ready`))), "both migrators to be ready");
+      // Both connections have read version 0 and are waiting for the signal;
+      // whichever takes the write lock second must see the other's commit.
+      writeFileSync(path.join(root, "go"), "go");
+      expect(await Promise.all(children.map((child) => child.exited))).toEqual([0, 0]);
+    } finally {
+      for (const child of children) child.stop();
+    }
+
+    const db = rawForTest(file);
+    expect(readSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    expect(tableNames(db)).toContain("threads");
   });
 
   it("keeps the schema on a database that is already current", () => {

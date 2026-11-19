@@ -39,6 +39,12 @@ describe.skipIf(!underBun)("schema v1", () => {
     await expect(schemaDump(db)).toMatchFileSnapshot(path.join(__dirname, "fixtures", "schema-v1.sql"));
   });
 
+  it("refuses a thread row with no model selection", () => {
+    const db = openForTest(temporaryRoot("model"));
+    const row = { ...encodeThread(sparseThread()), model_instance: null, model_id: null };
+    expect(() => insertRow(db, INSERT_THREAD, row)).toThrow(/NOT NULL/);
+  });
+
   it("removes a thread's rows with the thread (ON DELETE CASCADE)", () => {
     const db = openForTest(temporaryRoot("cascade"));
     const thread = sparseThread();

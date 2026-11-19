@@ -57,8 +57,8 @@ CREATE TABLE delegations (
 -- index delegations_child
 CREATE INDEX delegations_child ON delegations(child_thread_id)
 
--- index delegations_idem
-CREATE UNIQUE INDEX delegations_idem ON delegations(idempotency_key) WHERE idempotency_key IS NOT NULL
+-- index delegations_idempotency
+CREATE INDEX delegations_idempotency ON delegations(parent_thread_id, idempotency_key)
 
 -- index delegations_parent
 CREATE INDEX delegations_parent ON delegations(parent_thread_id, child_thread_id)
@@ -119,8 +119,8 @@ CREATE TABLE threads (
   hidden                 INTEGER NOT NULL DEFAULT 0,
   interaction_mode       TEXT NOT NULL,
   runtime_mode           TEXT NOT NULL,
-  model_instance         TEXT,            -- modelSelection.instanceId
-  model_id               TEXT,            -- modelSelection.model
+  model_instance         TEXT NOT NULL,   -- modelSelection.instanceId
+  model_id               TEXT NOT NULL,   -- modelSelection.model
   env_mode               TEXT NOT NULL,
   env_path               TEXT NOT NULL,
   env_branch             TEXT,
@@ -160,7 +160,7 @@ CREATE TABLE turns (
   schedule_reason  TEXT,
   held_at_settle   INTEGER NOT NULL DEFAULT 0,
   continue_attempt INTEGER,
-  queue_order      INTEGER,        -- queue.order: admission sorting
+  queue_order      REAL,           -- queue.order: admission sorting; a handoff summary sorts at N - 0.5
   queue_removed    INTEGER,        -- queue.removed: excluded from the runnable set
   queue_automatic  INTEGER,
   queue_wake_up    INTEGER,

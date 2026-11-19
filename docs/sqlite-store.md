@@ -44,8 +44,11 @@ gets is therefore the user's macOS version, not Bun's. macOS 13 ships SQLite
 3.39, which is the floor schema v1 targets: `STRICT` tables, partial indexes and
 JSON1 are all available; `jsonb` (3.45) and `timediff()` (3.43) are not used.
 `connection.ts` checks `sqlite_version()` against 3.39 and probes the features
-on a TEMP table at open, refusing with `SQLITE_TOO_OLD` naming the loaded
-version. Linux and Windows builds bundle Bun's own SQLite.
+on a TEMP table at open: below the floor it refuses with `SQLITE_TOO_OLD`, and
+at or above the floor but missing STRICT tables, a partial index or JSON1 it
+refuses with `SQLITE_FEATURES_MISSING`. Both name the loaded version and the
+floor, because on macOS the loaded one is the user's. Linux and Windows builds
+bundle Bun's own SQLite.
 
 The API is synchronous: one connection per process owned by the daemon, and
 query duration is event-loop stall. Queries on the request path stay small;
@@ -89,6 +92,16 @@ behind a 1 s transaction failed at 201 ms; with 3000 it succeeded at 1272 ms.
 `PRAGMA wal_checkpoint` inside a write transaction fails: never checkpoint
 there.
 
+An existing store is checked through a **read-only connection before it is
+opened**: identity and schema version. (A hot rollback journal is the
+exception: only a writable connection can recover it, and recovery finishes or
+undoes an interrupted transaction rather than revealing new committed data.)
+Opening a writable connection that is then closed checkpoints the WAL into the
+database file, so a refusal — a newer schema, a file that is not ours — must
+not do that. A newer schema committed only to the WAL by a writer that died is
+still detected and still leaves the WAL, and the database file, byte for byte
+unchanged.
+
 WAL is unsupported on network filesystems and corruption is possible there —
 all processes must be on one host. `STORE_ROOT` is user-settable, so a store on
 a mapped drive is possible; the failure to enter WAL is refused rather than
@@ -107,7 +120,7 @@ its own; everything else is one `rest` JSON column, merged back on read in
 
 | table | key | columns that exist because code queries them | JSON |
 |---|---|---|---|
-| `threads` | `id` | project, title and source, hidden, modes, model, env, every timestamp, pending flags, `usage_pause` | research fields, sessions, instruction/mode state, subagents, overrides |
+| `threads` | `id` | project, title and source, hidden, modes, model (NOT NULL — a record without one is the importer's to quarantine), env, every timestamp, pending flags, `usage_pause` | research fields, sessions, instruction/mode state, subagents, overrides |
 | `turns` | `seq`, unique `(thread_id, id)` | status, delivery, schedule, `held_at_settle`, queue order/removed/automatic/wake-up/request id, handoff destination, owner | queue conditions, handoff text, model, usage, error, modes, generation |
 | `messages` | `seq`, unique `(thread_id, id)` | turn, role, origin, text, attachments, notification | — |
 | `activities` | `seq`, unique `(thread_id, id)` | turn, kind, summary, `payload` BLOB + `payload_encoding` | payload JSON text |
@@ -116,11 +129,33 @@ its own; everything else is one `rest` JSON column, merged back on read in
 | `meta` | `key` | engine, schema, import state, imported at, source rows | — |
 | `quarantine` | — | at, reason, table, row JSON — rows taken out of the live tables instead of deleted | — |
 
+`turns.queue_order` is `REAL`: a model-handoff summary sorts just before the
+turn it summarises, at `order - 0.5`.
+
+`threads.model_instance` and `model_id` are `NOT NULL`: every `StoredThread`
+carries a `modelSelection`. A pre-SQLite record without one is the importer's
+problem (step 2): it quarantines the thread rather than inventing a model.
+
 Indexes: `threads_created`, `threads_project`; `turns_id` (unique),
 `turns_thread`, partial `turns_open` (queued/running) and `turns_due`
 (queued with a time); `messages_thread`, `messages_turn`; `activities_thread`,
 `activities_turn`; `checkpoints_thread`; `delegations_parent`,
-`delegations_child`, partial unique `delegations_idem`.
+`delegations_child`, and `delegations_idempotency` on
+`(parent_thread_id, idempotency_key)` — a plain lookup index, not a unique
+one. A replay is scoped to the caller's lineage, so two unrelated parents may
+use the same key; and a retry whose first child is gone stores a second row
+for the same parent and key.
+
+Deliberate normalisations in the row mapping (`records.ts`): `hidden: false`,
+`heldAtSettle: false` and `notify: false` read as absent, `titleSource: "seed"`
+reads as absent, and an explicit `null` for `scheduledFor`, `scheduleReason`,
+`owner` or `baseBranch` reads as absent. Every reader tests `=== true`,
+truthiness, or compares to `"user"`/`"provider"`, so the pairs are
+indistinguishable in behaviour. `usagePause` is the exception — a JSON column,
+so SQL NULL (absent) and the JSON text `null` stay distinct. Free text (title,
+message text, activity summary, delegation prompt) is stored well-formed: a
+lone surrogate from a code-unit slice becomes U+FFFD, because SQLite TEXT is
+UTF-8; JSON columns keep one escaped and lossless.
 
 `payload` is a BLOB even though it holds JSON text, so compression later is a
 data change rather than a schema change. Do not compress in the first
@@ -135,9 +170,12 @@ identity and version.
 
 `PRAGMA user_version` plus numbered steps, oldest first. Each step runs in one
 `BEGIN IMMEDIATE` with its version bump **inside** the transaction, so a
-failure leaves the schema and the version untouched. A database newer than the
-build is refused before anything is written, with the store's `FORMAT_TOO_NEW`
-code so clients keep their handling.
+failure leaves the schema and the version untouched, and the version is read
+again once the write lock is held: two processes that open the same store at
+once do not both run the step, and an unexpected or newer version refuses
+before any DDL. A database newer than the build is refused before anything is
+written, with the store's `FORMAT_TOO_NEW` code so clients keep their
+handling.
 
 - A change is a new step, never an edit to an old one. The DDL of version 1 is
   pinned by a golden dump of `sqlite_master`; changing it is a deliberate act.
@@ -152,8 +190,12 @@ The test suite runs under Node, where `bun:sqlite` does not exist, so the
 SQLite tests skip there and run from `bun run test:sqlite`, which forces Bun.
 `bun run check` includes it. The tests are a schema golden, the migration
 runner (fresh, current, newer refused, a no-op step, a failing step rolling
-back), and a round-trip invariant: every table's representative record encodes,
-writes, reads and decodes back equal, unicode, large JSON and nulls included.
+back, and two real processes racing), the connection (pragmas, identity, an
+old runtime, a stripped one, a newer schema refused without checkpointing the
+WAL it lives in), and a round-trip invariant: every table's representative
+record encodes, writes, reads and decodes back equal, unicode, large JSON and
+nulls included, with the canonicalisations above and the lone-surrogate
+normalisation pinned.
 
 ## Performance budget
 
