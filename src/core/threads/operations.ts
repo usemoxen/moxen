@@ -1685,6 +1685,9 @@ async function continueThreadReserved(
   const notifyParent = await carryDelegation(store, source.id, created.id);
   await endContinuedSession(ctx, source);
   const adopted = await adoptTasks(store, source.id, created.id);
+  // Notices already waiting on the old thread belong to the live conversation
+  // the tasks just moved to, not to the dormant one.
+  await moveTaskNotifications(ctx, source.id);
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
@@ -3421,33 +3424,112 @@ async function notifyDelegationParent(ctx: OperationContext, childThreadId: stri
   return row?.notify === true ? row.parentThreadId : null;
 }
 
-/** Batch a task notice for its parent; held or spent parents keep it durably until they can receive it. */
+/** The parent a task reports to now, whether or not it asked to be told; undefined when it has no live row. */
+async function liveDelegationParent(ctx: OperationContext, childThreadId: string): Promise<string | undefined> {
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  return rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined)?.parentThreadId;
+}
+
+/**
+ * Batch a task notice for the thread that owns the task now; held or spent
+ * parents keep it durably until they can receive it. A completion callback
+ * armed before a handoff still names the old parent, so the live row is
+ * resolved first: checking the old recipient's usage there would strand the
+ * notice in a batch no flush reaches until a restart.
+ */
 async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: string, entry: PendingTaskNotification): Promise<void> {
-  await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
-    // Serialize fact collection too: a later, faster report cannot overtake an
-    // earlier one. Registered under the thread lock so protection's flush
-    // cannot race a report that read the old, unprotected record.
-    const parent = await ctx.store.withThreadLock(parentThreadId, async () => ctx.store.readThreadRecord(parentThreadId));
-    if (parent !== null && (await parentMustWaitForUsage(ctx, parent))) {
-      // Held or spent: keep it durably in the batch file for the recovery or
-      // the user's next message, instead of starting its own turn into the wall.
+  let target = parentThreadId;
+  // Handoffs only move a row forward, so a chain cannot cycle; the bound is a
+  // guard against a store that keeps changing under us.
+  for (let hops = 0; hops < 16; hops += 1) {
+    const live = await liveDelegationParent(ctx, entry.child);
+    if (live !== undefined) target = live;
+    const rerouted = await ctx.store.withThreadLock(`\0task-notification:${target}`, async (): Promise<string | null> => {
+      // Re-read under the lock: a handoff that landed since the read above
+      // must win over the row we resolved.
+      const current = await liveDelegationParent(ctx, entry.child);
+      if (current !== undefined && current !== target) return current;
+      // Serialize fact collection too: a later, faster report cannot overtake an
+      // earlier one. Registered under the thread lock so protection's flush
+      // cannot race a report that read the old, unprotected record.
+      const parent = await ctx.store.withThreadLock(target, async () => ctx.store.readThreadRecord(target));
+      if (parent !== null && (await parentMustWaitForUsage(ctx, parent))) {
+        // Held or spent: keep it durably in the batch file for the recovery or
+        // the user's next message, instead of starting its own turn into the wall.
+        await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+          batches[target] = unionTaskEntries(batches[target] ?? [], [entry]);
+        });
+        return null;
+      }
+      const pending = pendingNotifications.get(target);
+      if (pending) clearTimeout(pending.timer);
+      const entries = unionTaskEntries(pending?.entries ?? [], [entry]);
+      // Persisted before the timer is armed: a restart inside the batch
+      // window replays the file, and the replay unions what is on disk.
       await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-        batches[parentThreadId] = unionTaskEntries(batches[parentThreadId] ?? [], [entry]);
+        batches[target] = unionTaskEntries(batches[target] ?? [], entries);
       });
-      return;
-    }
-    const pending = pendingNotifications.get(parentThreadId);
-    if (pending) clearTimeout(pending.timer);
-    const entries = unionTaskEntries(pending?.entries ?? [], [entry]);
-    // Persisted before the timer is armed: a restart inside the batch
-    // window replays the file, and the replay unions what is on disk.
-    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-      batches[parentThreadId] = unionTaskEntries(batches[parentThreadId] ?? [], entries);
+      const timer = setTimeout(() => void flushTaskNotifications(ctx, target).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
+      timer.unref?.();
+      pendingNotifications.set(target, { timer, entries });
+      return null;
     });
-    const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
-    timer.unref?.();
-    pendingNotifications.set(parentThreadId, { timer, entries });
+    if (rerouted === null) return;
+    target = rerouted;
+  }
+  // Not reachable for a real continuation chain: keep the notice durable for
+  // the next flush of whichever parent we resolved last rather than drop it.
+  await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+    batches[target] = unionTaskEntries(batches[target] ?? [], [entry]);
   });
+}
+
+/**
+ * A thread that continued hands its tasks to the new thread: move the notices
+ * already waiting on the old parent (held, spent, or inside the batch window)
+ * to the conversation that owns them now, so no restart and no flush of the
+ * dormant parent is needed for them to arrive.
+ */
+async function moveTaskNotifications(ctx: OperationContext, sourceId: string): Promise<void> {
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const live = new Map(
+    rows.filter((row) => row.continuedIn === undefined).map((row) => [row.childThreadId, row.parentThreadId] as const),
+  );
+  const moved = new Map<string, PendingTaskNotification[]>();
+  const keepHere = (entry: PendingTaskNotification): boolean => {
+    const target = live.get(entry.child);
+    return target === undefined || target === sourceId;
+  };
+  const take = (entry: PendingTaskNotification): void => {
+    const target = live.get(entry.child)!;
+    moved.set(target, [...(moved.get(target) ?? []), entry]);
+  };
+  await ctx.store.withThreadLock(`\0task-notification:${sourceId}`, async () => {
+    const pending = pendingNotifications.get(sourceId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingNotifications.delete(sourceId);
+    }
+    for (const entry of pending?.entries ?? []) if (!keepHere(entry)) take(entry);
+    // The durable copy moves under the same lock, so a concurrent report or
+    // flush sees the batch before or after the handoff, never in both places.
+    await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+      const stored = batches[sourceId] ?? [];
+      const keep: PendingTaskNotification[] = [];
+      for (const entry of stored) {
+        if (keepHere(entry)) keep.push(entry);
+        else take(entry);
+      }
+      if (keep.length > 0) batches[sourceId] = keep;
+      else delete batches[sourceId];
+      for (const [target, entries] of moved) {
+        batches[target] = unionTaskEntries(batches[target] ?? [], entries);
+      }
+    });
+  });
+  for (const [target, entries] of moved) {
+    for (const entry of unionTaskEntries(entries, [])) await enqueueTaskNotification(ctx, target, entry);
+  }
 }
 
 /**

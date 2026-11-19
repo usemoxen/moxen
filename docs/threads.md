@@ -471,11 +471,15 @@ that continues hands every task it delegated to the new thread — running,
 idle, finished and cancelled alike, including tasks that themselves carried
 on (research roles stay with the run): the handoff lists them, and from then
 on steering, `task_status` and completion notifications resolve against the
-new parent while the old one reads `TASK_NOT_FOUND`. The re-pointing is one
-atomic write, so a notification deciding mid-transfer sees every row before
-or every row after it; a report queued and fully delivered just before the
-transfer still reaches the old thread — the task's next report, and
-`task_status` on the new parent at any time, cover it. A continued thread
+new parent while the old one reads `TASK_NOT_FOUND`. Notices already waiting
+for the old thread move with the handoff, and one that arrives afterwards is
+routed before its recipient's allowance is checked, so a spent or held old
+thread never strands it until a restart; the new thread's own hold still
+keeps it waiting there. The re-pointing is one atomic write, so a
+notification deciding mid-transfer sees every row before or every row after
+it; a report queued and fully delivered just before the transfer still
+reaches the old thread — the task's next report, and `task_status` on the
+new parent at any time, cover it. A continued thread
 starts no new delegations (`THREAD_CONTINUED` names the live thread):
 otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A manual continue needs an idle source: while one of its

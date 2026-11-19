@@ -652,6 +652,27 @@ describe("cancelling a delegated task's automatic continue", () => {
   });
 });
 
+async function spentClaudeParent(w: Awaited<ReturnType<typeof world>>) {
+  const parent = await createThread(w.store, {
+    projectId: "p",
+    title: "orchestrator",
+    env: { mode: "local", path: w.work, branch: null },
+    modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+  });
+  recordUsageWindows("claude", [
+    { id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(Date.now() + 3_600_000).toISOString() },
+  ]);
+  return parent;
+}
+
+async function hold(w: Awaited<ReturnType<typeof world>>, threadId: string, provider: string, phase: "waiting" | "resuming" = "waiting"): Promise<void> {
+  const record = await w.store.readThreadRecord(threadId);
+  await w.store.writeThreadRecord({
+    ...record!,
+    usagePause: { provider, windows: [], phase, resetsAt: new Date(Date.now() + 3_600_000).toISOString(), order: 1, handoff: false },
+  });
+}
+
 describe("a task notification across a continued parent", () => {
   it("reroutes a queued pause to the new parent only", async () => {
     const w = await world();
@@ -674,6 +695,99 @@ describe("a task notification across a continued parent", () => {
     const delivered = await notificationsIn(w, continued.threadId);
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toContain(child.id);
+  });
+
+  it("reports a task that finishes after a handoff to the new parent while the old one is spent", async () => {
+    const w = await world();
+    const parent = await spentClaudeParent(w);
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+
+    // The orchestrator carries on in a new thread on another provider while
+    // the task is still running; its completion callback still names the old
+    // parent, which has no allowance left.
+    const continued = await continueThread(w.ctx, {
+      threadId: parent.id,
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+
+    // Resolved to the live parent before its recipient was checked: the notice
+    // waits with the new thread, not in a batch nothing would flush.
+    expect((await batchesOf(w))[parent.id]).toBeUndefined();
+    expect((await batchesOf(w))[continued.threadId]).toEqual([{ child: child.id }]);
+
+    await flushTaskNotifications(w.ctx, continued.threadId);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    const delivered = await notificationsIn(w, continued.threadId);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain(child.id);
+  });
+
+  it("moves a batch already waiting on the old parent when the thread continues", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+
+    await hold(w, parent.id, "codex");
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    expect(await batchesOf(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+
+    // The handoff takes the waiting notice with it; its own first turn pulls
+    // the moved batch along, so it arrives without a restart or a flush of the
+    // dormant parent.
+    const continued = await continueThread(w.ctx, { threadId: parent.id });
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    const delivered = await notificationsIn(w, continued.threadId);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain(child.id);
+    expect(await batchesOf(w)).toEqual({});
+
+    // One notice: a restart replays nothing left, and neither parent resends.
+    await recoverTaskNotifications(w.ctx);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, continued.threadId)).toHaveLength(1);
+    expect(await batchesOf(w)).toEqual({});
+  });
+
+  it("keeps a post-handoff notice under the new parent's own hold and delivers it once", async () => {
+    const w = await world();
+    const parent = await spentClaudeParent(w);
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, turn.id, { text: "Done." });
+
+    const continued = await continueThread(w.ctx, {
+      threadId: parent.id,
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    await hold(w, continued.threadId, "codex");
+
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    // The live recipient is held for its own allowance: the notice waits with
+    // it instead of starting a turn into that limit.
+    expect(await notificationsIn(w, continued.threadId)).toEqual([]);
+    expect((await batchesOf(w))[parent.id]).toBeUndefined();
+    expect((await batchesOf(w))[continued.threadId]).toEqual([{ child: child.id }]);
+
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(continued.threadId))!, usagePause: null });
+    await flushTaskNotifications(w.ctx, continued.threadId);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    const delivered = await notificationsIn(w, continued.threadId);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain(child.id);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    await recoverTaskNotifications(w.ctx);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, continued.threadId)).toHaveLength(1);
   });
 });
 
