@@ -17,6 +17,7 @@
  */
 import { CliError } from "../errors.js";
 import { untrustedContext } from "../untrusted.js";
+import { ranTurns } from "./project.js";
 import type { ThreadStore } from "./store.js";
 import type { StoredActivity, StoredMessage, StoredTurn } from "./types.js";
 
@@ -149,7 +150,7 @@ function toolCalls(number: number, activities: readonly StoredActivity[]): ToolC
 
 async function turnViews(store: ThreadStore, threadId: string): Promise<TurnView[]> {
   const [turns, messages, activities] = await Promise.all([store.readTurns(threadId), store.readMessages(threadId), store.readActivities(threadId)]);
-  const ran = turns.filter((turn) => turn.status !== "queued").sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const ran = ranTurns(turns);
   return ran.map((turn, index) => {
     const number = index + 1;
     const own = messages.filter((message) => message.turnId === turn.id);
