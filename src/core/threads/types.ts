@@ -398,10 +398,24 @@ export interface StoredDelegation {
   /**
    * The turn an explicit cancel stopped, when one was live. Its own settle
    * lands after the `cancelled` mark is written, so the mark must outlive it;
-   * a turn started afterwards clears the mark as fresh work. Absent on rows
+   * a turn that ran after it clears the mark as fresh work. Absent on rows
    * cancelled while idle, and on rows written before it existed.
    */
   readonly cancelledTurnId?: string;
+  /**
+   * Counts successful cancellations on this row. A settle reads it with the
+   * row and clears only while it still matches, so a cancellation written in
+   * between (a recovery cancel included) is never erased by an older settle.
+   */
+  readonly cancelledGeneration?: number;
+  /**
+   * The last turn that settled on this task, from its own settle hook. A
+   * cancellation mark reads it to see whether work that ran after the turn it
+   * stopped already finished before the mark could be written; such a mark
+   * lost the race and is not written. Absent until a turn settles, and on
+   * rows written before it existed.
+   */
+  readonly lastSettledTurnId?: string;
   readonly status: DelegationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;

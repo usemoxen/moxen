@@ -812,26 +812,26 @@ export class ThreadStore {
     delegationId: string,
     patch: Partial<StoredDelegation>,
   ): Promise<StoredDelegation | null> {
-    return await this.updateDelegationIf(delegationId, () => true, patch);
+    return await this.updateDelegationWith(delegationId, () => patch);
   }
 
   /**
-   * Patch a delegation row only while it still matches, checked and written
-   * under the one ledger lock: a caller that read the row earlier cannot
-   * overwrite a change that landed in between (a newer cancellation, say).
-   * Null when the row is gone or no longer matches.
+   * Patch a delegation row from a builder run under the one ledger lock: the
+   * row it decides on is the row it writes, so a check and the write it
+   * guards cannot be separated by another writer. Null from the builder
+   * leaves the row alone; so does a missing row.
    */
-  async updateDelegationIf(
+  async updateDelegationWith(
     delegationId: string,
-    matches: (current: StoredDelegation) => boolean,
-    patch: Partial<StoredDelegation>,
+    build: (current: StoredDelegation) => Partial<StoredDelegation> | null | Promise<Partial<StoredDelegation> | null>,
   ): Promise<StoredDelegation | null> {
     return await this.withThreadLock("!delegations", async () => {
       const all = await this.readDelegations();
       const index = all.findIndex((delegation) => delegation.id === delegationId);
       if (index < 0) return null;
       const current = all[index]!;
-      if (!matches(current)) return null;
+      const patch = await build(current);
+      if (patch === null) return null;
       const updated: StoredDelegation = {
         ...current,
         ...patch,
@@ -842,6 +842,11 @@ export class ThreadStore {
       await this.writeDelegationRows(next);
       return updated;
     });
+  }
+
+  /** Record that a task turn settled, for a later cancellation mark to see. */
+  async recordDelegationSettle(delegationId: string, turnId: string): Promise<void> {
+    await this.updateDelegationWith(delegationId, () => ({ lastSettledTurnId: turnId }));
   }
 
   /**

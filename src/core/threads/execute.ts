@@ -509,7 +509,8 @@ export interface ExecuteTurnArgs {
   /**
    * This one turn's settle, with its ledger id, before a queued turn it
    * promoted is taken: a cancellation check must read the turn that actually
-   * settled, and never clear a mark for a turn it did not.
+   * settled, and never clear a mark for a turn it did not. Runs from the
+   * turn runner itself, so every path that runs a turn gets it.
    */
   readonly onTurnSettled?: (storeTurnId: string) => Promise<void>;
   /** Once the turn has settled and any queued turn is under way: where the server hands off or compacts a long thread unasked. */
@@ -521,7 +522,6 @@ export interface ExecuteTurnArgs {
 export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
   return trackRun(
     runExecuteTurn(args)
-      .then(() => args.onTurnSettled?.(args.storeTurnId).catch(() => undefined))
       .then(() => runPromotedTurn(args))
       // Never the turn's failure: the turn is settled whatever this does.
       .then(() => args.afterSettle?.().catch(() => undefined)),
@@ -687,6 +687,8 @@ export async function ensureDriverSession(
     readonly store?: ThreadStore;
     /** After a turn the provider starts itself settles (`ExecuteTurnArgs.afterSettle`). */
     readonly afterSettle?: () => Promise<void>;
+    /** Each turn's own settle, a turn the provider starts itself included (`ExecuteTurnArgs.onTurnSettled`). */
+    readonly onTurnSettled?: (storeTurnId: string) => Promise<void>;
     /** End the session after this long with nothing happening on it (`idle.ts`); null or absent: never. */
     readonly idleTtlMs?: number | null;
   } = {},
@@ -724,7 +726,7 @@ export async function ensureDriverSession(
   if (options.store) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
   await captureRuleBaseline(driver, thread.id, driverKey(selection.instanceId), cwd);
-  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null);
+  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onTurnSettled);
 }
 
 const watching = new WeakMap<TurnDriver, Map<string, () => void>>();
@@ -758,7 +760,15 @@ function subagentPayload(event: Extract<ProviderRuntimeEvent, { type: "subagent.
  * - background tasks starting and ending, and the live set of them, become
  *   activity rows the transcript and the tasks panel read.
  */
-export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threadId: string, cwd: string, afterSettle?: () => Promise<void>, idleTtlMs: number | null = null): void {
+export function watchDriverSession(
+  store: ThreadStore,
+  driver: TurnDriver,
+  threadId: string,
+  cwd: string,
+  afterSettle?: () => Promise<void>,
+  idleTtlMs: number | null = null,
+  onTurnSettled?: (storeTurnId: string) => Promise<void>,
+): void {
   let byThread = watching.get(driver);
   if (!byThread) {
     byThread = new Map();
@@ -827,6 +837,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
             ...(turn.modelSelection ? { modelSelection: turn.modelSelection } : {}),
             workingDirectory: cwd,
             ...(afterSettle ? { afterSettle } : {}),
+            ...(onTurnSettled ? { onTurnSettled } : {}),
           }).catch(() => undefined);
         }
       }).catch(() => undefined);
@@ -1483,6 +1494,9 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     if (args.freshConversation && !answered && !interrupted) await forgetUnansweredSession(store, args, threadId, storeTurnId);
     else await persistResumeCursor(store, driver, threadId);
     await syncProviderTitle(store, driver, threadId, cwd);
+    // This turn's own settle, whichever path started it (a send, a promoted
+    // queued turn, the recovery path, a turn the provider started itself).
+    await args.onTurnSettled?.(storeTurnId).catch(() => undefined);
   }
 }
 
