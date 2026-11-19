@@ -2245,10 +2245,11 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   // Only a user's own message ends a usage wait; an internal origin, a
   // usage-control turn or an explicitly marked dispatch is automatic.
   const automatic = input.automatic === true || input.origin !== undefined || input.usageControl === true;
-  if (!automatic) await authorizeUsageNoticeForTurn(store, driver, thread.id, sendSelection.instanceId);
   const { threadId: _threadId, driverPrompt, onEvent, ...send } = input;
   const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(input.queue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : undefined;
   const sent = await sendTurn(store, thread.id, { ...send, automatic, ...(automaticQueue ? { queue: automaticQueue } : {}) });
+  // Only a user message the thread accepted ends the wait; a refused send did not reach the model.
+  if (!automatic) await authorizeUsageNoticeForTurn(store, driver, thread.id, sendSelection.instanceId);
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.

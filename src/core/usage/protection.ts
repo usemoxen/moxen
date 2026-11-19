@@ -553,7 +553,12 @@ export class UsageProtection {
   /** Drop one account's warning from the thread and from the provider's runtime context. */
   private async dropNotice(ctx: OperationContext, threadId: string, provider: string): Promise<void> {
     await clearUsageNotice(ctx.store, threadId, provider).catch(() => undefined);
-    await Effect.runPromise(ctx.driverFor(provider).clearNotice?.(threadId) ?? Effect.void).catch(() => undefined);
+    try {
+      await Effect.runPromise(ctx.driverFor(provider).clearNotice?.(threadId) ?? Effect.void);
+    } catch {
+      // The provider may be gone; the record is already clear, which is what
+      // decides later delivery.
+    }
   }
 
   private async deliverNotice(ctx: OperationContext, row: UsageRow, selection: { instanceId: string }, notice: UsageNoticeState): Promise<void> {
