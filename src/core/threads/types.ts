@@ -389,12 +389,14 @@ export interface StoredDelegation {
   readonly modelSnapshot?: { readonly parent?: string; readonly child?: string };
   /**
    * A settled review task's pinned outcome: the verdict and report of its
-   * last settled turn. A follow-up turn that settles re-pins. Read paths
+   * last settled turn, and the model that produced that report (the
+   * same-model warning compares it, so a continuation on another model is
+   * judged as it ran). A follow-up turn that settles re-pins. Read paths
    * prefer this over the latest assistant text, so a conversational
    * follow-up cannot rewrite the settled verdict. Absent until the task
    * settles, and on rows written before it existed.
    */
-  readonly review?: { readonly verdict: ReviewVerdict | null; readonly report: string | null };
+  readonly review?: { readonly verdict: ReviewVerdict | null; readonly report: string | null; readonly model?: string };
   readonly status: DelegationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
