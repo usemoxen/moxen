@@ -517,6 +517,13 @@ export type ProviderRuntimeEvent =
       readonly threadId: ThreadId;
       readonly state: string;
       readonly raw?: unknown;
+    }
+  | {
+      /** A usage warning reached the provider's runtime context (a hook's additional context). */
+      readonly type: "usage.notice.delivered";
+      readonly provider: ProviderDriverKind;
+      readonly threadId: ThreadId;
+      readonly key: string;
     };
 
 /** A live background task, as a driver reports it. */
@@ -599,6 +606,22 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
    * confirmation signal ignore it.
    */
   readonly steerTurn?: (threadId: ThreadId, text: string, images?: readonly ProviderImage[], steerId?: string) => Effect.Effect<void, TError>;
+
+  /**
+   * Hand a usage warning to the provider's runtime context, outside the
+   * user's messages: Claude an in-process hook's `additionalContext`,
+   * OpenCode a session instruction entry. `"delivered"` means the provider
+   * took it now; `"queued"` means it will put it into the next request and
+   * publish `usage.notice.delivered` once it does. Omitted by Codex, whose
+   * app-server protocol has no such channel; its warning is ordinary text.
+   */
+  readonly injectNotice?: (
+    threadId: ThreadId,
+    notice: { readonly key: string; readonly text: string },
+  ) => Effect.Effect<"delivered" | "queued", TError>;
+
+  /** Remove a runtime-context warning, when the user authorizes continuing or the window resets. */
+  readonly clearNotice?: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
   /**
    * A steer handed to the provider's running turn that the provider has not

@@ -111,8 +111,8 @@ export interface StoredThread {
   /** Durable account-quota queue. Only its coordinator may run while held. */
   readonly usagePause?: UsagePause | null;
   readonly usageProtectionOverride?: UsageProtectionOverride | null;
-  /** The model-facing usage warning this conversation was given, or still owes (`usage/notice.ts`). */
-  readonly usageNotice?: UsageNoticeState | null;
+  /** Model-facing usage warnings by account (`usage/notice.ts`): what each conversation was told, and whether it still waits. */
+  readonly usageNotices?: Readonly<Record<string, UsageNoticeState>>;
   readonly id: string;
   /** Internal tool tasks stay addressable by id but do not appear in thread lists. */
   readonly hidden?: boolean;
@@ -222,6 +222,8 @@ export interface StoredTurn {
   readonly threadId: string;
   readonly status: TurnStatus;
   readonly delivery: TurnDelivery;
+  /** True for an input Moxen dispatched itself (compaction, handoff, a background wake), never the user's. */
+  readonly automatic?: boolean;
   readonly messageId: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: InteractionMode;
@@ -427,6 +429,12 @@ export interface SendTurnInput {
   readonly queue?: QueuePolicy;
   /** Internal coordinator input; never accepted from the client protocol. */
   readonly usageControl?: boolean;
+  /**
+   * The dispatcher's own work (compaction, a handoff, a background wake),
+   * never the user speaking. Persisted on the turn so a later promotion still
+   * knows an automatic input from an explicit one.
+   */
+  readonly automatic?: boolean;
   readonly prompt: string;
   readonly ifBusy?: SendIfBusy;
   readonly delivery?: SendDelivery;

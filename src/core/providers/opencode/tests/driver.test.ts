@@ -143,6 +143,21 @@ describe("opencode driver", () => {
     expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(true);
   });
 
+  it("injects a usage warning as a session instruction entry, not a user prompt, and clears it", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    const result = await Effect.runPromise(driver.injectNotice("thread-1", { key: "codex:session@x", text: "<moxen-usage-notice>stop safely</moxen-usage-notice>" }));
+    expect(result).toBe("delivered");
+    expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({
+      sessionID: "opencode-session-1", key: "moxen-usage-notice", value: "<moxen-usage-notice>stop safely</moxen-usage-notice>",
+    });
+    // A runtime instruction entry, never the conversation's user messages.
+    expect(server.callsTo("session.prompt")).toEqual([]);
+    await Effect.runPromise(driver.clearNotice("thread-1"));
+    expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({ key: "moxen-usage-notice", value: null });
+  });
+
   it("starts its server with the tools the setting switches off, and restarts it once nothing runs when the setting changes", async () => {
     const transport = new FakeOpencodeTransport({ messages: assistantMessages() });
     const driver = new OpenCodeDriver({ transport, env: {}, reconcileDelayMs: 5 });

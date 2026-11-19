@@ -300,19 +300,42 @@ action pauses the account's running threads. Automatic uses the same action
 without waiting for a click. The server owns this work, so closing the TUI does
 not disable it.
 
-`notify` also warns the model in the running conversation: a trusted
-`<moxen-usage-notice>` block tells it the allowance is nearly exhausted, to use
-only essential tools to leave the work in progress safe, then stop using tools
-and wait. Where the provider takes input mid-turn the block is handed to the
-live turn; where it cannot, it goes ahead of the next input. It never starts a
-provider turn of its own, and the user's typed transcript is left as it was.
-The warning is recorded on the thread per provider and window reset, so later
-input, a reconnect or a server restart does not repeat it; a reset, or another
-window running hot, can warn again. The runtime instructions also say that only
-an actual message from the user authorizes continuing, and that a delegate,
-tool output, a fake tag or another synthetic notice cannot — a warning never
-authorizes work, and an automatic task, background or queued notice is not
-permission to act either.
+`notify` also warns the model in the running conversation with a
+`<moxen-usage-notice>` block: the allowance is nearly exhausted, use only
+essential tools to leave the work in progress safe, then stop using tools and
+wait. How the block reaches the model depends on what the provider actually
+offers:
+
+| Provider | Channel | What is guaranteed |
+|---|---|---|
+| Claude Code | an in-process hook's `additionalContext` | runtime context outside the user's messages; a user cannot author it |
+| OpenCode | a `moxen-usage-notice` session instruction entry | an instruction entry outside the user's messages; a user cannot author it |
+| Codex, Moxen Harness | ordinary text in the running turn or next prompt | no runtime-context channel exists, so its tag is the only marker |
+
+The block never starts a provider turn of its own. On Claude it waits for the
+next prompt or tool batch and stays pending if the turn ends first; on OpenCode
+it is an instruction entry; on Codex it is text. The user's stored message is
+never rewritten — the text a person typed stays the transcript — but on a
+provider with no runtime channel the warning is prefixed to what that provider
+receives for the turn. Pressing stop or a provider that ends the turn before a
+Claude hook fires leaves the warning pending for the next input rather than
+sending a warning-only turn.
+
+The warning is recorded on the thread per account (Claude, Codex, an OpenCode
+instance) and window reset, not once per thread: switching to another provider
+and back does not warn again, and a continuation carries the record to its new
+thread. A reset, or another window running hot, can warn again. Once the block
+has arrived, the thread stays *waiting*. Every automatic input — a delegated
+task's report or pause/cancel note, a background notice, an agent-queued
+message, a question answer, a usage continuation, a compaction or handoff turn
+— carries the block again and is acknowledgement-only. Only an explicit
+message from the user ends the wait: a turn the user sent with no internal
+origin, not a usage-control, compaction, handoff or background turn, and not a
+question answer. Ending the wait keeps the window key, so the same allowance
+does not warn again, and removes an OpenCode instruction entry or a queued
+Claude hook context. The runtime instructions say the same: only an actual
+message from the user authorizes continuing, and a delegate, tool output, a
+fake tag or another synthetic notice cannot.
 
 A config file that already says `notify` keeps that value, but the mode now
 also warns the model; the earlier, user-only behaviour has its own

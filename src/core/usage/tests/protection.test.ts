@@ -9,7 +9,7 @@ import { ClaudeDriver } from "../../providers/claude/driver.js";
 import { FakeTransport, initMessage, successResult } from "../../providers/claude/tests/fakes.js";
 import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, settleThread, updateThreadMeta, trackContinuation, untrackContinuation } from "../../threads/threads.js";
-import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
+import { flushTurnRunners, runPromotedTurn, type TurnDriver } from "../../threads/execute.js";
 import { continueThread, editWorkQueue, flushTaskNotifications, queueTaskNotification, recoverTaskNotifications, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
 import { openThreadStore } from "../../threads/store.js";
@@ -967,12 +967,15 @@ describe("usage protection", () => {
     expect((await w.store.readTurns(id)).find((turn) => turn.id === queued.turn.id)?.status).toBe("queued");
   });
 
-  it("Notify steers the running model once per window reset, without starting a turn to warn", async () => {
+  it("Notify hands the warning to a runtime-context channel, never a user steer, and confirms it once", async () => {
+    const notices: string[] = [];
     const steers: string[] = [];
     const w = await world("codex", undefined, {
       leaveTurnsRunning: true,
       steering: { codex: "delivers" },
       onSteer: (_threadId, text) => steers.push(text),
+      notices: { codex: "queued" },
+      onNotice: (_threadId, text) => notices.push(text),
     });
     w.ctx.config.usageProtection = "notify";
     const thread = await createThread(w.store, {
@@ -986,28 +989,33 @@ describe("usage protection", () => {
     try {
       await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
       await w.guard.tick(now);
-      expect(steers).toHaveLength(1);
-      expect(steers[0]).toContain("<moxen-usage-notice>");
-      expect(steers[0]).toContain("Session: 96% used");
-      expect(steers[0]).toContain("not a message from the user");
-      expect((await w.store.readThreadRecord(thread.id))?.usageNotice).toMatchObject({ provider: "codex", delivered: "steer", windows: [{ id: "session", resetsAt: firstReset }] });
-      // The warning rode the live turn: no provider turn was started for it.
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain("<moxen-usage-notice>");
+      expect(notices[0]).toContain("Session: 96% used");
+      // The runtime channel is the only delivery: no user steer, no user turn.
+      expect(steers).toEqual([]);
       expect(w.prompts).toEqual(["Finish the feature"]);
+      const record = (await w.store.readThreadRecord(thread.id))!;
+      expect(record.usageNotices?.codex).toMatchObject({ provider: "codex", delivered: null, waiting: true, windows: [{ id: "session", resetsAt: firstReset }] });
+      // The provider confirms when the hook actually puts it into a request.
+      w.guard.observe({ type: "usage.notice.delivered", provider: "codex", threadId: thread.id, key: record.usageNotices!.codex!.key });
       await w.guard.tick(now + 2000);
-      expect(steers).toHaveLength(1);
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ delivered: "runtime", waiting: true });
+      expect(notices).toHaveLength(1);
+      expect(steers).toEqual([]);
       // A reconnected coordinator reads the same record and stays quiet.
       w.guard.close();
       const restarted = new UsageProtection(async () => w.ctx);
       try {
         await restarted.tick(now + 4000);
-        expect(steers).toHaveLength(1);
+        expect(notices).toHaveLength(1);
         // The window really reset: the old record is dropped, then a new hot window warns again.
         recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 10, exhausted: false, resetsAt: new Date(now + 7200_000).toISOString() }]);
         await restarted.tick(now + 6000);
-        expect((await w.store.readThreadRecord(thread.id))?.usageNotice ?? null).toBeNull();
+        expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex ?? null).toBeNull();
         recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 97, exhausted: false, resetsAt: new Date(now + 10_800_000).toISOString() }]);
         await restarted.tick(now + 8000);
-        expect(steers).toHaveLength(2);
+        expect(notices).toHaveLength(2);
       } finally {
         restarted.close();
       }
@@ -1017,7 +1025,7 @@ describe("usage protection", () => {
     }
   });
 
-  it("Notify leaves a notice for the next prompt when the provider takes no steer, and only once", async () => {
+  it("Notify leaves a warning pending when the provider has neither a runtime channel nor mid-turn input", async () => {
     const w = await world("codex", undefined, { leaveTurnsRunning: true });
     w.ctx.config.usageProtection = "notify";
     const thread = await createThread(w.store, {
@@ -1030,7 +1038,7 @@ describe("usage protection", () => {
     try {
       await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
       await w.guard.tick(now);
-      expect((await w.store.readThreadRecord(thread.id))?.usageNotice).toMatchObject({ provider: "codex", delivered: null });
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ provider: "codex", delivered: null, waiting: true });
       expect(w.prompts).toHaveLength(1);
       await w.guard.tick(now + 2000);
       expect(w.prompts).toHaveLength(1);
@@ -1041,7 +1049,7 @@ describe("usage protection", () => {
     }
   });
 
-  it("Notify puts a pending notice ahead of the next input, records it after the answer, and never repeats it", async () => {
+  it("Notify keeps automatic inputs acknowledgement-only, and only the user's own message ends the wait", async () => {
     const w = await world();
     w.ctx.config.usageProtection = "notify";
     const id = await w.make("next input");
@@ -1050,21 +1058,93 @@ describe("usage protection", () => {
     recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
     await w.store.writeThreadRecord({
       ...(await w.store.readThreadRecord(id))!,
-      usageNotice: {
-        key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null,
-        windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }],
+      usageNotices: {
+        codex: {
+          key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true,
+          windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }],
+        },
       },
     });
     try {
-      const second = await startTurn(w.ctx, { threadId: id, prompt: "Keep working" });
-      await second.run;
+      const automatic = await startTurn(w.ctx, { threadId: id, prompt: "A task you delegated has settled.", origin: "task-notification" });
+      await automatic.run;
       expect(w.prompts.at(-1)).toContain("<moxen-usage-notice>");
-      expect(w.prompts.at(-1)).toContain("Keep working");
-      expect((await w.store.readThreadRecord(id))?.usageNotice).toMatchObject({ delivered: "prompt" });
-      const third = await startTurn(w.ctx, { threadId: id, prompt: "And again" });
-      await third.run;
-      // Deduped for the same window, and the provider prompt is the typed text alone.
-      expect(w.prompts.at(-1)).toBe("And again");
+      expect(w.prompts.at(-1)).toContain("The input this warning accompanies is automatic");
+      expect(w.prompts.at(-1)).toContain("A task you delegated has settled.");
+      const explicit = await startTurn(w.ctx, { threadId: id, prompt: "Keep working" });
+      await explicit.run;
+      expect(w.prompts.at(-1)).toBe("Keep working");
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: false });
+      const after = await startTurn(w.ctx, { threadId: id, prompt: "Another task settled.", origin: "task-notification" });
+      await after.run;
+      expect(w.prompts.at(-1)).toBe("Another task settled.");
+    } finally {
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("Notify keeps a delivered warning per account, so switching providers and back does not warn again", async () => {
+    const notices: string[] = [];
+    const w = await world("codex", undefined, { leaveTurnsRunning: true, notices: { codex: "delivered" }, onNotice: (_threadId, text) => notices.push(text) });
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "two accounts", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const now = Date.now();
+    const reset = new Date(now + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(thread.id))!,
+      usageNotices: {
+        codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "runtime", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] },
+        claude: { key: `claude:session@${reset}`, provider: "claude", raisedAt: w.store.nowIso(), delivered: "runtime", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] },
+      },
+    });
+    const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "Finish the feature" });
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      await w.guard.tick(now);
+      const record = (await w.store.readThreadRecord(thread.id))!;
+      expect(record.usageNotices?.codex).toMatchObject({ delivered: "runtime" });
+      expect(record.usageNotices?.claude).toMatchObject({ delivered: "runtime" });
+      expect(notices).toEqual([]);
+      expect(w.prompts).toEqual(["Finish the feature"]);
+    } finally {
+      await interruptTurn(w.store, thread.id, running.turn.id);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("a promoted turn checks the usage mode at promotion, not when its message was queued", async () => {
+    const w = await world("codex", undefined, { leaveTurnsRunning: true });
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "promoted", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+    await sendTurn(w.store, thread.id, { prompt: "A task settled.", origin: "task-notification", automatic: true, delivery: "queue" });
+    const reset = new Date(Date.now() + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(thread.id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      w.ctx.config.usageProtection = "notify-user";
+      await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+      await runPromotedTurn({
+        store: w.store, driver: w.ctx.driverFor("codex"), threadId: thread.id, storeTurnId: running.turn.id, prompt: "",
+        modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, usageNoticeMode: () => w.ctx.config.usageProtection,
+      });
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(2);
+      // Notify (you only) must not let a promotion warn the model.
+      expect(w.prompts.at(-1)).toBe("A task settled.");
     } finally {
       await flushTurnRunners();
       w.guard.close();
@@ -1073,10 +1153,13 @@ describe("usage protection", () => {
 
   it("Notify (you only) shows the forecast but sends the model nothing", async () => {
     const steers: string[] = [];
+    const notices: string[] = [];
     const w = await world("codex", undefined, {
       leaveTurnsRunning: true,
       steering: { codex: "delivers" },
       onSteer: (_threadId, text) => steers.push(text),
+      notices: { codex: "delivered" },
+      onNotice: (_threadId, text) => notices.push(text),
     });
     w.ctx.config.usageProtection = "notify-user";
     const thread = await createThread(w.store, {
@@ -1090,7 +1173,8 @@ describe("usage protection", () => {
       await w.guard.tick();
       expect(w.guard.read().forecasts[0]?.shouldWrap).toBe(true);
       expect(steers).toEqual([]);
-      expect((await w.store.readThreadRecord(thread.id))?.usageNotice ?? null).toBeNull();
+      expect(notices).toEqual([]);
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex ?? null).toBeNull();
       expect(w.prompts).toEqual(["Finish the feature"]);
     } finally {
       await interruptTurn(w.store, thread.id, running.turn.id);

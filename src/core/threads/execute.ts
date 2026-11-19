@@ -23,7 +23,7 @@ import type { BackgroundTaskSummary, RateLimitWindow } from "../providers/spi.js
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
-import { markUsageNoticeDelivered, pendingUsageNotice, withUsageNotice } from "../usage/notice.js";
+import { authorizeUsageNotice, automaticTurn, markUsageNoticeDelivered, usageNoticeAccount, usageNoticeText, waitingUsageNotice, withUsageNotice } from "../usage/notice.js";
 import type { McpServerSpec } from "../mcp.js";
 
 import { CodexDriver } from "../providers/codex/driver.js";
@@ -48,7 +48,7 @@ import type {
   UnconfirmedSteer,
 } from "../providers/spi.js";
 import { CliError } from "../errors.js";
-import type { InteractionMode, ModelSelection, ProvidersConfig, RuntimeMode } from "../types.js";
+import type { CliConfig, InteractionMode, ModelSelection, ProvidersConfig, RuntimeMode } from "../types.js";
 import {
   captureWorktree,
   diffCheckpointStat,
@@ -111,6 +111,14 @@ export interface TurnDriver extends ProviderSessionTitles {
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
   steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[], steerId?: string): Effect.Effect<void, CliError>;
+  /**
+   * A usage warning through the provider's runtime context, outside the
+   * user's messages (see `ProviderAdapter.injectNotice`). Omitted where the
+   * provider has no such channel.
+   */
+  injectNotice?(threadId: string, notice: { readonly key: string; readonly text: string }): Effect.Effect<"delivered" | "queued", CliError>;
+  /** Remove a runtime-context warning after the user authorizes or the window resets. */
+  clearNotice?(threadId: string): Effect.Effect<void, CliError>;
   /**
    * Steers pushed to the running turn that the provider never confirmed
    * reaching the conversation (see `ProviderAdapter.takeUnconfirmedSteers`).
@@ -511,6 +519,12 @@ export interface ExecuteTurnArgs {
   readonly afterSettle?: () => Promise<void>;
   /** Each live context reading the turn records while it runs: where the server compacts a thread that crosses its line mid-turn. */
   readonly onContextReading?: (usage: ContextWindowUsage) => void;
+  /**
+   * The usage-protection mode as it stands when a promoted turn is dispatched,
+   * not when the turn before it started: a setting switched to Off or Notify
+   * (you only) mid-turn must not let the promotion warn the model.
+   */
+  readonly usageNoticeMode?: () => CliConfig["usageProtection"];
 }
 
 export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -520,6 +534,60 @@ export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
       // Never the turn's failure: the turn is settled whatever this does.
       .then(() => args.afterSettle?.().catch(() => undefined)),
   );
+}
+
+/**
+ * The one usage-notice delivery decision, for every dispatch: a fresh turn,
+ * a steer into a running one, a recovered turn, or a queued turn being
+ * promoted. An automatic input under a waiting warning carries it again
+ * (runtime context where the provider has one, plain text otherwise) so it
+ * stays acknowledgement-only; an explicit user input was authorized before
+ * this is called and carries nothing.
+ */
+export async function withUsageNoticeForTurn(input: {
+  readonly store: ThreadStore;
+  readonly driver: TurnDriver;
+  readonly thread: StoredThread;
+  readonly instanceId: string;
+  readonly prompt: string;
+  readonly mode: CliConfig["usageProtection"] | undefined;
+  readonly automatic: boolean;
+}): Promise<{ readonly prompt: string; readonly afterAnswer: (() => Promise<void>) | null }> {
+  const unchanged = { prompt: input.prompt, afterAnswer: null };
+  if (input.mode !== "notify" || !input.automatic) return unchanged;
+  const notice = waitingUsageNotice(input.thread, input.instanceId);
+  if (notice === null) return unchanged;
+  if (input.driver.injectNotice) {
+    const accepted = await Effect.runPromise(input.driver.injectNotice(input.thread.id, {
+      key: notice.key,
+      text: usageNoticeText(notice, { automatic: true }),
+    })).catch(() => null);
+    if (accepted === "delivered") await markUsageNoticeDelivered(input.store, input.thread.id, notice.provider, notice.key, "runtime").catch(() => undefined);
+    // "queued" confirms through `usage.notice.delivered`; a failure stays
+    // pending for the next input instead of falling back to user text.
+    return unchanged;
+  }
+  return {
+    prompt: withUsageNotice(input.prompt, notice, { automatic: true }),
+    afterAnswer: notice.delivered === null
+      ? () => markUsageNoticeDelivered(input.store, input.thread.id, notice.provider, notice.key, "text")
+      : null,
+  };
+}
+
+/**
+ * An explicit user message ends the wait for this account, on every dispatch
+ * path. The key stays, so the same window never warns again, and a queued
+ * runtime-context warning is removed before it could reach the request.
+ */
+export async function authorizeUsageNoticeForTurn(
+  store: ThreadStore,
+  driver: TurnDriver | null,
+  threadId: string,
+  instanceId: string,
+): Promise<void> {
+  await authorizeUsageNotice(store, threadId, usageNoticeAccount(instanceId)).catch(() => undefined);
+  if (driver !== null) await Effect.runPromise(driver.clearNotice?.(threadId) ?? Effect.void).catch(() => undefined);
 }
 
 /** Saved attachments as provider images; a file gone from disk is skipped. */
@@ -606,8 +674,11 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       return;
     }
     // One message, or several queued ones batched into this turn at promotion.
-    const prompt = turnPrompt(await store.readMessages(threadId), next);
+    const messages = await store.readMessages(threadId);
+    const prompt = turnPrompt(messages, next);
     if (prompt === null) return;
+    const automatic = automaticTurn(messages, next);
+    if (!automatic) await authorizeUsageNoticeForTurn(store, driver, threadId, selection.instanceId);
     // Its images were saved when it was queued; the bytes come off disk.
     const images = await imagesOf(prompt.attachments);
     // Rule files edited while the session ran the turn before: a patch ahead
@@ -623,18 +694,23 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // so only an edit landing mid-turn waits one extra turn. Rule files need
     // no setup, so they do refresh above.
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
-    const notice = pendingUsageNotice(thread, selection.instanceId);
+    // The mode is read now, at promotion, so a setting changed after this turn
+    // was queued decides whether it warns.
+    const notice = await withUsageNoticeForTurn({
+      store, driver, thread, instanceId: selection.instanceId, prompt: prompt.text,
+      mode: args.usageNoticeMode?.() ?? "off", automatic,
+    });
     claimed = null;
     void executeTurn({
       store,
       driver,
       threadId,
       storeTurnId: next.id,
-      prompt: withRuleUpdate(notice ? withUsageNotice(prompt.text, notice) : prompt.text, rules?.text ?? null),
-      ...(rules || notice
+      prompt: withRuleUpdate(notice.prompt, rules?.text ?? null),
+      ...(rules || notice.afterAnswer
         ? { afterAnswer: async () => {
           await rules?.commit();
-          if (notice) await markUsageNoticeDelivered(store, threadId, notice.key, "prompt");
+          await notice.afterAnswer?.();
         } }
         : {}),
       ...(images.length > 0 ? { images } : {}),

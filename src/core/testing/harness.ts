@@ -59,6 +59,11 @@ class HarnessDriver implements TurnDriver {
     steer?: { readonly mode: "delivers" | "fails"; readonly onSteer?: (threadId: string, text: string) => void },
     sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>,
     private readonly onStopSession?: (threadId: string) => void,
+    notice?: {
+      readonly mode: "delivered" | "queued" | "fails";
+      readonly onNotice?: (threadId: string, text: string) => void;
+      readonly onClear?: (threadId: string) => void;
+    },
   ) {
     // Only a driver whose provider takes mid-turn input has the method, as with the real ones.
     if (steer) {
@@ -68,9 +73,23 @@ class HarnessDriver implements TurnDriver {
           : Effect.sync(() => steer.onSteer?.(threadId, text));
     }
     if (sideQuestion) this.sideQuestion = sideQuestion;
+    if (notice) {
+      this.injectNotice = (threadId, payload) =>
+        notice.mode === "fails"
+          ? Effect.fail(new CliError("NOTICE_FAILED", "Harness driver could not inject the notice."))
+          : Effect.sync(() => {
+            notice.onNotice?.(threadId, payload.text);
+            return notice.mode === "queued" ? "queued" as const : "delivered" as const;
+          });
+      this.clearNotice = (threadId) => Effect.sync(() => notice.onClear?.(threadId));
+    }
   }
 
   steerTurn?: (threadId: string, text: string) => Effect.Effect<void, CliError>;
+
+  injectNotice?: (threadId: string, notice: { readonly key: string; readonly text: string }) => Effect.Effect<"delivered" | "queued", CliError>;
+
+  clearNotice?: (threadId: string) => Effect.Effect<void, CliError>;
 
   /** Only where the test gave the provider one, as with the real drivers that can copy a session. */
   sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>;
@@ -188,6 +207,12 @@ export interface TestHarnessOptions {
   readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivers" | "fails">>;
   /** Sees each steer a driver accepted. */
   readonly onSteer?: (threadId: string, text: string) => void;
+  /** Which providers' drivers have a runtime-context notice channel, and how it answers. The others have none. */
+  readonly notices?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivered" | "queued" | "fails">>;
+  /** Sees each notice a runtime-context channel took. */
+  readonly onNotice?: (threadId: string, text: string) => void;
+  /** Sees each notice clear. */
+  readonly onNoticeCleared?: (threadId: string) => void;
   /** Answers `/btw` for these providers; the others have no `sideQuestion`, so they are `SIDE_QUESTION_UNSUPPORTED`. */
   readonly sideQuestions?: Partial<Record<"claude" | "codex" | "opencode" | "harness", (input: SideQuestionInput) => Promise<SideAnswer>>>;
 }
@@ -197,7 +222,11 @@ function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
   const factory = (kind?: "claude" | "codex" | "opencode" | "harness") => (): TurnDriver => {
     const mode = kind === undefined ? undefined : options.steering?.[kind];
     const sideQuestion = kind === undefined ? undefined : options.sideQuestions?.[kind];
-    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion, options.onStopSession);
+    const noticeMode = kind === undefined ? undefined : options.notices?.[kind];
+    const notice = noticeMode
+      ? { mode: noticeMode, ...(options.onNotice ? { onNotice: options.onNotice } : {}), ...(options.onNoticeCleared ? { onClear: options.onNoticeCleared } : {}) }
+      : undefined;
+    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion, options.onStopSession, notice);
   };
   return {
     claude: factory("claude"), codex: factory("codex"), opencode: factory("opencode"),

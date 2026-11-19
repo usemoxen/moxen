@@ -66,6 +66,12 @@ describe("codex session resume", () => {
 });
 
 describe("codex driver turns", () => {
+  it("has no runtime-context notice channel, so its usage warning is ordinary text", () => {
+    const driver = new CodexDriver({ transport: new FakeCodexTransport() }) as unknown as { injectNotice?: unknown; clearNotice?: unknown };
+    expect(driver.injectNotice).toBeUndefined();
+    expect(driver.clearNotice).toBeUndefined();
+  });
+
   it("measures streamed messages without counting reasoning summaries or tool execution", async () => {
     const transport = new FakeCodexTransport();
     const driver = new CodexDriver({ transport });

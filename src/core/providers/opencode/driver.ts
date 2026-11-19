@@ -336,6 +336,8 @@ function canonicalToolList(names: string | readonly string[] | undefined): strin
 
 /** The instruction entry key runtime instructions live under. */
 const INSTRUCTIONS_KEY = "moxen";
+/** The session instruction entry a usage warning uses: runtime context, never a user message. */
+const NOTICE_INSTRUCTION_KEY = "moxen-usage-notice";
 
 /**
  * The name agents see moxen's tools under (`MOXEN_MCP_SERVER_NAME` in
@@ -2570,6 +2572,28 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         turn.steerMessageIds.delete(messageID);
         throw cause;
       }
+    });
+
+  /**
+   * A usage warning as a session instruction entry: OpenCode attaches it to
+   * the session's next request, outside the conversation's user messages.
+   */
+  readonly injectNotice = (threadId: ThreadId, notice: { key: string; text: string }): Effect.Effect<"delivered" | "queued", CliError> =>
+    this.attempt("OPENCODE_NOTICE_FAILED", `Could not inject a usage notice on thread ${threadId}`, async () => {
+      const session = this.requireSession(threadId);
+      if (session.closed) throw new CliError("OPENCODE_NOT_STARTED", `No live OpenCode session exists for thread ${threadId}.`, { details: { threadId } });
+      const connection = await this.connectionFor(session);
+      await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, notice.text);
+      return "delivered" as const;
+    });
+
+  /** Remove the warning entry: the user has authorized continuing, or its window reset. */
+  readonly clearNotice = (threadId: ThreadId): Effect.Effect<void, CliError> =>
+    this.attempt("OPENCODE_NOTICE_FAILED", `Could not clear a usage notice on thread ${threadId}`, async () => {
+      const session = this.sessions.get(threadId);
+      if (!session || session.closed) return;
+      const connection = await this.connectionFor(session);
+      await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, null).catch(() => undefined);
     });
 
   /** Fail every open turn on one server: a fault with no session to blame. */

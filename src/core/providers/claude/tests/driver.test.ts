@@ -73,6 +73,29 @@ describe("claude driver turns", () => {
     ]);
   });
 
+  it("injects a usage warning through hook context, never the user message stream or a redelivered steer", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const result = await Effect.runPromise(driver.injectNotice(START.threadId, { key: "codex:session@x", text: "<moxen-usage-notice>stop safely</moxen-usage-notice>" }));
+    expect(result).toBe("queued");
+    // Nothing entered the conversation as a user message, so there is no unconfirmed steer to turn into a warning-only turn.
+    expect(transport.created[0]!.prompts).toEqual([]);
+    expect(driver.takeUnconfirmedSteers(START.threadId)).toEqual([]);
+    const hook = transport.created[0]!.options.hooks?.UserPromptSubmit?.[0]?.hooks?.[0] as unknown as ((input: unknown) => Promise<unknown>) | undefined;
+    expect(hook).toBeDefined();
+    const hookInput = { hook_event_name: "UserPromptSubmit", session_id: "s", transcript_path: "", cwd: "/repo" };
+    expect(await hook!(hookInput)).toMatchObject({
+      hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "<moxen-usage-notice>stop safely</moxen-usage-notice>" },
+    });
+    // Confirmed once: the next request boundary carries nothing.
+    expect(await hook!(hookInput)).toEqual({});
+    // A cleared warning never reaches a request either.
+    await Effect.runPromise(driver.injectNotice(START.threadId, { key: "codex:session@y", text: "second" }));
+    await Effect.runPromise(driver.clearNotice(START.threadId));
+    expect(await hook!(hookInput)).toEqual({});
+  });
+
   it("always runs on Claude Code's own system prompt, appending runtime instructions when given", async () => {
     const transport = new FakeTransport([[initMessage()], [initMessage()]]);
     const driver = new ClaudeDriver({ transport });

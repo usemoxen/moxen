@@ -212,6 +212,12 @@ interface ClaudeSession {
   query: ClaudeQuery;
   input: PromptQueue;
   closed: boolean;
+  /**
+   * A usage warning waiting to reach the next request through a hook's
+   * `additionalContext`, outside the user's messages. Replaced by a newer
+   * warning and cleared when the user authorizes continuing.
+   */
+  runtimeNotice: { key: string; text: string } | null;
   resumeSessionId: string | null;
   account: { subscriptionType?: string; tokenSource?: string; apiProvider?: string } | null;
   model: string | null;
@@ -542,6 +548,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         query: undefined as unknown as ClaudeQuery,
         input: new PromptQueue(),
         closed: false,
+        runtimeNotice: null,
         resumeSessionId: null,
         account: null,
         model: input.modelSelection?.model ?? null,
@@ -630,6 +637,28 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       // Said outright rather than left to the default: a steer is read at
       // the running turn's next step, never held until it ends.
       session.input.push(text, images, "next", uuid);
+    });
+
+  /**
+   * A usage warning into the runtime context: the next `UserPromptSubmit` or
+   * `PostToolBatch` hook returns it as `additionalContext`, which the CLI
+   * injects into the request outside the user's messages. It is never pushed
+   * into `session.input`, so it cannot be mistaken for a user turn or become
+   * an unconfirmed steer.
+   */
+  readonly injectNotice = (threadId: ThreadId, notice: { key: string; text: string }): Effect.Effect<"delivered" | "queued", CliError> =>
+    this.attempt("CLAUDE_NOTICE_FAILED", `Could not inject a usage notice on thread ${threadId}`, async () => {
+      const session = this.requireSession(threadId);
+      if (session.closed) throw new CliError("CLAUDE_NOT_STARTED", `No live Claude session exists for thread ${threadId}.`, { details: { threadId } });
+      session.runtimeNotice = { key: notice.key, text: notice.text };
+      return "queued" as const;
+    });
+
+  /** Remove a queued runtime warning: the user has authorized continuing, or its window reset. */
+  readonly clearNotice = (threadId: ThreadId): Effect.Effect<void, CliError> =>
+    this.attempt("CLAUDE_NOTICE_FAILED", `Could not clear a usage notice on thread ${threadId}`, async () => {
+      const session = this.sessions.get(threadId);
+      if (session) session.runtimeNotice = null;
     });
 
   /**
@@ -2153,7 +2182,28 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     ];
     const text = (value: unknown): string | null => (typeof value === "string" && value.trim() ? value.trim() : null);
     const openTurnId = (): TurnId | null => session.transcript.find((turn) => turn.status === "running")?.id ?? null;
+    /**
+     * A usage warning queued by `injectNotice`, handed to the next request as
+     * hook context and confirmed once. Both a submitted prompt and a tool
+     * batch are request boundaries, so a running turn and the next input are
+     * both covered; anything left at settle waits for the next one.
+     */
+    const runtimeNotice = (event: "UserPromptSubmit" | "PostToolBatch"): HookCallbackMatcher[] => [
+      {
+        hooks: [
+          async () => {
+            const notice = session.runtimeNotice;
+            if (notice === null) return {};
+            session.runtimeNotice = null;
+            this.publish({ type: "usage.notice.delivered", provider: "claude", threadId: session.threadId, key: notice.key });
+            return { hookSpecificOutput: { hookEventName: event, additionalContext: notice.text } };
+          },
+        ],
+      },
+    ];
     const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {
+      UserPromptSubmit: runtimeNotice("UserPromptSubmit"),
+      PostToolBatch: runtimeNotice("PostToolBatch"),
       PostCompact: observe((input) => {
         this.publish({
           type: "session.notice",
