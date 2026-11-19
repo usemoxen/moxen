@@ -110,8 +110,8 @@ describe("revertThread numbering", () => {
     });
     expect((await w.store.readTurns(w.thread.id)).find((turn) => turn.id === handedOff.id)?.startedAt).toBeUndefined();
 
-    // Two turns ran here: keeping both drops nothing and rolls nothing back.
-    const kept = await revertThread(w.ctx, w.thread.id, 2);
+    // Two turns ran here: keeping both drops nothing, and asks for no files either.
+    const kept = await revertThread(w.ctx, w.thread.id, 2, { restoreFiles: true });
     expect(kept).toMatchObject({ keptTurns: 2, removedTurns: 0, providers: [] });
     expect(w.rollbacks).toEqual([]);
 
