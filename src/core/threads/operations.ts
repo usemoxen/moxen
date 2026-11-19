@@ -4261,11 +4261,34 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
         return;
       }
     }
-    await deliverTaskNotifications(ctx, parentThreadId, mine);
+    const deferred = await deliverTaskNotifications(ctx, parentThreadId, mine);
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-      delete batches[parentThreadId];
+      // A task still running work of its own (a compaction it started after
+      // its turn settled) reports once that work ends: its entry stays in the
+      // batch instead of being dropped, and the watcher below queues it again then.
+      if (deferred.length > 0) batches[parentThreadId] = deferred;
+      else delete batches[parentThreadId];
     });
+    for (const entry of deferred) watchDeferredNotification(ctx, parentThreadId, entry);
   });
+}
+
+/** One watcher per parent and task: a repeated flush must not stack watchers that each flush. */
+const deferredNotificationWatches = new Set<string>();
+
+/**
+ * Queue a task's kept-back notification again once its work ends. The entry
+ * already sits in the durable batch; queueing unions with it (one entry per
+ * task), so this watcher and any watcher the settle also wakes cannot deliver
+ * it twice. Watching from the start (`onlyFutureSettles` false) closes the gap
+ * between the flush looking and this subscription: the check runs after it, so
+ * a settle in between is either seen as already done or heard as an event.
+ */
+function watchDeferredNotification(ctx: OperationContext, parentThreadId: string, entry: PendingTaskNotification): void {
+  const key = `${parentThreadId}\0${entry.child}`;
+  if (deferredNotificationWatches.has(key)) return;
+  deferredNotificationWatches.add(key);
+  notifyWhenTaskSettles(ctx, parentThreadId, entry.child, false, null, () => deferredNotificationWatches.delete(key));
 }
 
 /**
@@ -4368,10 +4391,19 @@ function hasQueuedResume(turns: readonly StoredTurn[], recoveryTurnId: string | 
   );
 }
 
-/** How many of a task's turns have settled: the generation a notification snapshot was taken at. */
-async function settledTurnCount(ctx: OperationContext, childThreadId: string): Promise<number> {
-  const turns = await ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
-  return turns.filter((turn) => turn.completedAt !== null).length;
+/**
+ * How many of a task's *work* turns have settled: the generation a
+ * notification snapshot was taken at. A maintenance turn (`/compact`) is not
+ * work, so its settle never makes a background-work follow-up look like the
+ * task waking to finish.
+ */
+async function settledWorkTurnCount(ctx: OperationContext, childThreadId: string): Promise<number> {
+  const [turns, messages] = await Promise.all([
+    ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]),
+    ctx.store.readMessages(childThreadId).catch(() => [] as StoredMessage[]),
+  ]);
+  const messageText = new Map(messages.map((message) => [message.id, message.text]));
+  return turns.filter((turn) => turn.completedAt !== null && turn.maintenance !== true && !isCompactCommand(messageText.get(turn.messageId) ?? "")).length;
 }
 
 /** Past this age, background work a task left running is flagged as probably forgotten. Moxen never stops it. */
@@ -4586,7 +4618,7 @@ export function isStoppedBySettle(child: StoredThread | null, status: TaskNotifi
  * settle covers is stale and dropped, and a settle a cancellation covers
  * wins over it, so each child reads once.
  */
-async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<void> {
+async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<PendingTaskNotification[]> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   // A task whose parent continued in a new thread reports there instead.
   const liveParent = (id: string) => rows.find((row) => row.childThreadId === id && row.continuedIn === undefined)?.parentThreadId;
@@ -4599,9 +4631,15 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   // One that handed off to a new thread has not finished either: its parent hears from the continuation.
   const movedOn = (id: string) => rows.some((row) => row.childThreadId === id && row.parentThreadId === parentThreadId && row.continuedIn !== undefined);
   const settleIds = mine.filter((entry) => pendingEntryKind(entry) === "settle").map((entry) => entry.child);
-  const final = (await Promise.all(settleIds.map(async (id) => (!movedOn(id) && (await taskHasSettledForGood(ctx, id)) ? id : null)))).filter(
-    (id): id is string => id !== null,
-  );
+  const settleStates = await Promise.all(settleIds.map(async (id) => {
+    if (movedOn(id)) return { id, final: false, moved: true };
+    return { id, final: await taskHasSettledForGood(ctx, id), moved: false };
+  }));
+  const final = settleStates.filter((state) => state.final && !state.moved).map((state) => state.id);
+  // Work still running: keep the entry for a flush once it ends.
+  const deferred: PendingTaskNotification[] = settleStates
+    .filter((state) => !state.final && !state.moved)
+    .map((state) => ({ child: state.id }));
   const settled = new Set(final);
   // A pause or cancellation a settle report covers is stale: the settle says where the task stands.
   // One whose task handed off is the continuation's to report.
@@ -4630,7 +4668,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   // gap), rather than arming a watcher that only hears future settles.
   const generations = new Map<string, number>();
   const tasks = (await Promise.all(final.map(async (id) => {
-    const since = await settledTurnCount(ctx, id);
+    const since = await settledWorkTurnCount(ctx, id);
     const task = await taskNotificationOf(ctx, id);
     const from = continuesTaskId(id);
     if (task) generations.set(task.taskId, since);
@@ -4654,7 +4692,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     (task): task is TaskNotification => task !== null,
   );
   const all = [...tasks, ...pauseTasks, ...cancelTasks];
-  if (all.length === 0) return;
+  if (all.length === 0) return deferred;
   // A task that ended its turn with background work still running is not
   // done: when that work ends, the provider wakes the task where it can, and
   // the parent hears again once the task next has nothing left to run. Work
@@ -4675,7 +4713,9 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     }
   }
   const parent = await ctx.store.readThreadRecord(parentThreadId);
-  if (!parent || parent.archivedAt != null) return;
+  // Nothing can deliver to an archived or deleted parent, so a task kept
+  // back for later is dropped with the rest instead of waiting forever.
+  if (!parent || parent.archivedAt != null) return [];
   if (parent.deletedAt != null) {
     // Dropped, not queued and not thrown: the conversation is gone. One
     // line in the server log; nothing more (MXN-290 review).
@@ -4684,7 +4724,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
       `${new Date().toISOString()} task notification: parent ${parentThreadId} is deleted; dropping ${all.length} task(s)\n`,
       "utf8",
     ).catch(() => undefined);
-    return;
+    return [];
   }
   const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
   const steerable = running && (await canSteer(ctx, parent));
@@ -4696,6 +4736,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     delivery: steerable ? "steer" : "queue",
     wakeSettled: true,
   });
+  return deferred;
 }
 
 /**
@@ -6054,7 +6095,8 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
  * `sinceGeneration` is the settle generation the caller's snapshot was taken
  * at: when set, a settle that landed between the snapshot and this arming
  * reports at once instead of being lost. A task that has not settled since
- * keeps waiting for a future one.
+ * keeps waiting for a future one. `onDone` runs once the notice is queued, so
+ * a caller watching on a task's behalf can forget its watch.
  */
 function notifyWhenTaskSettles(
   ctx: OperationContext,
@@ -6062,6 +6104,7 @@ function notifyWhenTaskSettles(
   childThreadId: string,
   onlyFutureSettles = false,
   sinceGeneration: number | null = null,
+  onDone: () => void = () => undefined,
 ): void {
   let done = false;
   let checking = false;
@@ -6079,13 +6122,14 @@ function notifyWhenTaskSettles(
       do {
         again = false;
         if (done || !(await taskHasSettledForGood(ctx, childThreadId))) continue;
-        if (sinceGeneration !== null && (await settledTurnCount(ctx, childThreadId)) <= sinceGeneration) {
+        if (sinceGeneration !== null && (await settledWorkTurnCount(ctx, childThreadId)) <= sinceGeneration) {
           // No settle since the caller's snapshot: a turn settling in the gap
           // would have moved the generation. Keep waiting for a future one.
           continue;
         }
         done = true;
         stop();
+        onDone();
         await queueTaskNotification(ctx, parentThreadId, childThreadId);
       } while (again);
     } finally {

@@ -944,7 +944,11 @@ is told again, by a task notification, when the task next has nothing left to
 run: the notification is not one-shot, and covers a queued message's turn too.
 `task_status` reports `running` from the moment of the wake.
 
-A turn-end notification always fires on time and nothing can hold it. When the
+A turn-end notification always fires on time and nothing can hold it. A bare
+`/compact` turn is maintenance, not a report: the notification reads the task's
+last turn that did real work, and a batch that comes due while the task is
+still compacting waits for it and then goes out once, instead of being
+dropped. When the
 task's turn ends with background work still running, the notification names
 that work and for how long (for example "turn ended, 1 background process
 still running: bun run check, 4m"), and reads as not finished: the parent must
@@ -1403,8 +1407,10 @@ is read as it arrives) is over the line that would compact the thread once the t
 ended (`auto`, a delegated task, or past the hard line on `ask`), Moxen stops the
 turn, compacts, and sends a continue so the task goes on from where it was
 (`compactMidTurn` in `core/threads/operations.ts`). A compaction that left the thread
-past its line is not repeated until it has dropped below it once. `off`: nobody
-compacts. With Claude Code compacting by itself, a model's own Compact at size
+past its line is not repeated until it has dropped below it once. A hand-off
+document skips a compaction turn when it names the request the thread began
+with and last received, and when it decides whether the work may already be
+done. `off`: nobody compacts. With Claude Code compacting by itself, a model's own Compact at size
 becomes that model's auto-compact window (100K to 1M) when its session starts;
 on the Moxen Harness a profile's own compaction still wins for its models. The Moxen Harness compacts inside its own loop: its own
 compaction is `auto` (so a global `provider` means `auto` there). On `ask` it

@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 
 import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
+import { isCompactCommand } from "../providers/spi.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
@@ -664,6 +665,7 @@ export async function sendTurn(
         : delivery === "restart" ? "restarted"
         : "started",
       messageId: store.newId(),
+      ...(isCompactCommand(prompt) ? { maintenance: true as const } : {}),
       runtimeMode,
       interactionMode,
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),

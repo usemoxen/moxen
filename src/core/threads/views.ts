@@ -64,11 +64,16 @@ export function isThreadActive(thread: ThreadEnvelope): boolean {
   );
 }
 
+/**
+ * The thread's last real reply: a maintenance turn's output (the provider's
+ * compaction summary) is not a report of the work, so it is skipped.
+ */
 export function latestAssistantText(thread: ThreadEnvelope): string | null {
+  const maintenance = new Set(thread.maintenanceTurns ?? []);
   const messages = thread.messages ?? [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
-    if (message.role === "assistant" && message.text.trim().length > 0) return message.text;
+    if (message.role === "assistant" && message.text.trim().length > 0 && (message.turnId === null || !maintenance.has(message.turnId))) return message.text;
   }
   return null;
 }
