@@ -1391,7 +1391,6 @@ A row you set beats Moxen's shipped price for those fields on that provider,
 so the same model can cost differently on two providers; clearing a row, or a
 model from it, returns to the shipped price. A price with only some fields
 values what it names and counts the rest as zero. Models match by the string
-Stats buckets them under, slash included. For the shipped list only, a Claude
-snapshot id with a `-YYYYMMDD` suffix and no row of its own takes its undated
-model's price (`claude-haiku-4-5-20251001` reads `claude-haiku-4-5`); a row
-you set must name the id as the provider reports it.
+Stats buckets them under, slash included. Moxen's shipped table prices Codex
+models, with OpenCode's to follow; Claude Code reports each turn's cost, so
+Stats uses that report instead of estimating Claude from the table.

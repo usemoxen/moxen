@@ -32,13 +32,10 @@ export const DEFAULT_MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
   "claude-opus-4-8": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
   "claude-opus-4-7": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
   "claude-opus-4-6": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
-  "claude-opus-4-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
   "claude-sonnet-4-6": { input: 3, cacheRead: 0.3, cacheWrite: 3.75, output: 15 },
-  "claude-haiku-5-5": { input: 0.1, cacheRead: 0.01, cacheWrite: 0.125, output: 0.5 },
   "claude-haiku-4-5": { input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 5 },
   "claude-fable-5": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
   "claude-fable-5-1": { input: 10, cacheRead: 0.25, cacheWrite: 12.5, output: 50 },
-  "claude-fable-5-2": { input: 8, cacheRead: 0.2, cacheWrite: 10, output: 40 },
   "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
   "gpt-6.2-sol": { input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 },
   "gpt-6.2-astra": { input: 8, cacheRead: 0.4, cacheWrite: 10, output: 40 },
@@ -57,16 +54,6 @@ export const DEFAULT_MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
 export type ModelPriceKind = "claude" | "codex" | "opencode" | "harness";
 
 /**
- * The shipped row for a model. Claude reports dated snapshots
- * (`claude-haiku-4-5-20251001`) where the list is per model, so an id with
- * no row of its own falls back to the same slug without its `-YYYYMMDD`
- * suffix. User rows still match the reported id only.
- */
-function shippedPriceFor(model: string): ModelPrice | undefined {
-  return DEFAULT_MODEL_PRICES[model] ?? DEFAULT_MODEL_PRICES[model.replace(/-\d{8}$/u, "")];
-}
-
-/**
  * What a model costs on a provider kind: the user's rows for that kind,
  * field by field over the shipped row. Matched on the model string the stats
  * already bucket by (an OpenCode slug keeps its slash), so a user's price for
@@ -78,7 +65,7 @@ export function modelPriceFor(
   kind: ModelPriceKind | null,
   model: string,
 ): ModelPrice | null {
-  const shipped = shippedPriceFor(model);
+  const shipped = DEFAULT_MODEL_PRICES[model];
   const own = (kind === null ? undefined : config.providers?.[kind]) as
     | { readonly modelInputPrices?: Readonly<Record<string, number>>; readonly modelOutputPrices?: Readonly<Record<string, number>>; readonly modelCacheReadPrices?: Readonly<Record<string, number>>; readonly modelCacheWritePrices?: Readonly<Record<string, number>> }
     | undefined;

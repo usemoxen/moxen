@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { bundledClaudeModels } from "../../providers/claude/catalog.js";
-import { DEFAULT_MODEL_PRICES, modelPriceFor, priceUsage, usageCost, type ModelPrice, type ModelPriceKind } from "../prices.js";
+import { DEFAULT_MODEL_PRICES, modelPriceFor, priceUsage, usageCost, type ModelPrice } from "../prices.js";
 
 const usage = { input: 1e6, cacheRead: 1e6, cacheCreate: 1e6, output: 1e6, thinking: 1e6 };
 
 // The ids Codex's live `model/list` reported (2026-11-19). Codex has no
-// bundled catalog, so the snapshot lives here: a model either has a shipped
-// price or is named in UNPRICED below.
+// bundled catalog, so the snapshot lives here: every id must have a shipped
+// price or be named in UNPRICED with a reason.
 const CODEX_MODELS = [
   "gpt-6.2-sol",
   "gpt-6.2-astra",
@@ -21,29 +20,15 @@ const CODEX_MODELS = [
   "gpt-5.6-luna",
 ];
 
-// The ids the installed Claude Code reported the same day; the bundled
-// fallback (`claude-models.json`) is checked too, so a model added there
-// without a price fails this test.
-const CLAUDE_MODELS = [
-  "claude-sonnet-5-5",
-  "claude-opus-5-5",
-  "claude-fable-5-2",
-  "claude-fable-5-1",
-  "claude-haiku-5-5",
-  "claude-haiku-4-5-20251001",
-  "claude-sonnet-5",
-  "claude-opus-5",
-  "claude-fable-5",
-  "claude-opus-4-8",
-  "claude-opus-4-7",
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-];
-
-// Models deliberately left unpriced, with the reason. It is empty today:
-// every id Codex and Claude list has a published API price. Add an entry
-// only when no price can be verified, never a guessed zero.
+// Codex models deliberately left unpriced, with the reason. It is empty
+// today: every id Codex lists has a published API price. Add an entry only
+// when no price can be verified, never a guessed zero.
 const UNPRICED: Readonly<Record<string, string>> = {};
+
+// Claude models are deliberately not in the shipped table: Claude Code
+// reports each turn's cost, and `usageCost` prefers that reported `costUsd`
+// over any estimate, so pricing them here would only guess at a number the
+// provider already gives us.
 
 describe("model prices", () => {
   it("prices a model the user set, even one the shipped list never heard of", () => {
@@ -95,15 +80,10 @@ describe("model prices", () => {
 });
 
 describe("shipped price coverage", () => {
-  it("prices every model Codex and Claude list, or names why it deliberately has none", () => {
-    const claudeIds = [...new Set([...bundledClaudeModels().map((model) => model.slug), ...CLAUDE_MODELS])];
-    const offered: Array<readonly [ModelPriceKind, string]> = [
-      ...CODEX_MODELS.map((id) => ["codex", id] as const),
-      ...claudeIds.map((id) => ["claude", id] as const),
-    ];
-    const missing = offered
-      .filter(([kind, id]) => UNPRICED[id] === undefined && modelPriceFor({ providers: {} }, kind, id) === null)
-      .map(([, id]) => id);
-    expect(missing, "models offered without a price or an UNPRICED reason").toEqual([]);
+  it("prices every model Codex lists, or names why it deliberately has none", () => {
+    const missing = CODEX_MODELS.filter(
+      (id) => UNPRICED[id] === undefined && modelPriceFor({ providers: {} }, "codex", id) === null,
+    );
+    expect(missing, "Codex models offered without a price or an UNPRICED reason").toEqual([]);
   });
 });
