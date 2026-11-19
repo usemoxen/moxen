@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import { testHarness } from "../../testing/harness.js";
+import { prepareQueuedHandoff, type OperationContext } from "../operations.js";
 import { toActivityEnvelope, toCheckpointEnvelope, toMessageEnvelope, toThreadEnvelope } from "../project.js";
+import { parseQueuePolicy } from "../queue.js";
 import { turnThroughput } from "../throughput.js";
+import { completeTurn, createThread, sendTurn } from "../threads.js";
 import type { StoredThread, StoredTurn } from "../types.js";
 
 function thread(overrides: Partial<StoredThread> = {}): StoredThread {
@@ -126,6 +130,45 @@ describe("toThreadEnvelope", () => {
       turn({ id: "q", status: "interrupted", delivery: "queued", createdAt: "2026-11-19T00:05:00.000Z", scheduledFor: "2026-11-19T00:20:00.000Z", updatedAt: "2026-11-19T00:17:00.000Z", completedAt: "2026-11-19T00:17:00.000Z" }),
     ]);
     expect(projected.latestTurn).toMatchObject({ turnId: "t1", state: "completed" });
+  });
+
+  /**
+   * MXN-374 follow-up: a queued entry handed off to a new thread is marked
+   * completed by the queue pass without starting here, so it is not a turn
+   * and cannot take a number from one that ran later.
+   */
+  it("numbers a checkpoint by the turns that ran, not by an entry handed off before one", async () => {
+    const harness = await testHarness();
+    const ctx: OperationContext = { store: harness.store, storeRoot: harness.root, config: harness.config, driverFor: () => harness.drivers.codex!() };
+    const real = await createThread(harness.store, {
+      projectId: "p",
+      title: "Handoff",
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      env: { mode: "local", path: harness.work, branch: null },
+    });
+    const first = (await sendTurn(harness.store, real.id, { prompt: "first" })).turn;
+    await completeTurn(harness.store, real.id, first.id, { text: "one" });
+    const handedOff = (await sendTurn(harness.store, real.id, { prompt: "carry on elsewhere", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+    const second = (await sendTurn(harness.store, real.id, { prompt: "second" })).turn;
+    await completeTurn(harness.store, real.id, second.id, { text: "two" });
+    await prepareQueuedHandoff(ctx, real.id, handedOff.id, Date.now());
+    // The row the settle path would write for the second turn that ran.
+    await harness.store.appendLedger(real.id, "checkpoints", {
+      id: harness.store.newId(),
+      threadId: real.id,
+      turnId: second.id,
+      status: "available",
+      ref: "post",
+      baseRef: "pre",
+      files: [],
+      createdAt: harness.store.nowIso(),
+    });
+
+    const projected = toThreadEnvelope((await harness.store.readThreadRecord(real.id))!, await harness.store.readTurns(real.id), {
+      checkpoints: await harness.store.readCheckpoints(real.id),
+    });
+    expect(projected.checkpoints?.map((row) => [row.turnId, row.checkpointTurnCount])).toEqual([[second.id, 2]]);
+    expect(projected.latestTurn).toMatchObject({ turnId: second.id, state: "completed" });
   });
 
   it("attaches ledgers with checkpoint turn counts", () => {

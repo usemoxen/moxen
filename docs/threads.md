@@ -1336,8 +1336,9 @@ the file, and writes its replacement too.
 Revert rolls back every provider that saw a dropped turn, then cuts the
 ledger. Turns are counted in the order they ran, as every other reader
 numbers them; a message that never ran is not counted: an interrupted one
-is left in the ledger, and a terminal one that never reached the provider
-has no prompt or snapshot to roll back.
+is left in the ledger, and so is one a queued handoff prepared for a new
+thread — neither reached this thread's provider, so neither has a prompt or
+a snapshot to roll back.
 Files stay as they are unless asked back too (`--restore-files`),
 in which case the worktree returns to the first dropped turn's snapshot
 and the replaced state is pinned under a `revert-*` ref to undo by.

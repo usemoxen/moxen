@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import { testHarness } from "../../testing/harness.js";
 import type { TurnDriver } from "../execute.js";
-import { revertThread, type OperationContext } from "../operations.js";
+import { prepareQueuedHandoff, revertThread, type OperationContext } from "../operations.js";
+import { parseQueuePolicy } from "../queue.js";
 import { completeTurn, createThread, interruptTurn, promoteDueScheduledTurn, sendTurn } from "../threads.js";
 
 /**
@@ -87,5 +88,41 @@ describe("revertThread numbering", () => {
     expect((await w.store.readTurns(w.thread.id)).map((turn) => turn.id)).toEqual([first.id, cancelled.id]);
     expect((await w.store.readTurns(w.thread.id)).find((turn) => turn.id === cancelled.id)?.status).toBe("interrupted");
     expect((await w.store.readMessages(w.thread.id)).some((message) => message.turnId === cancelled.id)).toBe(true);
+  });
+
+  /**
+   * MXN-374 follow-up: an entry handed off to a new thread is marked completed
+   * without running here. Keeping the turns that ran must not count it, or
+   * keepTurns drops a real turn instead.
+   */
+  it("keeps the turns that ran when an entry was handed off before the second one", async () => {
+    const w = await world();
+    const first = (await sendTurn(w.store, w.thread.id, { prompt: "first" })).turn;
+    await completeTurn(w.store, w.thread.id, first.id, { text: "one" });
+
+    const handedOff = (await sendTurn(w.store, w.thread.id, { prompt: "carry on elsewhere", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+    const second = (await sendTurn(w.store, w.thread.id, { prompt: "second" })).turn;
+    await completeTurn(w.store, w.thread.id, second.id, { text: "two" });
+    await prepareQueuedHandoff(w.ctx, w.thread.id, handedOff.id, Date.now());
+    expect((await w.store.readTurns(w.thread.id)).find((turn) => turn.id === handedOff.id)).toMatchObject({
+      status: "completed",
+      delivery: "queued",
+    });
+    expect((await w.store.readTurns(w.thread.id)).find((turn) => turn.id === handedOff.id)?.startedAt).toBeUndefined();
+
+    // Two turns ran here: keeping both drops nothing and rolls nothing back.
+    const kept = await revertThread(w.ctx, w.thread.id, 2);
+    expect(kept).toMatchObject({ keptTurns: 2, removedTurns: 0, providers: [] });
+    expect(w.rollbacks).toEqual([]);
+
+    // Keeping one drops the second turn, and only the prompt its provider saw.
+    const cut = await revertThread(w.ctx, w.thread.id, 1);
+    expect(cut).toMatchObject({ keptTurns: 1, removedTurns: 1, providers: ["codex"] });
+    expect(w.rollbacks).toEqual([{ threadId: w.thread.id, numTurns: 1 }]);
+    // The entry that never ran stays in the ledger, like an interrupted-before-start row.
+    expect((await w.store.readTurns(w.thread.id)).map((turn) => turn.id)).toEqual([first.id, handedOff.id]);
+    const messages = await w.store.readMessages(w.thread.id);
+    expect(messages.some((message) => message.turnId === second.id)).toBe(false);
+    expect(messages.some((message) => message.turnId === handedOff.id)).toBe(true);
   });
 });

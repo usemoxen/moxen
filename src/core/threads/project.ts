@@ -38,14 +38,21 @@ import type {
 /**
  * Whether this turn is one of the thread's turns as a reader sees them: it
  * left the queue and ran. A queued message that never started — still
- * waiting, or interrupted before it ran — is not a turn, and counting it
- * would insert it among turns a reader already has (and renumber them).
+ * waiting, interrupted before it ran, or handed off to a new thread — is not
+ * a turn, and counting it would insert it among turns a reader already has
+ * (and renumber them).
+ *
  * `startedAt` is set whenever a queued turn is promoted; a turn that ran at
  * once started at its `createdAt`, and a queued turn that reached a terminal
  * status (completed or failed) ran even if an old row did not record when.
+ * The exception is an entry whose queue policy continues it in another
+ * thread: admission never starts one, so handoff preparation settles its row
+ * (completed, or failed preparing) without a start. `startedAt` still wins
+ * over the policy, in case an old row was edited back to this thread and ran.
  */
 function turnRan(turn: StoredTurn): boolean {
   if (turn.status === "queued") return false;
+  if (turn.startedAt === undefined && (turn.queue?.continuation ?? "same-thread") !== "same-thread") return false;
   return !(turn.status === "interrupted" && turn.startedAt === undefined && turn.delivery === "queued");
 }
 
