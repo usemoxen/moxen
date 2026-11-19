@@ -13,12 +13,14 @@ import {
   decodeCheckpoint,
   decodeDelegation,
   decodeMessage,
+  decodeScalar,
   decodeThread,
   decodeTurn,
   encodeActivity,
   encodeCheckpoint,
   encodeDelegation,
   encodeMessage,
+  encodeScalar,
   encodeThread,
   encodeTurn,
   type ActivityRow,
@@ -38,6 +40,7 @@ import {
   INSERT_TURN,
 } from "./inserts.js";
 import {
+  AT,
   activityWithPayload,
   activityWithoutPayload,
   completedTurn,
@@ -131,7 +134,7 @@ describe.skipIf(!underBun)("row round trip", () => {
     insertRow(db, INSERT_DELEGATION, encodeDelegation(full));
     insertRow(db, INSERT_DELEGATION, encodeDelegation(sparse));
 
-    const rows = db.query<DelegationRow, []>("SELECT * FROM delegations ORDER BY created_at, id").all();
+    const rows = db.query<DelegationRow, []>("SELECT * FROM delegations ORDER BY seq").all();
     expect(rows.map((row) => decodeDelegation(row))).toEqual([full, sparse]);
   });
 
@@ -173,19 +176,104 @@ describe.skipIf(!underBun)("row round trip", () => {
     );
   });
 
-  it("stores free text as well-formed UTF-8 and keeps JSON payloads escaped", () => {
+  it("reads delegations in append order, not id order", () => {
     const db = storeWithThreads();
-    const cut = "before \uD83D";
-    const message = { ...sparseMessage(), id: "msg-cut", text: cut };
-    // Defined at the writer, not left to SQLite's UTF-8 conversion on read.
-    expect(encodeMessage(message).text).toBe("before \uFFFD");
-    insertRow(db, INSERT_MESSAGE, encodeMessage(message));
-    expect(decodeMessage(db.query<MessageRow, [string]>("SELECT * FROM messages WHERE id = ?").get(message.id)!).text).toBe("before \uFFFD");
+    // Same instant, and the first appended row sorts last by id: only `seq`
+    // carries the JSONL order.
+    const first = { ...fullDelegation(), id: "zzz-first", createdAt: AT, updatedAt: AT };
+    const second = { ...fullDelegation(), id: "aaa-second", createdAt: AT, updatedAt: AT };
+    insertRow(db, INSERT_DELEGATION, encodeDelegation(first));
+    insertRow(db, INSERT_DELEGATION, encodeDelegation(second));
 
-    // JSON columns escape a lone surrogate, so they keep it exactly.
-    const activity = { ...activityWithPayload({ note: cut }), id: "act-cut" };
+    expect(db.query<{ id: string }, []>("SELECT id FROM delegations ORDER BY seq").all()).toEqual([{ id: "zzz-first" }, { id: "aaa-second" }]);
+    expect(db.query<{ id: string }, []>("SELECT id FROM delegations ORDER BY id").all()).toEqual([{ id: "aaa-second" }, { id: "zzz-first" }]);
+    expect(db.query<DelegationRow, []>("SELECT * FROM delegations ORDER BY seq").all().map((row) => decodeDelegation(row))).toEqual([first, second]);
+  });
+
+  it("keeps exact scalar keys distinct and finds each by its encoded value", () => {
+    const db = storeWithThreads();
+    const lone = "a\uD83Db";
+    const emoji = "a\u{1F462}b";
+    const tilde = "~literal";
+    for (const [id, key] of [["del-lone", lone], ["del-emoji", emoji], ["del-tilde", tilde]] as const) {
+      insertRow(db, INSERT_DELEGATION, encodeDelegation({ ...sparseDelegation(), id, idempotencyKey: key }));
+    }
+
+    expect(encodeScalar(lone)).not.toBe(encodeScalar(emoji));
+    const lookup = (key: string) =>
+      db.query<{ id: string }, [string]>("SELECT id FROM delegations WHERE idempotency_key = ?").all(encodeScalar(key));
+    expect(lookup(lone)).toEqual([{ id: "del-lone" }]);
+    expect(lookup(emoji)).toEqual([{ id: "del-emoji" }]);
+    expect(lookup(tilde)).toEqual([{ id: "del-tilde" }]);
+    // A query with the raw value finds nothing once the value was encoded.
+    expect(db.query<{ id: string }, [string]>("SELECT id FROM delegations WHERE idempotency_key = ?").all(lone)).toEqual([]);
+
+    for (const [id, key] of [["del-lone", lone], ["del-emoji", emoji], ["del-tilde", tilde]] as const) {
+      const row = db.query<DelegationRow, [string]>("SELECT * FROM delegations WHERE id = ?").get(id)!;
+      expect(row.idempotency_key).not.toBeNull();
+      expect(decodeScalar(row.idempotency_key!)).toBe(key);
+      expect(decodeDelegation(row).idempotencyKey).toBe(key);
+    }
+  });
+
+  it("round-trips model ids, env paths and request keys through the scalar codec", () => {
+    const db = storeWithThreads();
+    const thread = {
+      ...sparseThread(),
+      id: "thread-scalar",
+      modelSelection: { instanceId: "inst\uD83D", model: "~model" },
+      env: { mode: "local" as const, path: "C:\\pa\uD83Dth", branch: "feat~ure" },
+    };
+    insertRow(db, INSERT_THREAD, encodeThread(thread));
+    const threadRow = db.query<ThreadRow, [string]>("SELECT * FROM threads WHERE id = ?").get(thread.id)!;
+    expect(threadRow.model_id.startsWith("~")).toBe(true);
+    expect(decodeThread(threadRow)).toEqual(thread);
+
+    const base = queuedTurn(thread.id);
+    const turn = {
+      ...base,
+      id: "turn-scalar",
+      queue: { ...base.queue!, requestId: "req\uD83D" },
+      owner: { pid: 7, host: "ho~st" },
+    };
+    insertRow(db, INSERT_TURN, encodeTurn(turn));
+    expect(decodeTurn(db.query<TurnRow, [string]>("SELECT * FROM turns WHERE id = ?").get(turn.id)!)).toEqual(turn);
+  });
+
+  it("keeps a sliced emoji exact in display text while the SQL projection is well-formed", () => {
+    const db = storeWithThreads();
+    const cut = "café \uD83D";
+
+    const message = { ...sparseMessage(), id: "msg-cut", text: cut };
+    insertRow(db, INSERT_MESSAGE, encodeMessage(message));
+    const messageRow = db.query<MessageRow, [string]>("SELECT * FROM messages WHERE id = ?").get(message.id)!;
+    expect(messageRow.text).toBe("café \uFFFD");
+    expect(JSON.parse(messageRow.original_text!)).toBe(cut);
+    expect(decodeMessage(messageRow).text).toBe(cut);
+
+    const activity = { ...activityWithPayload({ note: "unchanged" }), id: "act-cut", summary: cut };
     insertRow(db, INSERT_ACTIVITY, encodeActivity(activity));
-    expect(decodeActivity(db.query<ActivityRow, [string]>("SELECT * FROM activities WHERE id = ?").get(activity.id)!).payload).toEqual({ note: cut });
+    const activityRow = db.query<ActivityRow, [string]>("SELECT * FROM activities WHERE id = ?").get(activity.id)!;
+    expect(activityRow.summary).toBe("café \uFFFD");
+    expect(JSON.parse(activityRow.original_summary!)).toBe(cut);
+    const decodedActivity = decodeActivity(activityRow);
+    expect(decodedActivity.summary).toBe(cut);
+    // The payload shape is untouched.
+    expect(decodedActivity.payload).toEqual({ note: "unchanged" });
+
+    const thread = { ...sparseThread(), id: "thread-cut", title: cut };
+    insertRow(db, INSERT_THREAD, encodeThread(thread));
+    const threadRow = db.query<ThreadRow, [string]>("SELECT * FROM threads WHERE id = ?").get(thread.id)!;
+    expect(threadRow.title).toBe("café \uFFFD");
+    expect(JSON.parse(threadRow.rest).originalText).toBe(cut);
+    expect(decodeThread(threadRow).title).toBe(cut);
+
+    const delegation = { ...sparseDelegation(), id: "del-cut", prompt: cut };
+    insertRow(db, INSERT_DELEGATION, encodeDelegation(delegation));
+    const delegationRow = db.query<DelegationRow, [string]>("SELECT * FROM delegations WHERE id = ?").get(delegation.id)!;
+    expect(delegationRow.prompt).toBe("café \uFFFD");
+    expect(JSON.parse(delegationRow.rest).originalText).toBe(cut);
+    expect(decodeDelegation(delegationRow).prompt).toBe(cut);
   });
 
   it("stores and reads meta values", () => {

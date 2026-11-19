@@ -52,9 +52,12 @@ export function openForTest(root: string, options?: OpenStoreDatabaseOptions): D
 }
 
 /** A bare connection, for building a file the opener did not write (or reading one back). */
-export function rawForTest(file: string, options: { create?: boolean } = {}): Database {
+export function rawForTest(file: string, options: { create?: boolean; readonly?: boolean } = {}): Database {
   const { Database: BunDatabase } = requireBun("bun:sqlite") as typeof import("bun:sqlite");
-  const db = new BunDatabase(file, { create: options.create ?? true });
+  const db =
+    options.readonly === true
+      ? new BunDatabase(file, { readonly: true })
+      : new BunDatabase(file, { create: options.create ?? true });
   opened.push(db);
   return db;
 }

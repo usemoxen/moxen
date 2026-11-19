@@ -44,6 +44,12 @@ export function schemaTooNew(found: number, current: number = SCHEMA_VERSION): C
 export interface MigrateOptions {
   /** Steps to run. Production uses `MIGRATIONS`; tests pass their own to prove the runner. */
   readonly migrations?: readonly SchemaMigration[];
+  /**
+   * Test seam: runs after the last step commits and before the final version
+   * is read. Production never sets it; the tests use it to force a newer
+   * version into that gap.
+   */
+  readonly afterMigrations?: (db: Database) => void;
 }
 
 /**
@@ -56,8 +62,13 @@ export interface MigrateOptions {
  */
 export function migrateStoreSchema(db: Database, options: MigrateOptions = {}): number {
   const migrations = options.migrations ?? MIGRATIONS;
+  // The registered target is the ceiling, so a test registry (a synthetic v2)
+  // can finish above the build's schema version. Production registers only
+  // SCHEMA_VERSION, so there it is the same number.
+  const target = migrations[migrations.length - 1]?.version ?? 0;
+  const ceiling = Math.max(SCHEMA_VERSION, target);
   const start = readSchemaVersion(db);
-  if (start > SCHEMA_VERSION) throw schemaTooNew(start);
+  if (start > ceiling) throw schemaTooNew(start);
 
   let version = start;
   for (const migration of migrations) {
@@ -75,7 +86,7 @@ export function migrateStoreSchema(db: Database, options: MigrateOptions = {}): 
     // because the read above happened before this connection held the lock.
     const step = db.transaction(() => {
       const current = readSchemaVersion(db);
-      if (current > SCHEMA_VERSION) throw schemaTooNew(current);
+      if (current > ceiling) throw schemaTooNew(current);
       if (current >= migration.version) return;
       if (current !== migration.version - 1) throw missingMigration(current);
       migration.up(db);
@@ -95,7 +106,15 @@ export function migrateStoreSchema(db: Database, options: MigrateOptions = {}): 
     }
     version = readSchemaVersion(db);
   }
-  return version;
+  options.afterMigrations?.(db);
+  // Read the version again after the last step: a writer that landed a newer
+  // schema in the gap must refuse, not be reported as the version we ran.
+  const final = readSchemaVersion(db);
+  if (final > ceiling) throw schemaTooNew(final);
+  if (final < target) {
+    throw new CliError("STORE_MIGRATION_FAILED", `The thread store schema ended at version ${final}, but this build migrated to version ${target}.`);
+  }
+  return final;
 }
 
 function missingMigration(current: number): CliError {

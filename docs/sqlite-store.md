@@ -66,13 +66,20 @@ runs in a worker or at idle. A write transaction must not span an `await`.
   store. A hex dump and `moxen store path` agree about what the file is.
 - `PRAGMA user_version` is the **schema** version, its own sequence from 1. A
   newer schema is refused with `FORMAT_TOO_NEW`, naming both numbers.
+- `<store root>/store.db-open-lock` is the **setup gate**: a separate SQLite
+  database whose write lock serializes opening, initializing and migrating a
+  store across processes. It holds no rows, writes nothing, and is never
+  deleted.
 - `<store root>/store.json` stays the **engine** marker: format version 1 is
   the JSONL ledgers, 2 is `store.db`. That is what makes an older build refuse
   a cut-over store directly. `format.ts` still owns `config.json`, which is not
   moving.
 
-Opening order is identity, then the version check, then the pragmas and
-migrations, so a refusal happens before the first write to the file.
+Opening order: probe the runtime in memory; check an existing file read-only;
+take the gate; check again in a read transaction; for an existing WAL store
+keep that transaction open while the writable handle is opened and checked
+again under `BEGIN IMMEDIATE`; then apply the pragmas and migrate. Every
+refusal happens before a persistent change.
 
 ## Pragmas
 
@@ -92,15 +99,36 @@ behind a 1 s transaction failed at 201 ms; with 3000 it succeeded at 1272 ms.
 `PRAGMA wal_checkpoint` inside a write transaction fails: never checkpoint
 there.
 
-An existing store is checked through a **read-only connection before it is
-opened**: identity and schema version. (A hot rollback journal is the
-exception: only a writable connection can recover it, and recovery finishes or
-undoes an interrupted transaction rather than revealing new committed data.)
-Opening a writable connection that is then closed checkpoints the WAL into the
-database file, so a refusal — a newer schema, a file that is not ours — must
-not do that. A newer schema committed only to the WAL by a writer that died is
-still detected and still leaves the WAL, and the database file, byte for byte
-unchanged.
+**Setup is serialized.** `<root>/store.db-open-lock` is opened, given the busy
+timeout, and locked with `BEGIN IMMEDIATE` before any store handle is opened;
+it is rolled back and closed in `finally`. Two processes starting against a
+fresh root initialize one schema instead of racing the DDL. There are no PID
+files and no stale-owner cleanup.
+
+**A refusal must not checkpoint.** An existing store is checked through a
+read-only connection twice: before the gate and again in a read transaction
+under it. For an existing WAL store that read transaction stays alive while
+the writable handle is opened and identity and version are rechecked under
+`BEGIN IMMEDIATE`; a rejected writable handle is rolled back and closed before
+the reader is released, so its close cannot checkpoint the WAL into the
+database file. For an accepted rollback-mode store the reader is released
+before the journal-mode transition, and the gate is held through the
+transition, validation and migration. An absent or zero-byte database is
+created only under the gate. A newer schema committed only to the WAL, or
+between two checks, is still detected and leaves the database and WAL byte for
+byte unchanged.
+
+The guarantee covers the main database file and the WAL. Read-only preflight
+may create or rebuild `-shm`, or create an empty WAL; those coordination files
+carry no committed data. A raw SQLite client that bypasses the gate, or a
+process that replaces the database path, is outside the guarantee.
+
+**Recovery is refused, not attempted.** A hot rollback journal
+(`SQLITE_READONLY_ROLLBACK`) fails with `STORE_RECOVERY_REQUIRED`: this build
+does not reopen writable to recover it, and does not suggest deleting the
+journal. If permissions prevent SQLite from reading the WAL, the original
+error is reported unchanged; `immutable` mode is never used to guess a
+version.
 
 WAL is unsupported on network filesystems and corruption is possible there —
 all processes must be on one host. `STORE_ROOT` is user-settable, so a store on
@@ -122,10 +150,10 @@ its own; everything else is one `rest` JSON column, merged back on read in
 |---|---|---|---|
 | `threads` | `id` | project, title and source, hidden, modes, model (NOT NULL — a record without one is the importer's to quarantine), env, every timestamp, pending flags, `usage_pause` | research fields, sessions, instruction/mode state, subagents, overrides |
 | `turns` | `seq`, unique `(thread_id, id)` | status, delivery, schedule, `held_at_settle`, queue order/removed/automatic/wake-up/request id, handoff destination, owner | queue conditions, handoff text, model, usage, error, modes, generation |
-| `messages` | `seq`, unique `(thread_id, id)` | turn, role, origin, text, attachments, notification | — |
-| `activities` | `seq`, unique `(thread_id, id)` | turn, kind, summary, `payload` BLOB + `payload_encoding` | payload JSON text |
+| `messages` | `seq`, unique `(thread_id, id)` | turn, role, origin, text + `original_text`, attachments, notification | — |
+| `activities` | `seq`, unique `(thread_id, id)` | turn, kind, summary + `original_summary`, `payload` BLOB + `payload_encoding` | payload JSON text |
 | `checkpoints` | `seq`, unique `(thread_id, id)` | turn, status, ref, base ref, files | — |
-| `delegations` | `id` | parent, child, status, notify, continue fields, idempotency key, base branch, prompt | model snapshot, review |
+| `delegations` | `seq`, unique `id` | parent, child, status, notify, continue fields, idempotency key, base branch, prompt | model snapshot, review, `originalText` |
 | `meta` | `key` | engine, schema, import state, imported at, source rows | — |
 | `quarantine` | — | at, reason, table, row JSON — rows taken out of the live tables instead of deleted | — |
 
@@ -146,16 +174,33 @@ one. A replay is scoped to the caller's lineage, so two unrelated parents may
 use the same key; and a retry whose first child is gone stores a second row
 for the same parent and key.
 
+**Exact scalar keys.** `encodeScalar`/`decodeScalar` are one reversible TEXT
+codec: a well-formed string that does not start with `~` is stored verbatim; a
+string starting with `~`, or containing a lone surrogate, is stored as `~` plus
+four lowercase hex digits per UTF-16 code unit, so it is collision-free and
+exact. SQL NULL stays NULL. Any predicate on an encoded column binds the
+encoded value. It covers delegation `idempotency_key` and `base_branch`, thread
+`model_instance`, `model_id`, `env_path` and `env_branch`, and turn
+`queue_request_id` and `owner_host`. Generated ids and references, enums, ISO
+timestamps and JSON columns stay verbatim. This is why two replay keys that
+would both become U+FFFD cannot alias, and why `base_branch` matches
+`env_branch` on both sides of a comparison.
+
+**Exact display text.** Thread titles, message text, activity summaries and
+delegation prompts are stored well-formed for display; when the projection
+changes a string, the original is kept in row metadata — `rest.originalText`
+for threads and delegations, and the JSON-string `original_text` /
+`original_summary` columns for messages and activities. Decode prefers the
+original, so a lone surrogate from a code-unit slice survives exactly. Activity
+payloads are untouched.
+
 Deliberate normalisations in the row mapping (`records.ts`): `hidden: false`,
 `heldAtSettle: false` and `notify: false` read as absent, `titleSource: "seed"`
-reads as absent, and an explicit `null` for `scheduledFor`, `scheduleReason`,
-`owner` or `baseBranch` reads as absent. Every reader tests `=== true`,
-truthiness, or compares to `"user"`/`"provider"`, so the pairs are
-indistinguishable in behaviour. `usagePause` is the exception — a JSON column,
-so SQL NULL (absent) and the JSON text `null` stay distinct. Free text (title,
-message text, activity summary, delegation prompt) is stored well-formed: a
-lone surrogate from a code-unit slice becomes U+FFFD, because SQLite TEXT is
-UTF-8; JSON columns keep one escaped and lossless.
+reads as absent, and a `null` for `scheduledFor`, `scheduleReason`, `owner` or
+`baseBranch` reads as absent. Every reader tests `=== true`, truthiness, or
+compares to `"user"`/`"provider"`, so the pairs are indistinguishable in
+behaviour. `usagePause` is the exception — a JSON column, so SQL NULL (absent)
+and the JSON text `null` stay distinct.
 
 `payload` is a BLOB even though it holds JSON text, so compression later is a
 data change rather than a schema change. Do not compress in the first
@@ -175,7 +220,9 @@ again once the write lock is held: two processes that open the same store at
 once do not both run the step, and an unexpected or newer version refuses
 before any DDL. A database newer than the build is refused before anything is
 written, with the store's `FORMAT_TOO_NEW` code so clients keep their
-handling.
+handling. The version is read once more after the last step commits: a newer
+version forced into that gap refuses rather than being returned as the version
+this build ran.
 
 - A change is a new step, never an edit to an old one. The DDL of version 1 is
   pinned by a golden dump of `sqlite_master`; changing it is a deliberate act.
@@ -188,14 +235,17 @@ handling.
 
 The test suite runs under Node, where `bun:sqlite` does not exist, so the
 SQLite tests skip there and run from `bun run test:sqlite`, which forces Bun.
-`bun run check` includes it. The tests are a schema golden, the migration
+`bun run check` includes it. The tests are a schema golden; the migration
 runner (fresh, current, newer refused, a no-op step, a failing step rolling
-back, and two real processes racing), the connection (pragmas, identity, an
-old runtime, a stripped one, a newer schema refused without checkpointing the
-WAL it lives in), and a round-trip invariant: every table's representative
-record encodes, writes, reads and decodes back equal, unicode, large JSON and
-nulls included, with the canonicalisations above and the lone-surrogate
-normalisation pinned.
+back, two real processes racing, and a version forced before the final read);
+the connection (pragmas, identity, an old runtime, a stripped one, two real
+processes opening one fresh root, and the refusals — a newer schema in the WAL,
+with a stale journal, with a missing `-shm`, in a foreign WAL database, and
+forced between each pair of checks — with the database and WAL bytes compared);
+a hot-journal fixture that fails closed with `STORE_RECOVERY_REQUIRED`; and a
+round-trip invariant for every table, including exact scalar keys, a sliced
+emoji kept through the display metadata, a half-step queue order, unicode
+surrogates and nulls.
 
 ## Performance budget
 

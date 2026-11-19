@@ -5,6 +5,25 @@
  * else is in `rest` as JSON and merged back here, so no caller has to know
  * which field went where.
  *
+ * Exact scalar keys: `encodeScalar`/`decodeScalar` are one reversible TEXT
+ * codec. A well-formed string that does not start with `~` is stored verbatim;
+ * a string that starts with `~`, or contains a lone surrogate, is stored as
+ * `~` plus four lowercase hex digits per UTF-16 code unit. SQL NULL stays NULL.
+ * The reserved prefix makes the two forms collision-free. Any SQL predicate on
+ * an encoded column binds `encodeScalar(value)`, never the raw value. Applied
+ * to delegation `idempotency_key`/`base_branch`, thread `model_instance`/
+ * `model_id`/`env_path`/`env_branch`, and turn `queue_request_id`/`owner_host`.
+ * Generated ids and references, enums, ISO timestamps and JSON columns stay
+ * verbatim.
+ *
+ * Exact display text: title, message text, activity summary and delegation
+ * prompt are stored well-formed for display, and the original string is kept
+ * when the projection differs — `rest.originalText` for threads and
+ * delegations, and the `original_text` / `original_summary` JSON-string columns
+ * for messages and activities. Decode prefers the original, so a lone
+ * surrogate from a code-unit slice survives exactly. Activity payloads are
+ * untouched.
+ *
  * Canonicalizations, all deliberate and pinned by `tests/records.test.ts`:
  * - `hidden: false`, `heldAtSettle: false` and `notify: false` decode as
  *   absent. Readers test `=== true` or truthiness, never `=== false`.
@@ -14,9 +33,6 @@
  *   `baseBranch` decodes as absent. Every reader uses truthiness or optional
  *   chaining on them, so both forms mean the same thing; only `owner: null`
  *   is written today (clearing an owner).
- * - A lone surrogate in free text is stored as U+FFFD (`wellFormed` below):
- *   SQLite TEXT is UTF-8 and cannot hold one. JSON columns keep them escaped,
- *   because JSON.stringify does.
  *
  * `usagePause` is the exception: it is a JSON column, so absent (SQL NULL) and
  * an explicit `null` (the JSON text `null`) stay distinct.
@@ -99,6 +115,8 @@ export interface MessageRow {
   origin: string | null;
   created_at: string;
   text: string;
+  /** JSON string of the original when the display projection differs; NULL otherwise. */
+  original_text: string | null;
   attachments: string | null;
   notification: string | null;
 }
@@ -109,6 +127,8 @@ export interface ActivityRow {
   turn_id: string | null;
   kind: string;
   summary: string;
+  /** JSON string of the original when the display projection differs; NULL otherwise. */
+  original_summary: string | null;
   created_at: string;
   payload: Uint8Array | null;
   payload_encoding: string;
@@ -180,6 +200,38 @@ function wellFormed(value: string): string {
   return out;
 }
 
+/**
+ * The reversible scalar codec (see the file header). A well-formed value
+ * without the reserved prefix is stored as written; anything else becomes
+ * `~` plus four lowercase hex digits per UTF-16 code unit.
+ */
+export function encodeScalar(value: string): string {
+  if (!value.startsWith("~") && wellFormed(value) === value) return value;
+  let out = "~";
+  for (let i = 0; i < value.length; i += 1) out += value.charCodeAt(i).toString(16).padStart(4, "0");
+  return out;
+}
+
+/** The inverse of `encodeScalar`; a malformed encoded value is a corrupt row. */
+export function decodeScalar(value: string): string {
+  if (!value.startsWith("~")) return value;
+  const hex = value.slice(1);
+  if (hex.length % 4 !== 0 || !/^[0-9a-f]*$/.test(hex)) {
+    throw new CliError("INVALID_STORE_ROW", `A stored value is not a valid encoded scalar: ${JSON.stringify(value.slice(0, 32))}.`);
+  }
+  let out = "";
+  for (let i = 0; i < hex.length; i += 4) out += String.fromCharCode(Number.parseInt(hex.slice(i, i + 4), 16));
+  return out;
+}
+
+function encodeNullableScalar(value: string | null | undefined): string | null {
+  return value === null || value === undefined ? null : encodeScalar(value);
+}
+
+function decodeNullableScalar(value: string | null): string | null {
+  return value === null ? null : decodeScalar(value);
+}
+
 function required(value: string | null, column: string, row: string): string {
   if (value === null) throw new CliError("INVALID_STORE_ROW", `A ${row} row is missing ${column}; the row cannot be read.`);
   return value;
@@ -192,6 +244,8 @@ function requiredNumber(value: number | null, column: string, row: string): numb
 
 export function encodeThread(thread: StoredThread): ThreadRow {
   const rest: Record<string, unknown> = {};
+  const title = wellFormed(thread.title);
+  if (title !== thread.title) rest.originalText = thread.title;
   if (thread.researchRun !== undefined) rest.researchRun = thread.researchRun;
   if (thread.pastResearchRuns !== undefined) rest.pastResearchRuns = thread.pastResearchRuns;
   if (thread.researchRole !== undefined) rest.researchRole = thread.researchRole;
@@ -210,16 +264,16 @@ export function encodeThread(thread: StoredThread): ThreadRow {
   return {
     id: thread.id,
     project_id: thread.projectId,
-    title: wellFormed(thread.title),
+    title,
     title_source: thread.titleSource ?? "seed",
     hidden: thread.hidden === true ? 1 : 0,
     interaction_mode: thread.interactionMode,
     runtime_mode: thread.runtimeMode,
-    model_instance: thread.modelSelection.instanceId,
-    model_id: thread.modelSelection.model,
+    model_instance: encodeScalar(thread.modelSelection.instanceId),
+    model_id: encodeScalar(thread.modelSelection.model),
     env_mode: thread.env.mode,
-    env_path: thread.env.path,
-    env_branch: thread.env.branch,
+    env_path: encodeScalar(thread.env.path),
+    env_branch: encodeNullableScalar(thread.env.branch),
     created_at: thread.createdAt,
     updated_at: thread.updatedAt,
     archived_at: thread.archivedAt,
@@ -242,16 +296,16 @@ export function decodeThread(row: ThreadRow): StoredThread {
   return {
     id: row.id,
     projectId: row.project_id,
-    title: row.title,
+    title: typeof rest.originalText === "string" ? rest.originalText : row.title,
     ...(row.title_source === "seed" ? {} : { titleSource: row.title_source as NonNullable<StoredThread["titleSource"]> }),
     ...(row.hidden === 0 ? {} : { hidden: true }),
     modelSelection:
       options === undefined
-        ? { instanceId: row.model_instance, model: row.model_id }
-        : { instanceId: row.model_instance, model: row.model_id, options },
+        ? { instanceId: decodeScalar(row.model_instance), model: decodeScalar(row.model_id) }
+        : { instanceId: decodeScalar(row.model_instance), model: decodeScalar(row.model_id), options },
     runtimeMode: row.runtime_mode as RuntimeMode,
     interactionMode: row.interaction_mode as InteractionMode,
-    env: { mode: row.env_mode as StoredThread["env"]["mode"], path: row.env_path, branch: row.env_branch },
+    env: { mode: row.env_mode as StoredThread["env"]["mode"], path: decodeScalar(row.env_path), branch: decodeNullableScalar(row.env_branch) },
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     archivedAt: row.archived_at,
@@ -316,10 +370,10 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
     queue_removed: flag(turn.queue?.removed),
     queue_automatic: flag(turn.queue?.automatic),
     queue_wake_up: flag(turn.queue?.wakeUp),
-    queue_request_id: turn.queue?.requestId ?? null,
+    queue_request_id: encodeNullableScalar(turn.queue?.requestId),
     handoff_destination: turn.handoff?.destinationThreadId ?? null,
     owner_pid: turn.owner?.pid ?? null,
-    owner_host: turn.owner?.host ?? null,
+    owner_host: encodeNullableScalar(turn.owner?.host),
     created_at: turn.createdAt,
     updated_at: turn.updatedAt,
     completed_at: turn.completedAt,
@@ -336,7 +390,7 @@ function turnQueue(row: TurnRow, rest: Record<string, unknown>): NonNullable<Sto
     ...(row.queue_removed === null ? {} : { removed: row.queue_removed !== 0 }),
     ...(row.queue_automatic === null ? {} : { automatic: row.queue_automatic !== 0 }),
     ...(row.queue_wake_up === null ? {} : { wakeUp: row.queue_wake_up !== 0 }),
-    ...(row.queue_request_id === null ? {} : { requestId: row.queue_request_id }),
+    ...(row.queue_request_id === null ? {} : { requestId: decodeScalar(row.queue_request_id) }),
   };
 }
 
@@ -362,7 +416,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     ...(handoff === undefined
       ? {}
       : { handoff: { ...handoff, destinationThreadId: required(row.handoff_destination, "handoff_destination", "turns") } }),
-    ...(ownerPresent ? { owner: { pid: row.owner_pid as number, host: row.owner_host as string } } : {}),
+    ...(ownerPresent ? { owner: { pid: row.owner_pid as number, host: decodeScalar(row.owner_host as string) } } : {}),
     runtimeMode: rest.runtimeMode as RuntimeMode,
     interactionMode: rest.interactionMode as InteractionMode,
     ...(rest.interactionModeExplicit === undefined ? {} : { interactionModeExplicit: true as const }),
@@ -382,6 +436,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
 }
 
 export function encodeMessage(message: StoredMessage): MessageRow {
+  const body = wellFormed(message.text);
   return {
     id: message.id,
     thread_id: message.threadId,
@@ -389,7 +444,8 @@ export function encodeMessage(message: StoredMessage): MessageRow {
     role: message.role,
     origin: message.origin ?? null,
     created_at: message.createdAt,
-    text: wellFormed(message.text),
+    text: body,
+    original_text: body === message.text ? null : JSON.stringify(message.text),
     attachments: jsonText(message.attachments),
     notification: jsonText(message.notification),
   };
@@ -404,7 +460,7 @@ export function decodeMessage(row: MessageRow): StoredMessage {
     turnId: row.turn_id,
     role: row.role as StoredMessage["role"],
     createdAt: row.created_at,
-    text: row.text,
+    text: row.original_text === null ? row.text : (JSON.parse(row.original_text) as string),
     ...(row.origin === null ? {} : { origin: row.origin as NonNullable<StoredMessage["origin"]> }),
     ...(attachments === undefined || attachments === null ? {} : { attachments }),
     ...(notification === undefined || notification === null ? {} : { notification }),
@@ -412,12 +468,14 @@ export function decodeMessage(row: MessageRow): StoredMessage {
 }
 
 export function encodeActivity(activity: StoredActivity): ActivityRow {
+  const body = wellFormed(activity.summary);
   return {
     id: activity.id,
     thread_id: activity.threadId,
     turn_id: activity.turnId,
     kind: activity.kind,
-    summary: wellFormed(activity.summary),
+    summary: body,
+    original_summary: body === activity.summary ? null : JSON.stringify(activity.summary),
     created_at: activity.createdAt,
     payload: activity.payload === undefined ? null : utf8.encode(JSON.stringify(activity.payload)),
     payload_encoding: "json",
@@ -434,7 +492,7 @@ export function decodeActivity(row: ActivityRow): StoredActivity {
     threadId: row.thread_id,
     turnId: row.turn_id,
     kind: row.kind,
-    summary: row.summary,
+    summary: row.original_summary === null ? row.summary : (JSON.parse(row.original_summary) as string),
     createdAt: row.created_at,
     ...(payload === undefined ? {} : { payload }),
   };
@@ -469,6 +527,8 @@ export function decodeCheckpoint(row: CheckpointRow): StoredCheckpoint {
 
 export function encodeDelegation(delegation: StoredDelegation): DelegationRow {
   const rest: Record<string, unknown> = {};
+  const prompt = wellFormed(delegation.prompt);
+  if (prompt !== delegation.prompt) rest.originalText = delegation.prompt;
   if (delegation.modelSnapshot !== undefined) rest.modelSnapshot = delegation.modelSnapshot;
   if (delegation.review !== undefined) rest.review = delegation.review;
   return {
@@ -479,9 +539,9 @@ export function encodeDelegation(delegation: StoredDelegation): DelegationRow {
     notify: delegation.notify === true ? 1 : 0,
     continued_in: delegation.continuedIn ?? null,
     continues_task_id: delegation.continuesTaskId ?? null,
-    idempotency_key: delegation.idempotencyKey ?? null,
-    base_branch: delegation.baseBranch ?? null,
-    prompt: wellFormed(delegation.prompt),
+    idempotency_key: encodeNullableScalar(delegation.idempotencyKey),
+    base_branch: encodeNullableScalar(delegation.baseBranch),
+    prompt,
     created_at: delegation.createdAt,
     updated_at: delegation.updatedAt,
     rest: JSON.stringify(rest),
@@ -494,15 +554,15 @@ export function decodeDelegation(row: DelegationRow): StoredDelegation {
     id: row.id,
     parentThreadId: row.parent_thread_id,
     childThreadId: row.child_thread_id,
-    prompt: row.prompt,
-    ...(row.base_branch === null ? {} : { baseBranch: row.base_branch }),
+    prompt: typeof rest.originalText === "string" ? rest.originalText : row.prompt,
+    ...(row.base_branch === null ? {} : { baseBranch: decodeScalar(row.base_branch) }),
     status: row.status as StoredDelegation["status"],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.notify === 0 ? {} : { notify: true }),
     ...(row.continued_in === null ? {} : { continuedIn: row.continued_in }),
     ...(row.continues_task_id === null ? {} : { continuesTaskId: row.continues_task_id }),
-    ...(row.idempotency_key === null ? {} : { idempotencyKey: row.idempotency_key }),
+    ...(row.idempotency_key === null ? {} : { idempotencyKey: decodeScalar(row.idempotency_key) }),
     ...(rest.modelSnapshot === undefined ? {} : { modelSnapshot: rest.modelSnapshot as NonNullable<StoredDelegation["modelSnapshot"]> }),
     ...(rest.review === undefined ? {} : { review: rest.review as NonNullable<StoredDelegation["review"]> }),
   };

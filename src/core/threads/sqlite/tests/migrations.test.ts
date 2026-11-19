@@ -51,6 +51,15 @@ describe.skipIf(!underBun)("schema migrations", () => {
     expect(readSchemaVersion(db)).toBe(99);
   });
 
+  it("refuses a newer version forced before the final version read", () => {
+    const db = rawForTest(storeDatabasePath(temporaryRoot("final-read")));
+    expect(() =>
+      migrateStoreSchema(db, {
+        afterMigrations: (connection) => connection.exec("PRAGMA user_version = 99"),
+      }),
+    ).toThrow(expect.objectContaining({ code: "FORMAT_TOO_NEW", message: expect.stringContaining("version 99") }));
+  });
+
   it("applies a no-op step and bumps user_version without changing the schema", () => {
     const plain = openForTest(temporaryRoot("plain"));
     const withNoop = rawForTest(storeDatabasePath(temporaryRoot("noop")));

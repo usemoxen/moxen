@@ -8,6 +8,7 @@ CREATE TABLE activities (
   turn_id      TEXT,
   kind         TEXT NOT NULL,
   summary      TEXT NOT NULL,
+  original_summary TEXT,           -- JSON string: the exact code units when the display summary had to change
   created_at   TEXT NOT NULL,
   payload      BLOB,               -- JSON text (zstd later behind payload_encoding)
   payload_encoding TEXT NOT NULL DEFAULT 'json',
@@ -39,7 +40,8 @@ CREATE INDEX checkpoints_thread ON checkpoints(thread_id, seq)
 
 -- table delegations
 CREATE TABLE delegations (
-  id                TEXT PRIMARY KEY,
+  seq               INTEGER PRIMARY KEY,
+  id                TEXT NOT NULL,
   parent_thread_id  TEXT NOT NULL,
   child_thread_id   TEXT NOT NULL,
   status            TEXT NOT NULL,
@@ -51,7 +53,8 @@ CREATE TABLE delegations (
   prompt            TEXT NOT NULL,
   created_at        TEXT NOT NULL,
   updated_at        TEXT NOT NULL,
-  rest              TEXT NOT NULL   -- JSON: modelSnapshot, review
+  rest              TEXT NOT NULL,  -- JSON: modelSnapshot, review, originalText
+  UNIQUE (id)                       -- append order is seq, like the ledgers
 ) STRICT
 
 -- index delegations_child
@@ -73,6 +76,7 @@ CREATE TABLE messages (
   origin       TEXT,
   created_at   TEXT NOT NULL,
   text         TEXT NOT NULL,
+  original_text TEXT,              -- JSON string: the exact code units when the display text had to change
   attachments  TEXT,               -- JSON array
   notification TEXT,               -- JSON: task/background notification facts
   UNIQUE (thread_id, id)
