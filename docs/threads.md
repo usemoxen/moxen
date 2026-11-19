@@ -42,7 +42,9 @@ process running it (pid and host). If that process dies mid-turn — a
 crashed server, a killed CLI, a TUI closed during a turn — nothing would
 ever settle it, so the next operation that touches the thread interrupts
 the orphaned turn and runs the one queued behind it. A turn owned on
-another host is never judged.
+another host is never judged. A running turn that a server shutdown stops
+is recorded interrupted with that reason, and so is one a settle ends, so a
+ledger never leaves an unexplained stop.
 
 A queued message outlives the settle it was waiting for when the thread
 cannot take it: a snoozed thread, or a provider whose allowance is
@@ -476,7 +478,24 @@ transfer still reaches the old thread — the task's next report, and
 `task_status` on the new parent at any time, cover it. A continued thread
 starts no new delegations (`THREAD_CONTINUED` names the live thread):
 otherwise the row would answer to a dormant thread while its continuation
-steers beside it. A
+steers beside it. A manual continue needs an idle source: while one of its
+turns is running, the palette's Continue in a new thread row is disabled
+("turn still running") and dispatching `thread.continue` anyway is refused
+with `THREAD_BUSY`, before any destination or continuation note is written —
+the two workers would start in the same checkout side by side. Once the
+reservation wins, the source is claimed until the handoff lands: no turn may
+start there in the meantime (a racing send, background wake-up or scheduled
+admission is refused with `THREAD_BUSY`, and a queued handoff — stored or
+model — simply waits for a later pass instead of preparing beside it), so the
+destination never runs beside a turn the race admitted. The claim is
+registered against the server process running the handoff, so it stays
+effective for the whole handoff however long provider startup takes, and
+clears when the handoff lands or fails — a later send on the old thread
+is the user's own choice — while a claim whose handoff died with it heals
+on the next admission instead of wedging the thread. Queued or
+scheduled work is not a running turn, so an idle thread with schedules
+still continues; stopping the turn (or waiting for it to settle) and
+retrying goes through. A
 continuation can also change the model: continuing in a new thread keeps the
 project, the checkout and the handoff, and takes an optional target
 model/provider — the palette's Continue in a new thread row opens a modal
@@ -1120,10 +1139,18 @@ A `modelSelection` with `provider`/`model` together is refused.
   delegated task is not offered the tool and is refused when it calls
   anyway: its long work is compacted in place, and its report — not a
   forked continuation — decides what runs next.
-- The same conditions as the palette action apply: a missing, deleted,
+- Only the agent's own continue refuses those: a missing, deleted,
   archived or settled thread is refused with a clear error, as is a thread
-  held by usage protection (its recovery runs first). A research run's
-  roles and lead are refused (`THREAD_CONTINUE_RESEARCH`).
+  held by usage protection (its recovery runs first). The palette action
+  continues any idle thread it can read — archived, settled, usage-held,
+  even soft-deleted by id — refusing only a missing source (and a running
+  one, above). While a manual handoff is in flight, the agent's continue is
+  refused with `THREAD_BUSY` like any other waiter, and goes through once
+  the handoff lands. A research run's
+  roles and lead are refused to the agent (`THREAD_CONTINUE_RESEARCH`); the
+  palette action is not subject to that restriction. Unlike the
+  palette action, a running source is not refused: the caller's own turn is
+  necessarily open, so the destination waits instead (see below).
 - An agent may continue its thread up to 3 times in a row
   (`MAX_CONSECUTIVE_AGENT_CONTINUATIONS`); a 4th is refused until the user
   speaks in the thread, which resets the count. A user's own palette
@@ -1167,8 +1194,11 @@ relies on a watcher to wake it. A thread that was continued in a new one does
 not. Continuing ends its provider session (`endContinuedSession` in
 `core/threads/operations.ts`), which stops its background tasks and closes the
 way they could start a turn there, so the old thread and the new one never act
-on the same news. If a turn is still open on it, the session is left to finish
-and only the tasks the provider can name are stopped. Sending the old thread a
+on the same news. A manual continue is refused while a turn is still open on
+it, so the session always ends at once there; only an agent's own queued
+continuation can still arrive with the calling turn open, and then the
+session is left to finish while only the tasks the provider can name are
+stopped. Sending the old thread a
 message resumes it from its cursor, without its old background work. Delegated
 tasks are separate and unchanged by this.
 
@@ -1304,7 +1334,11 @@ the file, and writes its replacement too.
 ## Revert
 
 Revert rolls back every provider that saw a dropped turn, then cuts the
-ledger. Files stay as they are unless asked back too (`--restore-files`),
+ledger. Turns are counted in the order they ran, as every other reader
+numbers them; a message that never ran is not counted: an interrupted one
+is left in the ledger, and a terminal one that never reached the provider
+has no prompt or snapshot to roll back.
+Files stay as they are unless asked back too (`--restore-files`),
 in which case the worktree returns to the first dropped turn's snapshot
 and the replaced state is pinned under a `revert-*` ref to undo by.
 

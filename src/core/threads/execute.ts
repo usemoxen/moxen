@@ -1617,7 +1617,13 @@ async function settleTurn(
       ...(outcome.generation !== undefined ? { generation: outcome.generation } : {}),
     });
   } else if (outcome.status === "interrupted") {
-    await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
+    // A run stopped without Moxen's interrupt recording the stop first: the
+    // process closed its provider sessions (a server shutdown or restart) or
+    // the provider ended the turn. Record why, rather than leave an
+    // interruption nothing explains.
+    const live = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
+    const reason = live?.status === "running" ? "Moxen or the provider stopped this run before it finished." : undefined;
+    await interruptTurn(store, threadId, storeTurnId, undefined, reason ? { reason } : {}).catch(() => undefined);
   } else {
     await failTurn(store, threadId, storeTurnId, {
       error: outcome.error ?? "Turn failed.",

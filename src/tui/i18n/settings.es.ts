@@ -189,7 +189,7 @@ export const settingsEs: Readonly<Record<string, string>> = {
   "Gruvbox": "Gruvbox",
   "Tokyo Night": "Tokyo Night",
   "Language": "Idioma",
-  "The language of the interface. Auto follows the terminal's locale (LC_ALL, LC_MESSAGES, LANG) and falls back to English. Only the TUI is translated; CLI output and --json stay in English.": "El idioma de la interfaz. Automático usa el idioma del terminal (LC_ALL, LC_MESSAGES, LANG) y, si no lo reconoce, el inglés. Solo se traduce la TUI; la salida de la CLI y --json siguen en inglés.",
+  "The language of the interface. Auto follows the environment (LC_ALL, LC_MESSAGES, LANG) and the system locale, then falls back to English. CLI output and --json stay in English.": "El idioma de la interfaz. Automático usa el idioma del entorno (LC_ALL, LC_MESSAGES, LANG) y del sistema. Si no lo reconoce, usa el inglés. La salida de la CLI y --json siguen en inglés.",
   "English": "English",
   "Español (España)": "Español (España)",
   "Model backdrops": "Fondos por modelo",

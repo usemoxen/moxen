@@ -76,6 +76,10 @@ export interface HelloResult {
   readonly restartRequired: boolean;
   /** Remote sockets: the server's name (its host), for the client's list of servers. */
   readonly serverName?: string;
+  /** Desktop stdio bridge only: the saved name of a paired server. */
+  readonly pairedName?: string;
+  /** Desktop stdio bridge only: the local runtime locale, not the server's. */
+  readonly clientLocale?: string;
   /** Local sockets: the config file the server runs on, so a client asking for another can refuse. */
   readonly configPath?: string;
   /** Remote sockets: the device this socket is, once admitted. */

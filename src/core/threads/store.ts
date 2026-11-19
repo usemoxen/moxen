@@ -563,7 +563,7 @@ export class ThreadStore {
     return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
   }
 
-  async readLedger<T>(threadId: string, name: LedgerName): Promise<T[]> {
+  async readLedger<T>(threadId: string, name: LedgerName, options?: { reportTornTail?: boolean }): Promise<T[]> {
     const file = ledgerFile(this.root, threadId, name);
     let raw: string;
     try {
@@ -572,7 +572,7 @@ export class ThreadStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
-    return this.parseLedgerLines<T>(raw, file, "ledger-line", threadId);
+    return this.parseLedgerLines<T>(raw, file, "ledger-line", threadId, options);
   }
 
   /**
@@ -580,7 +580,7 @@ export class ThreadStore {
    * the rows; rewrites re-read the file themselves and splice skipped lines
    * back, so no writer below can lose what it could not read.
    */
-  private parseLedgerLines<T>(raw: string, file: string, kind: "ledger-line" | "delegation-line", threadId?: string): T[] {
+  private parseLedgerLines<T>(raw: string, file: string, kind: "ledger-line" | "delegation-line", threadId?: string, options?: { reportTornTail?: boolean }): T[] {
     const rows: T[] = [];
     const lines = raw.split("\n");
     const complete = raw.endsWith("\n");
@@ -600,7 +600,7 @@ export class ThreadStore {
           report(true);
           continue;
         case "bad-json":
-          if (index === lines.length - 1 && !complete) {
+          if (index === lines.length - 1 && !complete && !options?.reportTornTail) {
             const pending = this.pendingTorn.get(file);
             if (!pending || pending.line !== lineNumber || pending.raw !== line) {
               // First sight: a crash in flight, not corruption yet. Re-read once.
@@ -755,8 +755,15 @@ export class ThreadStore {
     }
   }
 
-  async readTurns(threadId: string): Promise<StoredTurn[]> {
-    return await this.readLedger<StoredTurn>(threadId, "turns");
+  /**
+   * Turns ledger rows. With `reportTornTail`, an unterminated bad-JSON tail
+   * is reported at once instead of being pended for a confirming re-read:
+   * the admission read runs under the source lock and cannot proceed on an
+   * unreadable snapshot. Observational reads keep the pending grace for a
+   * crash still in flight.
+   */
+  async readTurns(threadId: string, options?: { reportTornTail?: boolean }): Promise<StoredTurn[]> {
+    return await this.readLedger<StoredTurn>(threadId, "turns", options);
   }
 
   async updateTurn(threadId: string, turnId: string, patch: Partial<StoredTurn>): Promise<StoredTurn | null> {

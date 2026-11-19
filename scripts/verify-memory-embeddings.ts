@@ -3,7 +3,8 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
@@ -12,7 +13,7 @@ import { namedPipe, probe } from "../src/server/transport/endpoint.js";
 import { startEmbeddingsHeartbeat } from "../src/server/embeddingsHeartbeat.js";
 
 // `--dist <dir>` checks another bundle (an unpacked release archive's `dist/`) instead of the checkout's.
-// `--workdir <dir>` keeps the validation state (config, socket, downloaded runtime) somewhere else instead of
+// `--workdir <dir>` keeps the validation state (config, downloaded runtime) somewhere else instead of
 // `.moxen/embedding-validation` beside the script: the smoke test points it at its scratch folder so a run
 // against an unpacked archive leaves that folder alone.
 const distFlag = process.argv.indexOf("--dist");
@@ -22,19 +23,46 @@ const root = path.resolve(workdirFlag >= 0 && process.argv[workdirFlag + 1] ? pr
 await mkdir(root, { recursive: true });
 const config = path.join(root, "config.json");
 await writeFile(config, JSON.stringify({ memoryEmbeddings: false }));
-const endpoint = process.platform === "win32" ? namedPipe(`moxen-embedding-validation-${process.pid}`) : path.join(root, "server.sock");
-const start = () => spawn(process.execPath, [path.join(dist, "server", "daemon.js")], {
-  env: { ...process.env, MOXEN_STORE_ROOT: root, MOXEN_CONFIG: config, MOXEN_SERVER_ENDPOINT: endpoint },
-  stdio: "ignore",
-});
-let server = start();
-let client: RemoteConnection | undefined;
-const deadline = Date.now() + 15_000;
-try {
-  while (!await probe(endpoint)) {
-    if (Date.now() > deadline || server.exitCode !== null) throw new Error("Production daemon failed to start");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+// The validation state may be deep in a worktree or release scratch directory.
+const socketDir = process.platform === "win32" ? undefined : await mkdtemp(path.join(os.tmpdir(), "mx-"));
+const endpoint = socketDir ? path.join(socketDir, "s") : namedPipe(`moxen-embedding-validation-${process.pid}`);
+
+async function start(action: "start" | "restart"): Promise<() => Promise<void>> {
+  const server = spawn(process.execPath, [path.join(dist, "server", "daemon.js")], {
+    env: { ...process.env, MOXEN_STORE_ROOT: root, MOXEN_CONFIG: config, MOXEN_SERVER_ENDPOINT: endpoint },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  server.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  let spawnError: Error | undefined;
+  server.on("error", (error) => { spawnError = error; });
+  // Wait for stderr to drain as well as for the process to exit.
+  const closed = new Promise<void>((resolve) => server.once("close", () => resolve()));
+  const stop = async (): Promise<void> => {
+    if (server.pid !== undefined && server.exitCode === null && server.signalCode === null) server.kill();
+    await closed;
+  };
+  const deadline = Date.now() + 15_000;
+  try {
+    while (!await probe(endpoint)) {
+      if (spawnError) throw spawnError;
+      if (server.exitCode !== null) throw new Error(`Exited with code ${server.exitCode}`);
+      if (server.signalCode !== null) throw new Error(`Exited on signal ${server.signalCode}`);
+      if (Date.now() > deadline) throw new Error("Timed out waiting for the daemon to listen");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return stop;
+  } catch (cause) {
+    await stop();
+    const diagnostic = stderr.trim();
+    throw new Error(`Production daemon failed to ${action}: ${diagnostic || (cause instanceof Error ? cause.message : String(cause))}`, { cause });
   }
+}
+
+let stopServer: (() => Promise<void>) | undefined;
+let client: RemoteConnection | undefined;
+try {
+  stopServer = await start("start");
   client = await RemoteConnection.connect(endpoint);
   const corpus = [
     ["secrets", "Authentication keys belong in the OS keychain. Provider CLIs manage their own login. Never print tokens."],
@@ -120,15 +148,9 @@ try {
   // before any search. Restart the real daemon to check the shipped behavior.
   await client.close();
   client = undefined;
-  const stopped = once(server, "exit");
-  server.kill();
-  await stopped;
-  server = start();
+  await stopServer();
   const restartDeadline = Date.now() + 15_000;
-  while (!await probe(endpoint)) {
-    if (Date.now() > restartDeadline || server.exitCode !== null) throw new Error("Production daemon failed to restart");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  stopServer = await start("restart");
   client = await RemoteConnection.connect(endpoint);
   let startup = await client.query({ type: "memory.embeddings.status" });
   while (startup.state !== "ready") {
@@ -140,10 +162,10 @@ try {
   console.log(JSON.stringify({ startupWarm: true, device: startup.device, validation: startup.validation }));
   console.log(JSON.stringify({ beats: heartbeat.beats, maxHeartbeatMs: heartbeat.maxHeartbeatMs, passed: true }));
 } finally {
-  await client?.close();
-  if (server.exitCode === null && server.signalCode === null) {
-    const exited = once(server, "exit");
-    server.kill();
-    await exited;
+  try {
+    await client?.close();
+    await stopServer?.();
+  } finally {
+    if (socketDir) await rm(socketDir, { recursive: true, force: true });
   }
 }

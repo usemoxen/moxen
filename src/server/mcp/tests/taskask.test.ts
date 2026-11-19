@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { SideQuestionInput } from "../../../core/providers/spi.js";
 import { testHarness, type TestHarnessOptions } from "../../../core/testing/harness.js";
+import { completeTurn } from "../../../core/threads/threads.js";
 import { openThreadStore, type ThreadStore } from "../../../core/threads/store.js";
 import { DirectConnection } from "../../connection.js";
 import { callMoxenTool, DELEGATION_TOOLS, moxenToolsFor } from "../tools.js";
@@ -28,7 +29,14 @@ async function setup(options: TestHarnessOptions = {}) {
     const result = await callMoxenTool(connection, from, "task_ask", { taskId, question }, askTimeoutMs === undefined ? {} : { askTimeoutMs });
     return { ...result, json: result.isError ? null : (JSON.parse(result.text) as Record<string, unknown>) };
   };
-  return { harness, connection, store, orchestrator: orchestrator.threadId, delegate, ask };
+  // MXN-372: a manual continue refuses a running source, so settle the
+  // source's own turn first; its tasks keep running.
+  const settleRunningTurns = async (threadId: string = orchestrator.threadId) => {
+    for (const turn of await store.readTurns(threadId)) {
+      if (turn.status === "running") await completeTurn(store, threadId, turn.id, { text: "Settled for the handoff." });
+    }
+  };
+  return { harness, connection, store, orchestrator: orchestrator.threadId, delegate, ask, settleRunningTurns };
 }
 
 /** The task's thread as `task_ask` must leave it: its messages, its turns, its activity ledger. */
@@ -127,6 +135,7 @@ describe("task_ask: whose task it is", () => {
     const t = await setup({ leaveTurnsRunning: true, sideQuestions: { opencode: async () => ({ text: "yes", withContext: true }) } });
     try {
       const taskId = await t.delegate();
+      await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
       expect((await t.ask(continued.threadId, taskId)).isError).toBe(false);
       expect((await t.ask(t.orchestrator, taskId)).text).toContain("TASK_NOT_FOUND");

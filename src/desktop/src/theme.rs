@@ -1,13 +1,113 @@
 use gpui::{FontWeight, Styled, px};
 use gpui::{Hsla, rgb};
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::LazyLock;
+
+#[derive(Clone, Copy)]
+struct Palette {
+    mode: &'static str,
+    colors: Option<&'static HashMap<&'static str, Hsla>>,
+}
+
+fn palette(setting: Option<&str>) -> Palette {
+    Palette {
+        mode: if setting == Some("catppuccin-latte") {
+            "light"
+        } else {
+            "dark"
+        },
+        colors: setting
+            .filter(|&name| name != "moxen")
+            .and_then(|name| SCHEMES.get(name)),
+    }
+}
+
+thread_local! { static THEME: Cell<Palette> = Cell::new(palette(None)); }
+
+pub fn apply(setting: Option<&str>) {
+    THEME.set(palette(setting));
+}
 
 static TOKENS: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../design-system/tokens.json"))
         .expect("pinned design tokens")
 });
 
+// Read only the literal roles of the same palettes the TUI uses. The
+// default, aliases and tokens without a palette counterpart still come
+// from the pinned design system.
+type Scheme = HashMap<&'static str, Hsla>;
+
+/// The scheme header of one palette block (`  name: {`, quotes optional):
+/// trimmed before matching, so a reindent or a new quoting style cannot
+/// silently drop a scheme.
+fn scheme_name(line: &'static str) -> Option<&'static str> {
+    let name = line
+        .trim()
+        .strip_suffix('{')?
+        .trim_end()
+        .strip_suffix(':')?;
+    let name = name.trim();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(name.trim_matches('"'))
+}
+
+/// One palette role (`    role: "#rrggbb",`): anything else on the line —
+/// the `label`, the interface above the palettes — is not a color.
+fn scheme_role(line: &'static str) -> Option<(&'static str, &'static str)> {
+    let line = line.trim().strip_suffix(',')?;
+    let (role, value) = line.split_once(':')?;
+    let role = role.trim();
+    let hex = value
+        .trim()
+        .strip_prefix('"')?
+        .strip_suffix('"')?
+        .strip_prefix('#')?;
+    if role.is_empty() || role.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((role, hex))
+}
+
+/// A palette hex: exactly six hex digits. A malformed one fails the test
+/// suite (see `every_tui_palette_color_is_six_hex_digits`) instead of
+/// panicking on first paint, and names the offender here too.
+fn scheme_color(scheme: &str, role: &str, hex: &str) -> Hsla {
+    let valid = hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !valid {
+        panic!("TUI palette color is not six hex digits: {scheme} {role} #{hex}");
+    }
+    rgb(u32::from_str_radix(hex, 16).expect("TUI palette color")).into()
+}
+
+static SCHEMES: LazyLock<HashMap<&'static str, Scheme>> = LazyLock::new(|| {
+    let mut schemes = HashMap::new();
+    let mut name = None;
+    for line in include_str!("../../tui/themes.ts").lines() {
+        if let Some(header) = scheme_name(line) {
+            name = Some(header);
+        } else if line.trim().starts_with('}') {
+            name = None;
+        } else if let Some(scheme) = name
+            && let Some((role, hex)) = scheme_role(line)
+        {
+            schemes
+                .entry(scheme)
+                .or_insert_with(HashMap::new)
+                .insert(role, scheme_color(scheme, role, hex));
+        }
+    }
+    schemes
+});
+
 pub fn color(name: &str) -> Hsla {
+    token_color(name, THEME.get())
+}
+
+fn token_color(name: &str, palette: Palette) -> Hsla {
     let token = TOKENS["color"]["tokens"]
         .as_array()
         .unwrap()
@@ -15,9 +115,33 @@ pub fn color(name: &str) -> Hsla {
         .find(|t| t["name"] == name)
         .expect("known color token");
     if let Some(alias) = token["value"].as_str() {
-        return color(alias.trim_matches(['{', '}']));
+        return token_color(alias.trim_matches(['{', '}']), palette);
     }
-    let hex = token["value"]["dark"]
+    if let Some(colors) = palette.colors {
+        let role = match name {
+            "ground" => "base",
+            "raised" => "raised",
+            "sunk" => "hover",
+            "rule" => "border",
+            "edge" | "label-8" => "faint",
+            "ink" => "bright",
+            "ink-2" => "dim",
+            "live" => "accent",
+            "held" | "label-5" => "yellow",
+            "broken" => "red",
+            "added" | "label-3" => "green",
+            "label-1" => "orange",
+            "label-2" => "blue",
+            "label-4" => "purple",
+            "label-6" => "teal",
+            "label-7" => "pink",
+            _ => "",
+        };
+        if let Some(color) = colors.get(role) {
+            return *color;
+        }
+    }
+    let hex = token["value"][palette.mode]
         .as_str()
         .unwrap()
         .trim_start_matches('#');
@@ -101,7 +225,7 @@ pub fn focus_ring() -> Vec<gpui::BoxShadow> {
 }
 
 pub fn float_shadow() -> Vec<gpui::BoxShadow> {
-    let value = TOKENS["shadow"]["tokens"][0]["value"]["dark"]
+    let value = TOKENS["shadow"]["tokens"][0]["value"][THEME.get().mode]
         .as_str()
         .unwrap();
     let (geometry, rgba) = value.split_once("rgba(").expect("shadow-float rgba");
@@ -136,4 +260,87 @@ pub fn float_shadow() -> Vec<gpui::BoxShadow> {
         });
     }
     shadows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parsed_schemes_match_the_tui_theme_keys() {
+        // The keys the TUI declares, read with nothing but the block syntax:
+        // if the palette parser above ever skips a scheme, this names it.
+        let mut keys = include_str!("../../tui/themes.ts")
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_suffix('{')
+                    .and_then(|line| line.trim_end().strip_suffix(':'))
+                    .map(|name| name.trim().trim_matches('"').to_string())
+            })
+            .collect::<Vec<_>>();
+        keys.sort();
+        let mut parsed = SCHEMES
+            .keys()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        parsed.sort();
+        assert_eq!(parsed, keys);
+    }
+
+    #[test]
+    fn every_tui_palette_color_is_six_hex_digits() {
+        // Every `"#…"` literal in the TUI palette file, independent of the
+        // parser above: a malformed hex fails here, not on first paint. The
+        // count must match the parsed roles, so a silently skipped line
+        // fails loudly too.
+        let mut colors = 0;
+        for (index, line) in include_str!("../../tui/themes.ts").lines().enumerate() {
+            let mut rest = line;
+            while let Some(start) = rest.find("\"#") {
+                rest = &rest[start + 1..];
+                let end = rest.find('"').expect("TUI palette color closes its quote");
+                let hex = &rest[1..end];
+                assert!(
+                    hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "TUI palette color is not six hex digits (line {}): #{hex}",
+                    index + 1,
+                );
+                colors += 1;
+                rest = &rest[end + 1..];
+            }
+        }
+        assert!(colors > 0);
+        assert_eq!(colors, SCHEMES.values().map(HashMap::len).sum::<usize>());
+    }
+
+    #[test]
+    #[should_panic(expected = "TUI palette color is not six hex digits: test accent #zzzzzz")]
+    fn a_malformed_hex_names_the_scheme_and_role() {
+        scheme_color("test", "accent", "zzzzzz");
+    }
+
+    #[test]
+    fn known_schemes_use_the_design_system_and_unknown_ones_use_moxen() {
+        for name in [
+            "catppuccin-latte",
+            "catppuccin-frappe",
+            "catppuccin-macchiato",
+            "catppuccin-mocha",
+            "dracula",
+            "nord",
+            "gruvbox",
+            "tokyo-night",
+        ] {
+            apply(Some(name));
+            let chosen = palette(Some(name));
+            assert_eq!(color("live"), chosen.colors.unwrap()["accent"]);
+            assert_eq!(color("ground"), chosen.colors.unwrap()["base"]);
+            assert_eq!(color("provider-claude"), chosen.colors.unwrap()["orange"]);
+            assert_ne!(color("ground"), token_color("ground", palette(None)));
+        }
+        assert_eq!(palette(Some("catppuccin-latte")).mode, "light");
+        apply(Some("future-theme"));
+        assert_eq!(color("ground"), token_color("ground", palette(None)));
+    }
 }

@@ -85,13 +85,99 @@ export function liveTurn(turns: StoredTurn[]): StoredTurn | null {
   return openTurn(turns) ?? turns.find((turn) => !isKnownTurnStatus(turn.status)) ?? null;
 }
 
+/**
+ * How long an unregistered continuation claim blocks admissions: a backstop
+ * for claims no live handoff owns (a clear that failed to write, a reused
+ * pid, a writer this process cannot see). A handoff running in this process
+ * is registered below and never expires by age.
+ */
+export const CONTINUE_CLAIM_TTL_MS = 60_000;
+
+/**
+ * Claim tokens with a manual handoff running in this process. Production
+ * keeps one server per store (`claimStore` refuses a second; the CLI always
+ * dispatches to a server, never in-process), so the handoff and every
+ * admission it races run here and a registered token is proof of life —
+ * regardless of how long provider startup takes. A restart empties this
+ * (and changes pid), so a leftover claim heals by pid below.
+ */
+const liveContinuations = new Set<string>();
+
+/** Mark a manual handoff running here; admission blocks on its token until released. */
+export function trackContinuation(token: string): void {
+  liveContinuations.add(token);
+}
+
+/** Release a manual handoff that ended here; admission heals any leftover record on its own. */
+export function untrackContinuation(token: string): void {
+  liveContinuations.delete(token);
+}
+
+/**
+ * Whether a manual continuation in flight forbids starting a turn on this
+ * thread now. A claim whose handoff runs in this process blocks for as long
+ * as it runs. Otherwise the owner is judged by pid (same host) or age
+ * alone (another host, which production never writes — paired servers keep
+ * their own stores): a dead or stale claim is cleared here so a crashed
+ * handoff never wedges the thread, and a reused pid cannot block past the
+ * TTL. Returns the thread as admission must see it (healed when it was
+ * dead), since the caller holds the lock and writes its own copy back
+ * afterwards. Caller must hold the thread lock.
+ */
+export async function continuationInFlight(store: ThreadStore, thread: StoredThread): Promise<{ blocked: boolean; thread: StoredThread }> {
+  const claim = thread.continueClaim;
+  if (!claim) return { blocked: false, thread };
+  // The handoff runs here: effective for its whole life, however long
+  // provider startup takes — never expired by age.
+  if (liveContinuations.has(claim.token)) return { blocked: true, thread };
+  // Same host, our own pid, but no live handoff owns the token: its cleanup
+  // already ran (untrack precedes the record clear), so the record write
+  // must have died with the handoff. Heal at once rather than stalling
+  // until the TTL lapses.
+  const ownDeadHandoff = claim.host === os.hostname() && claim.pid === process.pid;
+  const fresh = Date.parse(claim.at) > Date.now() - CONTINUE_CLAIM_TTL_MS;
+  const alive = claim.host === os.hostname() ? processAlive(claim.pid) : true;
+  if (!ownDeadHandoff && alive && fresh) return { blocked: true, thread };
+  const current = await store.readThreadRecord(thread.id);
+  if (current?.continueClaim?.token !== claim.token) return { blocked: false, thread: current ?? thread };
+  const healed = { ...current, continueClaim: null, updatedAt: store.nowIso() };
+  await store.writeThreadRecord(healed);
+  return { blocked: false, thread: healed };
+}
+
 /** A turns ledger problem hiding rows of this thread, if one is reported. */
-function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreProblem | null {
+export function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreProblem | null {
   const file = store.turnsFile(threadId);
   return store.storeProblems().find((problem) => problem.kind === "ledger-line" && problem.threadId === threadId && problem.file === file) ?? null;
 }
 
-function unreadableTurnsError(threadId: string, problem: StoreProblem): CliError {
+/**
+ * A THREAD_BUSY refusal raised because a manual continuation owns the
+ * checkout (see `continuationInFlight`), as opposed to one raised by a busy
+ * turn. Catch sites that must yield only to a handoff — the usage wrap-up,
+ * the queue pass — discriminate with `isContinuationBusy`, never on the
+ * message and never by re-reading the claim (which may not be persisted
+ * yet, or may already have cleared, when the refusal arrives).
+ */
+export function continuationBusyError(threadId: string): CliError {
+  return new CliError("THREAD_BUSY", `Thread ${threadId} is being continued in a new thread. Retry when it lands.`, {
+    exitCode: 4,
+    details: { threadId, continued: true },
+  });
+}
+
+/** Whether this failure is a manual-handoff contention refusal (see above). */
+export function isContinuationBusy(cause: unknown): cause is CliError {
+  return (
+    cause instanceof CliError &&
+    cause.code === "THREAD_BUSY" &&
+    typeof cause.details === "object" &&
+    cause.details !== null &&
+    (cause.details as { continued?: unknown }).continued === true
+  );
+}
+
+export function unreadableTurnsError(threadId: string, problem: StoreProblem): CliError {
   return new CliError(
     "TURNS_LEDGER_CORRUPT",
     `Thread ${threadId} may have an active turn hidden in an unreadable ledger line (${problem.file}${problem.line === undefined ? "" : `:${problem.line}`}). Move the bad line aside first — the TUI warning offers it, or remove the line by hand — then retry.`,
@@ -237,14 +323,14 @@ export async function createThread(
 
 export async function listThreads(
   store: ThreadStore,
-  options: { status?: ThreadStatus | "all"; projectId?: string } = {},
+  options: { status?: ThreadStatus | "all"; projectId?: string; includeArchived?: boolean } = {},
 ): Promise<StoredThread[]> {
   const status = options.status ?? "active";
   const now = Date.parse(store.nowIso());
   const threads: StoredThread[] = [];
   for (const id of await store.listThreadIds()) {
     const thread = await store.readThreadRecord(id);
-    if (!thread || thread.archivedAt != null || thread.deletedAt != null) continue;
+    if (!thread || thread.deletedAt != null || (thread.archivedAt != null && !options.includeArchived)) continue;
     if (options.projectId !== undefined && thread.projectId !== options.projectId) continue;
     if (status !== "all" && threadStatus(thread, now) !== status) continue;
     threads.push(thread);
@@ -335,12 +421,44 @@ export async function sendTurn(
     const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true && !manualContinuation;
     if (usageHeld) delivery = "queue";
 
+    let turns = await store.readTurns(threadId);
+
     if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled && !usageHeld) {
       throw new CliError(
         "SETTLED_THREAD_CONFIRMATION_REQUIRED",
         `Thread ${threadId} is settled. Re-run with wakeSettled to send and wake it.`,
         { exitCode: 4, details: { threadId, settledAt: thread.settledAt } },
       );
+    }
+    // A manual continuation in flight owns the checkout: refuse a send that
+    // would start a running turn — or release usage protection, wake a
+    // settled thread, or touch a live turn — before it writes anything. The
+    // unsettle and the usage-protection release below must not run for a
+    // refused send (a refused send once destroyed protection and its
+    // recovery turn, and once woke a settled thread it never started on).
+    // Predicted from the same inputs the turn below is cut from: with no
+    // live turn and no protection release, nothing between here and there
+    // changes the outcome, so queued and scheduled sends pass through
+    // untouched. Keep beside the status computation below; if that formula
+    // changes, mirror it here.
+    const live = liveTurn(turns);
+    const duplicate = input.queue?.requestId ? turns.find((turn) => turn.queue?.requestId === input.queue!.requestId) : undefined;
+    const joinsExisting = duplicate !== undefined && duplicate.status !== "running";
+    const gateWaitingOut = scheduledFor === null && !openTurn(turns) && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
+    const gateHoldUntil = gateWaitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
+    const gateHeldQueue = (usageHeld && !input.queue && origin !== undefined) || input.queue !== undefined;
+    const gateHeldBehind =
+      scheduledFor === null && !openTurn(turns) && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue") &&
+      turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
+    const joinsWaitingReset = input.scheduleReason === "usage-reset" && turns.some((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset");
+    const gateQueued =
+      gateHeldQueue || usageHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && openTurn(turns) !== null);
+    if (joinsExisting ? false : live !== null || manualContinuation || !gateQueued) {
+      const admission = await continuationInFlight(store, thread);
+      thread = admission.thread;
+      if (admission.blocked) {
+        throw continuationBusyError(threadId);
+      }
     }
     if (thread.settledAt != null && input.wakeSettled === true && !usageHeld) {
       thread = {
@@ -354,7 +472,6 @@ export async function sendTurn(
       store.emit(threadId, "unsettle");
     }
 
-    let turns = await store.readTurns(threadId);
     const hidden = hiddenTurnsProblem(store, threadId);
     if (hidden) throw unreadableTurnsError(threadId, hidden);
     if (input.queue?.requestId) {
@@ -506,6 +623,17 @@ export async function sendTurn(
     if (usageHeld && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
     const status = heldQueue || usageHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    // A manual continuation in flight owns the checkout now: no turn may
+    // start beside its destination while it prepares. Queued and scheduled
+    // turns are not starting, so they pass; the handoff clears the claim
+    // when it lands, and a dead one heals here.
+    if (status === "running") {
+      const admission = await continuationInFlight(store, thread);
+      thread = admission.thread;
+      if (admission.blocked) {
+        throw continuationBusyError(threadId);
+      }
+    }
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
@@ -583,12 +711,14 @@ async function interruptTurnLocked(
   turn: StoredTurn,
   now: string,
   usagePause?: StoredTurn["usagePause"],
+  reason?: string,
 ): Promise<StoredTurn> {
   store.abortRunning(turn.id);
   store.untrackRunning(turn.id);
   const updated = await store.updateTurn(thread.id, turn.id, {
     status: "interrupted",
     ...(usagePause ? { usagePause } : {}),
+    ...(reason ? { error: reason } : {}),
     updatedAt: now,
     completedAt: now,
   });
@@ -597,7 +727,7 @@ async function interruptTurnLocked(
     threadId: thread.id,
     turnId: turn.id,
     kind: "turn.interrupted",
-    summary: turn.id,
+    summary: reason ?? turn.id,
     // A queued or scheduled message taken back before it ran: clients drop
     // it from the transcript rather than show a turn that never happened.
     ...(turn.status === "queued" ? { payload: { beforeStart: true } } : {}),
@@ -655,6 +785,14 @@ export async function startBackgroundTurn(
         { details: { threadId } },
       );
     }
+    // A manual continuation in flight owns the checkout: a native wake-up
+    // waits for the handoff rather than starting beside it. The healed
+    // record is the one this turn is cut from, so a dead claim stays dead.
+    const admission = await continuationInFlight(store, thread);
+    const admitted = admission.thread;
+    if (admission.blocked) {
+      throw continuationBusyError(threadId);
+    }
     const unreadable = hiddenTurnsProblem(store, threadId);
     if (unreadable) throw unreadableTurnsError(threadId, unreadable);
     if (live !== null) {
@@ -671,9 +809,9 @@ export async function startBackgroundTurn(
       owner: currentTurnOwner(),
       delivery: "background",
       messageId: store.newId(),
-      runtimeMode: thread.runtimeMode,
-      interactionMode: thread.interactionMode,
-      modelSelection: input.modelSelection ?? thread.modelSelection,
+      runtimeMode: admitted.runtimeMode,
+      interactionMode: admitted.interactionMode,
+      modelSelection: input.modelSelection ?? admitted.modelSelection,
       parentTurnId: null,
       error: null,
       usage: null,
@@ -690,7 +828,7 @@ export async function startBackgroundTurn(
       summary: "Woken by a background task",
       createdAt: now,
     });
-    await store.writeThreadRecord({ ...thread, updatedAt: now });
+    await store.writeThreadRecord({ ...admitted, updatedAt: now });
     store.emit(threadId, "turn-started");
     return turn;
   });
@@ -938,6 +1076,10 @@ export async function promoteQueuedTurn(store: ThreadStore, rawThreadId: string)
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     if (openTurn(await store.readTurns(threadId))) return null;
+    // A manual continuation in flight owns the checkout: leave queued work
+    // queued. Admission retries once the handoff clears its claim.
+    const record = await store.readThreadRecord(threadId);
+    if (!record || (await continuationInFlight(store, record)).blocked) return null;
     await promoteQueuedLocked(store, threadId, now);
     return (await store.readTurns(threadId)).find((turn) => turn.status === "running" && !store.isTracked(turn.id)) ?? null;
   });
@@ -1364,6 +1506,10 @@ export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: s
     const now = store.nowIso();
     const turns = await store.readTurns(threadId);
     if (openTurn(turns)) return null;
+    // A manual continuation in flight owns the checkout: a due turn waits
+    // for the handoff to clear its claim rather than starting beside it.
+    const record = await store.readThreadRecord(threadId);
+    if (!record || (await continuationInFlight(store, record)).blocked) return null;
     const due = turns.find(
       (turn) => turn.status === "queued" && (admittedId ? turn.id === admittedId : typeof turn.scheduledFor === "string") && !isHeldTurn(turn, Date.parse(now)),
     );
@@ -1483,6 +1629,7 @@ export async function interruptTurn(
   rawThreadId: string,
   rawTurnId?: string,
   usagePause?: StoredTurn["usagePause"],
+  options: { readonly reason?: string } = {},
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId?.trim() || undefined;
@@ -1513,7 +1660,7 @@ export async function interruptTurn(
     // it (which claims the turn below before its session starts). Read before
     // the interrupt releases the claim.
     const hasRunner = store.isTracked(target.id);
-    const updated = await interruptTurnLocked(store, thread, target, now, usagePause);
+    const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason);
     if (hasRunner) {
       await promoteQueuedLocked(store, threadId, now);
     } else {
@@ -1595,7 +1742,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
         // Every live turn, queued ones included: a queue left behind would start the moment the settled thread woke.
         for (const turn of await store.readTurns(entry.id)) {
           if (turn.status === "running" || turn.status === "queued" || !isKnownTurnStatus(turn.status)) {
-            await interruptTurnLocked(store, entry.thread, turn, now);
+            await interruptTurnLocked(store, entry.thread, turn, now, undefined, "The thread was settled, stopping its work.");
           }
         }
         const index = members.findIndex((member) => member.id === entry.id);
@@ -1691,7 +1838,7 @@ export async function unsnoozeThread(store: ThreadStore, rawThreadId: string): P
   });
 }
 
-export async function archiveThread(store: ThreadStore, rawThreadId: string): Promise<StoredThread> {
+export async function archiveThread(store: ThreadStore, rawThreadId: string, releaseCheckout?: (thread: StoredThread) => Promise<void>): Promise<StoredThread> {
   const threadId = requireThreadId(rawThreadId);
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
@@ -1704,8 +1851,23 @@ export async function archiveThread(store: ThreadStore, rawThreadId: string): Pr
     }
     const next: StoredThread = { ...thread, archivedAt: thread.archivedAt ?? now, updatedAt: now };
     await store.writeThreadRecord(next);
+    await releaseCheckout?.(next);
     store.emit(threadId, "archived");
     return next;
+  });
+}
+
+export async function restoreThread(store: ThreadStore, rawThreadId: string, restoreCheckout: (thread: StoredThread) => Promise<void>): Promise<void> {
+  const threadId = requireThreadId(rawThreadId);
+  await store.withThreadLock(threadId, async () => {
+    const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+    if (thread.deletedAt != null || thread.hidden === true) {
+      throw new CliError("THREAD_ARCHIVED", `Thread ${threadId} cannot be restored.`, { exitCode: 4 });
+    }
+    if (thread.archivedAt == null) return;
+    await restoreCheckout(thread);
+    await store.writeThreadRecord({ ...thread, archivedAt: null, updatedAt: store.nowIso() });
+    store.emit(threadId, "restored");
   });
 }
 

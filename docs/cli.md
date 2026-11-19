@@ -189,9 +189,9 @@ moxen config set providers.opencode.modelOutputPrices 'opencode-go/muse-spark-1.
 
 A row you set beats Moxen's shipped price list for that model on that provider; clearing a row, or a model from it, returns to the shipped price. Stats and usage protection price turns that recorded no cost at these current values; a turn with a recorded cost keeps it, and a model with no price anywhere stays unpriced. A partial price values the fields it names and counts the rest as zero. The same rows are on each provider's settings page under Model prices.
 
-**Theme.** `ui.theme` picks the TUI colours: `moxen` (default), `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `dracula`, `nord`, `gruvbox` or `tokyo-night`. A running TUI picks up a change without restarting.
+**Theme.** `ui.theme` picks the interface colours: `moxen` (default), `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `dracula`, `nord`, `gruvbox` or `tokyo-night`. Settings changes apply without restarting. The desktop maps these palettes onto its design-system colour roles.
 
-**Language.** `ui.language` picks the TUI language: `auto` (default; follows `LC_ALL`, `LC_MESSAGES` or `LANG`, then the runtime's locale, and falls back to English), `en` or `es-ES`. A running TUI picks up a change without restarting. CLI output and `--json` stay in English.
+**Language.** `ui.language` picks the interface language: `auto` (default; follows `LC_ALL`, `LC_MESSAGES` or `LANG`, then the runtime's locale, and falls back to English), `en` or `es-ES`. Settings changes apply without restarting. CLI output and `--json` stay in English.
 
 `projectPolicy: "existing"` makes a missing project a hard error. `workspaceMode: "folder"` uses the exact current folder instead of walking up to the Git root. Whether a thread from `moxen handover` or `moxen threads create` gets a worktree is decided by the command (`--checkout`), then the project, then its `moxen.json`, then `threadEnvMode`. Explicit CLI config values remain overrides.
 

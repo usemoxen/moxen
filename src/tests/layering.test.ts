@@ -23,8 +23,9 @@
  * longer fires is itself a failure, so finishing a migration forces the
  * bookkeeping instead of leaving dead exceptions behind.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import path from "node:path";
+import { lstatSync, readdirSync, readFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import path, { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
 
@@ -116,16 +117,32 @@ const DEPTH_ALLOWLIST: ReadonlySet<string> = new Set([]);
 
 const IMPORT = /(?:^|\n)\s*(?:import|export)[\s\S]*?from\s+"([^"]+)"/g;
 
-function sourceFiles(): string[] {
+/**
+ * Build outputs and dependency trees are not source: cargo's `target/` holds
+ * dangling symlinks (a `statSync` follows them and throws), and neither it
+ * nor `node_modules/` nor `.git` may slow the walk or be treated as layers.
+ */
+const SKIP_DIRS = new Set(["target", "node_modules", ".git"]);
+
+function sourceFiles(root = "src"): string[] {
   const found: string[] = [];
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir)) {
+      if (SKIP_DIRS.has(entry)) continue;
       const full = path.join(dir, entry);
-      if (statSync(full).isDirectory()) walk(full);
+      // `lstatSync`: a dangling symlink is skipped, not followed into an error.
+      let stat;
+      try {
+        stat = lstatSync(full);
+      } catch {
+        continue;
+      }
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) walk(full);
       else if (/\.tsx?$/.test(full)) found.push(full);
     }
   };
-  walk("src");
+  walk(root);
   return found;
 }
 
@@ -262,5 +279,35 @@ describe("layering", () => {
     );
     expect([...DIRECTION_ALLOWLIST].filter((key) => !liveDirection.has(key)).sort()).toEqual([]);
     expect([...DEPTH_ALLOWLIST].filter((key) => !liveDepth.has(key)).sort()).toEqual([]);
+  });
+
+  it("skips build outputs, dependencies and version control when walking sources", () => {
+    const root = mkdtempSync(join(tmpdir(), "moxen-layers-"));
+    try {
+      // A source file the walk must find, plus lookalikes it must not: a
+      // source file under each skipped directory. `target/` also hides the
+      // case this test exists for (below): a file the walk must not read.
+      writeFileSync(join(root, "kept.ts"), "export const kept = 1;\n");
+      for (const dir of ["target", "node_modules", ".git"]) {
+        mkdirSync(join(root, dir), { recursive: true });
+        writeFileSync(join(root, dir, "skipped.ts"), "export const skipped = 1;\n");
+      }
+      expect(sourceFiles(root).map((file) => posix(file))).toEqual([posix(join(root, "kept.ts"))]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // Making a symlink needs a privilege Windows logins usually lack; the
+  // exclusion walk is pinned above on every platform.
+  it.skipIf(process.platform === "win32")("a dangling symlink is skipped, not followed", () => {
+    const root = mkdtempSync(join(tmpdir(), "moxen-layers-link-"));
+    try {
+      writeFileSync(join(root, "kept.ts"), "export const kept = 1;\n");
+      symlinkSync(join(root, "gone.ts"), join(root, "dangling.ts"));
+      expect(sourceFiles(root).map((file) => posix(file))).toEqual([posix(join(root, "kept.ts"))]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

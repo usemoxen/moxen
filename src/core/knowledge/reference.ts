@@ -4,8 +4,15 @@ import type { KnowledgePage, KnowledgeSection } from "./types.js";
 function kindText(kind: SettingKind | ListFieldKind): string {
   switch (kind.type) {
     case "enum": return `Choices: ${kind.choices.filter((choice) => !choice.hidden).map((choice) => `${choice.value} (${choice.label}${choice.description ? `: ${choice.description}` : ""})`).join("; ")}.`;
-    case "integer": return "min" in kind ? `Integer, ${kind.min} to ${kind.max}${kind.unit ? ` ${kind.unit}` : ""}.` : `Integer${kind.unit ? ` (${kind.unit})` : ""}; validated by the owning profile or server.`;
-    case "number": return "Number; validated by the owning profile or server.";
+    case "integer":
+    case "number": {
+      const name = kind.type === "integer" ? "Integer" : "Number";
+      const unit = "unit" in kind && kind.unit ? ` ${kind.unit}` : "";
+      if (kind.min !== undefined && kind.max !== undefined) return `${name}, ${kind.min} to ${kind.max}${unit}.`;
+      if (kind.min !== undefined) return `${name}, at least ${kind.min}${unit}.`;
+      if (kind.max !== undefined) return `${name}, at most ${kind.max}${unit}.`;
+      return `${name}${unit ? ` (${unit.trim()})` : ""}; validated by the owning profile or server.`;
+    }
     case "secret": return "Secret. The user enters it in masked Settings; never put a value in a model-visible command or file.";
     case "pairs": return `${kind.secret ? "Secret values; use masked Settings. " : ""}KEY=value pairs, one per line.`;
     case "words": return `Words separated by ${kind.separator === "comma" ? "commas" : "spaces (quote arguments containing spaces)"}.`;
