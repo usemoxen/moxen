@@ -759,7 +759,7 @@ export function normalizeAcpToolCall(
         ) !== null
       ) {
         const pattern =
-          asNonEmptyString(rawInput[" pattern"] ?? rawInput["pattern"] ?? rawInput["Pattern"]) ??
+          asNonEmptyString(rawInput["pattern"] ?? rawInput["Pattern"]) ??
           (/^Files named\s+"([^"]+)"/iu.exec(trimmedTitle)?.[1] ?? null);
         const searchDir = asNonEmptyString(rawInput["SearchDirectory"] ?? rawInput["searchDirectory"]);
         return {

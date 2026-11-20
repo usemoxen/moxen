@@ -1003,6 +1003,10 @@ describe("webToolSource", () => {
     expect(webToolSource("webfetch")).toBe("OpenCode");
     expect(webToolSource("websearch", "codex")).toBe("Codex");
     expect(webToolSource("webfetch", "codex")).toBe("Codex");
+    expect(webToolSource("WebSearch", "antigravity")).toBe("Antigravity");
+    expect(webToolSource("WebFetch", "antigravity")).toBe("Antigravity");
+    expect(webToolSource("WebSearch", "acp")).toBe("ACP");
+    expect(webToolSource("WebFetch", "acp/cline")).toBe("ACP");
     expect(webToolSource("mcp__exa__web_search_exa", "codex")).toBe("Exa");
     expect(webToolSource("mcp-websearch")).toBe("OpenCode");
     expect(webToolSource("default.web_search")).toBe("Moxen Harness");

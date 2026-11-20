@@ -1170,13 +1170,22 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string, o
   }
   if (action.reason !== "auto") {
     // An "ask" Moxen did not wait for: say why, so the card that never got an answer is accounted for.
+    const providerName =
+      ({
+        claude: "Claude Code",
+        codex: "Codex",
+        opencode: "OpenCode",
+        harness: "Moxen Harness",
+        antigravity: "Antigravity",
+        acp: "ACP",
+      } as Record<string, string>)[driverKey(snapshot.instanceId)] ?? snapshot.instanceId;
     await ctx.store.appendLedger(threadId, "activity", {
       id: ctx.store.newId(),
       threadId,
       turnId: null,
       kind: "notice",
       summary: action.reason === "delegated" ? "Compacting: a delegated task has no one to ask" : "Compacting: the thread is nearly full",
-      payload: { notice: "other", detail: "Claude Code's own compaction is off while Moxen compacts, so Moxen does it rather than let the next turn hit the limit." },
+      payload: { notice: "other", detail: `${providerName}'s own compaction is off while Moxen compacts, so Moxen does it rather than let the next turn hit the limit.` },
       createdAt: ctx.store.nowIso(),
     });
     ctx.store.emit(threadId, "activity");

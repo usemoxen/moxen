@@ -210,4 +210,17 @@ describe("ACP wire helpers", () => {
       input: {},
     });
   });
+
+  it("extracts Glob search pattern from rawInput.pattern cleanly", () => {
+    expect(
+      normalizeAcpToolCall("search", "Files named *.ts", {
+        pattern: "*.ts",
+        SearchDirectory: "src",
+      }),
+    ).toMatchObject({
+      canonicalTool: "Glob",
+      title: "*.ts",
+      input: { pattern: "*.ts", path: "src" },
+    });
+  });
 });

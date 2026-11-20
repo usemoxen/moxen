@@ -1036,7 +1036,11 @@ export function prettyMcpTool(tool: string): string {
 export function webToolSource(tool: string, provider?: string): string | null {
   const mcp = parseMcpToolName(tool);
   if (mcp !== null) return prettyMcpServer(mcp.server);
-  if (provider === "codex" && webToolKind(tool) !== null) return "Codex";
+  if (webToolKind(tool) !== null) {
+    if (provider === "codex") return "Codex";
+    if (provider === "antigravity") return "Antigravity";
+    if (provider === "acp" || provider?.startsWith("acp/")) return "ACP";
+  }
   const bare = tool.trim().split(".").pop() ?? "";
   if (/^Web(?:Search|Fetch)$/u.test(bare)) return "Claude Code";
   if (/^(?:mcp-)?web(?:search|fetch)$/u.test(bare)) return "OpenCode";
