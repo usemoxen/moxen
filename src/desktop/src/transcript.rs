@@ -440,7 +440,21 @@ fn call_step(call: &Call) -> Message {
             )
         }
         "command_execution" => {
-            let command = text(input, &["command"]).unwrap_or(tool);
+            if let Some(mcp_tool) = acp_mcp_tool(p, input) {
+                let args = input.get("Arguments").unwrap_or(input);
+                return step(
+                    "tool",
+                    clip(&tool_label(&mcp_tool, args)),
+                    cap(&format!("{}\n\n{output}", compact(args))),
+                    meta(elapsed(None)),
+                    failed,
+                    running,
+                );
+            }
+            let command = text(input, &["command"])
+                .or_else(|| text(input, &["CommandLine"]))
+                .or_else(|| text(p, &["title"]))
+                .unwrap_or(tool);
             let first = command
                 .lines()
                 .find(|l| !l.trim().is_empty())
@@ -497,7 +511,9 @@ fn call_step(call: &Call) -> Message {
             }
             "Grep" | "Glob" | "ToolSearch" | "WebSearch" => {
                 let what = text(input, &["pattern"])
+                    .or_else(|| text(input, &["Pattern"]))
                     .or_else(|| text(input, &["query"]))
+                    .or_else(|| text(input, &["Query"]))
                     .unwrap_or_default();
                 step(
                     "search",
@@ -520,15 +536,48 @@ fn call_step(call: &Call) -> Message {
     }
 }
 
+fn acp_mcp_tool(p: &Value, input: &Value) -> Option<String> {
+    let server = text(input, &["ServerName"]).or_else(|| text(input, &["serverName"]));
+    let tool = text(input, &["ToolName"])
+        .or_else(|| text(input, &["toolName"]))
+        .or_else(|| {
+            text(p, &["title"])
+                .and_then(|t| t.strip_prefix("MCP Tool "))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })?;
+    Some(format!("mcp__{}__{tool}", server.unwrap_or("mcp")))
+}
+
 /// `mcp__linear__get_issue` reads as `linear · get_issue`; the call's first
 /// short string argument follows, as a hint at what it was for.
 fn tool_label(tool: &str, input: &Value) -> String {
-    let name = match tool
+    let clean = tool.trim().strip_prefix("Run ").unwrap_or(tool.trim());
+    if clean == "manage_task" {
+        let action = text(input, &["Action"])
+            .or_else(|| text(input, &["action"]))
+            .unwrap_or("status");
+        let task = text(input, &["TaskId"])
+            .or_else(|| text(input, &["taskId"]))
+            .and_then(|id| id.rsplit('/').next())
+            .unwrap_or("task");
+        return match action {
+            "kill" => format!("Stopping {task}"),
+            "list" => "Listing background tasks".to_string(),
+            "send_input" => format!("Sending input to {task}"),
+            _ => format!("Checking output of {task}"),
+        };
+    }
+    let name = match clean
         .strip_prefix("mcp__")
         .and_then(|rest| rest.split_once("__"))
-    {
+        .or_else(|| {
+            clean
+                .strip_prefix("mcp_")
+                .and_then(|rest| rest.split_once('_'))
+        }) {
         Some((server, name)) => format!("{server} · {name}"),
-        None => tool.to_string(),
+        None => clean.to_string(),
     };
     let hint = input.as_object().and_then(|fields| {
         fields.values().find_map(|v| {
@@ -558,7 +607,12 @@ fn changed(tool: &str, input: &Value) -> (usize, usize, String) {
         }
     };
     match tool {
-        "Write" => one("", text(input, &["content"]).unwrap_or_default()),
+        "Write" => one(
+            "",
+            text(input, &["content"])
+                .or_else(|| text(input, &["Content"]))
+                .unwrap_or_default(),
+        ),
         "MultiEdit" => {
             for edit in input["edits"].as_array().into_iter().flatten() {
                 one(
@@ -567,11 +621,17 @@ fn changed(tool: &str, input: &Value) -> (usize, usize, String) {
                 );
             }
         }
-        _ => one(
-            text(input, &["old_string"]).unwrap_or_default(),
-            text(input, &["new_string"])
-                .unwrap_or(text(input, &["new_source"]).unwrap_or_default()),
-        ),
+        _ => {
+            let old = text(input, &["old_string"])
+                .or_else(|| text(input, &["Target"]))
+                .unwrap_or_default();
+            let new = text(input, &["new_string"])
+                .or_else(|| text(input, &["new_source"]))
+                .or_else(|| text(input, &["Replacement"]))
+                .or_else(|| text(input, &["Content"]))
+                .unwrap_or_default();
+            one(old, new);
+        }
     }
     (added, removed, shown)
 }
@@ -1018,5 +1078,73 @@ mod tests {
         };
         assert_eq!(name, "read");
         assert_eq!(summary, "…/repo/docs/contributing.md");
+    }
+
+    #[test]
+    fn antigravity_mcp_and_manage_task_rows_render_as_clean_tool_steps() {
+        let value = json!({
+            "messages": [],
+            "activities": [
+                activity("a1", "tool-call.completed", "2026-11-20T17:02:33.000Z", json!({
+                    "itemType": "command_execution",
+                    "status": "completed",
+                    "toolCallId": "c1",
+                    "title": "MCP Tool save_comment",
+                    "data": {
+                        "tool": "Bash",
+                        "state": {
+                            "status": "completed",
+                            "input": {
+                                "ServerName": "linear_linear",
+                                "ToolName": "save_comment",
+                                "Arguments": {"issueId": "MXN-432", "body": "Done"}
+                            }
+                        }
+                    }
+                })),
+                activity("a2", "tool-call.completed", "2026-11-20T17:02:49.000Z", json!({
+                    "itemType": "dynamic_tool_call",
+                    "status": "completed",
+                    "toolCallId": "c2",
+                    "title": "Run manage_task",
+                    "data": {
+                        "tool": "Run manage_task",
+                        "state": {
+                            "status": "completed",
+                            "input": {"Action": "status", "TaskId": "5bffed15/task-339"}
+                        }
+                    }
+                })),
+                activity("a3", "tool-call.completed", "2026-11-20T17:02:55.000Z", json!({
+                    "itemType": "dynamic_tool_call",
+                    "status": "completed",
+                    "toolCallId": "c3",
+                    "title": "Run mcp_linear_get_issue",
+                    "data": {
+                        "tool": "Run mcp_linear_get_issue",
+                        "state": {
+                            "status": "completed",
+                            "input": {"id": "MXN-432"}
+                        }
+                    }
+                })),
+            ],
+        });
+        let rows = project(&value);
+        let summaries: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| match &r.message {
+                Message::Tool { name, summary, .. } => (name.as_str(), summary.as_str()),
+                _ => panic!("expected tool row"),
+            })
+            .collect();
+        assert_eq!(
+            summaries,
+            vec![
+                ("tool", "linear_linear · save_comment  MXN-432"),
+                ("tool", "Checking output of task-339"),
+                ("tool", "linear · get_issue  MXN-432"),
+            ]
+        );
     }
 }

@@ -878,6 +878,25 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       record("subagent", `${event.agentType} ${event.status}`, subagentPayload(event));
       return;
     }
+    if (
+      (event.type === "tool.execute.updated" || event.type === "tool.execute.completed") &&
+      (recordingTurns.get(threadId) ?? 0) === 0
+    ) {
+      // A backgrounded tool call (e.g. an ACP `run_command` that exceeded
+      // `WaitMsBeforeAsync`) can finish after its turn settled. Record the
+      // completion row here so `collapseToolActivities` transitions the card
+      // from `"inProgress"` to `"completed"`.
+      let row: ReturnType<typeof toolActivityRow>;
+      try {
+        row = toolActivityRow(event);
+      } catch {
+        return;
+      }
+      if (row !== null) {
+        record(row.kind, row.summary, row.payload);
+      }
+      return;
+    }
     if (event.type === "user-input.request.opened" && (recordingTurns.get(threadId) ?? 0) === 0) {
       const row = userInputActivityRow(event);
       if (row?.payload.delivery === "async" && !lateQuestions.has(row.key)) {

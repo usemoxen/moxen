@@ -384,7 +384,15 @@ function shortenPath(value: string): string {
 }
 
 function shortInputPath(input: Record<string, unknown>): string | null {
-  const raw = asString(input.path);
+  const raw =
+    asString(input.path) ??
+    asString(input.Path) ??
+    asString(input.SearchPath) ??
+    asString(input.searchPath) ??
+    asString(input.SearchDirectory) ??
+    asString(input.searchDirectory) ??
+    asString(input.DirectoryPath) ??
+    asString(input.directoryPath);
   return raw === null ? null : shortenPath(raw);
 }
 
@@ -403,8 +411,15 @@ export function activityFilePath(activity: ActivityEnvelope): string | null {
   const input = asRecord(state.input) ?? asRecord(data.input) ?? {};
   const files = Array.isArray(data.files) ? data.files : [];
   const firstFile = asString(asRecord(files[0])?.path);
-  const inputPath = asString(input.file_path) ?? asString(input.filePath) ?? asString(input.path);
-  const title = asString(payload.title) ?? asString(activity.summary) ?? "";
+  const inputPath =
+    asString(input.file_path) ??
+    asString(input.filePath) ??
+    asString(input.path) ??
+    asString(input.Path);
+  const title = (asString(payload.title) ?? asString(activity.summary) ?? "").replace(
+    /^(?:File|Read|Directory)\s+/iu,
+    "",
+  );
   const titlePath = looksLikePath(title) ? title : null;
   return firstFile ?? inputPath ?? titlePath;
 }
@@ -624,6 +639,25 @@ const FRIENDLY_TOOL_TITLES: Record<string, string> = {
   monitor: "Monitoring process",
   taskoutput: "Checking task output",
   taskstop: "Stopping task",
+  managetask: "Managing background task",
+  manage_task: "Managing background task",
+  invokesubagent: "Delegating to subagent",
+  invoke_subagent: "Delegating to subagent",
+  definesubagent: "Defining subagent",
+  define_subagent: "Defining subagent",
+  managesubagents: "Managing subagents",
+  manage_subagents: "Managing subagents",
+  send_message: "Messaging agent",
+  schedule: "Scheduling wakeup",
+  runworkflow: "Running workflow",
+  run_workflow: "Running workflow",
+  swarm: "Managing swarm",
+  askquestion: "Asking question",
+  ask_question: "Asking question",
+  listresources: "Listing resources",
+  list_resources: "Listing resources",
+  readresource: "Reading resource",
+  read_resource: "Reading resource",
 };
 
 /**
@@ -960,8 +994,11 @@ function codeModeCalls(code: string): string {
  * as `plugin_<plugin>_<server>`. Neither reads well verbatim.
  */
 export function parseMcpToolName(name: string): { server: string; tool: string } | null {
-  const match = /^mcp__(.+?)__(.+)$/u.exec(name.trim());
-  return match === null ? null : { server: match[1]!, tool: match[2]! };
+  const clean = name.trim().replace(/^Run\s+/iu, "");
+  const match = /^mcp__(.+?)__(.+)$/u.exec(clean);
+  if (match !== null) return { server: match[1]!, tool: match[2]! };
+  const single = /^mcp_([a-z0-9]+)_([a-z0-9_]+)$/iu.exec(clean);
+  return single === null ? null : { server: single[1]!, tool: single[2]! };
 }
 
 /** `claude_ai_Linear` → `Linear`, `plugin_figma_figma` → `figma`, `claude_ai_Claude_Docs` → `Claude Docs`. */
@@ -1014,9 +1051,10 @@ export function prettyToolName(name: string): string {
 }
 
 function friendlyToolTitle(name: string): string {
-  const known = FRIENDLY_TOOL_TITLES[name.toLowerCase()];
+  const clean = name.trim().replace(/^Run\s+/iu, "");
+  const known = FRIENDLY_TOOL_TITLES[clean.toLowerCase()];
   if (known !== undefined) return known;
-  return prettyToolName(name);
+  return prettyToolName(clean);
 }
 
 function isRunning(payload: Record<string, unknown>): boolean {
@@ -1077,9 +1115,27 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     };
   }
 
-  const itemType = payload.itemType;
+  let itemType = payload.itemType;
+  let effectiveTool = tool;
+  let effectiveInput = input;
+  // Backward compatibility for already-recorded ACP `call_mcp_tool` rows that
+  // were misclassified as `command_execution` (`tool: "Bash"`, `title: "MCP Tool <name>"`).
   if (itemType === "command_execution") {
-    const command = asString(input.command) ?? asString(data.command) ?? title;
+    const mcpTitle = /^MCP Tool\s+(.+)$/iu.exec(title);
+    const serverName = asString(input.ServerName) ?? asString(input.serverName);
+    const toolName = asString(input.ToolName) ?? asString(input.toolName) ?? (mcpTitle ? mcpTitle[1]!.trim() : null);
+    if (mcpTitle !== null || (serverName !== null && toolName !== null)) {
+      itemType = "dynamic_tool_call";
+      effectiveTool = `mcp__${serverName ?? "mcp"}__${toolName ?? "tool"}`;
+      effectiveInput = asRecord(input.Arguments) ?? asRecord(input.arguments) ?? input;
+    }
+  }
+  if (itemType === "command_execution") {
+    const command =
+      asString(effectiveInput.command) ??
+      asString(effectiveInput.CommandLine) ??
+      asString(data.command) ??
+      title;
     const metadata = asRecord(state.metadata) ?? {};
     const time = asRecord(state.time) ?? {};
     const exit = asNumber(metadata.exit);
@@ -1090,9 +1146,9 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     const failed = !running && state.stopped !== true && ((exit !== null && exit !== 0) || state.status === "failed");
     return {
       kind: "command",
-      tool: tool ?? "bash",
+      tool: effectiveTool ?? "bash",
       command,
-      workdir: asString(input.workdir),
+      workdir: asString(effectiveInput.workdir),
       exit,
       durationMs: start !== null && end !== null && end >= start ? end - start : null,
       outputTail: failed && output.length > 0 ? lastLines(output, 3) : null,
@@ -1111,15 +1167,28 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     const files = Array.isArray(data.files) ? data.files : [];
     const firstFile = asString(asRecord(files[0])?.path);
     // OpenCode v2's `edit`/`write` name the file `path`.
-    const inputPath = asString(input.file_path) ?? asString(input.filePath) ?? asString(input.path) ?? asString(input.Path);
-    const titlePath = looksLikePath(title) ? title : null;
+    const inputPath =
+      asString(effectiveInput.file_path) ??
+      asString(effectiveInput.filePath) ??
+      asString(effectiveInput.path) ??
+      asString(effectiveInput.Path);
+    const cleanTitle = title.replace(/^(?:File|Edit|Write|Update)\s+/iu, "");
+    const titlePath = looksLikePath(cleanTitle) ? cleanTitle : null;
     // In-flight rows ("edit" title, empty input) genuinely have no path yet;
     // completed provider-native rows recover it from the `detail` echo.
     const filePath = firstFile ?? inputPath ?? titlePath ?? "…";
-    const oldString = asString(input.old_string) ?? asString(input.oldString);
-    const newString = asString(input.new_string) ?? asString(input.newString) ?? asString(input.content);
+    const oldString =
+      asString(effectiveInput.old_string) ??
+      asString(effectiveInput.oldString) ??
+      asString(effectiveInput.Target);
+    const newString =
+      asString(effectiveInput.new_string) ??
+      asString(effectiveInput.newString) ??
+      asString(effectiveInput.Replacement) ??
+      asString(effectiveInput.content) ??
+      asString(effectiveInput.Content);
     const path = filePath === "…" ? filePath : shortenPath(filePath);
-    const rawVerb = (tool ?? (looksLikePath(title) ? "edit" : title)).toLowerCase();
+    const rawVerb = (effectiveTool ?? (looksLikePath(cleanTitle) ? "edit" : cleanTitle)).toLowerCase();
     // `apply_patch` is OpenCode's patch-based edit tool — same "changed this
     // file" verb as Claude's Edit/MultiEdit, just a different name.
     const verb =
@@ -1173,7 +1242,9 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
   }
 
   if (itemType === "dynamic_tool_call" || itemType === "collab_agent_tool_call") {
-    const display = tool ?? "tool";
+    const rawDisplay = effectiveTool ?? "tool";
+    const display = rawDisplay.replace(/^Run\s+/iu, "").trim() || rawDisplay;
+    const input = effectiveInput;
     const name = display.toLowerCase();
     const moxenTool = moxenToolName(display);
     if (moxenTool === "knowledge_search" || moxenTool === "knowledge_read") {
@@ -1200,9 +1271,9 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     // Claude's Agent tool: say which subagent and what for, not its whole
     // prompt (the subagent reads that; the transcript needs the gist).
     // OpenCode's `subagent` tool is the same thing: `agent` names which one.
-    if (name === "agent" || name === "task" || name === "subagent") {
-      const type = asString(input.subagent_type) ?? asString(input.agent);
-      const description = asString(input.description);
+    if (name === "agent" || name === "task" || name === "subagent" || name === "invoke_subagent") {
+      const type = asString(input.subagent_type) ?? asString(input.agent) ?? asString(input.Role) ?? asString(input.TypeName);
+      const description = asString(input.description) ?? asString(input.Prompt);
       if (type !== null || description !== null) {
         // A background subagent's own run, folded in from its task rows
         // (`withSubagentState`): the call returns at launch, the work after.
@@ -1229,6 +1300,24 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     // no file path; it is a generic tool call, not the file Read view.
     const mcpTool = parseMcpToolName(display) !== null;
     const short = name.split(/[^a-z]+/).filter((part) => part.length > 0).pop() ?? name;
+    if ((short === "list" || (short === "read" && (/^Directory\s+/iu.test(title) || asString(input.DirectoryPath) !== null || asString(input.directoryPath) !== null))) && !mcpTool) {
+      const files = Array.isArray(data.files) ? data.files : [];
+      const firstFile = asString(asRecord(files[0])?.path);
+      const cleanDirTitle = title.replace(/^Directory\s+/iu, "").trim();
+      const dirPath =
+        asString(input.DirectoryPath) ??
+        asString(input.directoryPath) ??
+        asString(input.path) ??
+        asString(input.Path) ??
+        firstFile ??
+        (looksLikePath(cleanDirTitle) ? cleanDirTitle : null) ??
+        "…";
+      return {
+        kind: "list",
+        path: dirPath === "…" ? dirPath : shortenPath(dirPath),
+        running,
+      };
+    }
     if (short === "read" && !mcpTool) {
       // Claude's real Read tool call uses the snake_case `file_path` param
       // (same as Edit/Write); only checking `filePath` here always missed it
@@ -1264,7 +1353,7 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     if (short === "grep") {
       return {
         kind: "grep",
-        pattern: asString(input.pattern) ?? title,
+        pattern: asString(input.pattern) ?? asString(input.Pattern) ?? asString(input.query) ?? asString(input.Query) ?? title,
         scope: asString(input.include) ?? shortInputPath(input),
         running,
       };
@@ -1272,7 +1361,7 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     if (short === "glob") {
       return {
         kind: "grep",
-        pattern: asString(input.pattern) ?? title,
+        pattern: asString(input.pattern) ?? asString(input.Pattern) ?? title,
         scope: shortInputPath(input),
         running,
       };
@@ -1436,6 +1525,25 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
         kind: "tool",
         tool: `${stopping ? (running ? "Stopping" : "Stopped") : running ? "Reading output of" : "Output of"} ${taskId ?? "task"}`,
         detail: asString(payload.detail) ?? "",
+        running,
+      };
+    }
+    if (name === "manage_task" || name === "managetask") {
+      const action = (asString(input.Action) ?? asString(input.action) ?? "status").toLowerCase();
+      const rawTaskId = asString(input.TaskId) ?? asString(input.taskId) ?? asString(input.task_id);
+      const shortTaskId = rawTaskId ? (rawTaskId.split("/").pop() ?? rawTaskId) : null;
+      const verb =
+        action === "kill"
+          ? running ? "Stopping" : "Stopped"
+          : action === "list"
+            ? running ? "Listing background tasks" : "Listed background tasks"
+            : action === "send_input"
+              ? running ? "Sending input to" : "Sent input to"
+              : running ? "Checking output of" : "Checked output of";
+      return {
+        kind: "tool",
+        tool: action === "list" ? verb : `${verb} ${shortTaskId ?? "task"}`,
+        detail: "",
         running,
       };
     }

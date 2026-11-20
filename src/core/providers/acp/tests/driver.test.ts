@@ -550,4 +550,183 @@ describe("ACP crash recovery & rollback", () => {
       await Effect.runPromise(driver.stopAll());
     }
   });
+
+  it("canonicalizes ACP MCP calls, Run-prefixed tools, directory listings, URL reads, and web/glob searches", async () => {
+    const transport = new FakeAcpTransport({
+      onPrompt: (server) => {
+        // 1. Lazy call_mcp_tool emitted with kind: "execute" and title: "MCP Tool save_comment"
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc-mcp-lazy",
+          kind: "execute",
+          title: "MCP Tool save_comment",
+          status: "completed",
+          rawInput: {
+            ServerName: "linear_linear",
+            ToolName: "save_comment",
+            Arguments: { issueId: "MXN-434", body: "Done" },
+          },
+        });
+        // 2. Eager MCP tool emitted with kind: "other" and title: "Run mcp_linear_get_issue"
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc-mcp-eager",
+          kind: "other",
+          title: "Run mcp_linear_get_issue",
+          status: "completed",
+          rawInput: { id: "MXN-434", toolSummary: "Get issue" },
+        });
+        // 3. Built-in manage_task emitted with kind: "other" and title: "Run manage_task"
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc-manage",
+          kind: "other",
+          title: "Run manage_task",
+          status: "completed",
+          rawInput: { Action: "status", TaskId: "conv/task-339" },
+        });
+        // 4. list_dir emitted with kind: "read" and title: "Directory src/tui"
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc-dir",
+          kind: "read",
+          title: "Directory src/tui",
+          status: "completed",
+          rawInput: { DirectoryPath: "/Users/aaron/repo/src/tui" },
+        });
+        // 5. search_web emitted with kind: "search" and title: '"acp spec" on Web'
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc-web",
+          kind: "search",
+          title: '"acp spec" on Web',
+          status: "completed",
+          rawInput: { query: "acp spec" },
+        });
+        // 6. find_by_name emitted with kind: "search" and title: 'Files named "*.ts" in src'
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc-glob",
+          kind: "search",
+          title: 'Files named "*.ts" in src',
+          status: "completed",
+          rawInput: { Pattern: "*.ts", SearchDirectory: "src" },
+        });
+        return { stopReason: "end_turn" };
+      },
+    });
+    const driver = new AcpDriver({ transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "tools" }));
+      await driver.awaitTurn("thread-1", sent.turnId);
+      const completed = events.filter(
+        (e): e is Extract<ProviderRuntimeEvent, { readonly tool: string }> =>
+          e.type === "tool.execute.completed",
+      );
+      expect(completed.map((e) => [e.tool, (e.raw as Record<string, unknown>)["input"]])).toEqual([
+        ["mcp__linear_linear__save_comment", { issueId: "MXN-434", body: "Done" }],
+        ["mcp__linear__get_issue", { id: "MXN-434", toolSummary: "Get issue" }],
+        ["manage_task", { Action: "status", TaskId: "conv/task-339" }],
+        ["List", { DirectoryPath: "/Users/aaron/repo/src/tui", path: "/Users/aaron/repo/src/tui" }],
+        ["WebSearch", { query: "acp spec" }],
+        ["Glob", { Pattern: "*.ts", SearchDirectory: "src", pattern: "*.ts", path: "src" }],
+      ]);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("tracks backgrounded ACP commands and records out-of-turn completions and reactive wakeup turns", async () => {
+    const transport = new FakeAcpTransport({
+      onPrompt: (server) => {
+        // Start a command that remains in_progress when the turn settles (backgrounded after WaitMsBeforeAsync).
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-bg-check",
+          kind: "execute",
+          title: "bun run check",
+          status: "in_progress",
+          rawInput: {
+            CommandLine: "bun run check",
+            WaitMsBeforeAsync: 10_000,
+            toolSummary: "Full project check",
+          },
+        });
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Waiting for bun run check." },
+        });
+        return { stopReason: "end_turn" };
+      },
+    });
+    const driver = new AcpDriver({ transport, backgroundTurnIdleMs: 30 });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "check" }));
+      await driver.awaitTurn("thread-1", sent.turnId);
+
+      // The in_progress command is promoted to a live background task.
+      expect(driver.backgroundTasks("thread-1")).toMatchObject([
+        {
+          taskId: "call-bg-check",
+          taskType: "local_bash",
+          toolName: "Bash",
+          description: "Full project check",
+          command: "bun run check",
+        },
+      ]);
+      expect(events.some((e) => e.type === "background.task" && e.taskId === "call-bg-check" && e.status === "started")).toBe(true);
+
+      const server = transport.sessions[0]!.server;
+      // Now the background command finishes out-of-turn, and `agy acp` streams a reactive wakeup turn.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-bg-check",
+        status: "completed",
+        rawOutput: "Command exited with code 0.",
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Check finished cleanly." },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "All checks passed." },
+      });
+
+      await vi.waitFor(() => {
+        expect(driver.backgroundTasks("thread-1")).toEqual([]);
+        expect(
+          events.some(
+            (e) =>
+              e.type === "tool.execute.completed" &&
+              (e.raw as Record<string, unknown>)["toolCallId"] === "call-bg-check",
+          ),
+        ).toBe(true);
+        expect(events.some((e) => e.type === "turn.started" && e.origin === "background")).toBe(true);
+        expect(events.filter((e) => e.type === "turn.completed")).toHaveLength(2);
+      });
+
+      const bgStarted = events.find((e) => e.type === "turn.started" && e.origin === "background");
+      expect(bgStarted).toBeDefined();
+      if (bgStarted && bgStarted.type === "turn.started") {
+        const bgOutcome = await driver.awaitTurn("thread-1", bgStarted.turnId);
+        expect(bgOutcome.status).toBe("completed");
+        expect(bgOutcome.text).toBe("All checks passed.");
+      }
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
 });

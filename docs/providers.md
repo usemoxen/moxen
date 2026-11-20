@@ -82,6 +82,14 @@ negotiates any other protocol version is refused loudly
   `agy --print /credits --output-format json` (zero-turn local slash commands,
   no shell, no credential access) to report subscription quota windows and
   remaining credits in the Context tab and `usage.limits`.
+- **Tool canonicalization, background tasks & reactive wakeups**: `AcpDriver`
+  unwraps ACP lazy MCP calls (`call_mcp_tool` / `"MCP Tool <name>"`) and
+  `"Run mcp_<server>_<tool>"` calls into `mcp__<server>__<tool>` rows,
+  normalizes `list_dir`, `read_url_content`, `search_web`, `find_by_name`, and
+  `"Run <tool>"` orchestration calls, promotes backgrounded `run_command` /
+  `invoke_subagent` calls into `backgroundTasks(threadId)` (`background.task`
+  and `background.tasks.changed`), and records out-of-turn tool completions and
+  reactive wakeup turns (`origin: "background"`).
 
 ## Defaults
 

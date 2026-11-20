@@ -22,6 +22,7 @@ import { APP_VERSION } from "../../version.js";
 import { JsonRpcPeer } from "../stdio.js";
 import type {
   ApprovalRequestId,
+  BackgroundTaskSummary,
   ContextWindowUsage,
   ProviderAdapter,
   ProviderAdapterCapabilities,
@@ -66,6 +67,7 @@ import {
   findAcpEffortOption,
   isAcpAuthErrorText,
   isAcpSessionNotFoundText,
+  normalizeAcpToolCall,
   parseAcpAvailableCommands,
   parseAcpCatalogModels,
   parseAcpConfigOptions,
@@ -101,6 +103,8 @@ export interface AcpDriverOptions {
   readonly transport?: AcpTransport;
   readonly initializeTimeoutMs?: number;
   readonly promptTimeoutMs?: number;
+  /** Idle settle delay (ms) for out-of-turn reactive wakeup turns (`origin: "background"`). */
+  readonly backgroundTurnIdleMs?: number;
   /** Test seam for Antigravity `/usage` + `/credits` probing. */
   readonly probeUsage?: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
 }
@@ -127,10 +131,13 @@ interface AcpMessageSegment {
 
 interface AcpToolState {
   readonly toolCallId: string;
+  readonly turnId: TurnId;
+  canonicalTool: string;
   title: string;
   kind: string | null;
   status: "pending" | "in_progress" | "completed" | "failed";
   rawInput: Record<string, unknown>;
+  input: Record<string, unknown>;
   rawOutput: string | null;
   files: ReadonlyArray<{ readonly path: string; readonly diff?: string }>;
   patch: string | null;
@@ -147,6 +154,7 @@ interface AcpReasoningState {
 interface AcpTranscriptTurn {
   readonly id: TurnId;
   readonly prompt: string;
+  readonly origin?: "user" | "background";
   readonly items: AcpTranscriptItem[];
   status: "running" | TerminalTurnStatus;
   text: string;
@@ -195,11 +203,15 @@ interface AcpSession {
   readonly transcript: AcpTranscriptTurn[];
   readonly waiters: TurnWaiters<AcpTurnOutcome>;
   readonly parked: Map<ApprovalRequestId, ParkedAcpPermission>;
+  readonly backgroundTasks: Map<string, BackgroundTaskSummary>;
+  readonly backgroundTimers: Map<string, ReturnType<typeof setTimeout>>;
+  backgroundTurnIdleTimer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 15_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_BACKGROUND_TURN_IDLE_MS = 350;
 
 function toCliError(code: string, message: string, cause: unknown, agentLabel?: string): CliError {
   // Auth patterns win even over transport wrappers (`PEER_REQUEST_FAILED`).
@@ -285,6 +297,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly transport: AcpTransport;
   private readonly initializeTimeoutMs: number;
   private readonly promptTimeoutMs: number;
+  private readonly backgroundTurnIdleMs: number;
   private readonly probeUsageFn: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
   private readonly sessions = new Map<ThreadId, AcpSession>();
   /** ACP session id per Moxen thread, kept past session teardown for resume. */
@@ -305,6 +318,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SpawnAcpTransport();
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
     this.promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
+    this.backgroundTurnIdleMs = options.backgroundTurnIdleMs ?? DEFAULT_BACKGROUND_TURN_IDLE_MS;
     // When tests inject a fake transport without a custom usage probe, avoid spawning a real `agy` binary.
     this.probeUsageFn =
       options.probeUsage
@@ -412,6 +426,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
     this.sessions.get(threadId)?.context ?? null;
+
+  readonly backgroundTasks = (threadId: ThreadId): readonly BackgroundTaskSummary[] =>
+    [...(this.sessions.get(threadId)?.backgroundTasks.values() ?? [])];
 
   readonly refreshUsage = async (): Promise<{
     readonly key: string;
@@ -546,6 +563,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           transcript: [],
           waiters: new Map(),
           parked: new Map(),
+          backgroundTasks: new Map(),
+          backgroundTimers: new Map(),
+          backgroundTurnIdleTimer: null,
           closed: false,
         };
 
@@ -578,8 +598,13 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   sendTurn = (input: ProviderSendTurnInput): Effect.Effect<ProviderTurnStartResult, CliError> =>
     this.attempt("ACP_TURN_FAILED", `Could not send turn on thread ${input.threadId}`, async () => {
       const session = this.requireSession(input.threadId);
-      if (this.openTurn(session)) {
-        throw new CliError("ACP_TURN_BUSY", `Thread ${input.threadId} already has a running ACP turn.`);
+      const existingOpen = this.openTurn(session);
+      if (existingOpen) {
+        if (existingOpen.origin === "background") {
+          this.settleTurn(session, existingOpen, "completed", null);
+        } else {
+          throw new CliError("ACP_TURN_BUSY", `Thread ${input.threadId} already has a running ACP turn.`);
+        }
       }
       if (input.runtimeMode) session.runtimeMode = input.runtimeMode;
       if (input.modelSelection) {
@@ -590,6 +615,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const turn: AcpTranscriptTurn = {
         id: turnId,
         prompt: input.prompt,
+        origin: "user",
         items: [{ kind: "user", text: input.prompt }],
         status: "running",
         text: "",
@@ -973,13 +999,12 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       return;
     }
 
-    const turn = this.openTurn(session);
-    if (!turn) return;
-
     if (kind === "agent_thought_chunk") {
       const content = asRecord(update["content"]);
       const delta = asString(content?.["text"]) ?? asString(update["text"]);
       if (!delta) return;
+      const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
+      this.promoteInProgressTools(session, turn);
       this.pauseGenerationTimer(turn);
       if (!turn.activeReasoning) {
         const reasoningId = `acp-reason-${randomUUID()}`;
@@ -1006,6 +1031,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         reasoningId: turn.activeReasoning.id,
         text: delta,
       });
+      this.scheduleBackgroundTurnSettle(session);
       return;
     }
 
@@ -1013,6 +1039,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const content = asRecord(update["content"]);
       const delta = asString(content?.["text"]) ?? asString(update["text"]);
       if (!delta) return;
+      const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
+      this.promoteInProgressTools(session, turn);
       this.finishReasoning(session, turn);
       if (!turn.activeSegment) {
         const segment: AcpMessageSegment = { id: `acp-msg-${randomUUID()}`, text: "", isNote: false };
@@ -1033,10 +1061,12 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         text: delta,
         raw: update,
       });
+      this.scheduleBackgroundTurnSettle(session);
       return;
     }
 
     if (kind === "plan") {
+      const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
       const rawEntries = Array.isArray(update["entries"]) ? update["entries"] : [];
       const plan = rawEntries
         .map((entry) => {
@@ -1056,28 +1086,34 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         turnId: turn.id,
         raw: { plan },
       });
+      this.scheduleBackgroundTurnSettle(session);
       return;
     }
 
     if (kind === "tool_call" || kind === "tool_call_update") {
-      this.finishReasoning(session, turn);
-      this.flushActiveSegmentAsNote(session, turn);
-      this.pauseGenerationTimer(turn);
-
       const toolCallId = asNonEmptyString(update["toolCallId"]);
       if (!toolCallId) return;
+
+      const ownerTurn = this.findTurnWithTool(session, toolCallId);
+      const turn = ownerTurn ?? this.openTurn(session) ?? this.startOutOfTurn(session);
+      if (turn.status === "running") {
+        this.finishReasoning(session, turn);
+        this.flushActiveSegmentAsNote(session, turn);
+        this.pauseGenerationTimer(turn);
+      }
 
       const existing = turn.tools.get(toolCallId);
       const isNew = !existing;
       const now = Date.now();
       const rawKind = asNonEmptyString(update["kind"]) ?? existing?.kind ?? null;
-      const title = asNonEmptyString(update["title"]) ?? existing?.title ?? acpCanonicalToolName(rawKind, null);
+      const rawTitle = asNonEmptyString(update["title"]) ?? existing?.title ?? null;
       const rawStatus = asNonEmptyString(update["status"]);
       const status: AcpToolState["status"] =
         rawStatus === "completed" || rawStatus === "failed" || rawStatus === "in_progress" || rawStatus === "pending"
           ? rawStatus
           : existing?.status ?? "in_progress";
       const rawInput = asRecord(update["rawInput"]) ?? existing?.rawInput ?? {};
+      const normalized = normalizeAcpToolCall(rawKind, rawTitle, rawInput);
       const extracted = extractAcpToolContent(update["content"], update["locations"]);
       const rawOutputFromField =
         typeof update["rawOutput"] === "string"
@@ -1092,10 +1128,13 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
       const state: AcpToolState = {
         toolCallId,
-        title,
-        kind: rawKind,
+        turnId: turn.id,
+        canonicalTool: normalized.canonicalTool,
+        title: normalized.title,
+        kind: normalized.kind,
         status,
         rawInput,
+        input: normalized.input,
         rawOutput: output,
         files,
         patch,
@@ -1104,7 +1143,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       };
       turn.tools.set(toolCallId, state);
 
-      const canonicalTool = acpCanonicalToolName(state.kind, state.title);
+      const canonicalTool = state.canonicalTool;
       const eventType = terminal
         ? "tool.execute.completed"
         : isNew
@@ -1130,7 +1169,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           title: state.title,
           kind: state.kind,
           status: state.status,
-          input: state.rawInput,
+          input: state.input,
           output: state.rawOutput,
           files: state.files,
           patch: state.patch,
@@ -1138,7 +1177,197 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           endMs: state.endedAt,
         },
       });
+
+      if (terminal) {
+        this.clearBackgroundPromotionTimer(session, toolCallId);
+        this.finishBackgroundTask(session, state, this.openTurn(session)?.id ?? turn.id);
+      } else {
+        this.scheduleBackgroundPromotion(session, state);
+      }
+
+      this.scheduleBackgroundTurnSettle(session);
     }
+  }
+
+  private findTurnWithTool(session: AcpSession, toolCallId: string): AcpTranscriptTurn | null {
+    for (let i = session.transcript.length - 1; i >= 0; i -= 1) {
+      const turn = session.transcript[i]!;
+      if (turn.tools.has(toolCallId)) return turn;
+    }
+    return null;
+  }
+
+  private startOutOfTurn(session: AcpSession): AcpTranscriptTurn {
+    const turnId: TurnId = `acp-turn-${randomUUID()}`;
+    const turn: AcpTranscriptTurn = {
+      id: turnId,
+      prompt: "",
+      origin: "background",
+      items: [],
+      status: "running",
+      text: "",
+      error: null,
+      segments: [],
+      activeSegment: null,
+      activeReasoning: null,
+      tools: new Map(),
+      usage: null,
+      sawUsageUpdate: false,
+      generationChars: 0,
+      generationMs: 0,
+      generationStartedAt: null,
+    };
+    session.transcript.push(turn);
+    this.publish({
+      type: "turn.started",
+      provider: this.provider,
+      threadId: session.threadId,
+      turnId: turn.id,
+      origin: "background",
+    });
+    return turn;
+  }
+
+  private clearBackgroundTurnIdleTimer(session: AcpSession): void {
+    if (session.backgroundTurnIdleTimer !== null) {
+      clearTimeout(session.backgroundTurnIdleTimer);
+      session.backgroundTurnIdleTimer = null;
+    }
+  }
+
+  private scheduleBackgroundTurnSettle(session: AcpSession): void {
+    this.clearBackgroundTurnIdleTimer(session);
+    const open = this.openTurn(session);
+    if (!open || open.origin !== "background" || session.closed) return;
+    // Wait while any non-backgrounded tool call owned by this turn is still running.
+    const hasForegroundToolRunning = [...open.tools.values()].some(
+      (tool) =>
+        (tool.status === "in_progress" || tool.status === "pending") &&
+        !session.backgroundTasks.has(tool.toolCallId),
+    );
+    if (hasForegroundToolRunning) return;
+    const timer = setTimeout(() => {
+      session.backgroundTurnIdleTimer = null;
+      if (session.closed || open.status !== "running") return;
+      this.settleTurn(session, open, "completed", null);
+      if (this.provider === "antigravity") {
+        void this.refreshAntigravityUsage(session, true);
+      }
+    }, this.backgroundTurnIdleMs);
+    timer.unref?.();
+    session.backgroundTurnIdleTimer = timer;
+  }
+
+  private clearBackgroundPromotionTimer(session: AcpSession, toolCallId: string): void {
+    const timer = session.backgroundTimers.get(toolCallId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      session.backgroundTimers.delete(toolCallId);
+    }
+  }
+
+  private scheduleBackgroundPromotion(session: AcpSession, state: AcpToolState): void {
+    if (session.closed || session.backgroundTasks.has(state.toolCallId)) return;
+    if (state.canonicalTool !== "Bash" && state.canonicalTool !== "Agent") return;
+    const immediate =
+      state.canonicalTool === "Agent" ||
+      state.rawInput["IsDaemon"] === true ||
+      state.rawInput["run_in_background"] === true;
+    if (immediate) {
+      this.promoteToolToBackground(session, state);
+      return;
+    }
+    const rawWait = state.rawInput["WaitMsBeforeAsync"];
+    const waitMs =
+      typeof rawWait === "number" && Number.isFinite(rawWait) && rawWait > 0
+        ? rawWait
+        : typeof rawWait === "string" && Number.isFinite(Number(rawWait)) && Number(rawWait) > 0
+          ? Number(rawWait)
+          : null;
+    if (waitMs === null || session.backgroundTimers.has(state.toolCallId)) return;
+    const timer = setTimeout(() => {
+      session.backgroundTimers.delete(state.toolCallId);
+      if (state.status === "in_progress" || state.status === "pending") {
+        this.promoteToolToBackground(session, state);
+      }
+    }, waitMs);
+    timer.unref?.();
+    session.backgroundTimers.set(state.toolCallId, timer);
+  }
+
+  private promoteInProgressTools(session: AcpSession, turn: AcpTranscriptTurn): void {
+    for (const state of turn.tools.values()) {
+      if (state.status === "in_progress" || state.status === "pending") {
+        this.promoteToolToBackground(session, state);
+      }
+    }
+  }
+
+  private promoteToolToBackground(session: AcpSession, state: AcpToolState): void {
+    this.clearBackgroundPromotionTimer(session, state.toolCallId);
+    if (session.closed || session.backgroundTasks.has(state.toolCallId)) return;
+    if (state.status !== "in_progress" && state.status !== "pending") return;
+    if (state.canonicalTool !== "Bash" && state.canonicalTool !== "Agent") return;
+    const isAgent = state.canonicalTool === "Agent";
+    const taskType = isAgent ? "local_agent" : "local_bash";
+    const command = isAgent
+      ? (asNonEmptyString(state.input["Prompt"] ?? state.input["prompt"]) ?? null)
+      : (asNonEmptyString(state.input["command"] ?? state.input["CommandLine"]) ?? state.title);
+    const description =
+      asNonEmptyString(state.input["toolSummary"] ?? state.input["description"] ?? state.input["Role"]) ??
+      (command ? command.split("\n")[0]!.trim() : state.title);
+    const summary: BackgroundTaskSummary = {
+      taskId: state.toolCallId,
+      taskType,
+      toolName: state.canonicalTool,
+      description,
+      command,
+      startedAt: new Date(state.startedAt).toISOString(),
+      stoppable: false,
+    };
+    session.backgroundTasks.set(state.toolCallId, summary);
+    this.publish({
+      type: "background.task",
+      provider: this.provider,
+      threadId: session.threadId,
+      turnId: this.openTurn(session)?.id ?? state.turnId,
+      taskId: state.toolCallId,
+      status: "started",
+      description,
+      taskType,
+      toolUseId: state.toolCallId,
+      summary: null,
+    });
+    this.publish({
+      type: "background.tasks.changed",
+      provider: this.provider,
+      threadId: session.threadId,
+      tasks: [...session.backgroundTasks.values()],
+    });
+  }
+
+  private finishBackgroundTask(session: AcpSession, state: AcpToolState, turnId: TurnId | null): void {
+    const existing = session.backgroundTasks.get(state.toolCallId);
+    if (!existing) return;
+    session.backgroundTasks.delete(state.toolCallId);
+    this.publish({
+      type: "background.task",
+      provider: this.provider,
+      threadId: session.threadId,
+      turnId,
+      taskId: state.toolCallId,
+      status: state.status === "failed" ? "failed" : "completed",
+      description: existing.description,
+      taskType: existing.taskType,
+      toolUseId: state.toolCallId,
+      summary: null,
+    });
+    this.publish({
+      type: "background.tasks.changed",
+      provider: this.provider,
+      threadId: session.threadId,
+      tasks: [...session.backgroundTasks.values()],
+    });
   }
 
   private async handlePermissionRequest(session: AcpSession, params: unknown): Promise<unknown> {
@@ -1146,10 +1375,12 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     const toolCall = asRecord(record["toolCall"]) ?? {};
     const options = parseAcpPermissionOptions(record["options"]);
     const kind = asNonEmptyString(toolCall["kind"]);
-    const title = asNonEmptyString(toolCall["title"]) ?? acpCanonicalToolName(kind, null);
-    const toolName = acpCanonicalToolName(kind, title);
     const rawInput = asRecord(toolCall["rawInput"]) ?? {};
-    const sessionKey = `${kind ?? "tool"}:${title}`;
+    const rawTitle = asNonEmptyString(toolCall["title"]);
+    const normalized = normalizeAcpToolCall(kind, rawTitle, rawInput);
+    const title = normalized.title;
+    const toolName = normalized.canonicalTool;
+    const sessionKey = `${normalized.kind ?? "tool"}:${title}`;
 
     // Worktree isolation always wins, even in full-access mode.
     if (session.isolation) {
@@ -1279,6 +1510,10 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     raw?: unknown,
   ): void {
     if (turn.status !== "running") return;
+    this.clearBackgroundTurnIdleTimer(session);
+    if (status === "completed") {
+      this.promoteInProgressTools(session, turn);
+    }
     this.finishReasoning(session, turn);
     this.pauseGenerationTimer(turn);
     turn.activeSegment = null;
@@ -1317,6 +1552,20 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private closeSession(session: AcpSession, status: TerminalTurnStatus, error: string | null): void {
     if (session.closed) return;
     session.closed = true;
+    this.clearBackgroundTurnIdleTimer(session);
+    for (const timer of session.backgroundTimers.values()) {
+      clearTimeout(timer);
+    }
+    session.backgroundTimers.clear();
+    if (session.backgroundTasks.size > 0) {
+      session.backgroundTasks.clear();
+      this.publish({
+        type: "background.tasks.changed",
+        provider: this.provider,
+        threadId: session.threadId,
+        tasks: [],
+      });
+    }
     this.cancelAllParked(session);
     const open = this.openTurn(session);
     if (open) {

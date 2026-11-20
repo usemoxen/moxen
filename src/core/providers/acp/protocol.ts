@@ -553,28 +553,262 @@ export function acpStopReasonToStatus(stopReason: unknown): TerminalTurnStatus {
   return "completed";
 }
 
-/** Canonical Moxen tool name for an ACP `toolCall.kind`, so TUI/Desktop render identical badges & verbs. */
-export function acpCanonicalToolName(kind: string | null, title: string | null): string {
-  switch (kind) {
-    case "read":
-      return "Read";
-    case "edit":
-      return "Edit";
-    case "delete":
-      return "Edit";
-    case "move":
-      return "Edit";
-    case "search":
-      return "Grep";
-    case "execute":
-      return "Bash";
-    case "fetch":
-      return "WebFetch";
-    case "think":
-      return "Think";
-    default:
-      return title && title.length > 0 ? title : "Tool";
+export interface NormalizedAcpToolCall {
+  readonly canonicalTool: string;
+  readonly kind: string | null;
+  readonly title: string;
+  readonly input: Record<string, unknown>;
+}
+
+function unwrapMcpArguments(rawInput: Record<string, unknown>): Record<string, unknown> {
+  const rawArgs = rawInput["Arguments"] ?? rawInput["arguments"];
+  const recordArgs = asRecord(rawArgs);
+  if (recordArgs) return recordArgs;
+  if (typeof rawArgs === "string" && rawArgs.trim().startsWith("{")) {
+    try {
+      const parsed = asRecord(JSON.parse(rawArgs));
+      if (parsed) return parsed;
+    } catch {
+      // Keep rawInput when Arguments is not valid JSON.
+    }
   }
+  return rawInput;
+}
+
+function canonicalMcpName(server: string | null, tool: string): string {
+  const cleanTool = tool.trim();
+  if (/^mcp__(.+?)__(.+)$/iu.test(cleanTool)) return cleanTool;
+  if (server && server.trim().length > 0) {
+    return `mcp__${server.trim()}__${cleanTool}`;
+  }
+  const single = /^mcp_([a-z0-9]+)_([a-z0-9_]+)$/iu.exec(cleanTool);
+  if (single) {
+    return `mcp__${single[1]}__${single[2]}`;
+  }
+  return `mcp__mcp__${cleanTool}`;
+}
+
+/**
+ * Normalize an ACP `tool_call` / `tool_call_update` notification's `(kind, title, rawInput)`
+ * into Moxen's canonical tool vocabulary and unwrapped input record.
+ *
+ * Handles `agy acp` conventions from `stepview.KindTitleAndLocations`:
+ * - Lazy MCP calls (`call_mcp_tool`) arrive with `kind: "execute"`, `title: "MCP Tool <name>"`,
+ *   and `rawInput: { ServerName, ToolName, Arguments }`.
+ * - Eager MCP tools and built-in orchestration tools arrive with `kind: "other"` and
+ *   `title: "Run <tool>"` (e.g. `"Run mcp_linear_get_issue"`, `"Run manage_task"`).
+ * - `list_dir` arrives with `kind: "read"` and `title: "Directory <path>"`.
+ * - `read_url_content` arrives with `kind: "read"` and `title: "URL <url>"`.
+ * - `search_web` arrives with `kind: "search"` and `title: "<query> on Web"`.
+ * - `find_by_name` arrives with `kind: "search"` and `title: "Files named <pattern>"`.
+ * - `write_file` arrives with `kind: "edit"` and `Content` (without `Target`/`old_string`).
+ * - `run_command` passes PascalCase `CommandLine`.
+ */
+export function normalizeAcpToolCall(
+  kind: string | null,
+  title: string | null,
+  rawInput: Record<string, unknown> = {},
+): NormalizedAcpToolCall {
+  const trimmedTitle = title?.trim() ?? "";
+
+  // 1. Lazy MCP tool call (`call_mcp_tool` / `"MCP Tool <name>"`).
+  const mcpTitleMatch = /^MCP Tool\s+(.+)$/iu.exec(trimmedTitle);
+  const inputServer = asNonEmptyString(
+    rawInput["ServerName"] ?? rawInput["serverName"] ?? rawInput["server_name"],
+  );
+  const inputTool = asNonEmptyString(
+    rawInput["ToolName"] ?? rawInput["toolName"] ?? rawInput["tool_name"],
+  );
+  if (mcpTitleMatch !== null || (inputServer !== null && inputTool !== null)) {
+    const toolName = inputTool ?? asNonEmptyString(rawInput["name"]) ?? mcpTitleMatch?.[1]?.trim() ?? "tool";
+    const canonicalTool = canonicalMcpName(inputServer, toolName);
+    return {
+      canonicalTool,
+      kind: "other",
+      title: canonicalTool,
+      input: unwrapMcpArguments(rawInput),
+    };
+  }
+
+  // 2. Leading `"Run <tool>"` prefix emitted by `agy acp` for `kind: "other"` tools.
+  const runMatch = /^Run\s+(.+)$/iu.exec(trimmedTitle);
+  if (runMatch !== null && (kind === null || kind === "other")) {
+    const bare = runMatch[1]!.trim();
+    if (/^mcp__(.+?)__(.+)$/iu.test(bare)) {
+      return { canonicalTool: bare, kind: "other", title: bare, input: rawInput };
+    }
+    const singleMcp = /^mcp_([a-z0-9]+)_([a-z0-9_]+)$/iu.exec(bare);
+    if (singleMcp !== null) {
+      const canonicalTool = `mcp__${singleMcp[1]}__${singleMcp[2]}`;
+      return { canonicalTool, kind: "other", title: canonicalTool, input: rawInput };
+    }
+    const lowerBare = bare.toLowerCase();
+    if (lowerBare === "invoke_subagent") {
+      const role = asNonEmptyString(rawInput["Role"] ?? rawInput["role"] ?? rawInput["TypeName"]);
+      const prompt = asNonEmptyString(rawInput["Prompt"] ?? rawInput["prompt"]);
+      return {
+        canonicalTool: "Agent",
+        kind: "other",
+        title: role ?? "Agent",
+        input: {
+          ...rawInput,
+          ...(role && rawInput["subagent_type"] === undefined ? { subagent_type: role } : {}),
+          ...(prompt && rawInput["description"] === undefined ? { description: prompt } : {}),
+        },
+      };
+    }
+    if (lowerBare === "ask_question") {
+      return { canonicalTool: "AskUserQuestion", kind: "other", title: "AskUserQuestion", input: rawInput };
+    }
+    return { canonicalTool: bare, kind: "other", title: bare, input: rawInput };
+  }
+
+  switch (kind) {
+    case "read": {
+      if (
+        /^Directory\s+/iu.test(trimmedTitle) ||
+        asNonEmptyString(rawInput["DirectoryPath"] ?? rawInput["directoryPath"]) !== null
+      ) {
+        const clean = trimmedTitle.replace(/^Directory\s+/iu, "").trim();
+        const dirPath = asNonEmptyString(rawInput["DirectoryPath"] ?? rawInput["directoryPath"]) ?? (clean || null);
+        return {
+          canonicalTool: "List",
+          kind: "read",
+          title: clean || dirPath || "List",
+          input: dirPath && rawInput["path"] === undefined ? { ...rawInput, path: dirPath } : rawInput,
+        };
+      }
+      if (
+        /^URL\s+/iu.test(trimmedTitle) ||
+        asNonEmptyString(rawInput["Url"] ?? rawInput["url"]) !== null
+      ) {
+        const clean = trimmedTitle.replace(/^URL\s+/iu, "").trim();
+        const url = asNonEmptyString(rawInput["Url"] ?? rawInput["url"]) ?? (clean || null);
+        return {
+          canonicalTool: "WebFetch",
+          kind: "fetch",
+          title: clean || url || "WebFetch",
+          input: url && rawInput["url"] === undefined ? { ...rawInput, url } : rawInput,
+        };
+      }
+      const cleanRead = trimmedTitle.replace(/^File\s+/iu, "").trim();
+      return {
+        canonicalTool: "Read",
+        kind: "read",
+        title: cleanRead || "Read",
+        input: rawInput,
+      };
+    }
+    case "edit":
+    case "delete":
+    case "move": {
+      const cleanEdit = trimmedTitle.replace(/^File\s+/iu, "").trim();
+      const hasContent = asNonEmptyString(rawInput["Content"] ?? rawInput["content"]) !== null;
+      const hasTarget =
+        rawInput["Target"] !== undefined ||
+        rawInput["old_string"] !== undefined ||
+        rawInput["oldString"] !== undefined;
+      const canonicalTool = kind === "edit" && hasContent && !hasTarget ? "Write" : "Edit";
+      return {
+        canonicalTool,
+        kind,
+        title: cleanEdit || canonicalTool,
+        input: rawInput,
+      };
+    }
+    case "search": {
+      if (/\s+on Web$/iu.test(trimmedTitle)) {
+        const stripped = trimmedTitle.replace(/\s+on Web$/iu, "").replace(/^"(.*)"$/u, "$1").trim();
+        const query = asNonEmptyString(rawInput["query"] ?? rawInput["Query"]) ?? (stripped || trimmedTitle);
+        return {
+          canonicalTool: "WebSearch",
+          kind: "search",
+          title: query,
+          input: rawInput["query"] === undefined ? { ...rawInput, query } : rawInput,
+        };
+      }
+      if (
+        /^Files named\s+/iu.test(trimmedTitle) ||
+        asNonEmptyString(
+          rawInput["Pattern"] ?? rawInput["SearchDirectory"] ?? rawInput["searchDirectory"],
+        ) !== null
+      ) {
+        const pattern =
+          asNonEmptyString(rawInput[" pattern"] ?? rawInput["pattern"] ?? rawInput["Pattern"]) ??
+          (/^Files named\s+"([^"]+)"/iu.exec(trimmedTitle)?.[1] ?? null);
+        const searchDir = asNonEmptyString(rawInput["SearchDirectory"] ?? rawInput["searchDirectory"]);
+        return {
+          canonicalTool: "Glob",
+          kind: "search",
+          title: pattern ?? (trimmedTitle || "Glob"),
+          input: {
+            ...rawInput,
+            ...(pattern && rawInput["pattern"] === undefined ? { pattern } : {}),
+            ...(searchDir && rawInput["path"] === undefined ? { path: searchDir } : {}),
+          },
+        };
+      }
+      const query =
+        asNonEmptyString(rawInput["pattern"] ?? rawInput["Pattern"] ?? rawInput["query"] ?? rawInput["Query"]) ??
+        (/^Grep\s+"([^"]+)"/iu.exec(trimmedTitle)?.[1] ??
+          /^"([^"]+)"\s+on\s+(?:Code Search|Moma)$/iu.exec(trimmedTitle)?.[1] ??
+          null);
+      const searchPath = asNonEmptyString(rawInput["SearchPath"] ?? rawInput["searchPath"]);
+      return {
+        canonicalTool: "Grep",
+        kind: "search",
+        title: query ?? (trimmedTitle || "Grep"),
+        input: {
+          ...rawInput,
+          ...(query && rawInput["pattern"] === undefined ? { pattern: query } : {}),
+          ...(searchPath && rawInput["path"] === undefined ? { path: searchPath } : {}),
+        },
+      };
+    }
+    case "execute": {
+      const cmd =
+        asNonEmptyString(rawInput["command"] ?? rawInput["CommandLine"] ?? rawInput["commandLine"]) ??
+        (trimmedTitle || null);
+      return {
+        canonicalTool: "Bash",
+        kind: "execute",
+        title: cmd ?? "Bash",
+        input: cmd && rawInput["command"] === undefined ? { ...rawInput, command: cmd } : rawInput,
+      };
+    }
+    case "fetch":
+      return {
+        canonicalTool: "WebFetch",
+        kind: "fetch",
+        title: trimmedTitle || "WebFetch",
+        input: rawInput,
+      };
+    case "think":
+      return {
+        canonicalTool: "Think",
+        kind: "think",
+        title: trimmedTitle || "Think",
+        input: rawInput,
+      };
+    default: {
+      const fallback = trimmedTitle.length > 0 ? trimmedTitle : "Tool";
+      return {
+        canonicalTool: fallback,
+        kind,
+        title: fallback,
+        input: rawInput,
+      };
+    }
+  }
+}
+
+/** Canonical Moxen tool name for an ACP `toolCall.kind`, so TUI/Desktop render identical badges & verbs. */
+export function acpCanonicalToolName(
+  kind: string | null,
+  title: string | null,
+  rawInput?: Record<string, unknown>,
+): string {
+  return normalizeAcpToolCall(kind, title, rawInput).canonicalTool;
 }
 
 export interface AcpExtractedContent {

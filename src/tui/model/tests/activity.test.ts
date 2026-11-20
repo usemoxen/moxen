@@ -1051,4 +1051,78 @@ describe("Antigravity ACP Read rows", () => {
     } as unknown as ActivityEnvelope);
     expect(row).toMatchObject({ kind: "read", path: "docs/contributing.md" });
   });
+
+  it("renders ACP call_mcp_tool rows (even when previously recorded as command_execution) as MCP tool calls instead of Bash", () => {
+    const row = describeActivity({
+      ...activity("tool-call.completed", {
+        itemType: "command_execution",
+        status: "completed",
+        toolCallId: "call_mcp_1",
+        title: "MCP Tool save_comment",
+        data: {
+          tool: "Bash",
+          state: {
+            status: "completed",
+            input: {
+              ServerName: "linear_linear",
+              ToolName: "save_comment",
+              Arguments: { issueId: "MXN-432", body: "Work done." },
+            },
+          },
+        },
+      }),
+      summary: "$ MCP Tool save_comment",
+    } as unknown as ActivityEnvelope);
+    expect(row).toEqual({
+      kind: "tool",
+      tool: "Linear · Save comment",
+      detail: "",
+      running: false,
+    });
+  });
+
+  it("formats ACP Run-prefixed eager MCP tools and manage_task rows with friendly titles", () => {
+    const eagerMcp = describeActivity({
+      ...activity("tool-call.completed", {
+        itemType: "dynamic_tool_call",
+        status: "completed",
+        toolCallId: "call_mcp_2",
+        title: "Run mcp_linear_get_issue",
+        data: {
+          tool: "Run mcp_linear_get_issue",
+          state: { status: "completed", input: { id: "MXN-432", toolSummary: "Get issue" } },
+        },
+      }),
+      summary: "Run mcp_linear_get_issue",
+    } as unknown as ActivityEnvelope);
+    expect(eagerMcp).toEqual({
+      kind: "tool",
+      tool: "Linear · Get issue",
+      detail: "",
+      running: false,
+    });
+
+    const manageTask = describeActivity({
+      ...activity("tool-call.completed", {
+        itemType: "dynamic_tool_call",
+        status: "completed",
+        toolCallId: "call_manage_1",
+        title: "Run manage_task",
+        data: {
+          tool: "Run manage_task",
+          state: {
+            status: "completed",
+            input: { Action: "status", TaskId: "5bffed15-ca12-4cab-b582-ba2dd401a441/task-339" },
+          },
+        },
+      }),
+      summary: "Run manage_task",
+    } as unknown as ActivityEnvelope);
+    expect(manageTask).toEqual({
+      kind: "tool",
+      tool: "Checked output of task-339",
+      detail: "",
+      running: false,
+    });
+  });
 });
