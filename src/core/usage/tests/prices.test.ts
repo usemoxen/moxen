@@ -4,6 +4,32 @@ import { DEFAULT_MODEL_PRICES, modelPriceFor, priceUsage, usageCost, type ModelP
 
 const usage = { input: 1e6, cacheRead: 1e6, cacheCreate: 1e6, output: 1e6, thinking: 1e6 };
 
+// The ids Codex's live `model/list` reported (2026-11-19). Codex has no
+// bundled catalog, so the snapshot lives here: every id must have a shipped
+// price or be named in UNPRICED with a reason.
+const CODEX_MODELS = [
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
+  "gpt-6.1-terra",
+  "gpt-6.1-sol",
+  "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+];
+
+// Codex models deliberately left unpriced, with the reason. It is empty
+// today: every id Codex lists has a published API price. Add an entry only
+// when no price can be verified, never a guessed zero.
+const UNPRICED: Readonly<Record<string, string>> = {};
+
+// Claude models are deliberately not in the shipped table: Claude Code
+// reports each turn's cost, and `usageCost` prefers that reported `costUsd`
+// over any estimate, so pricing them here would only guess at a number the
+// provider already gives us.
+
 describe("model prices", () => {
   it("prices a model the user set, even one the shipped list never heard of", () => {
     const config = { providers: { opencode: { modelInputPrices: { "opencode-go/muse-spark-1.3-contributor": 2 }, modelOutputPrices: { "opencode-go/muse-spark-1.3-contributor": 10 } } } };
@@ -50,5 +76,14 @@ describe("model prices", () => {
   it("doubles the estimate for a fast-lane request", () => {
     const price = modelPriceFor({ providers: {} }, "codex", "gpt-6.1-sol");
     expect(usageCost(price, usage, true)!.usd).toBeCloseTo(usageCost(price, usage)!.usd * 2, 9);
+  });
+});
+
+describe("shipped price coverage", () => {
+  it("prices every model Codex lists, or names why it deliberately has none", () => {
+    const missing = CODEX_MODELS.filter(
+      (id) => UNPRICED[id] === undefined && modelPriceFor({ providers: {} }, "codex", id) === null,
+    );
+    expect(missing, "Codex models offered without a price or an UNPRICED reason").toEqual([]);
   });
 });

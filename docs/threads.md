@@ -1391,4 +1391,6 @@ A row you set beats Moxen's shipped price for those fields on that provider,
 so the same model can cost differently on two providers; clearing a row, or a
 model from it, returns to the shipped price. A price with only some fields
 values what it names and counts the rest as zero. Models match by the string
-Stats buckets them under, slash included.
+Stats buckets them under, slash included. Moxen's shipped table prices Codex
+models, with OpenCode's to follow; Claude Code reports each turn's cost, so
+Stats uses that report instead of estimating Claude from the table.
