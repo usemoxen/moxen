@@ -168,7 +168,8 @@ describe("background work through ClientApi", () => {
         prompt: "Watch on agy",
         wait: true,
         threadEnvMode: "local",
-        modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+        provider: "antigravity",
+        model: "gemini-4-neon",
       });
       expect(await connection.query({ type: "thread.background.list", threadId: agy.threadId })).toMatchObject({
         live: true,
@@ -181,7 +182,8 @@ describe("background work through ClientApi", () => {
         prompt: "Watch on acp",
         wait: true,
         threadEnvMode: "local",
-        modelSelection: { instanceId: "acp/cline", model: "default" },
+        provider: "acp/cline",
+        model: "default",
       });
       expect(await connection.query({ type: "thread.background.list", threadId: acp.threadId })).toMatchObject({
         live: true,
