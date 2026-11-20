@@ -16,6 +16,7 @@ import { isSecretRef, secretRef, writeSecret } from "./secrets.js";
 import { normalizePriceMap } from "./modelprices.js";
 import type {
   AcpProviderConfig,
+  AntigravityProviderConfig,
   ClaudeProviderConfig,
   CodexProviderConfig,
   CliConfig,
@@ -702,6 +703,12 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     const prices = modelPricesOf(input.harness, "providers.harness", skipped);
     if (withProfiles || defaults || models || prices) result.harness = { ...defaults, ...withProfiles, ...models, ...prices };
   });
+  if (input.antigravity !== undefined) guarded(skipped, "providers.antigravity", input.antigravity, () => {
+    const antigravity = normalizeSection<AntigravityProviderConfig>(input.antigravity, "providers.antigravity", ["binaryPath", "launchArgs", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"], skipped);
+    const models = handoffModelsOf(input.antigravity, "providers.antigravity", skipped);
+    const prices = modelPricesOf(input.antigravity, "providers.antigravity", skipped);
+    if (antigravity || models || prices) result.antigravity = { ...antigravity, ...models, ...prices };
+  });
   if (input.acp !== undefined) guarded(skipped, "providers.acp", input.acp, () => {
     const rawAcp = input.acp as Record<string, unknown>;
     let agents: AcpProviderConfig["agents"];
@@ -727,7 +734,7 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
         if (parsed.length > 0) agents = parsed;
       }
     }
-    const acp = normalizeSection<AcpProviderConfig>(input.acp, "providers.acp", ["binaryPath", "launchArgs", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"], skipped);
+    const acp = normalizeSection<AcpProviderConfig>(input.acp, "providers.acp", ["runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"], skipped);
     if (acp) delete (acp as unknown as Record<string, unknown>).agents;
     const models = handoffModelsOf(input.acp, "providers.acp", skipped);
     const prices = modelPricesOf(input.acp, "providers.acp", skipped);
@@ -735,7 +742,7 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
   });
   // A newer build's extra providers stay in the file untouched.
   for (const [kind, value] of Object.entries(input)) {
-    if (kind !== "claude" && kind !== "codex" && kind !== "opencode" && kind !== "harness" && kind !== "acp") {
+    if (kind !== "claude" && kind !== "codex" && kind !== "opencode" && kind !== "harness" && kind !== "acp" && kind !== "antigravity") {
       (result as Record<string, unknown>)[kind] = value;
     }
   }

@@ -72,8 +72,8 @@ export { LINE_PERCENT_MAX, LINE_PERCENT_MIN, LINE_TOKENS_MAX, LINE_TOKENS_MIN, c
 
 // -- what is in force, most specific first ------------------------------------
 
-export type LongThreadKind = "claude" | "codex" | "opencode" | "harness" | "acp";
-export const LONG_THREAD_KINDS: readonly LongThreadKind[] = ["claude", "codex", "opencode", "harness", "acp"];
+export type LongThreadKind = "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity";
+export const LONG_THREAD_KINDS: readonly LongThreadKind[] = ["claude", "codex", "opencode", "harness", "acp", "antigravity"];
 
 /**
  * Who compacts a long thread: the provider itself, Moxen asking first, Moxen
@@ -88,6 +88,7 @@ export const COMPACTION_MODES: Readonly<Record<LongThreadKind, readonly Compacti
   opencode: ["provider", "ask", "auto", "off"],
   harness: ["ask", "auto", "off"],
   acp: ["provider", "ask", "auto", "off"],
+  antigravity: ["provider", "ask", "auto", "off"],
 };
 /** What the global Compaction means on each provider: the Harness's own compaction is its automatic one. */
 const GLOBAL_COMPACTION_ON: Readonly<Record<LongThreadKind, (mode: CompactionMode) => CompactionMode>> = {
@@ -96,9 +97,10 @@ const GLOBAL_COMPACTION_ON: Readonly<Record<LongThreadKind, (mode: CompactionMod
   opencode: (mode) => mode,
   harness: (mode) => (mode === "provider" ? "auto" : mode),
   acp: (mode) => mode,
+  antigravity: (mode) => mode,
 };
 const isCompactionMode = (value: unknown): value is CompactionMode => value === "provider" || value === "ask" || value === "auto" || value === "off";
-export const DEFAULT_COMPACTION_MODE: Readonly<Record<LongThreadKind, CompactionMode>> = { codex: "provider", claude: "ask", opencode: "provider", harness: "auto", acp: "provider" };
+export const DEFAULT_COMPACTION_MODE: Readonly<Record<LongThreadKind, CompactionMode>> = { codex: "provider", claude: "ask", opencode: "provider", harness: "auto", acp: "provider", antigravity: "provider" };
 
 export const DEFAULT_AUTO_COMPACT_PERCENT = 80;
 /** Where Moxen compacts when no tab sets a line; the Harness has its own rule by window size (`compactsettings.ts`). */
@@ -117,7 +119,7 @@ const isHandoffMode = (value: unknown): value is AutoHandoffMode => value === "o
 function kindOf(instanceId: string | undefined): LongThreadKind | undefined {
   if (instanceId === undefined) return undefined;
   const kind = driverKindOfInstance(instanceId);
-  return kind === "codex" || kind === "claude" || kind === "opencode" || kind === "harness" || kind === "acp" ? kind : undefined;
+  return kind === "codex" || kind === "claude" || kind === "opencode" || kind === "harness" || kind === "acp" || kind === "antigravity" ? kind : undefined;
 }
 
 /** The first candidate that holds a value. Within one level the newer key comes first, so it wins over the older one beside it. */

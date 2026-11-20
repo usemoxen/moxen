@@ -44,7 +44,7 @@ export interface Diagnosis {
     readonly codex?: ProviderCheck;
     readonly claude: ProviderCheck;
     readonly opencode: ProviderCheck;
-    readonly acp?: ProviderCheck;
+    readonly antigravity?: ProviderCheck;
   };
   readonly store: { readonly ok: boolean; readonly path: string };
   readonly auth: {
@@ -76,8 +76,8 @@ async function probeProvider(binary: string, login: string, minVersion?: string,
  * configured with (`providers.<name>.binaryPath`), probed here too so the check
  * and the sessions look at the same binary; unset, the one on PATH.
  */
-export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, claudeBinaryPath?: string, codexBinaryPath?: string, acpBinaryPath?: string): Promise<Diagnosis> {
-  const [git, claude, opencode, codex, acp] = await Promise.all([
+export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, claudeBinaryPath?: string, codexBinaryPath?: string, antigravityBinaryPath?: string): Promise<Diagnosis> {
+  const [git, claude, opencode, codex, antigravity] = await Promise.all([
     commandExists("git"),
     probeProvider(claudeBinaryPath ?? "claude", "inherit from `claude auth login`", CLAUDE_CODE_MIN_VERSION),
     probeProvider(
@@ -93,9 +93,9 @@ export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, c
     })(),
     (async () => {
       try {
-        const launch = acpLaunchCommand(acpBinaryPath ?? "agy", [], process.env);
-        return await probeProvider(launch.command, "inherit from `agy` login (ACP v1)", undefined, launch.args);
-      } catch { return { ok: false, installed: false, version: null, login: "inherit from `agy` login (ACP v1)" }; }
+        const launch = acpLaunchCommand(antigravityBinaryPath ?? "agy", [], process.env);
+        return await probeProvider(launch.command, "inherit from `agy` login", undefined, launch.args);
+      } catch { return { ok: false, installed: false, version: null, login: "inherit from `agy` login" }; }
     })(),
   ]);
   const storeWritable = await access(path.dirname(storeRoot), constants.W_OK)
@@ -108,7 +108,7 @@ export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, c
   return {
     node: { ok: true, version: process.version },
     git: { ok: git },
-    providers: { claude, opencode, codex, acp },
+    providers: { claude, opencode, codex, antigravity },
     store: { ok: storeWritable, path: storeRoot },
     auth: { ok: authProviders.length > 0, path: path.join(dataDir, "opencode", "opencode.db"), providers: authProviders, types },
   };

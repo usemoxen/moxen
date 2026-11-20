@@ -16,7 +16,8 @@ but never reaches upward into the server or a client
 | 2 | OpenCode | OpenCode v2 (2.0+): `opencode serve` plus the generated client | API keys; ChatGPT Pro/Plus and SuperGrok logins are built into v2 (`opencode auth login`) |
 | 3 | Codex | `codex app-server` over stdio JSON-RPC (tested on 0.166.0) | Inherited `codex login`; the CLI owns authentication |
 | 4 | Moxen Harness | Our own agent loop over an endpoint you configure (`providers.harness.profiles`): OpenAI Chat Completions, OpenAI Responses or Anthropic Messages | A key kept in the OS keychain, or read from the environment variable a profile names; never in the config file |
-| 5 | ACP (Antigravity `agy` & ACP agents) | Agent Client Protocol v1 (`protocolVersion: 1`) over stdio JSON-RPC (`agy acp` preset or custom `providers.acp.agents`) | Inherited by each ACP CLI; Moxen never reads or stores credentials |
+| 5 | Antigravity | Official `agy` CLI unmodified (`agy acp`) over pinned ACP v1 (`protocolVersion: 1`) | Inherited `agy` login; Moxen never reads or stores credentials |
+| 6 | ACP | Agent Client Protocol v1 (`protocolVersion: 1`) over stdio JSON-RPC for profiles you configure (`providers.acp.agents`, from the ACP Registry or manually) | Inherited by each ACP CLI; Moxen never reads or stores credentials |
 
 Credentials live with the provider CLIs (OpenCode keeps them in its own
 SQLite, read only as provider type). This CLI never handles their tokens; the
@@ -35,35 +36,35 @@ other OpenCode provider reports no plan windows; when the route has nothing
 to say — not signed in, no Go plan, an older server — usage is simply unknown,
 never an error.
 
-## ACP (Antigravity `agy` & ACP agents)
+## Antigravity and ACP
 
-Moxen's `acp` driver speaks **Agent Client Protocol v1** over newline-delimited
-JSON-RPC 2.0 on stdio. Moxen pins **`protocolVersion: 1`** during `initialize`:
-an agent that negotiates any other protocol version is refused loudly
+Moxen speaks **Agent Client Protocol v1** over newline-delimited JSON-RPC 2.0 on
+stdio, pinning **`protocolVersion: 1`** during `initialize`: an agent that
+negotiates any other protocol version is refused loudly
 (`ACP_PROTOCOL_VERSION_UNSUPPORTED`) rather than running in an unverified mode.
 
-- **Built-in `agy` preset**: `acp/agy` runs `agy acp` (configured with
-  `providers.acp.binaryPath` and `providers.acp.launchArgs`).
-- **Custom ACP agents**: add entries under `providers.acp.agents` (`id`, `name`,
-  `command`, `args`, `launchArgs`, `env`, `enabled`, `defaultModel`,
-  `defaultMode`). Each enabled entry is exposed as `acp/<id>`. An entry with
-  `id: "agy"` overrides (or, with `enabled: false`, disables) the built-in
-  preset. Launch arguments are tokenized into argv arrays and never joined into
-  a shell string.
-- **ACP Registry**: Moxen caches the pinned v1 ACP Registry
-  (`https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`)
-  under `<storeRoot>/cache/acp-registry.json` (with offline fallback) and
-  surfaces compatible registry agents (`binary`, `npx`, `uvx`) as `acp/<id>`,
-  keeping user-configured entries authoritative and reporting missing runtimes
-  or incompatible platforms cleanly.
-- **Worktree isolation & permissions**: when an ACP agent delegates `fs/*` or
-  `terminal/*` to the client, Moxen enforces worktree isolation on writes and
-  commands and spawns processes with `shell: false`. Permission requests
-  (`session/request_permission`) surface in Moxen's approval panel, honor
-  `acceptForSession`, and unblock cleanly on `interruptTurn`.
-- **Diagnostics**: `moxen doctor` probes the configured `agy` binary and catalog
-  discovery runs `initialize` without creating an empty session or reading
-  credentials.
+- **Antigravity (`antigravity`)**: a first-class provider alongside Claude Code,
+  Codex and OpenCode. It runs the official `agy` CLI unmodified (`agy acp`,
+  configured under `providers.antigravity.binaryPath` and
+  `providers.antigravity.launchArgs`), updates itself via
+  `moxen update antigravity` (`agy update`), and is probed by `moxen doctor`.
+- **ACP profiles (`providers.acp.agents`)**: managed like Moxen Harness
+  profiles (`providers.harness.profiles`). Add as many ACP agents as you want
+  — either picked from the pinned v1 ACP Registry
+  (`https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`,
+  cached under `<storeRoot>/cache/acp-registry.json` with offline fallback) or
+  added manually (`id`, `name`, `command`, `args`, `launchArgs`, `env`,
+  `enabled`, `defaultModel`, `defaultMode`). Each enabled profile appears as
+  `acp/<id>` in the model picker. Launch arguments are tokenized into argv
+  arrays and never joined into a shell string.
+- **Worktree isolation & permissions**: when Antigravity or an ACP agent
+  delegates `fs/*` or `terminal/*` to the client, Moxen enforces worktree
+  isolation on writes and commands and spawns processes with `shell: false`.
+  Permission requests (`session/request_permission`) surface in Moxen's
+  approval panel, honor `acceptForSession`, and unblock cleanly on
+  `interruptTurn`.
+- **Diagnostics**: `moxen doctor` probes `agy`, and catalog discovery runs
+  `initialize` without creating an empty session or reading credentials.
 
 ## Defaults
 

@@ -31,7 +31,7 @@ fn number(value: &Value, key: &str) -> Option<f64> {
 /// words, like the TUI's `SECTION_LABEL`; anything the snapshot carries that
 /// is not listed here renders at the end, so a newer server's section still
 /// shows up.
-pub const SETTING_SECTIONS: [(&str, &str); 15] = [
+pub const SETTING_SECTIONS: [(&str, &str); 16] = [
     ("general", "General"),
     ("defaults", "Defaults"),
     ("sessions", "Sessions"),
@@ -43,6 +43,7 @@ pub const SETTING_SECTIONS: [(&str, &str); 15] = [
     ("provider:claude", "Claude Code"),
     ("provider:opencode", "OpenCode"),
     ("provider:codex", "Codex"),
+    ("provider:antigravity", "Antigravity"),
     ("provider:acp", "ACP"),
     ("provider:harness", "Moxen Harness"),
     ("mcp", "MCP servers"),
@@ -860,6 +861,23 @@ pub fn mcp_document(target: &str) -> Result<String, String> {
     Ok(Value::Object(document).to_string())
 }
 
+pub fn acp_agent_document(target: &str) -> Result<String, String> {
+    let text = target.trim();
+    let mut words = text.split_whitespace();
+    let command = words.next().unwrap_or_default();
+    if command.is_empty() {
+        return Err("Type a command to launch the ACP agent.".into());
+    }
+    let mut document = serde_json::Map::new();
+    document.insert("command".into(), Value::String(command.into()));
+    let args: Vec<Value> = words.map(|word| Value::String(word.into())).collect();
+    if !args.is_empty() {
+        document.insert("args".into(), Value::Array(args));
+    }
+    document.insert("enabled".into(), Value::Bool(true));
+    Ok(Value::Object(document).to_string())
+}
+
 /// A line the settings window shows after an export or import.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsNotice {
@@ -1368,7 +1386,7 @@ pub struct ProviderLatest {
 
 impl UpdateState {
     pub fn providers_from_json(value: &Value) -> Vec<ProviderLatest> {
-        ["claude", "opencode", "codex"]
+        ["claude", "opencode", "codex", "antigravity"]
             .iter()
             .filter_map(|id| {
                 let entry = value.get(id)?;

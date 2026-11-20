@@ -485,6 +485,7 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
       native = fromClaude(event, raw);
       break;
     case "acp":
+    case "antigravity":
       native = fromAcp(event, raw);
       break;
     default:

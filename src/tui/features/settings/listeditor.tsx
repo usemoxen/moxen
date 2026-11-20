@@ -16,8 +16,11 @@ import type { ListField, ListItemView, SettingDescriptor, SettingEnds } from "..
 import type { HarnessRun } from "./useSettings.js";
 import type { DiscoverResult, DiscoveredModel } from "../../../core/types.js";
 import { MCP_PRESETS, PROVIDER_PRESETS, freeName, mcpTarget, type McpRunner, type ProviderPreset } from "../../../core/providers/harness/presets.js";
-import { filterEntries, mcpDocument, profileDocument, tokensShort } from "../../model/addwizard.js";
+import { filterEntries, acpAgentDocument, mcpDocument, profileDocument, tokensShort } from "../../model/addwizard.js";
 import type { HarnessApiFormat } from "../../../core/types.js";
+import type { QueryResult } from "../../../server/protocol.js";
+
+type AcpRegistryPreset = QueryResult<"acp.registry.list">["agents"][number];
 
 /**
  * The editor behind a list setting: today the harness profiles. Three screens
@@ -59,6 +62,7 @@ export function ListEditor({
   onTest,
   onProbe,
   onDiscover,
+  onAcpRegistry,
   onExport,
   onImport,
   notice,
@@ -82,6 +86,7 @@ export function ListEditor({
   onTest: (profileId: string, model?: string) => void;
   onProbe: (profileId: string, model?: string) => void;
   onDiscover: (baseUrl: string, apiFormat: HarnessApiFormat, apiKeyEnv?: string) => Promise<DiscoverResult>;
+  onAcpRegistry?: () => Promise<{ readonly agents: readonly AcpRegistryPreset[]; readonly source: "network" | "cache" | "empty" }>;
   onExport: (profileId: string, file: string) => void;
   onImport: (file: string) => void;
   notice: { readonly text: string; readonly error: boolean } | null;
@@ -286,6 +291,7 @@ export function ListEditor({
   const startAdd = () => {
     flow.current += 1;
     if (kind.type === "list" && kind.add === "mcp-server") return startAddMcp();
+    if (kind.type === "list" && kind.add === "acp-agent") return startAddAcp();
     const taken = new Set(items.map((item) => item.id));
     setOverlay({
       type: "pick",
@@ -407,6 +413,88 @@ export function ListEditor({
         );
       },
     });
+  };
+
+  const startAddAcp = () => {
+    const taken = new Set(items.map((item) => item.id));
+    const openPicker = (agents: readonly AcpRegistryPreset[]) => {
+      const options: EditorOption[] = [
+        ...agents.map((agent) => {
+          const detailParts = [agent.description, agent.note].filter((part): part is string => Boolean(part));
+          return {
+            value: agent.id,
+            label: agent.name,
+            description: detailParts.join(" — ") || agent.id,
+          };
+        }),
+        { value: TEXT_OPTION, label: t("le.acpCustom"), description: t("le.acpCustomHelp") },
+      ];
+      setOverlay({
+        type: "pick",
+        title: t("le.addAcp"),
+        description: t("le.addAcpHelp"),
+        options,
+        index: 0,
+        key: "",
+        custom: (option) => {
+          if (option.value === TEXT_OPTION) {
+            ask(
+              t("le.acpId"),
+              t("le.acpIdHelp"),
+              (rawId) => {
+                const id = rawId.trim().toLowerCase();
+                if (id === "") return;
+                ask(
+                  t("le.acpCommand"),
+                  t("le.acpCommandHelp"),
+                  (cmd) => {
+                    if (cmd.trim() === "") return;
+                    onSet(`${descriptor.key}[${id}]`, acpAgentDocument(cmd));
+                    onScreen({ profile: id, model: null });
+                  },
+                  "",
+                  "npx -y @example/agent --acp",
+                );
+              },
+              "",
+              "my-agent",
+            );
+            return;
+          }
+          const preset = agents.find((entry) => entry.id === option.value);
+          if (!preset) return;
+          const id = freeName(preset.id, taken);
+          const initialCmd = preset.command ? [preset.command, ...preset.args].join(" ") : "";
+          ask(
+            t("le.commandOf", { label: preset.name }),
+            preset.note ? `${t("le.acpCommandHelp")} (${preset.note})` : t("le.acpCommandHelp"),
+            (cmd) => {
+              if (cmd.trim() === "") return;
+              onSet(`${descriptor.key}[${id}]`, acpAgentDocument(cmd, { name: preset.name, ...(preset.env ? { env: preset.env } : {}) }));
+              onScreen({ profile: id, model: null });
+            },
+            initialCmd,
+            "npx -y @example/agent --acp",
+          );
+        },
+      });
+    };
+
+    if (!onAcpRegistry) {
+      openPicker([]);
+      return;
+    }
+    const mine = (flow.current += 1);
+    setOverlay({ type: "wait", title: t("le.loadingAcpRegistry"), message: t("le.loadingAcpRegistryHelp") });
+    void onAcpRegistry()
+      .then((result) => {
+        if (flow.current !== mine) return;
+        openPicker(result.agents);
+      })
+      .catch(() => {
+        if (flow.current !== mine) return;
+        openPicker([]);
+      });
   };
 
   const canTest = kind.type === "list" && kind.actions.includes("test");

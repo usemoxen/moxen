@@ -733,13 +733,14 @@ fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
     for section in snapshot.sections() {
         let category = match section {
             "provider:harness" => "Moxen Harness",
-            "provider:claude" | "provider:codex" | "provider:opencode" | "provider:acp" => {
+            "provider:acp" => "ACP",
+            "provider:claude" | "provider:codex" | "provider:opencode" | "provider:antigravity" => {
                 "Providers"
             }
             "mcp" | "skills" => "Integrations",
             _ => "Moxen",
         };
-        if section == "provider:harness" {
+        if section == "provider:harness" || section == "provider:acp" {
             let bare = snapshot
                 .settings
                 .iter()
@@ -1813,13 +1814,26 @@ fn add_buttons(
             .into_any_element(),
         );
     }
-    if key == "mcpServers" {
+    if key == "mcpServers" || key == "providers.acp.agents" {
+        let is_acp = key == "providers.acp.agents";
         let add = key.clone();
         buttons.push(
             small_button(
-                ("settings-add-mcp", 0),
-                "Add server…",
-                "Add an MCP server",
+                if is_acp {
+                    ("settings-add-acp", 0)
+                } else {
+                    ("settings-add-mcp", 0)
+                },
+                if is_acp {
+                    "Add agent…"
+                } else {
+                    "Add server…"
+                },
+                if is_acp {
+                    "Add an ACP agent profile"
+                } else {
+                    "Add an MCP server"
+                },
                 cx.listener(move |this, _, _, cx| {
                     this.settings_mcp_new = Some(McpWizard {
                         list_key: add.clone(),
@@ -2545,23 +2559,30 @@ impl Workspace {
                 wizard.name = text.to_lowercase();
                 wizard.step = 1;
             }
-            _ => match settings::mcp_document(&text) {
-                Err(message) => {
-                    self.settings_error = Some(message);
-                    return;
+            _ => {
+                let built = if wizard.list_key == "providers.acp.agents" {
+                    settings::acp_agent_document(&text)
+                } else {
+                    settings::mcp_document(&text)
+                };
+                match built {
+                    Err(message) => {
+                        self.settings_error = Some(message);
+                        return;
+                    }
+                    Ok(document) => {
+                        let key = wizard.list_key.clone();
+                        let name = wizard.name.clone();
+                        self.source
+                            .set_setting(&format!("{key}[{name}]"), &document);
+                        self.settings_mcp_new = None;
+                        self.settings_error = None;
+                        self.settings_item = Some(name);
+                        cx.notify();
+                        return;
+                    }
                 }
-                Ok(document) => {
-                    let key = wizard.list_key.clone();
-                    let name = wizard.name.clone();
-                    self.source
-                        .set_setting(&format!("{key}[{name}]"), &document);
-                    self.settings_mcp_new = None;
-                    self.settings_error = None;
-                    self.settings_item = Some(name);
-                    cx.notify();
-                    return;
-                }
-            },
+            }
         }
         self.settings_error = None;
         self.settings_mcp_new = Some(wizard);
@@ -2922,8 +2943,18 @@ fn profile_wizard_bar(w: &Workspace, wizard: &ProfileWizard, cx: &mut Context<Wo
 }
 
 fn mcp_wizard_bar(w: &Workspace, wizard: &McpWizard, cx: &mut Context<Workspace>) -> Div {
+    let is_acp = wizard.list_key == "providers.acp.agents";
     let step = if wizard.step == 0 {
-        "Name the server".to_string()
+        if is_acp {
+            "Name the ACP agent (lowercase id, becomes acp/<id>)".to_string()
+        } else {
+            "Name the server".to_string()
+        }
+    } else if is_acp {
+        format!(
+            "“{}” — command and arguments to launch the ACP agent (e.g. npx -y @example/agent --acp)",
+            wizard.name
+        )
     } else {
         format!(
             "“{}” — an http(s) address, or a command with its arguments",
@@ -3730,6 +3761,7 @@ fn providers_line(providers: &[String]) -> String {
             "claude" => "Claude Code",
             "codex" => "Codex",
             "opencode" => "OpenCode",
+            "antigravity" => "Antigravity",
             "acp" => "ACP",
             "harness" => "Moxen Harness",
             other => other,
@@ -3966,6 +3998,7 @@ fn provider_row(
         "claude" => "Claude Code",
         "codex" => "Codex",
         "opencode" => "OpenCode",
+        "antigravity" => "Antigravity",
         "acp" => "ACP",
         _ => provider.id.as_str(),
     };

@@ -31,7 +31,7 @@ export interface ImprovePromptInput {
 /** The provider and model the improver runs on, resolved from its own settings. */
 export interface PromptImproverSelection {
   readonly instanceId: string;
-  readonly provider: "claude" | "codex" | "opencode" | "harness" | "acp";
+  readonly provider: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity";
   readonly model: string;
 }
 

@@ -125,33 +125,15 @@ export interface ResolvedAcpAgent extends AcpAgentLaunchSpec {
 }
 
 /**
- * Resolve all enabled ACP agents from `providers.acp`:
- * - Built-in `agy` preset (`binaryPath` or `"agy"`, `["acp", ...launchArgs]`),
- *   unless overridden or disabled by a custom entry with `id: "agy"`.
- * - Every enabled custom entry in `providers.acp.agents`.
+ * Resolve all enabled ACP profiles from `providers.acp.agents` (just like
+ * `providers.harness.profiles`). Antigravity (`agy`) is its own first-class
+ * provider under `providers.antigravity`, not an implicit ACP profile.
  */
 export function resolveAcpAgents(
   config: AcpProviderConfig | undefined,
 ): ResolvedAcpAgent[] {
   const custom = config?.agents ?? [];
-  const byId = new Map<string, AcpAgentConfig>();
-  for (const entry of custom) {
-    byId.set(entry.id.trim().toLowerCase(), entry);
-  }
-
   const resolved: ResolvedAcpAgent[] = [];
-  const agyOverride = byId.get(AGY_ACP_LAUNCH_SPEC.id);
-  if (!agyOverride) {
-    const command = expandHome(config?.binaryPath?.trim() || AGY_ACP_LAUNCH_SPEC.command);
-    const extra = config?.launchArgs?.trim() ? tokenizeLaunchArgs(config.launchArgs.trim()) : [];
-    resolved.push({
-      id: AGY_ACP_LAUNCH_SPEC.id,
-      name: AGY_ACP_LAUNCH_SPEC.name ?? "Antigravity (agy)",
-      command,
-      args: [...AGY_ACP_LAUNCH_SPEC.args, ...extra],
-      isPreset: true,
-    });
-  }
 
   for (const entry of custom) {
     if (entry.enabled === false) continue;

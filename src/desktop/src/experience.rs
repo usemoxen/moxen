@@ -115,6 +115,7 @@ fn reset_key(path: &str) -> Option<String> {
     }
     if let Some(id) = path
         .strip_prefix("providers.harness.profiles[")
+        .or_else(|| path.strip_prefix("providers.acp.agents["))
         .and_then(|rest| rest.strip_suffix(']'))
     {
         return (!id.is_empty() && !id.contains(']') && !id.bytes().all(|c| c.is_ascii_digit()))
