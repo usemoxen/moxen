@@ -815,6 +815,7 @@ export interface AcpExtractedContent {
   readonly output: string | null;
   readonly files: ReadonlyArray<{ readonly path: string; readonly diff?: string }>;
   readonly patch: string | null;
+  readonly terminalId: string | null;
 }
 
 /**
@@ -829,6 +830,7 @@ export function extractAcpToolContent(
   const files: Array<{ path: string; diff?: string }> = [];
   const patches: string[] = [];
   const seenFiles = new Set<string>();
+  let terminalId: string | null = null;
 
   if (Array.isArray(content)) {
     for (const entry of content) {
@@ -859,7 +861,7 @@ export function extractAcpToolContent(
       }
       if (type === "terminal") {
         const termId = asNonEmptyString(item["terminalId"]);
-        if (termId) texts.push(`[terminal ${termId}]`);
+        if (termId) terminalId = termId;
       }
     }
   }
@@ -879,6 +881,7 @@ export function extractAcpToolContent(
     output: texts.length > 0 ? texts.join("\n") : null,
     files,
     patch: patches.length > 0 ? patches.join("\n") : null,
+    terminalId,
   };
 }
 

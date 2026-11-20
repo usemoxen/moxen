@@ -91,8 +91,13 @@ negotiates any other protocol version is refused loudly
   normalizes `list_dir`, `read_url_content`, `search_web`, `find_by_name`, and
   `"Run <tool>"` orchestration calls, promotes backgrounded `run_command` /
   `invoke_subagent` calls into `backgroundTasks(threadId)` (`background.task`
-  and `background.tasks.changed`), and records out-of-turn tool completions and
-  reactive wakeup turns (`origin: "background"`).
+  and `background.tasks.changed`), exposes `backgroundTaskOutput` from
+  accumulated tool updates or live client-owned `terminal/*` buffers, supports
+  `stopBackgroundTask` for client-terminal-backed tasks (while agent-internal
+  tasks like `agy`'s `run_command` remain `stoppable: false`), and records
+  out-of-turn tool completions and reactive wakeup turns
+  (`origin: "background"`). ACP v1 has no conversation rewind RPC, so
+  `AcpDriver` declares `supportsConversationRollback: false`.
 
 ## Defaults
 

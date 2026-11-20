@@ -147,6 +147,7 @@ interface AcpToolState {
   rawInput: Record<string, unknown>;
   input: Record<string, unknown>;
   rawOutput: string | null;
+  terminalId: string | null;
   files: ReadonlyArray<{ readonly path: string; readonly diff?: string }>;
   patch: string | null;
   startedAt: number;
@@ -320,6 +321,29 @@ function buildAnswerText(segments: readonly AcpMessageSegment[]): string {
   return last?.text ?? "";
 }
 
+const MAX_BACKGROUND_OUTPUT_LINES = 500;
+
+function extractRawOutputText(rawOutput: unknown): string | null {
+  if (typeof rawOutput === "string") return rawOutput;
+  const rec = asRecord(rawOutput);
+  if (rec) {
+    const output = asString(rec["output"]);
+    if (output !== null) return output;
+  }
+  if (rawOutput !== undefined && rawOutput !== null) {
+    return JSON.stringify(rawOutput);
+  }
+  return null;
+}
+
+function splitOutputLines(text: string): string[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.length > MAX_BACKGROUND_OUTPUT_LINES
+    ? lines.slice(lines.length - MAX_BACKGROUND_OUTPUT_LINES)
+    : lines;
+}
+
 function isLeadingSlashCommand(prompt: string): boolean {
   return /^\/[A-Za-z0-9_:-]+(?:\s|$)/.test(prompt.trimStart());
 }
@@ -476,6 +500,77 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
   readonly backgroundTasks = (threadId: ThreadId): readonly BackgroundTaskSummary[] =>
     [...(this.sessions.get(threadId)?.backgroundTasks.values() ?? [])];
+
+  /** Live buffer from a client-owned ACP terminal or accumulated output from `tool_call_update`. */
+  readonly backgroundTaskOutput = async (
+    threadId: ThreadId,
+    taskId: string,
+  ): Promise<{ readonly lines: readonly string[] } | null> => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return null;
+    const state = this.findTurnWithTool(session, taskId)?.tools.get(taskId) ?? null;
+    let text: string | null = null;
+    if (state?.terminalId) {
+      const termOut = session.clientHandlers.readTerminalOutput(state.terminalId);
+      if (termOut !== null && termOut.length > 0) {
+        text = termOut;
+      }
+    } else if (session.clientHandlers.hasTerminal(taskId)) {
+      const termOut = session.clientHandlers.readTerminalOutput(taskId);
+      if (termOut !== null && termOut.length > 0) {
+        text = termOut;
+      }
+    }
+    if (text === null && state?.rawOutput && state.rawOutput.length > 0) {
+      text = state.rawOutput;
+    }
+    if (text === null) return null;
+    return { lines: splitOutputLines(text) };
+  };
+
+  /** Stop a client-terminal-backed ACP background task; refuse agent-internal tasks cleanly. */
+  readonly stopBackgroundTask = (threadId: ThreadId, taskId: string): Effect.Effect<void, CliError> =>
+    this.attempt("ACP_TASK_STOP_FAILED", `Could not stop ACP background task ${taskId}`, async () => {
+      const session = this.requireSession(threadId);
+      const task = session.backgroundTasks.get(taskId);
+      if (!task) {
+        throw new CliError(
+          "BACKGROUND_TASK_NOT_FOUND",
+          `No background task ${taskId} is running on thread ${threadId}.`,
+          { exitCode: 3, details: { threadId, taskId } },
+        );
+      }
+      const state = this.findTurnWithTool(session, taskId)?.tools.get(taskId) ?? null;
+      const terminalId =
+        state?.terminalId ?? (session.clientHandlers.hasTerminal(taskId) ? taskId : null);
+      if (!task.stoppable || !terminalId || !session.clientHandlers.stopTerminal(terminalId)) {
+        throw new CliError(
+          "BACKGROUND_TASK_STOP_UNSUPPORTED",
+          `ACP agent "${session.agent.name ?? session.agent.id}" runs this background task internally and cannot stop it independently.`,
+          { exitCode: 4, details: { threadId, taskId } },
+        );
+      }
+      this.clearBackgroundPromotionTimer(session, taskId);
+      session.backgroundTasks.delete(taskId);
+      this.publish({
+        type: "background.task",
+        provider: this.provider,
+        threadId: session.threadId,
+        turnId: state?.turnId ?? null,
+        taskId,
+        status: "stopped",
+        description: task.description,
+        taskType: task.taskType,
+        toolUseId: taskId,
+        summary: null,
+      });
+      this.publish({
+        type: "background.tasks.changed",
+        provider: this.provider,
+        threadId: session.threadId,
+        tasks: [...session.backgroundTasks.values()],
+      });
+    });
 
   readonly refreshUsage = async (): Promise<{
     readonly key: string;
@@ -1256,12 +1351,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         const rawInput = asRecord(update["rawInput"]) ?? {};
         const normalized = normalizeAcpToolCall(rawKind, rawTitle, rawInput);
         const extracted = extractAcpToolContent(update["content"], update["locations"]);
-        const rawOutputFromField =
-          typeof update["rawOutput"] === "string"
-            ? update["rawOutput"]
-            : update["rawOutput"] !== undefined && update["rawOutput"] !== null
-              ? JSON.stringify(update["rawOutput"])
-              : null;
+        const rawOutputFromField = extractRawOutputText(update["rawOutput"]);
         const output = extracted.output ?? rawOutputFromField ?? null;
         const terminal = status === "completed" || status === "failed";
         const now = Date.now();
@@ -1327,13 +1417,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           ? rawStatus
           : existing?.status ?? "in_progress";
       const extracted = extractAcpToolContent(update["content"], update["locations"]);
-      const rawOutputFromField =
-        typeof update["rawOutput"] === "string"
-          ? update["rawOutput"]
-          : update["rawOutput"] !== undefined && update["rawOutput"] !== null
-            ? JSON.stringify(update["rawOutput"])
-            : null;
+      const rawOutputFromField = extractRawOutputText(update["rawOutput"]);
       const output = extracted.output ?? rawOutputFromField ?? existing?.rawOutput ?? null;
+      const terminalId = extracted.terminalId ?? existing?.terminalId ?? null;
       const files = extracted.files.length > 0 ? extracted.files : existing?.files ?? [];
       const patch = extracted.patch ?? existing?.patch ?? null;
       const terminal = status === "completed" || status === "failed";
@@ -1360,6 +1446,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         rawInput,
         input: normalized.input,
         rawOutput: output,
+        terminalId,
         files,
         patch,
         startedAt: existing?.startedAt ?? now,
@@ -1367,6 +1454,20 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         recordedInItems,
       };
       turn.tools.set(toolCallId, state);
+
+      // If an already-promoted background task just acquired a live client terminal, mark it stoppable.
+      if (!terminal && terminalId && session.clientHandlers.hasTerminal(terminalId)) {
+        const existingBg = session.backgroundTasks.get(toolCallId);
+        if (existingBg && !existingBg.stoppable) {
+          session.backgroundTasks.set(toolCallId, { ...existingBg, stoppable: true });
+          this.publish({
+            type: "background.tasks.changed",
+            provider: this.provider,
+            threadId: session.threadId,
+            tasks: [...session.backgroundTasks.values()],
+          });
+        }
+      }
 
       const canonicalTool = state.canonicalTool;
       const eventType = terminal
@@ -1542,6 +1643,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     const description =
       asNonEmptyString(state.input["toolSummary"] ?? state.input["description"] ?? state.input["Role"]) ??
       (command ? command.split("\n")[0]!.trim() : state.title);
+    const stoppable =
+      state.terminalId !== null && session.clientHandlers.hasTerminal(state.terminalId);
     const summary: BackgroundTaskSummary = {
       taskId: state.toolCallId,
       taskType,
@@ -1549,7 +1652,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       description,
       command,
       startedAt: new Date(state.startedAt).toISOString(),
-      stoppable: false,
+      stoppable,
     };
     session.backgroundTasks.set(state.toolCallId, summary);
     this.publish({

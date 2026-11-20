@@ -1420,7 +1420,7 @@ describe("driver event pump", () => {
 
     const rows = await store.readActivities(thread.id);
     const bgDone = rows.find((row) => row.kind === "background.completed");
-    const toolDone = rows.find((row) => row.kind === "tool-call.completed" && row.payload["toolCallId"] === "bg-from-t1");
+    const toolDone = rows.find((row) => row.kind === "tool-call.completed" && row.payload?.["toolCallId"] === "bg-from-t1");
     expect(bgDone?.turnId).toBe(turn1.id);
     expect(toolDone?.turnId).toBe(turn1.id);
   });

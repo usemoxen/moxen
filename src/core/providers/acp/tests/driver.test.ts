@@ -826,7 +826,10 @@ describe("ACP crash recovery & rollback", () => {
       });
 
       await vi.waitFor(() => expect(events.filter((e) => e.type === "turn.completed")).toHaveLength(1));
-      const bgStarts = events.filter((e) => e.type === "turn.started" && e.origin === "background");
+      const bgStarts = events.filter(
+        (e): e is Extract<ProviderRuntimeEvent, { readonly type: "turn.started" }> =>
+          e.type === "turn.started" && e.origin === "background",
+      );
       expect(bgStarts).toHaveLength(1);
       const outcome = await driver.awaitTurn("thread-1", bgStarts[0]!.turnId);
       expect(outcome.status).toBe("completed");
@@ -1102,8 +1105,10 @@ describe("ACP crash recovery & rollback", () => {
       server.finishPrompt("end_turn");
       await driver.awaitTurn("thread-1", sent.turnId);
 
-      const started = events.filter((e) => e.type === "tool.execute.started").map((e) => e.tool);
-      const completed = events.filter((e) => e.type === "tool.execute.completed");
+      const started = events
+        .filter((e): e is ToolRuntimeEvent => e.type === "tool.execute.started")
+        .map((e) => e.tool);
+      const completed = events.filter((e): e is ToolRuntimeEvent => e.type === "tool.execute.completed");
       expect(started).toEqual(["Agent", "WebSearch", "Glob", "List", "Write"]);
       expect(completed.map((e) => e.tool)).toEqual(["Agent", "WebSearch", "Glob", "List", "Write", "Write"]);
       const writeCompleted = completed.find(
@@ -1186,10 +1191,94 @@ describe("ACP crash recovery & rollback", () => {
       await Effect.runPromise(driver.interruptTurn("thread-1", sent.turnId));
       await vi.waitFor(() => {
         const terminalIds = events
-          .filter((e) => e.type === "tool.execute.completed")
+          .filter((e): e is ToolRuntimeEvent => e.type === "tool.execute.completed")
           .map((e) => (e.raw as Record<string, unknown>)["toolCallId"]);
         expect(terminalIds).toEqual(expect.arrayContaining(["tc-fg-bash", "tc-fg-read"]));
       });
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("exposes backgroundTaskOutput from tool_call_update and client terminals, and stops only client-terminal-backed tasks", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-bg-term-"));
+    tempDirs.push(dir);
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: dir }));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "run bg" }));
+      const server = transport.sessions[0]!.server;
+
+      // 1. Agent-internal background command (like agy's run_command): not stoppable, output from tool_call_update.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-internal",
+        kind: "execute",
+        title: "sleep 10",
+        status: "in_progress",
+        rawInput: { CommandLine: "sleep 10", IsDaemon: true },
+      });
+      await vi.waitFor(() =>
+        expect(driver.backgroundTasks("thread-1").some((t) => t.taskId === "tc-internal")).toBe(true),
+      );
+      expect(driver.backgroundTasks("thread-1").find((t) => t.taskId === "tc-internal")?.stoppable).toBe(false);
+      expect(await driver.backgroundTaskOutput("thread-1", "tc-internal")).toBeNull();
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-internal",
+        status: "in_progress",
+        rawOutput: { output: "line 1\r\nline 2\r\n", exit_code: null },
+      });
+      await vi.waitFor(async () => {
+        expect(await driver.backgroundTaskOutput("thread-1", "tc-internal")).toEqual({
+          lines: ["line 1", "line 2"],
+        });
+      });
+      expect(await codeOf(() => Effect.runPromise(driver.stopBackgroundTask("thread-1", "tc-internal")))).toBe(
+        "BACKGROUND_TASK_STOP_UNSUPPORTED",
+      );
+      expect(await codeOf(() => Effect.runPromise(driver.stopBackgroundTask("thread-1", "no-such-task")))).toBe(
+        "BACKGROUND_TASK_NOT_FOUND",
+      );
+
+      // 2. Client-owned ACP terminal task: live output from AcpClientHandlers and stoppable: true.
+      const created = (await server.ask("terminal/create", {
+        command: process.execPath,
+        args: ["-e", "process.stdout.write('term-ready\\n'); setInterval(() => {}, 10_000);"],
+        cwd: dir,
+      })) as { terminalId: string };
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-term",
+        kind: "execute",
+        title: "dev server",
+        status: "in_progress",
+        rawInput: { CommandLine: "dev server", IsDaemon: true },
+        content: [{ type: "terminal", terminalId: created.terminalId }],
+      });
+      await vi.waitFor(async () => {
+        const out = await driver.backgroundTaskOutput("thread-1", "tc-term");
+        expect(out?.lines).toContain("term-ready");
+      });
+      expect(driver.backgroundTasks("thread-1").find((t) => t.taskId === "tc-term")?.stoppable).toBe(true);
+
+      await Effect.runPromise(driver.stopBackgroundTask("thread-1", "tc-term"));
+      expect(driver.backgroundTasks("thread-1").some((t) => t.taskId === "tc-term")).toBe(false);
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === "background.task" && e.taskId === "tc-term" && e.status === "stopped")).toBe(true),
+      );
+      const exit = await server.ask("terminal/wait_for_exit", { terminalId: created.terminalId });
+      expect(exit).toBeDefined();
+
+      server.finishPrompt("end_turn");
+      await driver.awaitTurn("thread-1", sent.turnId);
     } finally {
       await Effect.runPromise(Fiber.interrupt(fiber));
       await Effect.runPromise(driver.stopAll());

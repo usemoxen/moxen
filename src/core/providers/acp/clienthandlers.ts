@@ -214,6 +214,24 @@ export class AcpClientHandlers {
     return {};
   }
 
+  hasTerminal(terminalId: string): boolean {
+    return this.terminals.has(terminalId);
+  }
+
+  readTerminalOutput(terminalId: string): string | null {
+    const terminal = this.terminals.get(terminalId);
+    return terminal ? terminal.output : null;
+  }
+
+  stopTerminal(terminalId: string): boolean {
+    const terminal = this.terminals.get(terminalId);
+    if (!terminal) return false;
+    if (!terminal.exited) {
+      killProcessTree(terminal.child, "SIGTERM");
+    }
+    return true;
+  }
+
   closeAll(): void {
     for (const terminal of this.terminals.values()) {
       if (!terminal.exited) {
