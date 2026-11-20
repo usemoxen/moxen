@@ -10,8 +10,10 @@ import { antigravityProvider, disambiguateAntigravityModelName, forgetAntigravit
 import { ANTIGRAVITY_DEFAULT_MODEL_SLUG, antigravityLaunchSpec } from "../config.js";
 import {
   ANTIGRAVITY_USAGE_PROBE_TIMEOUT_MS,
+  antigravityQuotaWindowForModel,
   forgetAntigravityUsageCache,
   parseAntigravityCreditsJson,
+  parseAntigravityQuotaError,
   parseAntigravityTier,
   parseAntigravityUsageJson,
   probeAntigravityUsage,
@@ -300,5 +302,82 @@ describe("Antigravity first-class provider", () => {
     expect(r1Dup?.credits).toBe(100);
     expect(rForced?.credits).toBe(85);
     expect(callNum).toBe(2);
+  });
+
+  it("parses Antigravity quota-exhaustion warning messages and maps them to model pools without false positives (MXN-454)", () => {
+    const now = Date.parse("2026-11-20T22:59:08.000Z");
+    const observed = parseAntigravityQuotaError(
+      "\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 17m8s.\n",
+      now,
+    );
+    expect(observed).toEqual({
+      message: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 17m8s.",
+      resetsAt: "2026-11-20T23:16:16.000Z",
+      pureWarning: true,
+    });
+
+    const withProse = parseAntigravityQuotaError(
+      "Checked the first file.\n\n⚠ You have exhausted your capacity on this model. Your quota will reset after 2h15m.\n",
+      now,
+    );
+    expect(withProse).toEqual({
+      message: "You have exhausted your capacity on this model. Your quota will reset after 2h15m.",
+      resetsAt: "2026-11-21T01:14:08.000Z",
+      pureWarning: false,
+    });
+
+    const noDuration = parseAntigravityQuotaError("⚠ Quota has been exceeded. Please try again later.", now);
+    expect(noDuration).toEqual({
+      message: "Quota has been exceeded. Please try again later.",
+      resetsAt: null,
+      pureWarning: true,
+    });
+
+    // Normal assistant prose discussing quota errors must never trigger false positives.
+    expect(
+      parseAntigravityQuotaError(
+        "I fixed the bug where '⚠ Individual quota reached. Resets in 17m8s.' completed normally.",
+        now,
+      ),
+    ).toBeNull();
+    expect(
+      parseAntigravityQuotaError(
+        "⚠ Individual quota reached. Resets in 17m8s.\nHere is how we handle that error in the driver.",
+        now,
+      ),
+    ).toBeNull();
+
+    // JSON-RPC error strings without the warning glyph still match when requireWarningPrefix is false.
+    expect(
+      parseAntigravityQuotaError("RESOURCE_EXHAUSTED: Individual quota reached. Resets in 45s.", now, {
+        requireWarningPrefix: false,
+      }),
+    ).toEqual({
+      message: "RESOURCE_EXHAUSTED: Individual quota reached. Resets in 45s.",
+      resetsAt: "2026-11-20T22:59:53.000Z",
+      pureWarning: true,
+    });
+
+    expect(antigravityQuotaWindowForModel("gemini-4-neon", "2026-11-20T23:16:16.000Z", now)).toEqual({
+      id: "gemini-5h",
+      label: "Session – Gemini",
+      usedPercent: 100,
+      exhausted: true,
+      resetsAt: "2026-11-20T23:16:16.000Z",
+    });
+    expect(antigravityQuotaWindowForModel("claude-sonnet-5-5", "2026-11-20T23:16:16.000Z", now)).toEqual({
+      id: "3p-5h",
+      label: "Session – Claude & GPT",
+      usedPercent: 100,
+      exhausted: true,
+      resetsAt: "2026-11-20T23:16:16.000Z",
+    });
+    expect(antigravityQuotaWindowForModel("gemini-4-neon", "2026-11-23T00:00:00.000Z", now)).toEqual({
+      id: "gemini-weekly",
+      label: "Weekly – Gemini",
+      usedPercent: 100,
+      exhausted: true,
+      resetsAt: "2026-11-23T00:00:00.000Z",
+    });
   });
 });

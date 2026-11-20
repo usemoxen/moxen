@@ -1424,4 +1424,91 @@ describe("driver event pump", () => {
     expect(bgDone?.turnId).toBe(turn1.id);
     expect(toolDone?.turnId).toBe(turn1.id);
   });
+
+  it("records usage.limit, fails the turn, and invokes onUsageLimit when Antigravity emits a quota warning (MXN-454)", async () => {
+    const { AcpDriver } = await import("../../providers/acp/driver.js");
+    const { FakeAcpTransport } = await import("../../providers/acp/tests/fakes.js");
+    const { resetUsageLimitsForTests, usageLimitsSnapshot } = await import("../../usage/limits.js");
+    resetUsageLimitsForTests();
+    cleanup.push(async () => {
+      resetUsageLimitsForTests();
+    });
+
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-agy-quota-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "p",
+      title: "Antigravity quota",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport, backgroundTurnIdleMs: 30 });
+    cleanup.push(() => Effect.runPromise(driver.stopAll()).catch(() => undefined));
+
+    const limitHits: Array<{ turnId: string; resetsAt: string | null }> = [];
+    const onUsageLimit = (turnId: string, resetsAt: string | null) => {
+      limitHits.push({ turnId, resetsAt });
+    };
+    await ensureDriverSession(driver, thread, { store, onUsageLimit });
+    const server = transport.sessions[0]!.server;
+
+    // 1. User turn hitting Antigravity quota exhaustion.
+    const { turn } = await sendTurn(store, thread.id, { prompt: "do work" });
+    const run = executeTurn({
+      store,
+      driver,
+      threadId: thread.id,
+      storeTurnId: turn.id,
+      prompt: "do work",
+      modelSelection: thread.modelSelection,
+      workingDirectory: root,
+      onUsageLimit,
+    });
+    await expect.poll(() => server.requestsTo("session/prompt").length).toBe(1);
+    server.notifyUpdate("acp-sess-1", {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: "\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 17m8s.\n",
+      },
+    });
+    server.finishPrompt("end_turn");
+    await run;
+
+    const storedTurn = (await store.readTurns(thread.id)).find((t) => t.id === turn.id);
+    expect(storedTurn?.status).toBe("failed");
+    expect(storedTurn?.error).toContain("Individual quota reached");
+    const activities = await store.readActivities(thread.id);
+    const limitRow = activities.find((a) => a.kind === "usage.limit" && a.turnId === turn.id);
+    expect(limitRow?.payload).toMatchObject({
+      provider: "antigravity",
+      rateLimitType: "gemini-5h",
+      label: "Session – Gemini",
+    });
+    expect(typeof limitRow?.payload?.["resetsAt"]).toBe("string");
+    expect(limitHits).toHaveLength(1);
+    expect(limitHits[0]?.turnId).toBe(turn.id);
+    expect(usageLimitsSnapshot()["antigravity"]?.windows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "gemini-5h", usedPercent: 100 })]),
+    );
+    // Retracted warning chunk must not be saved as a separate assistant reply.
+    const assistantMessages = (await store.readMessages(thread.id)).filter((m) => m.role === "assistant" && m.turnId === turn.id);
+    expect(assistantMessages).toEqual([]);
+
+    // 2. Background wakeup turn hitting quota also invokes onUsageLimit via watchDriverSession.
+    server.notifyUpdate("acp-sess-1", {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: "\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 10m.\n",
+      },
+    });
+    await expect.poll(() => limitHits.length, { timeout: 5_000 }).toBe(2);
+    await flushTurnRunners();
+    const bgTurn = (await store.readTurns(thread.id)).find((t) => t.id === limitHits[1]!.turnId);
+    expect(bgTurn?.status).toBe("failed");
+  });
 });

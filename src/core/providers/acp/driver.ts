@@ -50,10 +50,14 @@ import {
   type TurnId,
 } from "../spi.js";
 import {
+  antigravityQuotaWindowForModel,
+  parseAntigravityQuotaError,
   parseAntigravityTier,
   probeAntigravityUsage,
+  type AntigravityQuotaError,
   type AntigravityUsageSnapshot,
 } from "../antigravity/usage.js";
+import { describePauseUntil } from "../claude/usage.js";
 import {
   parkTurnWaiter,
   settleAndPublishTurn,
@@ -246,6 +250,7 @@ interface AcpSession {
   pendingInstructions: string | null;
   modes: AcpSessionModesState | null;
   configOptions: AcpConfigOption[];
+  currentModel: string | null;
   availableCommands: AcpAvailableCommand[];
   title: string | null;
   context: ContextWindowUsage | null;
@@ -590,6 +595,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.provider = options.provider ?? "acp";
     this.agents = new Map<string, AcpAgentLaunchSpec>([
       [AGY_ACP_LAUNCH_SPEC.id, AGY_ACP_LAUNCH_SPEC],
+      ...(this.provider === "antigravity" ? [["antigravity", AGY_ACP_LAUNCH_SPEC] as const] : []),
     ]);
     if (options.agents) {
       for (const [id, spec] of Object.entries(options.agents)) {
@@ -629,6 +635,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   setAgents(agents: Readonly<Record<string, AcpAgentLaunchSpec>>): void {
     this.agents.clear();
     this.agents.set(AGY_ACP_LAUNCH_SPEC.id, AGY_ACP_LAUNCH_SPEC);
+    if (this.provider === "antigravity") {
+      this.agents.set("antigravity", AGY_ACP_LAUNCH_SPEC);
+    }
     for (const [id, spec] of Object.entries(agents)) {
       this.agents.set(id.trim().toLowerCase(), spec);
     }
@@ -1163,6 +1172,10 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           pendingInstructions: !resumed && input.instructions?.trim() ? input.instructions.trim() : null,
           modes,
           configOptions,
+          currentModel:
+            input.modelSelection?.model?.trim()
+            || configOptions.find((opt) => opt.category === "model" || opt.id === "model")?.currentValue
+            || null,
           availableCommands: [],
           title: initialTitle,
           context: null,
@@ -1377,6 +1390,27 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
     const stopReason = record?.["stopReason"];
     const status = acpStopReasonToStatus(stopReason);
+    if (this.provider === "antigravity" && status === "completed") {
+      const quota = parseAntigravityQuotaError(buildAnswerText(turn.segments));
+      if (quota) {
+        if (
+          carriedInstructions !== null &&
+          session.pendingInstructions === null &&
+          quota.pureWarning &&
+          turn.tools.size === 0 &&
+          !turn.segments.some((seg) => seg.isNote)
+        ) {
+          session.pendingInstructions = carriedInstructions;
+        }
+        this.handleAntigravityQuotaHit(session, turn, quota);
+        this.settleTurn(session, turn, "failed", quota.message, {
+          ...(record ?? {}),
+          quotaExceeded: true,
+          resetsAt: quota.resetsAt,
+        });
+        return;
+      }
+    }
     const error = status === "failed" ? `ACP agent refused the turn (${String(stopReason)}).` : null;
     if (
       status === "failed" &&
@@ -1432,6 +1466,21 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     }
     const agentLabel = session.agent.name ?? session.agent.id;
     const err = toCliError("ACP_TURN_FAILED", `ACP turn failed for ${agentLabel}`, cause, agentLabel);
+    if (this.provider === "antigravity") {
+      const quota =
+        parseAntigravityQuotaError(err.message, Date.now(), { requireWarningPrefix: false }) ??
+        parseAntigravityQuotaError(buildAnswerText(turn.segments));
+      if (quota) {
+        this.handleAntigravityQuotaHit(session, turn, quota);
+        this.settleTurn(session, turn, "failed", quota.message, {
+          code: err.code,
+          message: quota.message,
+          quotaExceeded: true,
+          resetsAt: quota.resetsAt,
+        });
+        return;
+      }
+    }
     this.settleTurn(session, turn, "failed", err.message, { code: err.code, message: err.message });
   }
 
@@ -1706,6 +1755,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     const isSyntheticDefault = model === "" || model === "acp-default" || model === "antigravity-default";
 
     if (!isSyntheticDefault) {
+      session.currentModel = model;
       const modelOpt = session.configOptions.find((opt) => opt.category === "model" || opt.id === "model");
       if (modelOpt) {
         // Support legacy/CLI combined slugs such as `gemini-4-neon-high` by splitting
@@ -1715,6 +1765,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           if (split) {
             const suffix = model.slice(split.value.length + 1).trim();
             model = split.value;
+            session.currentModel = model;
             if (!effort && suffix.length > 0) effort = suffix;
           }
         }
@@ -1870,6 +1921,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     }
     if (kind === "config_option_update") {
       session.configOptions = parseAcpConfigOptions(update["configOptions"]);
+      const updatedModel = session.configOptions.find((opt) => opt.category === "model" || opt.id === "model")?.currentValue;
+      if (updatedModel) session.currentModel = updatedModel;
       return;
     }
     if (kind === "usage_update") {
@@ -2273,6 +2326,17 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     const timer = setTimeout(() => {
       session.backgroundTurnIdleTimer = null;
       if (session.closed || open.status !== "running") return;
+      if (this.provider === "antigravity") {
+        const quota = parseAntigravityQuotaError(buildAnswerText(open.segments));
+        if (quota) {
+          this.handleAntigravityQuotaHit(session, open, quota);
+          this.settleTurn(session, open, "failed", quota.message, {
+            quotaExceeded: true,
+            resetsAt: quota.resetsAt,
+          });
+          return;
+        }
+      }
       this.settleTurn(session, open, "completed", null);
       if (this.provider === "antigravity") {
         void this.refreshAntigravityUsage(session, true);
@@ -2672,11 +2736,74 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     });
   }
 
-  private async refreshAntigravityUsage(session: AcpSession, force = false): Promise<void> {
+  private handleAntigravityQuotaHit(
+    session: AcpSession,
+    turn: AcpTranscriptTurn,
+    quota: AntigravityQuotaError,
+  ): void {
+    const nowMs = Date.now();
+    const activeModel =
+      session.currentModel ??
+      session.configOptions.find((opt) => opt.category === "model" || opt.id === "model")?.currentValue ??
+      null;
+    const window = antigravityQuotaWindowForModel(activeModel, quota.resetsAt, nowMs);
+    if (quota.pureWarning) {
+      const retractedIds = turn.segments.filter((seg) => !seg.isNote).map((seg) => seg.id);
+      if (retractedIds.length > 0) {
+        for (let i = turn.segments.length - 1; i >= 0; i -= 1) {
+          if (!turn.segments[i]!.isNote) turn.segments.splice(i, 1);
+        }
+        turn.activeSegment = null;
+        this.publish({
+          type: "message.retracted",
+          provider: this.provider,
+          threadId: session.threadId,
+          turnId: turn.id,
+          messageIds: retractedIds,
+          toolUseIds: [],
+        });
+      }
+    }
+    this.publish({
+      type: "rate-limits.updated",
+      provider: this.provider,
+      threadId: session.threadId,
+      windows: [window],
+      raw: {
+        rateLimitType: window.id,
+        status: "rejected",
+        message: quota.message,
+      },
+    });
+    this.publish({
+      type: "thread.state.changed",
+      provider: this.provider,
+      threadId: session.threadId,
+      state: "rate-limited",
+      raw: {
+        rateLimitType: window.id,
+        label: window.label,
+        resetsAt: quota.resetsAt,
+        notice: describePauseUntil(quota.resetsAt, nowMs) ?? "paused",
+      },
+    });
+    void this.refreshAntigravityUsage(session, true, { bypassCoalesce: true });
+  }
+
+  private async refreshAntigravityUsage(
+    session: AcpSession,
+    force = false,
+    options?: { readonly bypassCoalesce?: boolean },
+  ): Promise<void> {
     if (this.provider !== "antigravity" || session.closed) return;
-    if (session.usageRefreshInFlight) return session.usageRefreshInFlight;
+    if (session.usageRefreshInFlight && !options?.bypassCoalesce) return session.usageRefreshInFlight;
     const now = Date.now();
-    if (force && session.lastForcedUsageRefreshAt > 0 && now - session.lastForcedUsageRefreshAt < USAGE_REFRESH_COALESCE_MS) {
+    if (
+      force &&
+      !options?.bypassCoalesce &&
+      session.lastForcedUsageRefreshAt > 0 &&
+      now - session.lastForcedUsageRefreshAt < USAGE_REFRESH_COALESCE_MS
+    ) {
       return;
     }
     if (force) session.lastForcedUsageRefreshAt = now;

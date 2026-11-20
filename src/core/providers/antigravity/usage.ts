@@ -15,6 +15,120 @@ export interface AntigravityUsageSnapshot {
   readonly credits: number | null;
 }
 
+export interface AntigravityQuotaError {
+  /** Clean error message with the leading `⚠ ` warning glyph stripped. */
+  readonly message: string;
+  /** Parsed reset timestamp (ISO-8601), or null when no duration/timestamp was given. */
+  readonly resetsAt: string | null;
+  /** True when the turn text consisted solely of the warning line (no prior assistant text). */
+  readonly pureWarning: boolean;
+}
+
+const QUOTA_ERROR_PATTERN =
+  /\b(?:individual\s+quota\s+(?:reached|exceeded|exhausted)|quota\s+(?:has\s+been\s+)?(?:reached|exceeded|exhausted)|exhausted\s+your\s+capacity|resource_exhausted|rate[\s_-]?limit(?:\s+(?:reached|exceeded|exhausted))?|usage\s+limit\s+(?:reached|exceeded))\b/i;
+
+const RELATIVE_RESET_PATTERN =
+  /(?:resets?\s+in|reset\s+after|try\s+again\s+in)\s+((?:\d+\s*(?:d|days?|h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)\s*)+)/i;
+
+const DURATION_TOKEN_PATTERN = /(\d+)\s*(d|days?|h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)/gi;
+
+const ABSOLUTE_RESET_PATTERN =
+  /(?:resets?\s+at|until)\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))/i;
+
+function parseResetTimestamp(text: string, nowMs: number): string | null {
+  const rel = RELATIVE_RESET_PATTERN.exec(text);
+  if (rel?.[1]) {
+    let totalMs = 0;
+    DURATION_TOKEN_PATTERN.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = DURATION_TOKEN_PATTERN.exec(rel[1])) !== null) {
+      const value = Number.parseInt(match[1]!, 10);
+      if (!Number.isFinite(value) || value < 0) continue;
+      const unit = match[2]!.toLowerCase();
+      if (unit.startsWith("d")) totalMs += value * 86_400_000;
+      else if (unit.startsWith("h")) totalMs += value * 3_600_000;
+      else if (unit.startsWith("m")) totalMs += value * 60_000;
+      else if (unit.startsWith("s")) totalMs += value * 1_000;
+    }
+    if (totalMs > 0) return new Date(nowMs + totalMs).toISOString();
+  }
+  const abs = ABSOLUTE_RESET_PATTERN.exec(text);
+  if (abs?.[1]) {
+    const parsed = Date.parse(abs[1]);
+    if (Number.isFinite(parsed) && parsed > nowMs) return new Date(parsed).toISOString();
+  }
+  return null;
+}
+
+/**
+ * Recognise Antigravity's quota-exhaustion error messages. Over ACP, `agy acp`
+ * formats `CORTEX_STEP_TYPE_ERROR_MESSAGE` as plain assistant text using
+ * `"\n⚠ %s\n"` (e.g. `"\n⚠ Individual quota reached. Please upgrade your
+ * subscription to increase your limits. Resets in 17m8s.\n"`) and completes
+ * the turn normally. By default (`requireWarningPrefix: true`), only a final
+ * line beginning with `⚠` matches so ordinary assistant prose discussing quota
+ * errors never false-positives.
+ */
+export function parseAntigravityQuotaError(
+  text: string,
+  nowMs: number = Date.now(),
+  options: { readonly requireWarningPrefix?: boolean } = {},
+): AntigravityQuotaError | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const requireWarningPrefix = options.requireWarningPrefix ?? true;
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return null;
+
+  const candidate = requireWarningPrefix ? lines[lines.length - 1]! : trimmed;
+  let body = candidate;
+  const hasWarningPrefix = /^⚠\uFE0F?\s+/.test(candidate);
+  if (requireWarningPrefix) {
+    if (!hasWarningPrefix) return null;
+    body = candidate.replace(/^⚠\uFE0F?\s+/, "").trim();
+  } else if (hasWarningPrefix) {
+    body = candidate.replace(/^⚠\uFE0F?\s+/, "").trim();
+  }
+  if (!body || !QUOTA_ERROR_PATTERN.test(body)) return null;
+
+  return {
+    message: body,
+    resetsAt: parseResetTimestamp(body, nowMs),
+    pureWarning: requireWarningPrefix ? lines.length === 1 : true,
+  };
+}
+
+/**
+ * Build a synthetic exhausted `RateLimitWindow` for the active Antigravity
+ * model pool so `usage-limits.json`, `standingLimit`, work-queue admission,
+ * and usage protection immediately see the hit before `/usage` finishes.
+ */
+export function antigravityQuotaWindowForModel(
+  model: string | null | undefined,
+  resetsAt: string | null,
+  nowMs: number = Date.now(),
+): RateLimitWindow {
+  const rawModel = model?.trim().toLowerCase() ?? "";
+  const isGemini =
+    !rawModel ||
+    rawModel === "default" ||
+    rawModel === "antigravity-default" ||
+    rawModel.startsWith("gemini");
+  const resetMs = resetsAt !== null ? Date.parse(resetsAt) : Number.NaN;
+  const isWeekly = Number.isFinite(resetMs) && resetMs - nowMs > 12 * 3_600_000;
+  if (isGemini) {
+    return isWeekly
+      ? { id: "gemini-weekly", label: "Weekly – Gemini", usedPercent: 100, exhausted: true, resetsAt }
+      : { id: "gemini-5h", label: "Session – Gemini", usedPercent: 100, exhausted: true, resetsAt };
+  }
+  return isWeekly
+    ? { id: "3p-weekly", label: "Weekly – Claude & GPT", usedPercent: 100, exhausted: true, resetsAt }
+    : { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 100, exhausted: true, resetsAt };
+}
+
 export type AntigravityCommandRunner = (
   command: string,
   args: readonly string[],

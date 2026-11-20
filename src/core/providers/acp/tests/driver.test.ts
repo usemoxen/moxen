@@ -2142,4 +2142,112 @@ describe("ACP native subagent status events (MXN-445)", () => {
       await Effect.runPromise(forkDriver.stopAll());
     }
   });
+
+  it("turns Antigravity quota-exhaustion replies into a rate-limit event, failed turn, and forced refresh (MXN-454)", async () => {
+    const transport = new FakeAcpTransport();
+    const probeCalls: Array<{ force?: boolean }> = [];
+    const driver = new AcpDriver({
+      provider: "antigravity",
+      transport,
+      backgroundTurnIdleMs: 30,
+      probeUsage: async (_command, _env, opts) => {
+        probeCalls.push({ ...(opts?.force !== undefined ? { force: opts.force } : {}) });
+        return {
+          windows: [
+            {
+              id: "gemini-5h",
+              label: "Session – Gemini",
+              usedPercent: 100,
+              exhausted: true,
+              resetsAt: "2026-11-20T23:16:16.000Z",
+            },
+          ],
+          credits: 50,
+        };
+      },
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(
+        driver.startSession({
+          threadId: "thread-quota",
+          workingDirectory: process.cwd(),
+          modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+        }),
+      );
+      const server = transport.sessions[0]!.server;
+
+      // 1. User turn completes with end_turn after emitting agy's warning chunk.
+      const beforeStart = Date.now();
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-quota", prompt: "keep working" }));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text: "\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 17m8s.\n",
+        },
+      });
+      server.finishPrompt("end_turn");
+      const outcome = await driver.awaitTurn("thread-quota", sent.turnId);
+      expect(outcome.status).toBe("failed");
+      expect(outcome.text).toBe("");
+      expect(outcome.error).toBe(
+        "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 17m8s.",
+      );
+      await vi.waitFor(() => {
+        expect(events.some((e) => e.type === "thread.state.changed" && e.state === "rate-limited")).toBe(true);
+        expect(probeCalls.some((c) => c.force === true)).toBe(true);
+      });
+      const rateLimited = events.find(
+        (e): e is Extract<ProviderRuntimeEvent, { type: "thread.state.changed" }> =>
+          e.type === "thread.state.changed" && e.state === "rate-limited",
+      )!;
+      const raw = rateLimited.raw as Record<string, unknown>;
+      expect(raw["rateLimitType"]).toBe("gemini-5h");
+      expect(raw["label"]).toBe("Session – Gemini");
+      expect(typeof raw["resetsAt"]).toBe("string");
+      const deltaMs = Date.parse(String(raw["resetsAt"])) - beforeStart;
+      expect(deltaMs).toBeGreaterThanOrEqual(17 * 60_000);
+      expect(deltaMs).toBeLessThanOrEqual(17 * 60_000 + 30_000);
+      expect(events.some((e) => e.type === "message.retracted")).toBe(true);
+
+      // 2. Out-of-turn background wakeup turn hitting quota also fails and emits rate-limited + forced probe (bypassing coalesce).
+      const forcedBefore = probeCalls.filter((c) => c.force === true).length;
+      events.length = 0;
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text: "\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 12m.\n",
+        },
+      });
+      await vi.waitFor(() => {
+        expect(events.some((e) => e.type === "turn.failed")).toBe(true);
+        expect(events.some((e) => e.type === "thread.state.changed" && e.state === "rate-limited")).toBe(true);
+        expect(probeCalls.filter((c) => c.force === true).length).toBeGreaterThan(forcedBefore);
+      });
+
+      // 3. Normal assistant prose mentioning quota text completes normally without rate-limiting.
+      events.length = 0;
+      const normal = await Effect.runPromise(driver.sendTurn({ threadId: "thread-quota", prompt: "explain the bug" }));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text: "The driver now handles '⚠ Individual quota reached. Resets in 17m8s.' cleanly.",
+        },
+      });
+      server.finishPrompt("end_turn");
+      const normalOutcome = await driver.awaitTurn("thread-quota", normal.turnId);
+      expect(normalOutcome.status).toBe("completed");
+      expect(normalOutcome.text).toContain("The driver now handles");
+      expect(events.some((e) => e.type === "thread.state.changed" && e.state === "rate-limited")).toBe(false);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
 });

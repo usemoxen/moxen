@@ -105,6 +105,11 @@ negotiates any other protocol version is refused loudly
   gauges track the `Gemini` pool (`5h`, `wk`, plus `Argon` once it reaches
   70%), while the extended Plan usage panel divides windows into `Gemini`
   (`5h`, `Weekly`, `Argon`) and `Claude & GPT` (`5h`, `Weekly`) subcategories.
+  When `agy acp` surfaces quota exhaustion as a warning reply (`⚠ ...`),
+  `AcpDriver` converts it into a `rate-limits.updated` + `rate-limited` state
+  event, fails the turn, and triggers a forced usage refresh so usage-limit
+  cards, `autoContinueAtUsageLimit`, and pool-scoped work-queue/protection
+  rules work consistently with other providers.
 - **Tool canonicalization, background tasks & reactive wakeups**: `AcpDriver`
   unwraps ACP lazy MCP calls (`call_mcp_tool` / `"MCP Tool <name>"`) and
   `"Run mcp_<server>_<tool>"` calls into `mcp__<server>__<tool>` rows,

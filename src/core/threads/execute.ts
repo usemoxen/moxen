@@ -701,6 +701,8 @@ export async function ensureDriverSession(
     readonly store?: ThreadStore;
     /** After a turn the provider starts itself settles (`ExecuteTurnArgs.afterSettle`). */
     readonly afterSettle?: () => Promise<void>;
+    /** Called when a background turn hits a usage limit (`ExecuteTurnArgs.onUsageLimit`). */
+    readonly onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void;
     /** End the session after this long with nothing happening on it (`idle.ts`); null or absent: never. */
     readonly idleTtlMs?: number | null;
   } = {},
@@ -738,7 +740,7 @@ export async function ensureDriverSession(
   if (options.store) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
   await captureRuleBaseline(driver, thread.id, driverKey(selection.instanceId), cwd);
-  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null);
+  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onUsageLimit);
 }
 
 const watching = new WeakMap<TurnDriver, Map<string, () => void>>();
@@ -814,7 +816,15 @@ function subagentPayload(event: Extract<ProviderRuntimeEvent, { type: "subagent.
  * - background tasks starting and ending, and the live set of them, become
  *   activity rows the transcript and the tasks panel read.
  */
-export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threadId: string, cwd: string, afterSettle?: () => Promise<void>, idleTtlMs: number | null = null): void {
+export function watchDriverSession(
+  store: ThreadStore,
+  driver: TurnDriver,
+  threadId: string,
+  cwd: string,
+  afterSettle?: () => Promise<void>,
+  idleTtlMs: number | null = null,
+  onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void,
+): void {
   let byThread = watching.get(driver);
   if (!byThread) {
     byThread = new Map();
@@ -893,6 +903,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
             driverTurnId: event.turnId,
             ...(turn.modelSelection ? { modelSelection: turn.modelSelection } : {}),
             workingDirectory: cwd,
+            ...(onUsageLimit ? { onUsageLimit } : {}),
             ...(afterSettle ? { afterSettle } : {}),
           }).catch(() => undefined);
         }
@@ -1202,8 +1213,8 @@ function recordTurnActivity(
   onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void,
 ): { onEvent: (event: ProviderRuntimeEvent) => void; flush: () => Promise<void>; saveUnfinishedText: () => Promise<void>; noteFailure: () => void; outputSeen: () => boolean } {
   const written = new Map<string, string>();
-  // Whether the provider showed any output this turn (streamed text or a tool call).
-  let outputSeen = false;
+  // Whether the provider showed any non-retracted output this turn (streamed text or a tool call).
+  let toolOutputSeen = false;
   let limitRecorded = false;
   // Appends are chained rather than fired in parallel: the ledger is an
   // append-only file and the rows must land in the order they happened.
@@ -1231,7 +1242,6 @@ function recordTurnActivity(
       const message = unfinished.get(id) ?? { text: "", createdAt: store.nowIso() };
       message.text += event.text;
       unfinished.set(id, message);
-      if (event.text.trim()) outputSeen = true;
       return;
     }
     if (event.type === "reasoning.updated") {
@@ -1398,7 +1408,7 @@ function recordTurnActivity(
     if (row === null) return;
     if (written.get(row.callId) === row.signature) return;
     written.set(row.callId, row.signature);
-    outputSeen = true;
+    toolOutputSeen = true;
     append(row.kind, row.summary, row.payload);
   };
   /**
@@ -1437,7 +1447,11 @@ function recordTurnActivity(
     unfinished.clear();
     return chain;
   };
-  return { onEvent, flush: () => chain, saveUnfinishedText, noteFailure, outputSeen: () => outputSeen };
+  const outputSeen = (): boolean =>
+    toolOutputSeen ||
+    notes.size > 0 ||
+    [...unfinished.values()].some((message) => message.text.trim().length > 0);
+  return { onEvent, flush: () => chain, saveUnfinishedText, noteFailure, outputSeen };
 }
 
 async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {

@@ -487,7 +487,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // same provider conversation with the request-scoped submission tool.
       if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
       setup = await sessionSetup(ctx, turnThread, selection.instanceId);
-      await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
+      await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId), ...usageLimitHook(ctx, threadId, selection.instanceId) });
       await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
       // Config or rule files changed while the session sat idle: a live session
       // takes them now, like a fresh send does — never a reason to fail the resume.
@@ -2272,7 +2272,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   let startFailure: unknown = null;
   try {
     setup = await sessionSetup(ctx, turnThread, turnModel.instanceId);
-    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id) });
+    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id), ...usageLimitHook(ctx, sent.thread.id, turnModel.instanceId) });
   } catch (cause) {
     startFailure = cause;
   }
@@ -2532,6 +2532,7 @@ export async function revertThread(
       modelSelection: entry.selection,
       ...sessionStart(await sessionSetup(ctx, thread, entry.instanceId)),
       ...longThreadHook(ctx, threadId),
+      ...usageLimitHook(ctx, threadId, entry.instanceId),
     });
     await Effect.runPromise(driver.rollbackThread(threadId, entry.prompts));
     rolledBack.push(key);
