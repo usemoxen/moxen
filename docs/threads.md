@@ -513,11 +513,14 @@ settle generation — and the message that reports it records every identity
 it consumed, so a replayed batch, a moved notice or a regenerated
 continuation notice is delivered once, while a later settle has a new
 identity and still reports. A settle also records its generation on the
-delegation row, and startup recovery queues a notice for any generation
-with no receipt. In the JSONL store, crash recovery and hand-off races are
-not transactional: an interruption, a hand-off landing during delivery, or
-a crash between a turn and its delegation row can still duplicate or delay
-a notice. Those paths are tracked in MXN-416 and are not guaranteed yet.
+delegation row; on startup the server replays pending batches and queues a
+notice for any generation ahead of the last generation a notice was queued
+for (`reportedGeneration` advances when the notice is queued, before a
+parent message records a receipt). In the JSONL store, crash recovery and
+hand-off races are not transactional: an interruption, a hand-off landing
+during delivery, or a crash between a turn and its delegation row can still
+duplicate or delay a notice. Those paths are tracked in MXN-416 and are not
+guaranteed yet.
 Task lookup follows the
 hand-off links with no hop cap — one
 pass over an indexed delegation ledger — so a task answers to its original

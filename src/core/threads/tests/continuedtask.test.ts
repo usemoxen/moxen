@@ -7,7 +7,7 @@ import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, continueOwnThread, cancelTask, describeTask, delegate, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, recoverTaskNotifications, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, continueOwnThread, cancelTask, describeTask, delegate, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, queueTaskPauseNotification, recoverTaskNotifications, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
 import { openThreadStore } from "../store.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -1345,5 +1345,116 @@ describe("notice receipts and identities (MXN-389)", () => {
       message.notification?.notices?.includes(`settle:${child.id}:1`),
     );
     expect(receipts).toHaveLength(1);
+  }, 30_000);
+});
+
+describe("one report for one verdict and one pause (MXN-389)", () => {
+  /** A review task whose first settle notice is batched under its parent. */
+  async function settledReviewOnce(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, parentId, child.id);
+    return child;
+  }
+
+  it("reroutes a coalesced verdict as one report when the parent is continued mid-delivery", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReviewOnce(w, parent.id);
+    for (const prompt of ["Re-check one", "Re-check two"]) {
+      const turn = (await sendTurn(w.store, child.id, { prompt })).turn;
+      await completeTurn(w.store, child.id, turn.id, { text: "Re-checked the login form.\n\nVERDICT: MERGE" });
+      await queueTaskNotification(w.ctx, parent.id, child.id);
+    }
+
+    // Pause the old parent's flush after its final owner lookup, continue the
+    // parent, then resume: the report is rerouted to the successor.
+    const realTurns = w.store.readTurns.bind(w.store);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    let parentReads = 0;
+    w.store.readTurns = async (threadId: string) => {
+      const turns = await realTurns(threadId);
+      if (threadId === parent.id) {
+        parentReads += 1;
+        if (parentReads === 2) {
+          entered();
+          await gate;
+        }
+      }
+      return turns;
+    };
+    // The destination's second admission is where a partial group could be
+    // flushed: flush it first, as a restart or timer could.
+    const realLock = w.store.withThreadLock.bind(w.store);
+    let destination = "";
+    let destinationLocks = 0;
+    let flushedEarly = false;
+    w.store.withThreadLock = async <T>(key: string, run: () => Promise<T>): Promise<T> => {
+      if (destination !== "" && key === `\0task-notification:${destination}`) {
+        destinationLocks += 1;
+        if (destinationLocks === 2 && !flushedEarly) {
+          flushedEarly = true;
+          await flushTaskNotifications(w.ctx, destination);
+        }
+      }
+      return await realLock(key, run);
+    };
+    try {
+      const flushing = flushTaskNotifications(w.ctx, parent.id);
+      await paused;
+      const nextParent = await continueThread(w.ctx, { threadId: parent.id });
+      destination = nextParent.threadId;
+      release();
+      await flushing;
+      await flushTaskNotifications(w.ctx, destination);
+      expect(await notificationsIn(w, parent.id)).toEqual([]);
+      const heard = await notificationsIn(w, destination);
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toContain("Review verdict: MERGE");
+      const message = (await w.store.readMessages(destination)).find((entry) => entry.origin === "task-notification");
+      expect(message?.notification?.notices).toHaveLength(3);
+    } finally {
+      w.store.readTurns = realTurns;
+      w.store.withThreadLock = realLock;
+    }
+  }, 30_000);
+
+  it("reports the newest pause once and records every pause identity", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d-pause", parentThreadId: parent.id, childThreadId: child.id, prompt: "work", status: "running", notify: true, createdAt: now, updatedAt: now });
+    // Keep the task live so the pause is deliverable.
+    await sendTurn(w.store, child.id, { prompt: "Later", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+    await queueTaskPauseNotification(w.ctx, child.id, "2027-01-01T00:00:00.000Z");
+    const done = (await sendTurn(w.store, child.id, { prompt: "One more step" })).turn;
+    await completeTurn(w.store, child.id, done.id, { text: "One more step done." });
+    await queueTaskPauseNotification(w.ctx, child.id, "2027-02-01T00:00:00.000Z");
+
+    const batches = path.join(w.root, "task-notification-batches.json");
+    const saved = await readFile(batches, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    const heard = await notificationsIn(w, parent.id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain("2027-02-01");
+    expect(heard[0]).not.toContain("2027-01-01");
+
+    // Both pause identities are covered by that one report.
+    await writeFile(batches, saved, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
   }, 30_000);
 });
