@@ -1124,20 +1124,25 @@ export function pendingPermissionRequests(state: ThreadState): PendingPermission
  */
 export function cancelledBeforeStart(activities: readonly ActivityEnvelope[]): Set<string> {
   const waited = new Set<string>();
-  const promoted = new Set<string>();
-  const interrupted = new Set<string>();
-  const cancelled = new Set<string>();
-  for (const activity of activities) {
+  const lastPromoted = new Map<string, number>();
+  const interruptions = new Map<string, { at: number; beforeStart: boolean }>();
+  for (const [index, activity] of activities.entries()) {
     const turnId = activity.turnId;
     if (turnId === null) continue;
     if (activity.kind === "turn.queued" || activity.kind === "turn.scheduled") waited.add(turnId);
-    else if (activity.kind === "turn.promoted") promoted.add(turnId);
+    else if (activity.kind === "turn.promoted") lastPromoted.set(turnId, index);
     else if (activity.kind === "turn.interrupted") {
-      interrupted.add(turnId);
-      if (asRecord(activity.payload)?.beforeStart === true) cancelled.add(turnId);
+      interruptions.set(turnId, { at: index, beforeStart: asRecord(activity.payload)?.beforeStart === true });
     }
   }
-  for (const turnId of interrupted) if (waited.has(turnId) && !promoted.has(turnId)) cancelled.add(turnId);
+  const cancelled = new Set<string>();
+  for (const [turnId, stop] of interruptions) {
+    // A before-start cancellation is undone by a later restore + promotion;
+    // older rows without the marker are a cancel only if the turn never ran.
+    if (stop.beforeStart) {
+      if ((lastPromoted.get(turnId) ?? -1) < stop.at) cancelled.add(turnId);
+    } else if (waited.has(turnId) && !lastPromoted.has(turnId)) cancelled.add(turnId);
+  }
   return cancelled;
 }
 

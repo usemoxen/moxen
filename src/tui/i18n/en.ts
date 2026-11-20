@@ -1121,6 +1121,8 @@ export const en = {
   "perm.move_13_pick_enter_39e3": "↑↓ move · 1-3 pick · enter selects · × denies",
   "queued.after_this_turn_c5ef": "after this turn",
   "queued.agent": "agent",
+  "queued.conditions.one": "{count} condition",
+  "queued.conditions.other": "{count} conditions",
   "queued.image_only_d3ad": "(image only)",
   "queued.queued_7b2f": "Queued",
   "side.done": "done",

@@ -588,23 +588,31 @@ retry. A restarted server never blindly replays a provider request whose
 acceptance is uncertain. **Schedule work** uses the same steps on one page that
 ends in "Queue this work".
 
-A waiting message's row says what it actually waits for: every condition the
-entry holds, not only "after this turn". The full text and the keys that act on
-it stay in the Work queue.
+A waiting message's row shows a bounded summary of what it holds — its
+scheduled time and, when it has several, a condition count — so the message
+and its agent marker keep their room. The focused entry in the Work queue
+shows every condition in full.
 
 An agent that queued a message with `message_queue` can see and take it back:
 `message_queue_list` lists the entries it created on its own thread and on
 tasks it delegated, `message_queue_edit` replaces what one waits for, and
 `message_queue_remove` drops it before it runs. They use the same Work queue
-edit and admission lock as the user's own actions. An agent never touches the
-user's entries or another agent's, and an entry that has started running
-cannot be taken back. The creating thread is recorded on the entry. A
-`thread` condition may not name the thread the message is queued on: it already
-waits for that thread's turn, so "after this turn" is implied.
+edit and admission lock as the user's own actions. Management follows the
+thread chain that owns the destination: when a task transfers to a
+continuation, the continuation inherits the earlier entries and the old parent
+no longer manages them. An agent never touches the user's entries or another
+agent's, and an entry that has started running cannot be taken back. The
+creating thread is recorded on the entry. Taking a waiting message back records
+a before-start cancellation, so the transcript does not show it as sent;
+adding it back and letting it run restores it. A `thread` condition may not name
+the thread the message is queued on: it already waits for that thread's turn,
+so "after this turn" is implied.
 
 Conditions name a provider either by its usage account (`claude`, `codex`) or
 by its provider instance (`claudeAgent`, `opencode/<provider>`); both read the
-same account windows.
+same account windows. A key that is a JavaScript prototype member
+(`constructor`, `__proto__`) is refused, and a bad condition already stored
+cannot break the queue read or its removal.
 
 The same controls are available without a TUI:
 

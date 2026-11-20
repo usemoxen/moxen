@@ -14,7 +14,7 @@ import { openThreadStore } from "../store.js";
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
-import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, queueAgentMessage, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, queueAgentMessage, removeAgentQueuedMessage, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -337,6 +337,36 @@ describe("a message an agent queues on a running thread", () => {
     await expect(queueAgentMessage(w.ctx, thread.id, { message: "later", conditions: parseQueuePolicy({ conditions: [{ type: "thread", threadId: thread.id }] }).conditions }))
       .rejects.toMatchObject({ code: "QUEUE_THREAD_SELF", message: expect.stringContaining("after this turn") });
     expect(await w.store.readTurns(thread.id)).toHaveLength(before.length);
+  });
+
+  it("refuses a provider key that is a prototype member, and reads a bad one already stored", async () => {
+    const w = await world();
+    const thread = await w.make();
+    expect(() => parseQueuePolicy({ conditions: [{ type: "usage", provider: "constructor", window: "session", minimum: 5 }] })).toThrow(CliError);
+    expect(() => parseQueuePolicy({ conditions: [{ type: "reset", provider: "__proto__", window: "session" }] })).toThrow(CliError);
+    const queued = await sendTurn(w.store, thread.id, { prompt: "bad condition", queue: parseQueuePolicy({ conditions: [] }) });
+    await w.store.updateTurn(thread.id, queued.turn.id, { queue: { ...queued.turn.queue!, conditions: [{ type: "usage", provider: "constructor", window: "session", minimum: 5 }] } });
+    const entry = (await readWorkQueue(w.ctx)).find((candidate) => candidate.turnId === queued.turn.id);
+    expect(entry?.blocked).toContain("constructor: usage unavailable");
+    await expect(runWorkQueue(w.ctx)).resolves.toBeUndefined();
+    await settleRuns();
+    expect(w.sent).toEqual([]);
+    await editWorkQueue(w.ctx, thread.id, queued.turn.id, "remove");
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)?.queue?.removed).toBe(true);
+  });
+
+  it("refuses an agent removal once the entry has failed instead of taking it back", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const queued = await sendTurn(w.store, thread.id, {
+      prompt: "agent work", agentThreadId: thread.id,
+      queue: parseQueuePolicy({ conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }] }),
+    });
+    await w.store.updateTurn(thread.id, queued.turn.id, { status: "failed", error: "boom", completedAt: w.store.nowIso() });
+    await expect(removeAgentQueuedMessage(w.ctx, thread.id, queued.turn.id)).rejects.toMatchObject({ code: "QUEUE_MESSAGE_STARTED" });
+    const turn = (await w.store.readTurns(thread.id)).find((candidate) => candidate.id === queued.turn.id)!;
+    expect(turn.status).toBe("failed");
+    expect(turn.queue?.removed).not.toBe(true);
   });
 });
 

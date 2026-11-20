@@ -2217,19 +2217,15 @@ fn queue_strip(waiting: &[Queued], running: bool, cx: &mut Context<Workspace>) -
                 key(item),
                 key(item),
             );
-            let label = if item.agent {
-                // An agent's message, marked as the agent's rather than read as the user's.
-                crate::language::message("queued.agent").to_string()
-            } else if item.held {
-                "held".to_string()
-            } else if item.scheduled.is_some() {
-                "scheduled".to_string()
+            let label = crate::live::queue_label(item);
+            let details = if item.blocked.is_empty() {
+                label.clone()
             } else {
-                // The TUI's queued word (`queued.queued_7b2f`), lowercased the
-                // way this strip reads it.
-                crate::language::message("queued.queued_7b2f").to_lowercase()
+                item.blocked.join("; ")
             };
             div()
+                .id(("queue-row", at))
+                .control(details)
                 .flex()
                 .items_center()
                 .gap(px(10.))

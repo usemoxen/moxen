@@ -67,7 +67,7 @@ import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
+import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT, agentMessageBody } from "./views.js";
 import { buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { ranTurns, toThreadEnvelope } from "./project.js";
@@ -108,7 +108,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhausted, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhausted, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
@@ -716,7 +716,14 @@ export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly Q
   return entries.sort((a, b) => a.policy.order - b.policy.order || a.turnId.localeCompare(b.turnId));
 }
 
-export async function editWorkQueue(ctx: OperationContext, threadId: string, turnId: string, action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit", policy?: QueuePolicy, notifyParent?: boolean): Promise<void> {
+/** An agent's own queue change (`message_queue_edit` / `message_queue_remove`), checked under the admission lock. */
+export interface AgentQueueEdit {
+  readonly callerThreadId: string;
+  /** For an edit: the new conditions, applied to the current policy so a hold or order is never undone. */
+  readonly conditions?: readonly QueueCondition[];
+}
+
+export async function editWorkQueue(ctx: OperationContext, threadId: string, turnId: string, action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit", policy?: QueuePolicy, notifyParent?: boolean, agent?: AgentQueueEdit): Promise<void> {
   await ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
     const allEntries = await readWorkQueue(ctx);
     const selected = allEntries.find((entry) => entry.threadId === threadId && entry.turnId === turnId);
@@ -733,15 +740,29 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     }
     let summaryToStop: StoredTurn | undefined;
     let cancelProtection = false;
-    const rows = policy ? await queueRows(ctx) : [];
+    const rows = policy || agent ? await queueRows(ctx) : [];
     await ctx.store.withThreadLock(threadId, async () => {
       const turn = (await ctx.store.readTurns(threadId)).find((t) => t.id === turnId);
-      if (!turn || turn.status !== "queued" && !(turn.queue && (turn.status === "interrupted" || turn.status === "failed"))) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
+      if (!turn) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
+      if (agent) {
+        if (action !== "edit" && action !== "remove") throw new CliError("INVALID_QUEUE", "Only an edit or a removal can be made for an agent's own entry.");
+        const scope = await managementScope(ctx, agent.callerThreadId);
+        if (!canManageAgentEntry(scope, agent.callerThreadId, turn.agentThreadId, threadId)) {
+          throw new CliError("QUEUE_MESSAGE_NOT_YOURS", "Only a message this thread's chain queued on a thread it still owns can be changed.");
+        }
+        // Rechecked under the lock: an entry that was promoted (or failed)
+        // between the tool's read and this write can never be taken back.
+        if (turn.status !== "queued" || turn.queue?.removed) throw new CliError("QUEUE_MESSAGE_STARTED", "That message has started running; a started message cannot be taken back.");
+      }
+      if (turn.status !== "queued" && !(turn.queue && (turn.status === "interrupted" || turn.status === "failed"))) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
       if (turn.handoff && (await ctx.store.readTurns(turn.handoff.destinationThreadId)).length) throw new CliError("HANDOFF_ALREADY_PREPARED", "The new thread is already prepared. Manage its queue entry instead.");
       const existing = turn.queue ?? parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
       const row = rows.find((candidate) => candidate.thread.id === threadId);
       const observed = row ? queueAdmission(row, turn, rows, ctx.config).latched : existing.latched ?? [];
       let next: QueuePolicy = policy ? { ...existing, ...parseQueuePolicy(policy), eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => JSON.stringify(existing.conditions[index]) === JSON.stringify(policy.conditions[index])) } : existing;
+      // An agent edits only what it waits for: the user's hold, order,
+      // sequential choice, continuation and latched events all stay.
+      if (agent?.conditions) next = { ...existing, conditions: agent.conditions, eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => JSON.stringify(existing.conditions[index]) === JSON.stringify(agent.conditions![index])) };
       if (next.conditions.some((c) => c.type === "thread" && c.threadId === threadId || c.type === "entry" && c.threadId === threadId && c.turnId === turnId)) throw new CliError("QUEUE_DEPENDENCY_CYCLE", "An entry cannot wait for itself or its own thread.");
       if (action === "first" || action === "last") next = { ...next, order: action === "first" ? Math.min(...entries.map((e) => e.policy.order)) - 1 : Math.max(...entries.map((e) => e.policy.order)) + 1 };
       if (movedOrder !== undefined) next = { ...next, order: movedOrder };
@@ -760,7 +781,14 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
         cancelProtection = true;
         summaryToStop = openTurn(await ctx.store.readTurns(threadId)) ?? summaryToStop;
       }
+      // Taken back while it waited: record the before-start cancellation so
+      // the transcript drops it instead of showing it as sent (MXN-401).
+      const removedBeforeStart = action === "remove" && turn.status === "queued";
       await ctx.store.updateTurn(threadId, turnId, { queue: next, ...(action === "remove" ? { status: "interrupted", completedAt: ctx.store.nowIso() } : action === "restore" ? { status: "queued", completedAt: null } : {}) });
+      if (removedBeforeStart) await ctx.store.appendLedger(threadId, "activity", {
+        id: ctx.store.newId(), threadId, turnId, kind: "turn.interrupted", summary: turnId,
+        payload: { beforeStart: true }, createdAt: ctx.store.nowIso(),
+      });
       ctx.store.emit(threadId, "queue-edited");
     });
     if (summaryToStop) {
@@ -777,6 +805,72 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     // Putting the entry back re-arms the resume: the task no longer reads cancelled.
     if (action === "restore") await reviveCancelledDelegation(ctx, threadId).catch(() => undefined);
   });
+}
+
+/** One waiting entry an agent queued, as `message_queue_list` reads it. */
+export interface AgentQueuedMessage {
+  readonly turnId: string;
+  readonly threadId: string;
+  readonly threadTitle: string;
+  /** What the agent wrote, without the header that marks it as the agent's. */
+  readonly message: string;
+  readonly status: "queued";
+  readonly scheduledFor: string | null;
+  readonly waitingFor: readonly string[];
+  readonly conditions: readonly QueueCondition[];
+}
+
+/** The waiting entry an agent names by turn id, or the error the tool should read. */
+async function agentQueueEntry(ctx: OperationContext, callerThreadId: string, turnId: string): Promise<WorkQueueEntry> {
+  const entry = (await readWorkQueue(ctx)).find((candidate) => candidate.turnId === turnId);
+  if (!entry) throw new CliError("QUEUE_MESSAGE_NOT_WAITING", "No waiting queue entry has that turnId. It may have started running; a started message cannot be taken back.");
+  if (entry.status !== "queued" || entry.policy.removed) throw new CliError("QUEUE_MESSAGE_STARTED", "That message has started running; a started message cannot be taken back.");
+  return entry;
+}
+
+/**
+ * The entries an agent queued that it may still manage: live, authored by
+ * its own chain, on its own thread or on a task it currently owns. The old
+ * parent of a task that continued loses both the list and the mutation.
+ */
+export async function listAgentQueuedMessages(ctx: OperationContext, rawCallerThreadId: string): Promise<AgentQueuedMessage[]> {
+  const callerThreadId = requireThreadId(rawCallerThreadId);
+  const scope = await managementScope(ctx, callerThreadId);
+  return (await readWorkQueue(ctx))
+    .filter((entry) => entry.status === "queued" && !entry.policy.removed && canManageAgentEntry(scope, callerThreadId, entry.agentThreadId, entry.threadId))
+    .map((entry) => ({
+      turnId: entry.turnId,
+      threadId: entry.threadId,
+      threadTitle: entry.title,
+      message: agentMessageBody(entry.prompt),
+      status: "queued" as const,
+      scheduledFor: entry.scheduledFor,
+      waitingFor: entry.blocked,
+      conditions: entry.policy.conditions,
+    }));
+}
+
+/** Replace what an agent's own queued message waits for, under the Work queue's admission lock. */
+export async function editAgentQueuedMessage(ctx: OperationContext, rawCallerThreadId: string, turnId: string, conditions: readonly QueueCondition[]): Promise<{ readonly threadId: string; readonly turnId: string }> {
+  const callerThreadId = requireThreadId(rawCallerThreadId);
+  const entry = await agentQueueEntry(ctx, callerThreadId, turnId);
+  if (conditions.some((condition) => condition.type === "thread" && condition.threadId === entry.threadId)) {
+    throw new CliError(
+      "QUEUE_THREAD_SELF",
+      "A thread condition cannot name the thread the message is queued on: it already waits for that thread's turn, and 'after this turn' is already implied.",
+      { exitCode: 4, details: { threadId: entry.threadId } },
+    );
+  }
+  await editWorkQueue(ctx, entry.threadId, turnId, "edit", undefined, undefined, { callerThreadId, conditions });
+  return { threadId: entry.threadId, turnId };
+}
+
+/** Take back an agent's own queued message, under the Work queue's admission lock. */
+export async function removeAgentQueuedMessage(ctx: OperationContext, rawCallerThreadId: string, turnId: string): Promise<{ readonly threadId: string; readonly turnId: string }> {
+  const callerThreadId = requireThreadId(rawCallerThreadId);
+  const entry = await agentQueueEntry(ctx, callerThreadId, turnId);
+  await editWorkQueue(ctx, entry.threadId, turnId, "remove", undefined, undefined, { callerThreadId });
+  return { threadId: entry.threadId, turnId };
 }
 
 export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snapshot?: readonly QueueRow[]): Promise<void> {
@@ -4505,24 +4599,55 @@ async function threadLineage(ctx: OperationContext, threadId: string): Promise<R
   return lineage;
 }
 
+/** The delegations and lineage one authorization check needs, read once for a list of entries. */
+interface ManagementScope {
+  readonly lineage: ReadonlySet<string>;
+  readonly delegations: readonly StoredDelegation[];
+}
+
+async function managementScope(ctx: OperationContext, threadId: string): Promise<ManagementScope> {
+  return { lineage: await threadLineage(ctx, threadId), delegations: await ctx.store.readDelegations() };
+}
+
+/** The delegation this scope holds on `rawTaskId`, following a task that carried on in a new thread. */
+function delegationFor(scope: ManagementScope, rawTaskId: string): StoredDelegation | null {
+  let taskId: string;
+  try {
+    taskId = requireThreadId(rawTaskId);
+  } catch {
+    return null;
+  }
+  const owned = scope.delegations.find((row) => scope.lineage.has(row.parentThreadId) && row.childThreadId === taskId);
+  if (!owned) return null;
+  let row = owned;
+  for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+    const next = scope.delegations.find((candidate) => scope.lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
+    if (!next) break;
+    row = next;
+  }
+  return row;
+}
+
+/**
+ * An agent entry is manageable only by the current owner of the destination
+ * and only when its author is in that owner's chain. A thread that delegated
+ * a task keeps managing it after a continuation (the continuation's lineage
+ * names the old parent); the old parent loses it when the task transfers.
+ */
+function canManageAgentEntry(scope: ManagementScope, callerThreadId: string, authorThreadId: string | undefined, destinationId: string): boolean {
+  if (authorThreadId === undefined || !scope.lineage.has(authorThreadId)) return false;
+  return destinationId === callerThreadId || delegationFor(scope, destinationId) !== null;
+}
+
 /**
  * The delegation `parentThreadId` holds on `rawTaskId`, followed to the thread
  * the task carried on in (`continuedIn`). Refuses with `TASK_NOT_FOUND`, the
  * same for a real id and a fake one, when that thread did not delegate it.
  */
 async function ownedDelegation(ctx: OperationContext, parentThreadId: string, rawTaskId: string): Promise<StoredDelegation> {
-  const rows = await ctx.store.readDelegations();
-  const lineage = await threadLineage(ctx, parentThreadId);
-  const owned = rows.find((row) => lineage.has(row.parentThreadId) && row.childThreadId === requireThreadId(rawTaskId));
-  if (!owned) {
+  const row = delegationFor(await managementScope(ctx, parentThreadId), rawTaskId);
+  if (!row) {
     throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3, details: { taskId: rawTaskId.trim(), parentThreadId } });
-  }
-  // A task that carried on in a new thread is that thread now.
-  let row = owned;
-  for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
-    const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
-    if (!next) break;
-    row = next;
   }
   return row;
 }

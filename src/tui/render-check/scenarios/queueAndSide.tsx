@@ -19,6 +19,7 @@ import { fail } from "../helpers.js";
  */
 export async function runQueueAndSide(): Promise<void> {
   await runQueued();
+  await runQueuedNarrow();
   await runSide();
 }
 
@@ -81,8 +82,7 @@ async function runQueued(): Promise<void> {
   if (paged.join() !== "1") fail(`paging the dock went to ${JSON.stringify(paged)}`);
 }
 
-function entry(overrides: Partial<SideQuestion>): SideQuestion {
-  return {
+function entry(overrides: Partial<SideQuestion>): SideQuestion {  return {
     id: 1,
     threadId: "t",
     question: "Which auth scheme did we settle on?",
@@ -92,6 +92,42 @@ function entry(overrides: Partial<SideQuestion>): SideQuestion {
     withContext: true,
     ...overrides,
   };
+}
+
+/** A narrow panel: the agent's marker and the state stay separate, and many conditions become a bounded count. */
+async function runQueuedNarrow(): Promise<void> {
+  const items: readonly QueuedMessage[] = [
+    {
+      turnId: "n1", messageId: "n1", text: `${SELF_QUEUED_HEADER}\n\nRecheck the build after the reset`, attachments: 0, scheduledFor: null, reason: null, agent: true,
+      conditions: [
+        { type: "reset", provider: "claude", window: "session", resetsAt: null },
+        { type: "usage", provider: "claude", window: "session", minimum: 40 },
+        { type: "thread", threadId: "thread-other" },
+      ],
+    },
+    {
+      turnId: "n2", messageId: "n2", text: "Verify the release", attachments: 0, scheduledFor: "2026-09-26T12:00:00.000Z", reason: "user",
+      conditions: [
+        { type: "reset", provider: "claude", window: "weekly", resetsAt: null },
+        { type: "usage", provider: "claude", window: "session", minimum: 10 },
+      ],
+    },
+  ];
+  const setup = await testRender(
+    <box style={{ width: 64, height: 8, flexDirection: "column" }}>
+      <QueuedPanel items={items} width={64} now={NOW} onCancel={() => {}} threads={[{ id: "thread-other", title: "Re-review" }]} />
+    </box>,
+    { width: 64, height: 9, exitOnCtrlC: false },
+  );
+  await setup.flush();
+  const frame = setup.captureCharFrame();
+  console.log("--- queued panel narrow ---");
+  console.log(frame);
+  for (const expected of ["agent · Recheck the build", "3 conditions", "2 conditions", "◷"]) {
+    if (!frame.includes(expected)) fail(`narrow queued panel is missing "${expected}"`);
+  }
+  if (frame.includes("After Claude's next session reset")) fail("narrow queued panel did not bound its condition list");
+  if (frame.split("\n").find((row) => row.includes("Recheck the build"))?.includes("n1") === true) fail("narrow queued panel shows an internal id");
 }
 
 async function runSide(): Promise<void> {

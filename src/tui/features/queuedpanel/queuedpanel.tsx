@@ -6,6 +6,7 @@ import { useRef } from "react";
 
 import { useHover } from "../../hooks/useHover.js";
 import { clockTime } from "../../model/turns.js";
+import { clippedText, textWidth } from "../../model/textoverflow.js";
 import { queueConditionText } from "../../model/workqueue.js";
 import { queuedLabel, queuedSummary, type QueuedMessage } from "../../model/thread.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -17,13 +18,23 @@ const MAX_QUEUED_ROWS = 6;
  * When a waiting message goes out. Plain queued ones go when the running
  * turn settles; the rest name their time, and every condition the entry
  * waits for, so a held message never reads as a plain "after this turn".
+ * `maxWidth` keeps the state label from crowding out the message and its
+ * agent marker: several conditions become a count, and the full list stays
+ * in the Work queue.
  */
-export function whenLabel(item: QueuedMessage, now: number, threads: readonly { id: string; title: string }[] = []): string {
+export function whenLabel(item: QueuedMessage, now: number, threads: readonly { id: string; title: string }[] = [], maxWidth = Number.POSITIVE_INFINITY): string {
   const at = item.scheduledFor === null ? null : clockTime(item.scheduledFor, now);
   // ◷, not the ⏲ emoji: terminals draw the emoji two cells wide over the space after it.
   const scheduled = at === null ? [] : [item.reason === "usage-hold" ? t("queued.afterReset", { at }) : `◷ ${at}`];
   const conditions = item.conditions ?? [];
-  if (conditions.length > 0) return [...scheduled, ...conditions.map((condition) => queueConditionText(condition, threads, [], now))].join(" · ");
+  if (conditions.length > 1) {
+    const summary = [...scheduled, t("queued.conditions", { count: conditions.length })].join(" · ");
+    return textWidth(summary) <= maxWidth ? summary : clippedText(summary, maxWidth);
+  }
+  if (conditions.length === 1) {
+    const one = [...scheduled, queueConditionText(conditions[0]!, threads, [], now)].join(" · ");
+    return textWidth(one) <= maxWidth ? one : clippedText(one, maxWidth);
+  }
   if (at === null) return t("queued.after_this_turn_c5ef");
   return scheduled[0]!;
 }
@@ -72,15 +83,17 @@ export function QueuedPanel({
   const rowWidth = Math.max(4, width - 2 - (overflows ? 1 : 0));
   const held = items.filter((item) => item.reason === "usage-hold").length;
   const rows = items.map((item, index) => {
-    const when = whenLabel(item, now, threads);
+    // Leave most of the row to the message and its agent marker; the state
+    // label shows a bounded summary (the Work queue has the full list).
+    const when = whenLabel(item, now, threads, Math.max(10, Math.floor(rowWidth * 0.42)));
     const extra = item.attachments > 0 ? t("queued.images", { count: item.attachments }) : "";
     // Cancel is 3 cells, the when-label and its gap follow the text.
-    const textWidth = Math.max(4, rowWidth - 4 - when.length - 2 - extra.length - 3);
+    const textWidthAvailable = Math.max(4, rowWidth - 4 - textWidth(when) - 2 - extra.length - 3);
     const firstLine = queuedLabel(item);
     return (
       <box key={item.turnId} style={{ width: rowWidth, flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`${index + 1}. `}</text>
-        <OverflowText fg={item.tasks === undefined && item.background !== true ? COLOR.text : COLOR.dim} bg={SURFACE.panel} width={textWidth}>{firstLine || t("queued.image_only_d3ad")}</OverflowText>
+        <OverflowText fg={item.tasks === undefined && item.background !== true ? COLOR.text : COLOR.dim} bg={SURFACE.panel} width={textWidthAvailable}>{firstLine || t("queued.image_only_d3ad")}</OverflowText>
         <text fg={COLOR.faint} bg={SURFACE.panel} selectable={false}>{extra}</text>
         <box style={{ flexGrow: 1 }} backgroundColor={SURFACE.panel} />
         <text fg={item.reason === "usage-hold" ? COLOR.warn : COLOR.faint} bg={SURFACE.panel} selectable={false}>

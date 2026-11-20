@@ -346,6 +346,15 @@ describe("continuing after a usage limit", () => {
     expect(ran.map((entry) => entry.id)).toEqual(["m2"]);
   });
 
+  it("shows a message again after a before-start cancel is restored and promoted", () => {
+    const queued = activity("q1", "turn.queued", {}, "turn-2");
+    const cancelled = activity("i1", "turn.interrupted", { beforeStart: true }, "turn-2");
+    const promoted = activity("p2", "turn.promoted", {}, "turn-2");
+    expect(timeline(state({ activities: [queued, cancelled], messages: [prompt("m2", "turn-2", "later please")] }))).toEqual([]);
+    const restored = timeline(state({ activities: [queued, cancelled, promoted], messages: [prompt("m2", "turn-2", "later please")] }));
+    expect(restored.map((entry) => entry.id)).toEqual(["m2"]);
+  });
+
   it("labels a queued native background notification instead of dumping its raw payload", () => {
     const held = (messageId: string) => ({ id: "t", queuedTurns: [{ turnId: "t", messageId, scheduledFor: null, scheduleReason: "usage-hold" }] }) as unknown as ThreadState["thread"];
     const raw = '{"task_id":"b1","status":"completed","output_file":"/tmp/out"}';

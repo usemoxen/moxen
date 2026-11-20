@@ -19,13 +19,13 @@ import { untrustedContext } from "../../core/untrusted.js";
 import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
 import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
-import { agentMessageBody, type DelegatedTaskStatus } from "../../core/threads/views.js";
+import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
 import { usageKeyForInstance } from "../../core/usage/limits.js";
 import type { ClientApi } from "../api.js";
-import { decodeResearchPlan, type CommandResult, type QueryResults } from "../protocol.js";
+import { decodeResearchPlan, type CommandResult } from "../protocol.js";
 
 export const MAX_WAIT_MS = 45_000;
 /**
@@ -385,7 +385,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "List the messages you queued with message_queue that are still waiting, on your own thread and on tasks you delegated. " +
       "Each entry has its turnId, its thread, what you wrote and what it waits for. " +
       "Use message_queue_edit or message_queue_remove with that turnId before it runs. " +
-      "It never lists the user's own queue entries, and a message that has started has left the queue.",
+      "It never lists the user's own queue entries, and a message that has started has left the queue. " +
+      "Management follows the destination's current owner: a continuation that takes over a task inherits its earlier entries.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
   },
@@ -395,6 +396,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Change what a message you queued with message_queue waits for, before it runs. " +
       "Pass its turnId and the new conditions: they replace the old ones whole. " +
       "Only an entry you queued can be changed (never the user's), and not one that has started running. " +
+      "It stays on the thread and task it was queued for; a continuation that took the task over inherits it. " +
       "A condition cannot wait for the thread the message is queued on: 'after this turn' is already implied.",
     inputSchema: {
       type: "object",
@@ -412,6 +414,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Take back a message you queued with message_queue before it runs, so it never reaches the thread. " +
       "Pass its turnId from message_queue or message_queue_list. " +
       "Only an entry you queued can be removed (never the user's), and not one that has started running. " +
+      "A continuation that took a task over inherits its earlier entries. " +
       "The message stays stored: the user can add it back from Work queue.",
     inputSchema: { type: "object", properties: { turnId: { type: "string" } }, required: ["turnId"], additionalProperties: false },
   },
@@ -1052,41 +1055,19 @@ export async function callMoxenTool(
         });
         return ok(queued);
       }
-      case "message_queue_list": {
-        const entries = (await api.query({ type: "queue.read" })).entries
-          .filter((entry) => entry.agentThreadId === parentThreadId && entry.status === "queued" && !entry.policy.removed);
-        return ok({
-          messages: entries.map((entry) => ({
-            turnId: entry.turnId,
-            threadId: entry.threadId,
-            threadTitle: entry.title,
-            message: agentMessageBody(entry.prompt),
-            conditions: entry.policy.conditions,
-            scheduledFor: entry.scheduledFor,
-            waitingFor: entry.blocked,
-          })),
-        });
-      }
+      case "message_queue_list":
+        return ok(await api.query({ type: "thread.message.queue.list", callerThreadId: parentThreadId }));
       case "message_queue_edit": {
         const turnId = argString(args, "turnId", true)!;
         if (!Array.isArray(args.conditions)) throw new CliError("INVALID_TOOL_INPUT", "conditions must be an array of queue conditions.");
-        const entry = await ownedQueueEntry(api, parentThreadId, turnId);
         const conditions = parseQueuePolicy({ conditions: args.conditions }).conditions;
-        if (conditions.some((condition) => condition.type === "thread" && condition.threadId === entry.threadId)) {
-          throw new CliError(
-            "QUEUE_THREAD_SELF",
-            "A thread condition cannot name the thread the message is queued on: it already waits for that thread's turn, and 'after this turn' is already implied.",
-            { exitCode: 4, details: { threadId: entry.threadId } },
-          );
-        }
-        await queueEdit(api, entry, "edit", { ...entry.policy, conditions });
-        return ok({ turnId, threadId: entry.threadId, conditions, note: "It now waits for these conditions instead of the old ones." });
+        const edited = await api.dispatch({ type: "thread.message.queue.edit", callerThreadId: parentThreadId, turnId, conditions });
+        return ok({ ...edited, conditions, note: "It now waits for these conditions instead of the old ones." });
       }
       case "message_queue_remove": {
         const turnId = argString(args, "turnId", true)!;
-        const entry = await ownedQueueEntry(api, parentThreadId, turnId);
-        await queueEdit(api, entry, "remove");
-        return ok({ turnId, threadId: entry.threadId, removed: true, note: "It will not run. The message stays stored; the user can add it back from Work queue." });
+        const removed = await api.dispatch({ type: "thread.message.queue.remove", callerThreadId: parentThreadId, turnId });
+        return ok({ ...removed, removed: true, note: "It will not run. The message stays stored; the user can add it back from Work queue." });
       }
       case "thread_continue": {
         const continued = await api.dispatch({
@@ -1229,34 +1210,6 @@ async function currentWebPolicy(api: ClientApi): Promise<WebPolicy> {
 
 function ok(value: unknown): ToolResult {
   return { text: JSON.stringify(value, null, 2), isError: false };
-}
-
-type QueueEntry = QueryResults["queue.read"]["entries"][number];
-
-/**
- * One waiting queue entry this thread queued itself with `message_queue`.
- * Entries the user queued, another agent's entries and started ones are all
- * refused here; the server repeats the "still waiting" check under the
- * admission lock when the edit lands.
- */
-async function ownedQueueEntry(api: ClientApi, callerThreadId: string, turnId: string): Promise<QueueEntry> {
-  const entry = (await api.query({ type: "queue.read" })).entries.find((candidate) => candidate.turnId === turnId);
-  if (!entry) throw new CliError("QUEUE_MESSAGE_NOT_WAITING", "No waiting queue entry has that turnId. It may have started running; a started message cannot be taken back.");
-  if (entry.agentThreadId !== callerThreadId) throw new CliError("QUEUE_MESSAGE_NOT_YOURS", "Only a message this thread queued with message_queue can be changed; this entry was not queued by it.");
-  if (entry.status !== "queued" || entry.policy.removed) throw new CliError("QUEUE_MESSAGE_STARTED", "That message has started running; a started message cannot be taken back.");
-  return entry;
-}
-
-/** The Work queue's own edit, so an agent's change takes the same lock and admission as the user's. */
-async function queueEdit(api: ClientApi, entry: QueueEntry, action: "edit" | "remove", policy?: QueueEntry["policy"]): Promise<void> {
-  try {
-    await api.dispatch({ type: "queue.edit", threadId: entry.threadId, turnId: entry.turnId, action, ...(policy ? { policy } : {}) });
-  } catch (cause) {
-    if (cause instanceof CliError && cause.code === "QUEUE_ENTRY_NOT_WAITING") {
-      throw new CliError("QUEUE_MESSAGE_STARTED", "That message has started running; a started message cannot be taken back.");
-    }
-    throw cause;
-  }
 }
 
 /**

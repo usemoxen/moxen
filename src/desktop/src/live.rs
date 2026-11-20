@@ -937,6 +937,16 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
             raw
         };
         let (body, images) = attachments::user_images(message, body_text);
+        let wait = listed.and_then(|at| entries.get(at));
+        let condition_count = wait
+            .and_then(|e| e["policy"]["conditions"].as_array())
+            .map_or(0, Vec::len);
+        let blocked = wait
+            .and_then(|e| e["blocked"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|reason| reason.as_str().map(str::to_string))
+            .collect();
         waiting.push((
             listed.unwrap_or(usize::MAX),
             Queued {
@@ -946,6 +956,8 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
                 held: listed.is_some_and(|at| entries[at]["policy"]["held"] == true),
                 agent,
                 scheduled: text(turn, &["scheduledFor"]).map(str::to_string),
+                condition_count,
+                blocked,
                 earlier: 0,
                 later: 0,
             },
@@ -963,6 +975,31 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
             queued
         })
         .collect()
+}
+
+/// The row's attribution and state, never one replacing the other: an agent's
+/// message keeps its marker beside held/scheduled, plus a bounded count of
+/// what it waits for. The full reasons stay on the row's control text.
+pub fn queue_label(item: &Queued) -> String {
+    let mut parts = Vec::new();
+    if item.agent {
+        parts.push(crate::language::message("queued.agent").to_string());
+    }
+    if item.held {
+        parts.push("held".to_string());
+    } else if item.scheduled.is_some() {
+        parts.push("scheduled".to_string());
+    } else if !item.agent {
+        parts.push(crate::language::message("queued.queued_7b2f").to_lowercase());
+    }
+    if item.condition_count > 0 {
+        parts.push(crate::language::plural(
+            "queued.conditions.one",
+            "queued.conditions.other",
+            item.condition_count,
+        ));
+    }
+    parts.join(" · ")
 }
 
 /// The server queue as `queue.read` lists it, without removed entries.
@@ -5482,6 +5519,28 @@ mod tests {
         let queue = queue_of(&typed, None);
         assert!(!queue[0].agent);
         assert_eq!(queue[0].text, "Run the tests");
+    }
+
+    #[test]
+    fn the_queue_label_keeps_agent_attribution_state_and_conditions() {
+        let thread = json!({
+            "messages": [{"id": "m1", "origin": "agent-message",
+                "text": "Message you queued for this thread earlier with message_queue (not from the user):\n\nRecheck the build"}],
+            "queuedTurns": [{"turnId": "t1", "messageId": "m1", "scheduledFor": "2026-11-16T20:00:00.000Z", "scheduleReason": null}],
+        });
+        let read = json!({"entries": [{
+            "threadId": "a", "turnId": "t1",
+            "policy": {"held": false, "conditions": [{}, {}, {}]},
+            "blocked": ["claude: waiting for session reset", "Thread is running"],
+        }]});
+        let queue = queue_of(&thread, Some(&read));
+        assert!(queue[0].agent);
+        assert!(queue[0].scheduled.is_some());
+        assert_eq!(queue[0].condition_count, 3);
+        assert_eq!(queue[0].blocked.len(), 2);
+        assert_eq!(queue_label(&queue[0]), "agent · scheduled · 3 conditions");
+        // Attribution is not replaced by the state: both stay in the label.
+        assert!(queue_label(&queue[0]).starts_with("agent · scheduled"));
     }
 
     #[test]

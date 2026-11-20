@@ -758,6 +758,8 @@ impl ThreadSource for MockSource {
                 held: false,
                 agent: false,
                 scheduled: None,
+                condition_count: 0,
+                blocked: vec![],
                 earlier: at,
                 later: last - at,
             })

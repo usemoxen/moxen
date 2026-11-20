@@ -11,6 +11,8 @@ import { openThreadStore, type ThreadStore } from "../../../core/threads/store.j
 import { completeTurn } from "../../../core/threads/threads.js";
 import { DirectConnection } from "../../connection.js";
 import { callMoxenTool, DELEGATION_TOOLS, moxenToolsFor } from "../tools.js";
+import type { ClientApi } from "../../api.js";
+import type { Command, Query } from "../../protocol.js";
 
 const WAIT = { timeout: 12_000 };
 
@@ -257,6 +259,135 @@ describe("message_queue: a thread condition naming the calling thread", () => {
       await t.connection.close();
     }
   }, 30_000);
+});
+
+describe("message_queue: management races and transferred tasks", () => {
+  const future = () => new Date(Date.now() + 3_600_000).toISOString();
+
+  it("refuses a prototype provider key and keeps queue reads working (MXN-401)", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const queued = await t.queue(t.orchestrator, { message: "still here", conditions: [{ type: "at", at: future() }] });
+      const bad = await callMoxenTool(t.connection, t.orchestrator, "message_queue_edit", {
+        turnId: queued.json!.turnId,
+        conditions: [{ type: "usage", provider: "constructor", window: "session", minimum: 5 }],
+      });
+      expect(bad.isError).toBe(true);
+      expect(bad.text).toContain("INVALID_QUEUE");
+      // A bad condition must never break the Work queue read.
+      expect((await t.connection.query({ type: "queue.read" })).entries.some((entry) => entry.turnId === queued.json!.turnId)).toBe(true);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("keeps the user's hold and order when an agent edits conditions mid-race", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const queued = await t.queue(t.orchestrator, { message: "edit me", conditions: [{ type: "at", at: future() }] });
+      const turnId = queued.json!.turnId as string;
+      let orderAfterUser = 0;
+      let raced = false;
+      const userHoldsAndMoves = async (): Promise<void> => {
+        await t.connection.dispatch({ type: "queue.edit", threadId: t.orchestrator, turnId, action: "hold" });
+        await t.connection.dispatch({ type: "queue.edit", threadId: t.orchestrator, turnId, action: "last" });
+        orderAfterUser = (await t.connection.query({ type: "queue.read" })).entries.find((entry) => entry.turnId === turnId)!.policy.order;
+      };
+      // The old tool read the entry and then dispatched; this wrapper puts the
+      // user's change in that gap. The new command does the read under the
+      // admission lock, so the same wrapper delays its dispatch instead.
+      const racing = {
+        query: async (query: Query) => {
+          const result = await t.connection.query(query);
+          if (query.type === "queue.read" && !raced) { raced = true; await userHoldsAndMoves(); }
+          return result;
+        },
+        dispatch: async (command: Command) => {
+          if (command.type === "thread.message.queue.edit" && !raced) { raced = true; await userHoldsAndMoves(); }
+          return t.connection.dispatch(command);
+        },
+      } as unknown as ClientApi;
+      const edited = await callMoxenTool(racing, t.orchestrator, "message_queue_edit", {
+        turnId,
+        conditions: [{ type: "reset", provider: "claude", window: "session" }],
+      });
+      expect(edited.isError).toBe(false);
+      const after = (await t.connection.query({ type: "queue.read" })).entries.find((entry) => entry.turnId === turnId)!;
+      expect(after.policy.held).toBe(true);
+      expect(after.policy.order).toBe(orderAfterUser);
+      expect(after.policy.conditions).toEqual([expect.objectContaining({ type: "reset", provider: "claude", window: "session" })]);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("refuses a removal that races the entry starting and failing", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const queued = await t.queue(t.orchestrator, { message: "take me back", conditions: [{ type: "at", at: future() }] });
+      const turnId = queued.json!.turnId as string;
+      const store = await t.served();
+      const failIt = async (): Promise<void> => {
+        await store.withThreadLock(t.orchestrator, () => store.updateTurn(t.orchestrator, turnId, { status: "failed", error: "boom", completedAt: store.nowIso() }));
+      };
+      let raced = false;
+      const racing = {
+        query: async (query: Query) => {
+          const result = await t.connection.query(query);
+          if (query.type === "queue.read" && !raced) { raced = true; await failIt(); }
+          return result;
+        },
+        dispatch: async (command: Command) => {
+          if (command.type === "thread.message.queue.remove" && !raced) { raced = true; await failIt(); }
+          return t.connection.dispatch(command);
+        },
+      } as unknown as ClientApi;
+      const removed = await callMoxenTool(racing, t.orchestrator, "message_queue_remove", { turnId });
+      expect(removed.isError).toBe(true);
+      expect(removed.text).toContain("QUEUE_MESSAGE_STARTED");
+      const turn = (await store.readTurns(t.orchestrator)).find((entry) => entry.id === turnId)!;
+      expect(turn.status).toBe("failed");
+      expect(turn.queue?.removed).not.toBe(true);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("records a before-start cancellation when an agent takes a waiting message back", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const queued = await t.queue(t.orchestrator, { message: "never mind", conditions: [{ type: "at", at: future() }] });
+      expect((await callMoxenTool(t.connection, t.orchestrator, "message_queue_remove", { turnId: queued.json!.turnId })).isError).toBe(false);
+      const activities = await (await t.served()).readActivities(t.orchestrator);
+      expect(activities.some((activity) => activity.kind === "turn.interrupted" && activity.turnId === queued.json!.turnId && (activity.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true)).toBe(true);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("takes management away from an old parent once the task transfers to a continuation", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const taskId = await t.delegate();
+      const queued = await t.queue(t.orchestrator, { threadId: taskId, message: "after the reset", conditions: [{ type: "at", at: future() }] });
+      const turnId = queued.json!.turnId as string;
+      await t.settleRunningTurns();
+      const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      expect(continued.threadId).not.toBe(t.orchestrator);
+
+      const oldRemove = await callMoxenTool(t.connection, t.orchestrator, "message_queue_remove", { turnId });
+      expect(oldRemove.isError).toBe(true);
+      expect(oldRemove.text).toContain("QUEUE_MESSAGE_NOT_YOURS");
+      expect(JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "message_queue_list", {})).text).messages).toEqual([]);
+
+      // The continuation owns the task now and inherits its earlier entries.
+      const listed = JSON.parse((await callMoxenTool(t.connection, continued.threadId, "message_queue_list", {})).text).messages as Array<Record<string, unknown>>;
+      expect(listed.find((entry) => entry.turnId === turnId)).toMatchObject({ threadId: taskId, message: "after the reset" });
+      expect((await callMoxenTool(t.connection, continued.threadId, "message_queue_remove", { turnId })).isError).toBe(false);
+    } finally {
+      await t.connection.close();
+    }
+  }, 45_000);
 });
 
 describe("message_queue: whose thread it is", () => {

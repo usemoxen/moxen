@@ -158,6 +158,9 @@ import {
   revertThread,
   runDueScheduledTurn,
   queueAgentMessage,
+  listAgentQueuedMessages,
+  editAgentQueuedMessage,
+  removeAgentQueuedMessage,
   startTurn,
   delegationInfo,
   flushTaskNotifications,
@@ -1608,6 +1611,10 @@ export class DirectConnection implements ClientApi {
         const ctx = await this.context();
         return await queueAgentMessage(ctx, command.callerThreadId, { message: command.message, ...(command.threadId !== undefined ? { threadId: command.threadId } : {}), ...(command.at !== undefined ? { at: command.at } : {}), ...(command.conditions ? { conditions: command.conditions } : {}) }, await this.usageProtection.snapshotRows(ctx));
       }
+      case "thread.message.queue.edit":
+        return await editAgentQueuedMessage(await this.context(), command.callerThreadId, command.turnId, command.conditions);
+      case "thread.message.queue.remove":
+        return await removeAgentQueuedMessage(await this.context(), command.callerThreadId, command.turnId);
       case "thread.plan.set":
         return await recordChecklist(await this.context(), command.threadId, command.plan);
       case "thread.background.stop": {
@@ -2327,6 +2334,8 @@ export class DirectConnection implements ClientApi {
         });
       case "thread.task.status":
         return await describeTask(ctx, query.parentThreadId, query.taskId);
+      case "thread.message.queue.list":
+        return { messages: await listAgentQueuedMessages(ctx, query.callerThreadId) };
       case "thread.delegation":
         return await delegationInfo(ctx, query.threadId);
       case "research.run":

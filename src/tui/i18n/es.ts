@@ -1115,6 +1115,8 @@ export const es: Catalog = {
   "perm.move_13_pick_enter_39e3": "↑↓ mover · 1-3 elegir · intro selecciona · × deniega",
   "queued.after_this_turn_c5ef": "después de este turno",
   "queued.agent": "agente",
+  "queued.conditions.one": "{count} condición",
+  "queued.conditions.other": "{count} condiciones",
   "queued.image_only_d3ad": "(solo imagen)",
   "queued.queued_7b2f": "En cola",
   "side.done": "hecho",
