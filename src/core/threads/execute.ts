@@ -734,11 +734,26 @@ export async function ensureDriverSession(
 const watching = new WeakMap<TurnDriver, Map<string, () => void>>();
 
 /**
- * Threads whose events a turn run is recording right now, counted per
- * thread. Checked synchronously by the session watcher, so an event is
- * recorded by exactly one of the two listeners that both see it.
+ * Active turn runners recording events per thread, with each runner's driver
+ * turn id once known. Checked synchronously by the session watcher so an event
+ * for one driver turn is recorded by its own turn runner and never duplicated
+ * or swallowed by a different settling turn.
  */
-const recordingTurns = new Map<string, number>();
+interface ActiveTurnRecorder {
+  driverTurnId: string | null;
+}
+const recordingTurns = new Map<string, Set<ActiveTurnRecorder>>();
+
+function isRecordedByActiveTurn(threadId: string, driverTurnId: string | null): boolean {
+  const recorders = recordingTurns.get(threadId);
+  if (!recorders || recorders.size === 0) return false;
+  for (const recorder of recorders) {
+    if (recorder.driverTurnId === null || driverTurnId === null || recorder.driverTurnId === driverTurnId) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function subagentPayload(event: Extract<ProviderRuntimeEvent, { type: "subagent.updated" }>): Record<string, unknown> {
   // Folds per agent (`toolCallId`) into one row that goes started → stopped.
@@ -874,13 +889,13 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       // Mid-turn the turn runner records it. A background subagent can
       // finish after its turn closed, when only this watcher is listening
       // — without this its row stayed "running" for good.
-      if ((recordingTurns.get(threadId) ?? 0) > 0) return;
+      if (isRecordedByActiveTurn(threadId, event.turnId)) return;
       record("subagent", `${event.agentType} ${event.status}`, subagentPayload(event));
       return;
     }
     if (
       (event.type === "tool.execute.updated" || event.type === "tool.execute.completed") &&
-      (recordingTurns.get(threadId) ?? 0) === 0
+      !isRecordedByActiveTurn(threadId, event.turnId)
     ) {
       // A backgrounded tool call (e.g. an ACP `run_command` that exceeded
       // `WaitMsBeforeAsync`) can finish after its turn settled. Record the
@@ -897,7 +912,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       }
       return;
     }
-    if (event.type === "user-input.request.opened" && (recordingTurns.get(threadId) ?? 0) === 0) {
+    if (event.type === "user-input.request.opened" && (recordingTurns.get(threadId)?.size ?? 0) === 0) {
       const row = userInputActivityRow(event);
       if (row?.payload.delivery === "async" && !lateQuestions.has(row.key)) {
         lateQuestions.add(row.key);
@@ -1386,12 +1401,22 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       liveReading = false;
     });
   };
+  const recorder: ActiveTurnRecorder = { driverTurnId: args.driverTurnId ?? null };
   const unsubscribe = subscribeDriverThread(driver, threadId, (event) => {
+    const eventTurnId = "turnId" in event ? event.turnId : null;
+    if (recorder.driverTurnId !== null && eventTurnId !== null && eventTurnId !== recorder.driverTurnId) {
+      return;
+    }
     recordTools.onEvent(event);
     onEvent?.(event);
     if (event.type === "token-usage.updated" && args.onContextReading !== undefined && Date.now() - lastLiveAt >= EVENT_CONTEXT_MS) readLive();
   });
-  recordingTurns.set(threadId, (recordingTurns.get(threadId) ?? 0) + 1);
+  let recorders = recordingTurns.get(threadId);
+  if (!recorders) {
+    recorders = new Set();
+    recordingTurns.set(threadId, recorders);
+  }
+  recorders.add(recorder);
   // Pre-turn capture first: the diff base must predate any provider write.
   const pre = cwd ? await captureWorktree(cwd, `moxen ${threadId}/${storeTurnId} pre`) : null;
   const controller = new AbortController();
@@ -1437,6 +1462,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
             ...(args.interactionMode ? { interactionMode: args.interactionMode } : {}),
           }),
         );
+    recorder.driverTurnId = sent.turnId;
     if (!args.driverTurnId && controller.signal.aborted) {
       // The stop landed while the prompt was going out: `onAbort`'s
       // interrupt found no open turn yet. Stop the run that just started —
@@ -1496,9 +1522,11 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     store.untrackRunning(storeTurnId);
     unsubscribe();
     if (!completedWithText) await recordTools.saveUnfinishedText();
-    const recording = (recordingTurns.get(threadId) ?? 1) - 1;
-    if (recording > 0) recordingTurns.set(threadId, recording);
-    else recordingTurns.delete(threadId);
+    const active = recordingTurns.get(threadId);
+    if (active) {
+      active.delete(recorder);
+      if (active.size === 0) recordingTurns.delete(threadId);
+    }
     // Drain queued tool rows before the run is considered over.
     await recordTools.flush();
     // Again at the end: some providers only report the handle once the

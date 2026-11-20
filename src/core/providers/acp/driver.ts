@@ -105,6 +105,8 @@ export interface AcpDriverOptions {
   readonly promptTimeoutMs?: number;
   /** Idle settle delay (ms) for out-of-turn reactive wakeup turns (`origin: "background"`). */
   readonly backgroundTurnIdleMs?: number;
+  /** Shorter settle grace (ms) after a `usage_update` following assistant text in a background turn. */
+  readonly backgroundTurnPostUsageIdleMs?: number;
   /** Test seam for Antigravity `/usage` + `/credits` probing. */
   readonly probeUsage?: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
 }
@@ -165,6 +167,8 @@ interface AcpTranscriptTurn {
   readonly tools: Map<string, AcpToolState>;
   usage: TokenUsageDelta | null;
   sawUsageUpdate: boolean;
+  hasAssistantTextSinceLastTool: boolean;
+  awaitingPostUsageSettle: boolean;
   generationChars: number;
   generationMs: number;
   generationStartedAt: number | null;
@@ -206,12 +210,20 @@ interface AcpSession {
   readonly backgroundTasks: Map<string, BackgroundTaskSummary>;
   readonly backgroundTimers: Map<string, ReturnType<typeof setTimeout>>;
   backgroundTurnIdleTimer: ReturnType<typeof setTimeout> | null;
+  usageRefreshInFlight: Promise<void> | null;
+  lastForcedUsageRefreshAt: number;
   closed: boolean;
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 15_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
-const DEFAULT_BACKGROUND_TURN_IDLE_MS = 350;
+// Out-of-turn wakeup turns have no explicit ACP end-of-turn signal: wait long enough
+// across thinking/streaming/post-tool LLM pauses so replies do not split mid-turn.
+const DEFAULT_BACKGROUND_TURN_IDLE_MS = 10_000;
+// Once `agy` emits `usage_update` after assistant text, any follow-up `tool_call` lands
+// within milliseconds; settle promptly after a short grace window.
+const DEFAULT_BACKGROUND_TURN_POST_USAGE_IDLE_MS = 1_500;
+const USAGE_REFRESH_COALESCE_MS = 2_000;
 
 function toCliError(code: string, message: string, cause: unknown, agentLabel?: string): CliError {
   // Auth patterns win even over transport wrappers (`PEER_REQUEST_FAILED`).
@@ -298,6 +310,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly initializeTimeoutMs: number;
   private readonly promptTimeoutMs: number;
   private readonly backgroundTurnIdleMs: number;
+  private readonly backgroundTurnPostUsageIdleMs: number;
   private readonly probeUsageFn: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
   private readonly sessions = new Map<ThreadId, AcpSession>();
   /** ACP session id per Moxen thread, kept past session teardown for resume. */
@@ -319,6 +332,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
     this.promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
     this.backgroundTurnIdleMs = options.backgroundTurnIdleMs ?? DEFAULT_BACKGROUND_TURN_IDLE_MS;
+    this.backgroundTurnPostUsageIdleMs =
+      options.backgroundTurnPostUsageIdleMs ??
+      Math.min(this.backgroundTurnIdleMs, DEFAULT_BACKGROUND_TURN_POST_USAGE_IDLE_MS);
     // When tests inject a fake transport without a custom usage probe, avoid spawning a real `agy` binary.
     this.probeUsageFn =
       options.probeUsage
@@ -566,6 +582,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           backgroundTasks: new Map(),
           backgroundTimers: new Map(),
           backgroundTurnIdleTimer: null,
+          usageRefreshInFlight: null,
+          lastForcedUsageRefreshAt: 0,
           closed: false,
         };
 
@@ -626,6 +644,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         tools: new Map(),
         usage: null,
         sawUsageUpdate: false,
+        hasAssistantTextSinceLastTool: false,
+        awaitingPostUsageSettle: false,
         generationChars: 0,
         generationMs: 0,
         generationStartedAt: null,
@@ -981,7 +1001,15 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const parsed = parseAcpUsageUpdate(update);
       if (parsed) {
         const activeTurn = this.openTurn(session);
-        if (activeTurn) activeTurn.sawUsageUpdate = true;
+        if (activeTurn) {
+          activeTurn.sawUsageUpdate = true;
+          if (activeTurn.origin === "background") {
+            if (activeTurn.hasAssistantTextSinceLastTool) {
+              activeTurn.awaitingPostUsageSettle = true;
+            }
+            this.scheduleBackgroundTurnSettle(session);
+          }
+        }
         const prev = session.context;
         session.context = {
           usedTokens: parsed.used,
@@ -1004,6 +1032,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const delta = asString(content?.["text"]) ?? asString(update["text"]);
       if (!delta) return;
       const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
+      turn.awaitingPostUsageSettle = false;
       this.promoteInProgressTools(session, turn);
       this.pauseGenerationTimer(turn);
       if (!turn.activeReasoning) {
@@ -1040,6 +1069,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const delta = asString(content?.["text"]) ?? asString(update["text"]);
       if (!delta) return;
       const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
+      turn.awaitingPostUsageSettle = false;
+      turn.hasAssistantTextSinceLastTool = true;
       this.promoteInProgressTools(session, turn);
       this.finishReasoning(session, turn);
       if (!turn.activeSegment) {
@@ -1067,6 +1098,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
     if (kind === "plan") {
       const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
+      turn.awaitingPostUsageSettle = false;
       const rawEntries = Array.isArray(update["entries"]) ? update["entries"] : [];
       const plan = rawEntries
         .map((entry) => {
@@ -1096,6 +1128,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
       const ownerTurn = this.findTurnWithTool(session, toolCallId);
       const turn = ownerTurn ?? this.openTurn(session) ?? this.startOutOfTurn(session);
+      const activeOpen = this.openTurn(session);
+      if (activeOpen) {
+        activeOpen.awaitingPostUsageSettle = false;
+        activeOpen.hasAssistantTextSinceLastTool = false;
+      }
       if (turn.status === "running") {
         this.finishReasoning(session, turn);
         this.flushActiveSegmentAsNote(session, turn);
@@ -1213,6 +1250,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       tools: new Map(),
       usage: null,
       sawUsageUpdate: false,
+      hasAssistantTextSinceLastTool: false,
+      awaitingPostUsageSettle: false,
       generationChars: 0,
       generationMs: 0,
       generationStartedAt: null,
@@ -1239,13 +1278,18 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.clearBackgroundTurnIdleTimer(session);
     const open = this.openTurn(session);
     if (!open || open.origin !== "background" || session.closed) return;
-    // Wait while any non-backgrounded tool call owned by this turn is still running.
-    const hasForegroundToolRunning = [...open.tools.values()].some(
-      (tool) =>
-        (tool.status === "in_progress" || tool.status === "pending") &&
-        !session.backgroundTasks.has(tool.toolCallId),
-    );
-    if (hasForegroundToolRunning) return;
+    // Hold the settle timer while any foreground tool owned by this turn is still
+    // running, or while a turn-local backgrounded tool is running with no assistant
+    // reply emitted after it yet.
+    const hasBlockingToolRunning = [...open.tools.values()].some((tool) => {
+      if (tool.status !== "in_progress" && tool.status !== "pending") return false;
+      if (!session.backgroundTasks.has(tool.toolCallId)) return true;
+      return !open.hasAssistantTextSinceLastTool;
+    });
+    if (hasBlockingToolRunning) return;
+    const delayMs = open.awaitingPostUsageSettle
+      ? this.backgroundTurnPostUsageIdleMs
+      : this.backgroundTurnIdleMs;
     const timer = setTimeout(() => {
       session.backgroundTurnIdleTimer = null;
       if (session.closed || open.status !== "running") return;
@@ -1253,7 +1297,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       if (this.provider === "antigravity") {
         void this.refreshAntigravityUsage(session, true);
       }
-    }, this.backgroundTurnIdleMs);
+    }, delayMs);
     timer.unref?.();
     session.backgroundTurnIdleTimer = timer;
   }
@@ -1476,17 +1520,31 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
   private async refreshAntigravityUsage(session: AcpSession, force = false): Promise<void> {
     if (this.provider !== "antigravity" || session.closed) return;
-    const snapshot = await this.probeUsageFn(session.agent.command, this.baseEnv, { force }).catch(() => null);
-    if (!snapshot || session.closed) return;
-    if (snapshot.windows.length === 0 && snapshot.credits === null) return;
-    this.publish({
-      type: "rate-limits.updated",
-      provider: this.provider,
-      threadId: session.threadId,
-      windows: snapshot.windows,
-      ...(snapshot.credits === null ? {} : { credits: snapshot.credits }),
-      ...(session.tier ? { raw: { subscriptionType: session.tier } } : {}),
+    if (session.usageRefreshInFlight) return session.usageRefreshInFlight;
+    const now = Date.now();
+    if (force && session.lastForcedUsageRefreshAt > 0 && now - session.lastForcedUsageRefreshAt < USAGE_REFRESH_COALESCE_MS) {
+      return;
+    }
+    if (force) session.lastForcedUsageRefreshAt = now;
+    const run = (async () => {
+      const snapshot = await this.probeUsageFn(session.agent.command, this.baseEnv, { force }).catch(() => null);
+      if (!snapshot || session.closed) return;
+      if (snapshot.windows.length === 0 && snapshot.credits === null) return;
+      this.publish({
+        type: "rate-limits.updated",
+        provider: this.provider,
+        threadId: session.threadId,
+        windows: snapshot.windows,
+        ...(snapshot.credits === null ? {} : { credits: snapshot.credits }),
+        ...(session.tier ? { raw: { subscriptionType: session.tier } } : {}),
+      });
+    })().finally(() => {
+      if (session.usageRefreshInFlight === run) {
+        session.usageRefreshInFlight = null;
+      }
     });
+    session.usageRefreshInFlight = run;
+    return run;
   }
 
   private outcomeOf(turn: AcpTranscriptTurn): AcpTurnOutcome {

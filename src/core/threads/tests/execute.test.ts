@@ -1278,4 +1278,61 @@ describe("driver event pump", () => {
     await expect.poll(() => failures.join("\n")).toContain("interruptTurn for thread");
     expect(failures.join("\n")).toContain("session already gone");
   });
+
+  it("does not misattribute Turn B's tool events to Turn A while Turn A is settling checkpoints", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-turnid-filter-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Turn isolation",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+    let settleHookFired = false;
+    const origAppend = store.appendLedger.bind(store);
+    store.appendLedger = (async (tid, kind, entry) => {
+      if (!settleHookFired && kind === "checkpoints") {
+        settleHookFired = true;
+        // Turn B emits a tool event with its own driver turnId while Turn A is still settling.
+        await Effect.runPromise(
+          Queue.offer(queue, {
+            type: "tool.execute.completed",
+            provider: "antigravity",
+            threadId: thread.id,
+            turnId: "driver-turn-B",
+            tool: "Read",
+            raw: { toolCallId: "tc-turn-b", title: "src/b.ts", status: "completed" },
+          }),
+        );
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      return origAppend(tid, kind, entry);
+    }) as typeof store.appendLedger;
+
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "driver-turn-A" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => ({ status: "completed", text: "Turn A done.", usage: null, error: null }),
+      streamEvents: Stream.fromQueue(queue),
+    };
+    const { turn: turnA } = await sendTurn(store, thread.id, { prompt: "go" });
+    await executeTurn({
+      store,
+      driver,
+      threadId: thread.id,
+      storeTurnId: turnA.id,
+      prompt: "go",
+      workingDirectory: root,
+    });
+
+    const activity = await store.readActivities(thread.id);
+    const misattributed = activity.filter(
+      (row) => row.turnId === turnA.id && JSON.stringify(row).includes("tc-turn-b"),
+    );
+    expect(misattributed).toEqual([]);
+  });
 });

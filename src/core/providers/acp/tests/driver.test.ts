@@ -729,4 +729,106 @@ describe("ACP crash recovery & rollback", () => {
       await Effect.runPromise(driver.stopAll());
     }
   });
+
+  it("does not split a wakeup turn across >350ms pauses, holds on turn-local tools, settles after post-text usage_update, and coalesces usage probes", async () => {
+    const transport = new FakeAcpTransport();
+    const probeUsage = vi.fn(async () => ({ windows: [], credits: 10 }));
+    const driver = new AcpDriver({
+      provider: "antigravity",
+      agents: { antigravity: { id: "antigravity", name: "Antigravity", command: "agy", args: ["acp"] } },
+      transport,
+      // Use the production 10s mid-stream idle window with a short post-usage grace for fast tests.
+      backgroundTurnPostUsageIdleMs: 40,
+      probeUsage,
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(
+        driver.startSession({
+          ...START,
+          modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+        }),
+      );
+      await vi.waitFor(() => expect(probeUsage).toHaveBeenCalledTimes(1));
+      probeUsage.mockClear();
+      const server = transport.sessions[0]!.server;
+
+      // Realistic agy multi-step wakeup: thought -> usage_update -> tool_call (backgrounded) -> pause -> completion -> pause -> chunk1 -> 450ms pause -> chunk2 -> usage_update.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Checking output..." },
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "usage_update",
+        used: 9_900,
+        size: 1_048_576,
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-wakeup-cmd",
+        kind: "execute",
+        title: "echo check",
+        status: "in_progress",
+        rawInput: { CommandLine: "echo check", WaitMsBeforeAsync: 10 },
+      });
+      // Let WaitMsBeforeAsync promote it to background; turn must still stay open because no reply followed.
+      await new Promise((r) => setTimeout(r, 70));
+      expect(driver.backgroundTasks("thread-1").map((t) => t.taskId)).toEqual(["tc-wakeup-cmd"]);
+      expect(events.filter((e) => e.type === "turn.completed")).toHaveLength(0);
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-wakeup-cmd",
+        status: "completed",
+        rawOutput: "ok",
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Part 1. " },
+      });
+      // Pause longer than the old 350ms idle cutoff before streaming Part 2.
+      await new Promise((r) => setTimeout(r, 420));
+      expect(events.filter((e) => e.type === "turn.completed")).toHaveLength(0);
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Part 2." },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "usage_update",
+        used: 10_660,
+        size: 1_048_576,
+      });
+
+      await vi.waitFor(() => expect(events.filter((e) => e.type === "turn.completed")).toHaveLength(1));
+      const bgStarts = events.filter((e) => e.type === "turn.started" && e.origin === "background");
+      expect(bgStarts).toHaveLength(1);
+      const outcome = await driver.awaitTurn("thread-1", bgStarts[0]!.turnId);
+      expect(outcome.status).toBe("completed");
+      expect(outcome.text).toBe("Part 1. Part 2.");
+      expect(probeUsage).toHaveBeenCalledTimes(1);
+
+      // A second wakeup settling immediately afterward coalesces its forced usage probe.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Follow-up." },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "usage_update",
+        used: 10_700,
+        size: 1_048_576,
+      });
+      await vi.waitFor(() => expect(events.filter((e) => e.type === "turn.completed")).toHaveLength(2));
+      expect(probeUsage).toHaveBeenCalledTimes(1);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
 });
