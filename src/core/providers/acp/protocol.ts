@@ -26,6 +26,7 @@ export const ACP_METHODS = {
   authenticate: "authenticate",
   sessionNew: "session/new",
   sessionLoad: "session/load",
+  sessionResume: "session/resume",
   sessionClose: "session/close",
   sessionPrompt: "session/prompt",
   sessionSetMode: "session/set_mode",
@@ -102,6 +103,7 @@ export interface AcpMcpCapabilities {
 
 export interface AcpAgentCapabilities {
   readonly loadSession: boolean;
+  readonly canResumeSession: boolean;
   readonly canCloseSession: boolean;
   readonly promptCapabilities: AcpPromptCapabilities;
   readonly mcpCapabilities: AcpMcpCapabilities;
@@ -150,6 +152,7 @@ export function parseAcpInitializeResult(raw: unknown, agentLabel?: string): Acp
     protocolVersion,
     agentCapabilities: {
       loadSession: caps["loadSession"] === true || caps["load_session"] === true,
+      canResumeSession: asRecord(sessionCaps["resume"]) !== null || sessionCaps["resume"] === true,
       canCloseSession: asRecord(sessionCaps["close"]) !== null || sessionCaps["close"] === true,
       promptCapabilities: {
         image: promptCaps["image"] === true,

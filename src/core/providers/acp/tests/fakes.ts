@@ -13,6 +13,7 @@ export interface FakeAcpScript {
   /** Override the negotiated protocolVersion returned from `initialize`. */
   readonly protocolVersion?: unknown;
   readonly loadSession?: boolean;
+  readonly canResumeSession?: boolean;
   readonly canCloseSession?: boolean;
   readonly version?: string;
   readonly imageCapability?: boolean;
@@ -70,7 +71,14 @@ export class FakeAcpServer {
             "protocolVersion" in this.script ? this.script.protocolVersion : ACP_PROTOCOL_VERSION,
           agentCapabilities: {
             loadSession: this.script.loadSession ?? true,
-            ...(this.script.canCloseSession ? { sessionCapabilities: { close: {} } } : {}),
+            ...(this.script.canCloseSession || this.script.canResumeSession
+              ? {
+                  sessionCapabilities: {
+                    ...(this.script.canCloseSession ? { close: {} } : {}),
+                    ...(this.script.canResumeSession ? { resume: {} } : {}),
+                  },
+                }
+              : {}),
             promptCapabilities: {
               image: this.script.imageCapability ?? true,
               audio: false,
@@ -97,6 +105,7 @@ export class FakeAcpServer {
       }
       case "session/close":
         return {};
+      case "session/resume":
       case "session/load": {
         const sessionId = (params as { sessionId?: string } | null)?.sessionId;
         if (!sessionId || this.script.lostSessions?.includes(sessionId)) {

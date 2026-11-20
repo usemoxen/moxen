@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -1819,6 +1819,177 @@ describe("ACP elicitation/create (ask_question) & respondToUserInput (MXN-443)",
           message: "Need user",
         }),
       ).toEqual({ action: "decline" });
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+});
+
+describe("ACP session/resume, session/close, steering, compaction, skills inventory, and context breakdown (MXN-444)", () => {
+  it("prefers session/resume over session/load when advertised and sends session/close on stopSession", async () => {
+    const transport = new FakeAcpTransport({ canResumeSession: true, canCloseSession: true });
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-prev" }));
+    const server = transport.sessions[0]!.server;
+    expect(server.requestsTo("session/resume")).toHaveLength(1);
+    expect(server.requestsTo("session/load")).toHaveLength(0);
+    expect(server.requestsTo("session/new")).toHaveLength(0);
+
+    await Effect.runPromise(driver.stopSession("thread-1"));
+    expect(server.requestsTo("session/close")).toEqual([
+      { method: "session/close", params: { sessionId: "acp-prev" } },
+    ]);
+  });
+
+  it("supports mid-turn steerTurn on antigravity (omitted on generic acp) across both immediate-ack and prompt-handoff flows", async () => {
+    const generic = new AcpDriver({ transport: new FakeAcpTransport() });
+    expect(generic.steerTurn).toBeUndefined();
+    expect(generic.compaction).toBeUndefined();
+
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    expect(driver.steerTurn).toBeDefined();
+    expect(driver.compaction).toEqual({ type: "slash-command", command: "/compact" });
+
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "start work" }));
+
+    // Mid-turn steer sends a second session/prompt without settling the running turn.
+    await Effect.runPromise(driver.steerTurn!("thread-1", "focus on tests"));
+    expect(server.requestsTo("session/prompt")).toHaveLength(2);
+    expect(server.requestsTo("session/prompt")[1]!.params).toMatchObject({
+      sessionId: "acp-sess-1",
+      prompt: [{ type: "text", text: "focus on tests" }],
+    });
+
+    // Prompt #1 finishes first (handoff to steer): turn must stay open until prompt #2 finishes too.
+    server.notifyUpdate("acp-sess-1", {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Steered reply." },
+    });
+    server.finishPrompt("end_turn");
+    let settledEarly = false;
+    const outcomePromise = driver.awaitTurn("thread-1", sent.turnId).then((res) => {
+      settledEarly = true;
+      return res;
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(settledEarly).toBe(false);
+
+    server.finishPrompt("end_turn");
+    const outcome = await outcomePromise;
+    expect(outcome.status).toBe("completed");
+    expect(outcome.text).toBe("Steered reply.");
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("emits compacted session.notice on /compact and computes scaled contextBreakdown & skillInventory", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-skills-"));
+    const home = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-home-"));
+    tempDirs.push(dir, home);
+    await mkdir(path.join(dir, ".agents", "skills", "deploy"), { recursive: true });
+    await writeFile(
+      path.join(dir, ".agents", "skills", "deploy", "SKILL.md"),
+      "---\nname: deploy\ndescription: Deploy the app\n---\nRun deploy.\n",
+      "utf8",
+    );
+
+    const transport = new FakeAcpTransport({
+      onSessionNew: (server, sessionId) => {
+        server.notifyUpdate(sessionId, {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [
+            { name: "compact", description: "Compact context" },
+            { name: "plan", description: "Plan changes", input: { hint: "goal" } },
+          ],
+        });
+      },
+    });
+    const driver = new AcpDriver({ provider: "antigravity", transport, skillHome: home });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: dir }));
+      const server = transport.sessions[0]!.server;
+
+      // skillInventory merges local skills with live available_commands_update.
+      const inventory = await driver.skillInventory(dir);
+      expect(inventory.trigger).toBe("/");
+      expect(inventory.skills).toMatchObject([
+        { name: "deploy", description: "Deploy the app", enabled: true },
+      ]);
+      expect(inventory.commands).toEqual([
+        { name: "compact", description: "Compact context", argumentHint: null, builtin: true },
+        { name: "plan", description: "Plan changes", argumentHint: "goal", builtin: true },
+      ]);
+
+      // Run a normal turn with reasoning + tool + reply + usage_update -> contextBreakdown reflects all categories.
+      const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "inspect repo" }));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Thinking about the repo structure." },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-1",
+        kind: "read",
+        title: "File a.ts",
+        status: "completed",
+        rawInput: { Path: "a.ts" },
+        rawOutput: { output: "export const a = 1;" },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Inspected a.ts." },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "usage_update",
+        used: 2_000,
+        size: 100_000,
+      });
+      server.finishPrompt("end_turn");
+      await driver.awaitTurn("thread-1", t1.turnId);
+
+      const breakdown = await driver.contextBreakdown("thread-1");
+      expect(breakdown).not.toBeNull();
+      expect(breakdown!.estimated).toBe(true);
+      expect(breakdown!.usedTokens).toBe(2_000);
+      expect(breakdown!.maxTokens).toBe(100_000);
+      expect(breakdown!.categories.map((c) => c.name)).toContain("Tool calls");
+      expect(breakdown!.categories.map((c) => c.name)).toContain("Reasoning");
+      expect(breakdown!.tools?.[0]?.name).toBe("Read");
+
+      // /compact emits session.notice: "compacted" and resets contextBreakdown window to post-compaction turns.
+      const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Compacted summary." },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "usage_update",
+        used: 400,
+        size: 100_000,
+      });
+      server.finishPrompt("end_turn");
+      await driver.awaitTurn("thread-1", t2.turnId);
+
+      await vi.waitFor(() =>
+        expect(
+          events.some(
+            (e) =>
+              e.type === "session.notice" &&
+              e.notice === "compacted" &&
+              e.detail === "Compacted summary.",
+          ),
+        ).toBe(true),
+      );
+      const afterCompact = await driver.contextBreakdown("thread-1");
+      expect(afterCompact!.usedTokens).toBe(400);
+      expect(afterCompact!.tools).toBeUndefined();
     } finally {
       await Effect.runPromise(Fiber.interrupt(fiber));
       await Effect.runPromise(driver.stopAll());

@@ -9,36 +9,45 @@
  * registry-supplied ACP agent via `acp/<agent-id>` instance routing.
  */
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
-import type { ModelSummary } from "../../catalog/summary.js";
+import { plainSkill, type ModelSummary, type SkillInventory, type SkillSummary } from "../../catalog/summary.js";
 import { CliError } from "../../errors.js";
 import { escapes, isolationViolation, rawInputViolation, type WorktreeIsolation } from "../../threads/isolation.js";
 import type { ModelSelection, RuntimeMode } from "../../types.js";
 import { APP_VERSION } from "../../version.js";
+import { conversationContextBreakdown } from "../context.js";
 import { assessCommandLine, classifyPath } from "../harness/commandsafety.js";
+import { parseSkillFile } from "../harness/skills.js";
 import { JsonRpcPeer } from "../stdio.js";
-import type {
-  ApprovalRequestId,
-  BackgroundTaskSummary,
-  ContextWindowUsage,
-  ProviderAdapter,
-  ProviderAdapterCapabilities,
-  ProviderApprovalDecision,
-  ProviderRuntimeEvent,
-  ProviderSendTurnInput,
-  ProviderSession,
-  ProviderSessionStartInput,
-  ProviderThreadSnapshot,
-  ProviderTurnStartResult,
-  ProviderUserInputAnswers,
-  RateLimitWindow,
-  ThreadId,
-  TokenUsageDelta,
-  TurnId,
+import {
+  isCompactCommand,
+  type ApprovalRequestId,
+  type BackgroundTaskSummary,
+  type ContextBreakdown,
+  type ContextWindowUsage,
+  type ProviderAdapter,
+  type ProviderAdapterCapabilities,
+  type ProviderApprovalDecision,
+  type ProviderCompaction,
+  type ProviderImage,
+  type ProviderRuntimeEvent,
+  type ProviderSendTurnInput,
+  type ProviderSession,
+  type ProviderSessionStartInput,
+  type ProviderThreadSnapshot,
+  type ProviderTurnStartResult,
+  type ProviderUserInputAnswers,
+  type RateLimitWindow,
+  type ThreadId,
+  type TokenUsageDelta,
+  type TurnId,
 } from "../spi.js";
 import {
   parseAntigravityTier,
@@ -117,6 +126,10 @@ export interface AcpDriverOptions {
   readonly cancelQuietMs?: number;
   /** Test seam for Antigravity `/usage` + `/credits` probing. */
   readonly probeUsage?: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
+  /** Override whether this driver advertises mid-turn steering (`steerTurn`). Defaults to `provider === "antigravity"`. */
+  readonly supportsSteering?: boolean;
+  /** Override home directory for local skill discovery (test seam). */
+  readonly skillHome?: string;
 }
 
 export interface AcpTurnOutcome {
@@ -176,7 +189,11 @@ interface AcpTranscriptTurn {
   readonly segments: AcpMessageSegment[];
   activeSegment: AcpMessageSegment | null;
   activeReasoning: AcpReasoningState | null;
+  readonly reasoningTexts: string[];
   readonly tools: Map<string, AcpToolState>;
+  readonly activePrompts: Set<InFlightAcpPrompt>;
+  compacting: boolean;
+  compacted: boolean;
   usage: TokenUsageDelta | null;
   sawUsageUpdate: boolean;
   hasAssistantTextSinceLastTool: boolean;
@@ -259,7 +276,61 @@ const DEFAULT_BACKGROUND_TURN_IDLE_MS = 10_000;
 const DEFAULT_BACKGROUND_TURN_POST_USAGE_IDLE_MS = 1_500;
 const DEFAULT_CANCEL_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_CANCEL_QUIET_MS = 500;
+const DEFAULT_SESSION_CLOSE_TIMEOUT_MS = 500;
+const STEER_ACK_CHECK_MS = 50;
 const USAGE_REFRESH_COALESCE_MS = 2_000;
+const SKILL_MARKER_FILE = ".moxen-skill.json";
+const MAX_LOCAL_SKILLS = 60;
+const MAX_SKILL_DESCRIPTION_CHARS = 300;
+
+function discoverLocalAcpSkills(cwd: string, home: string): SkillSummary[] {
+  const folders = [
+    path.join(cwd, ".claude", "skills"),
+    path.join(cwd, ".agents", "skills"),
+    path.join(home, ".claude", "skills"),
+    path.join(home, ".agents", "skills"),
+  ];
+  const found = new Map<string, SkillSummary>();
+  for (const folder of folders) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(folder, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const dirs = entries
+      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+      .map((entry) => path.join(folder, entry.name))
+      .filter((dir) => !fs.existsSync(path.join(dir, SKILL_MARKER_FILE)))
+      .sort();
+    for (const dir of dirs) {
+      const file = path.join(dir, "SKILL.md");
+      let text: string;
+      try {
+        text = fs.readFileSync(file, "utf8");
+      } catch {
+        continue;
+      }
+      const { fields, body } = parseSkillFile(text);
+      const folderName = path.basename(dir);
+      const name = fields["name"] && /^[A-Za-z0-9._-]{1,64}$/.test(fields["name"]) ? fields["name"] : folderName;
+      if (found.has(name)) continue;
+      const rawDesc = (
+        fields["description"] ||
+        body.split(/\r?\n/).find((line) => line.trim() !== "" && !line.startsWith("#")) ||
+        ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const description =
+        rawDesc.length > MAX_SKILL_DESCRIPTION_CHARS
+          ? `${rawDesc.slice(0, MAX_SKILL_DESCRIPTION_CHARS - 1)}…`
+          : rawDesc || null;
+      found.set(name, plainSkill(name, description));
+    }
+  }
+  return [...found.values()].sort((a, b) => (a.name < b.name ? -1 : 1)).slice(0, MAX_LOCAL_SKILLS);
+}
 
 function toCliError(code: string, message: string, cause: unknown, agentLabel?: string): CliError {
   // Auth patterns win even over transport wrappers (`PEER_REQUEST_FAILED`).
@@ -487,6 +558,13 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     sessionModelSwitch: "in-session",
     supportsConversationRollback: false,
   };
+  readonly compaction?: ProviderCompaction<CliError>;
+  readonly steerTurn?: (
+    threadId: ThreadId,
+    text: string,
+    images?: readonly ProviderImage[],
+    steerId?: string,
+  ) => Effect.Effect<void, CliError>;
 
   private readonly agents: Map<string, AcpAgentLaunchSpec>;
   private readonly baseEnv: NodeJS.ProcessEnv;
@@ -497,6 +575,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly backgroundTurnPostUsageIdleMs: number;
   private readonly cancelDrainTimeoutMs: number;
   private readonly cancelQuietMs: number;
+  private readonly skillHome: string;
   private readonly probeUsageFn: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
   private readonly sessions = new Map<ThreadId, AcpSession>();
   /** ACP session id per Moxen thread, kept past session teardown for resume. */
@@ -525,6 +604,13 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       Math.min(this.backgroundTurnIdleMs, DEFAULT_BACKGROUND_TURN_POST_USAGE_IDLE_MS);
     this.cancelDrainTimeoutMs = options.cancelDrainTimeoutMs ?? DEFAULT_CANCEL_DRAIN_TIMEOUT_MS;
     this.cancelQuietMs = options.cancelQuietMs ?? DEFAULT_CANCEL_QUIET_MS;
+    this.skillHome = options.skillHome ?? os.homedir();
+    if (this.provider === "antigravity") {
+      this.compaction = { type: "slash-command", command: "/compact" };
+    }
+    if (options.supportsSteering ?? this.provider === "antigravity") {
+      this.steerTurn = (threadId, text, images) => this.runSteerTurn(threadId, text, images);
+    }
     // When tests inject a fake transport without a custom usage probe, avoid spawning a real `agy` binary.
     this.probeUsageFn =
       options.probeUsage
@@ -651,6 +737,78 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
     this.sessions.get(threadId)?.context ?? null;
+
+  /** Estimated context breakdown from the live session's transcript since the last compaction. */
+  readonly contextBreakdown = async (threadId: ThreadId): Promise<ContextBreakdown | null> => {
+    const session = this.sessions.get(threadId);
+    if (!session?.context) return null;
+    const lastCompacted = session.transcript.findLastIndex((turn) => turn.compacted);
+    const turns = session.transcript.slice(lastCompacted + 1);
+    const messages: Array<{ readonly info: Record<string, unknown>; readonly parts: ReadonlyArray<Record<string, unknown>> }> = [];
+    for (const turn of turns) {
+      if (turn.prompt.length > 0) {
+        messages.push({
+          info: { role: "user" },
+          parts: [{ type: "text", text: turn.prompt }],
+        });
+      }
+      const assistantParts: Array<Record<string, unknown>> = [];
+      for (const reasoning of turn.reasoningTexts) {
+        if (reasoning.length > 0) {
+          assistantParts.push({ type: "reasoning", text: reasoning });
+        }
+      }
+      if (turn.activeReasoning && turn.activeReasoning.text.length > 0) {
+        assistantParts.push({ type: "reasoning", text: turn.activeReasoning.text });
+      }
+      for (const seg of turn.segments) {
+        if (seg.text.length > 0) {
+          assistantParts.push({ type: "text", text: seg.text });
+        }
+      }
+      for (const tool of turn.tools.values()) {
+        assistantParts.push({
+          type: "tool",
+          tool: tool.canonicalTool,
+          state: { input: tool.input, output: tool.rawOutput },
+        });
+      }
+      if (assistantParts.length > 0) {
+        messages.push({ info: { role: "assistant" }, parts: assistantParts });
+      }
+    }
+    return conversationContextBreakdown(session.context, messages);
+  };
+
+  /** Skills from local `.claude/skills` and `.agents/skills` merged with live ACP `available_commands_update`. */
+  readonly skillInventory = async (cwd: string): Promise<SkillInventory> => {
+    const skills = discoverLocalAcpSkills(cwd, this.skillHome);
+    const skillNames = new Set(skills.map((skill) => skill.name.toLowerCase()));
+    const resolvedCwd = path.resolve(cwd);
+    const liveSessions = [...this.sessions.values()].filter((s) => !s.closed);
+    const matching = liveSessions.filter((s) => path.resolve(s.workingDirectory) === resolvedCwd);
+    const commandSources = matching.length > 0 ? matching : liveSessions;
+    const seenCommands = new Set<string>();
+    const commands: SkillInventory["commands"][number][] = [];
+    for (const session of commandSources) {
+      for (const cmd of session.availableCommands) {
+        const key = cmd.name.toLowerCase();
+        if (seenCommands.has(key) || skillNames.has(key)) continue;
+        seenCommands.add(key);
+        commands.push({
+          name: cmd.name,
+          description: cmd.description.trim() || null,
+          argumentHint: cmd.inputHint,
+          builtin: true,
+        });
+      }
+    }
+    return {
+      trigger: "/",
+      skills,
+      commands,
+    };
+  };
 
   readonly backgroundTasks = (threadId: ThreadId): readonly BackgroundTaskSummary[] =>
     [...(this.sessions.get(threadId)?.backgroundTasks.values() ?? [])];
@@ -834,32 +992,44 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         let initialTitle: string | null = null;
         let resumed = false;
 
-        if (input.resumeCursor && init.agentCapabilities.loadSession) {
-          try {
-            const loadRaw = await peer.request(
-              ACP_METHODS.sessionLoad,
-              {
-                sessionId: input.resumeCursor,
-                cwd: input.workingDirectory,
-                mcpServers,
-              },
-              this.initializeTimeoutMs,
-            );
-            const loadRec = asRecord(loadRaw);
-            acpSessionId = asNonEmptyString(loadRec?.["sessionId"]) ?? input.resumeCursor;
-            modes = parseAcpModesState(loadRec?.["modes"]);
-            configOptions = parseAcpConfigOptions(loadRec?.["configOptions"]);
-            tier = parseAntigravityTier(loadRec);
-            initialTitle = asNonEmptyString(loadRec?.["title"])?.trim() ?? null;
-            resumed = true;
-          } catch (cause) {
-            const text = cause instanceof Error ? cause.message : String(cause);
-            // Never silently replace a conversation when resume fails for auth.
-            if (isAcpAuthErrorText(text)) {
-              throw toCliError("ACP_AUTH_REQUIRED", `Could not resume ACP session for ${agentLabel}`, cause, agentLabel);
-            }
-            if (!isAcpSessionNotFoundText(text)) {
-              throw toCliError("ACP_RESUME_FAILED", `Could not resume ACP session for ${agentLabel}`, cause, agentLabel);
+        if (input.resumeCursor && (init.agentCapabilities.canResumeSession || init.agentCapabilities.loadSession)) {
+          const methodsToTry: string[] = [];
+          if (init.agentCapabilities.canResumeSession) methodsToTry.push(ACP_METHODS.sessionResume);
+          if (init.agentCapabilities.loadSession) methodsToTry.push(ACP_METHODS.sessionLoad);
+
+          for (let idx = 0; idx < methodsToTry.length; idx += 1) {
+            const method = methodsToTry[idx]!;
+            try {
+              const loadRaw = await peer.request(
+                method,
+                {
+                  sessionId: input.resumeCursor,
+                  cwd: input.workingDirectory,
+                  mcpServers,
+                },
+                this.initializeTimeoutMs,
+              );
+              const loadRec = asRecord(loadRaw);
+              acpSessionId = asNonEmptyString(loadRec?.["sessionId"]) ?? input.resumeCursor;
+              modes = parseAcpModesState(loadRec?.["modes"]);
+              configOptions = parseAcpConfigOptions(loadRec?.["configOptions"]);
+              tier = parseAntigravityTier(loadRec);
+              initialTitle = asNonEmptyString(loadRec?.["title"])?.trim() ?? null;
+              resumed = true;
+              break;
+            } catch (cause) {
+              const text = cause instanceof Error ? cause.message : String(cause);
+              // Never silently replace a conversation when resume fails for auth.
+              if (isAcpAuthErrorText(text)) {
+                throw toCliError("ACP_AUTH_REQUIRED", `Could not resume ACP session for ${agentLabel}`, cause, agentLabel);
+              }
+              if (isAcpSessionNotFoundText(text)) {
+                break;
+              }
+              const isLastMethod = idx === methodsToTry.length - 1;
+              if (isLastMethod) {
+                throw toCliError("ACP_RESUME_FAILED", `Could not resume ACP session for ${agentLabel}`, cause, agentLabel);
+              }
             }
           }
         }
@@ -1004,6 +1174,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         this.clearCancelledStreamSuppression(session);
 
         const turnId: TurnId = `acp-turn-${randomUUID()}`;
+        const compacting = isCompactCommand(input.prompt);
         const turn: AcpTranscriptTurn = {
           id: turnId,
           prompt: input.prompt,
@@ -1015,7 +1186,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           segments: [],
           activeSegment: null,
           activeReasoning: null,
+          reasoningTexts: [],
           tools: new Map(),
+          activePrompts: new Set(),
+          compacting,
+          compacted: false,
           usage: null,
           sawUsageUpdate: false,
           hasAssistantTextSinceLastTool: false,
@@ -1043,17 +1218,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           session.capabilities.promptCapabilities.image,
         );
 
-        let resolveDone!: () => void;
-        const done = new Promise<void>((resolve) => {
-          resolveDone = resolve;
-        });
-        const inFlight: InFlightAcpPrompt = {
-          turn,
-          done,
-          resolveDone,
-          abandoned: false,
-          graceTimer: null,
-        };
+        const inFlight = this.createInFlightPrompt(turn);
+        turn.activePrompts.add(inFlight);
         session.inFlightPrompt = inFlight;
 
         void session.peer
@@ -1066,65 +1232,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
             this.promptTimeoutMs,
           )
           .then(
-            (result) => {
-              this.finishInFlightPrompt(session, inFlight);
-              if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
-              const record = asRecord(result);
-              const usage = parseAcpTurnUsage(record?.["usage"]);
-              if (usage) {
-                turn.usage = usage;
-                const fallbackUsed = usage.input + usage.cacheRead + usage.cacheCreate + usage.output;
-                const prev = session.context;
-                session.context = {
-                  usedTokens: turn.sawUsageUpdate && prev ? prev.usedTokens : fallbackUsed,
-                  maxTokens: prev?.maxTokens ?? null,
-                  cachedInputTokens: usage.cacheRead > 0 ? usage.cacheRead : (prev?.cachedInputTokens ?? null),
-                  autoCompactThreshold: prev?.autoCompactThreshold ?? null,
-                  compactsAutomatically: prev?.compactsAutomatically ?? null,
-                  ...(usage.costUsd !== undefined
-                    ? { costUsd: usage.costUsd }
-                    : prev?.costUsd !== undefined
-                      ? { costUsd: prev.costUsd }
-                      : {}),
-                };
-              }
-              const stopReason = record?.["stopReason"];
-              const status = acpStopReasonToStatus(stopReason);
-              const error = status === "failed" ? `ACP agent refused the turn (${String(stopReason)}).` : null;
-              if (
-                status === "failed" &&
-                carriedInstructions !== null &&
-                session.pendingInstructions === null &&
-                turn.segments.length === 0 &&
-                turn.tools.size === 0
-              ) {
-                session.pendingInstructions = carriedInstructions;
-              }
-              this.settleTurn(session, turn, status, error, record ?? undefined);
-              if (this.provider === "antigravity") {
-                void this.refreshAntigravityUsage(session, true);
-              }
-            },
-            (cause) => {
-              this.finishInFlightPrompt(session, inFlight);
-              if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
-              if (
-                carriedInstructions !== null &&
-                session.pendingInstructions === null &&
-                turn.segments.length === 0 &&
-                turn.tools.size === 0
-              ) {
-                session.pendingInstructions = carriedInstructions;
-              }
-              if (cause instanceof CliError && cause.code === "PEER_REQUEST_TIMEOUT") {
-                this.cancelAllParked(session);
-                session.peer.notify(ACP_METHODS.sessionCancel, { sessionId: session.acpSessionId });
-                this.startCancelledStreamSuppression(session);
-              }
-              const agentLabel = session.agent.name ?? session.agent.id;
-              const err = toCliError("ACP_TURN_FAILED", `ACP turn failed for ${agentLabel}`, cause, agentLabel);
-              this.settleTurn(session, turn, "failed", err.message, { code: err.code, message: err.message });
-            },
+            (result) => this.handlePromptSuccess(session, turn, inFlight, result, carriedInstructions),
+            (cause) => this.handlePromptFailure(session, turn, inFlight, cause, carriedInstructions),
           );
 
         return { threadId: input.threadId, turnId };
@@ -1132,6 +1241,172 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         session.sendingTurn = false;
       }
     });
+
+  private createInFlightPrompt(turn: AcpTranscriptTurn): InFlightAcpPrompt {
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    return {
+      turn,
+      done,
+      resolveDone,
+      abandoned: false,
+      graceTimer: null,
+    };
+  }
+
+  private handlePromptSuccess(
+    session: AcpSession,
+    turn: AcpTranscriptTurn,
+    inFlight: InFlightAcpPrompt,
+    result: unknown,
+    carriedInstructions: string | null,
+  ): void {
+    turn.activePrompts.delete(inFlight);
+    this.finishInFlightPrompt(session, inFlight);
+    if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
+    const record = asRecord(result);
+    const usage = parseAcpTurnUsage(record?.["usage"]);
+    if (usage) {
+      turn.usage = usage;
+      const fallbackUsed = usage.input + usage.cacheRead + usage.cacheCreate + usage.output;
+      const prev = session.context;
+      session.context = {
+        usedTokens: turn.sawUsageUpdate && prev ? prev.usedTokens : fallbackUsed,
+        maxTokens: prev?.maxTokens ?? null,
+        cachedInputTokens: usage.cacheRead > 0 ? usage.cacheRead : (prev?.cachedInputTokens ?? null),
+        autoCompactThreshold: prev?.autoCompactThreshold ?? null,
+        compactsAutomatically: prev?.compactsAutomatically ?? null,
+        ...(usage.costUsd !== undefined
+          ? { costUsd: usage.costUsd }
+          : prev?.costUsd !== undefined
+            ? { costUsd: prev.costUsd }
+            : {}),
+      };
+    }
+    // Wait for any sibling steering prompt on the same turn before settling.
+    if (turn.activePrompts.size > 0) return;
+
+    const stopReason = record?.["stopReason"];
+    const status = acpStopReasonToStatus(stopReason);
+    const error = status === "failed" ? `ACP agent refused the turn (${String(stopReason)}).` : null;
+    if (
+      status === "failed" &&
+      carriedInstructions !== null &&
+      session.pendingInstructions === null &&
+      turn.segments.length === 0 &&
+      turn.tools.size === 0
+    ) {
+      session.pendingInstructions = carriedInstructions;
+    }
+    if (turn.compacting && status === "completed") {
+      turn.compacted = true;
+      const detail = buildAnswerText(turn.segments).trim() || null;
+      this.publish({
+        type: "session.notice",
+        provider: this.provider,
+        threadId: session.threadId,
+        turnId: turn.id,
+        notice: "compacted",
+        title: "Conversation compacted",
+        detail,
+      });
+    }
+    this.settleTurn(session, turn, status, error, record ?? undefined);
+    if (this.provider === "antigravity") {
+      void this.refreshAntigravityUsage(session, true);
+    }
+  }
+
+  private handlePromptFailure(
+    session: AcpSession,
+    turn: AcpTranscriptTurn,
+    inFlight: InFlightAcpPrompt,
+    cause: unknown,
+    carriedInstructions: string | null,
+  ): void {
+    turn.activePrompts.delete(inFlight);
+    this.finishInFlightPrompt(session, inFlight);
+    if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
+    if (turn.activePrompts.size > 0) return;
+    if (
+      carriedInstructions !== null &&
+      session.pendingInstructions === null &&
+      turn.segments.length === 0 &&
+      turn.tools.size === 0
+    ) {
+      session.pendingInstructions = carriedInstructions;
+    }
+    if (cause instanceof CliError && cause.code === "PEER_REQUEST_TIMEOUT") {
+      this.cancelAllParked(session);
+      session.peer.notify(ACP_METHODS.sessionCancel, { sessionId: session.acpSessionId });
+      this.startCancelledStreamSuppression(session);
+    }
+    const agentLabel = session.agent.name ?? session.agent.id;
+    const err = toCliError("ACP_TURN_FAILED", `ACP turn failed for ${agentLabel}`, cause, agentLabel);
+    this.settleTurn(session, turn, "failed", err.message, { code: err.code, message: err.message });
+  }
+
+  private runSteerTurn(
+    threadId: ThreadId,
+    text: string,
+    images?: readonly ProviderImage[],
+  ): Effect.Effect<void, CliError> {
+    return this.attempt("ACP_STEER_FAILED", `Could not steer the turn on thread ${threadId}`, async () => {
+      const session = this.requireSession(threadId);
+      const open = this.openTurn(session);
+      if (!open || open.origin === "background") {
+        throw new CliError("TURN_NOT_RUNNING", `Thread ${threadId} has no running turn to steer.`, {
+          details: { threadId },
+        });
+      }
+      const promptBlocks = buildAcpPromptBlocks(
+        text,
+        images,
+        session.capabilities.promptCapabilities.image,
+      );
+      const inFlight = this.createInFlightPrompt(open);
+      open.activePrompts.add(inFlight);
+      session.inFlightPrompt = inFlight;
+
+      let earlyRejection: unknown = undefined;
+      let rejectedEarly = false;
+      const req = session.peer.request(
+        ACP_METHODS.sessionPrompt,
+        {
+          sessionId: session.acpSessionId,
+          prompt: promptBlocks,
+        },
+        this.promptTimeoutMs,
+      );
+      const settled = req.then(
+        (result) => {
+          this.handlePromptSuccess(session, open, inFlight, result, null);
+        },
+        (cause) => {
+          earlyRejection = cause;
+          rejectedEarly = true;
+          open.activePrompts.delete(inFlight);
+          this.finishInFlightPrompt(session, inFlight);
+        },
+      );
+
+      // Give the agent a brief tick to reject immediately if it refuses concurrent steering,
+      // without blocking while a valid steered prompt runs to completion.
+      await Promise.race([
+        settled,
+        new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, STEER_ACK_CHECK_MS);
+          t.unref?.();
+        }),
+      ]);
+      if (rejectedEarly) {
+        throw earlyRejection;
+      }
+      open.items.push({ kind: "user", text });
+    });
+  }
 
   awaitTurn(threadId: ThreadId, turnId: TurnId, signal?: AbortSignal): Promise<AcpTurnOutcome> {
     const session = this.sessions.get(threadId);
@@ -1162,7 +1437,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       session.peer.notify(ACP_METHODS.sessionCancel, { sessionId: session.acpSessionId });
       const open = this.openTurn(session);
       if (open) {
-        if (session.inFlightPrompt && session.inFlightPrompt.turn === open) {
+        if (open.activePrompts.size > 0) {
+          for (const prompt of open.activePrompts) {
+            this.abandonInFlightPrompt(session, prompt);
+          }
+        } else if (session.inFlightPrompt && session.inFlightPrompt.turn === open) {
           this.abandonInFlightPrompt(session, session.inFlightPrompt);
         } else if (open.origin === "background") {
           this.startCancelledStreamSuppression(session);
@@ -1250,10 +1529,10 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     });
 
   stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
-    Effect.sync(() => {
+    Effect.promise(async () => {
       const session = this.sessions.get(threadId);
       if (!session) return;
-      this.closeSession(session, "interrupted", null);
+      await this.closeSessionGracefully(session, "interrupted", null);
     });
 
   listSessions = (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
@@ -1290,10 +1569,10 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     );
 
   stopAll = (): Effect.Effect<void, CliError> =>
-    Effect.sync(() => {
-      for (const session of [...this.sessions.values()]) {
-        this.closeSession(session, "interrupted", null);
-      }
+    Effect.promise(async () => {
+      await Promise.all(
+        [...this.sessions.values()].map((session) => this.closeSessionGracefully(session, "interrupted", null)),
+      );
     });
 
   private resolveAgent(instanceId: string | undefined): AcpAgentLaunchSpec {
@@ -1839,7 +2118,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       segments: [],
       activeSegment: null,
       activeReasoning: null,
+      reasoningTexts: [],
       tools: new Map(),
+      activePrompts: new Set(),
+      compacting: false,
+      compacted: false,
       usage: null,
       sawUsageUpdate: false,
       hasAssistantTextSinceLastTool: false,
@@ -2210,6 +2493,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     const active = turn.activeReasoning;
     if (!active) return;
     turn.activeReasoning = null;
+    if (active.text.length > 0) {
+      turn.reasoningTexts.push(active.text);
+    }
     this.publish({
       type: "reasoning.updated",
       provider: this.provider,
@@ -2452,6 +2738,20 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       return true;
     }
     return false;
+  }
+
+  private async closeSessionGracefully(
+    session: AcpSession,
+    status: TerminalTurnStatus,
+    error: string | null,
+  ): Promise<void> {
+    if (session.closed) return;
+    if (session.capabilities.canCloseSession && !session.peer.closed) {
+      await session.peer
+        .request(ACP_METHODS.sessionClose, { sessionId: session.acpSessionId }, DEFAULT_SESSION_CLOSE_TIMEOUT_MS)
+        .catch(() => undefined);
+    }
+    this.closeSession(session, status, error);
   }
 
   private closeSession(session: AcpSession, status: TerminalTurnStatus, error: string | null): void {
