@@ -57,11 +57,20 @@ export interface Diagnosis {
   };
 }
 
-async function probeProvider(binary: string, login: string, minVersion?: string, prefix: readonly string[] = []): Promise<ProviderCheck> {
+async function probeProvider(
+  binary: string,
+  login: string,
+  minVersion?: string,
+  prefix: readonly string[] = [],
+  extraEnv?: NodeJS.ProcessEnv,
+): Promise<ProviderCheck> {
   const installed = await commandExists(binary);
   if (!installed) return { ok: false, installed, version: null, login };
   try {
-    const result = await runProcess(binary, [...prefix, "--version"], { timeoutMs: 10_000 });
+    const result = await runProcess(binary, [...prefix, "--version"], {
+      timeoutMs: 10_000,
+      ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {}),
+    });
     const firstLine = result.stdout.split("\n")[0]?.trim() ?? "";
     const version = firstLine.length > 0 ? firstLine.slice(0, 80) : null;
     if (minVersion === undefined) return { ok: true, installed, version, login };
@@ -88,13 +97,13 @@ export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, c
     (async () => {
       try {
         const launch = codexLaunchCommand(codexBinaryPath ?? "codex", [], process.env);
-        return await probeProvider(launch.command, "inherit from `codex login`", "0.164.0", launch.args);
+        return await probeProvider(launch.command, "inherit from `codex login`", "0.164.0", launch.args, launch.env);
       } catch { return { ok: false, installed: false, version: null, login: "inherit from `codex login`" }; }
     })(),
     (async () => {
       try {
         const launch = acpLaunchCommand(antigravityBinaryPath ?? "agy", [], process.env);
-        return await probeProvider(launch.command, "inherit from `agy` login", undefined, launch.args);
+        return await probeProvider(launch.command, "inherit from `agy` login", undefined, launch.args, launch.env);
       } catch { return { ok: false, installed: false, version: null, login: "inherit from `agy` login" }; }
     })(),
   ]);

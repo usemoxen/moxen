@@ -15,6 +15,7 @@ import { CliError } from "../../errors.js";
 import { killProcessTree } from "../../infra/process.js";
 import { escapes, isolationViolation, type WorktreeIsolation } from "../../threads/isolation.js";
 import { asNonEmptyString, asNumber, asRecord, asString } from "./protocol.js";
+import { acpLaunchCommand } from "./transport.js";
 
 const DEFAULT_OUTPUT_BYTE_LIMIT = 256 * 1024;
 
@@ -112,9 +113,11 @@ export class AcpClientHandlers {
     }
 
     const maxBytes = asNumber(record?.["outputByteLimit"]) ?? DEFAULT_OUTPUT_BYTE_LIMIT;
-    const child = nodeSpawn(command, rawArgs, {
+    const mergedEnv = { ...ctx.env, ...extraEnv };
+    const launch = acpLaunchCommand(command, rawArgs, mergedEnv);
+    const child = nodeSpawn(launch.command, [...launch.args], {
       cwd,
-      env: { ...ctx.env, ...extraEnv },
+      env: launch.env ? { ...mergedEnv, ...launch.env } : mergedEnv,
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],

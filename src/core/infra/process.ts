@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { CliError } from "../errors.js";
+import { isStandaloneExecutable } from "./standalone.js";
 
 export interface ProcessResult {
   stdout: string;
@@ -118,32 +119,185 @@ export async function runProcess(
   });
 }
 
-export async function commandExists(command: string): Promise<boolean> {
-  const locator = process.platform === "win32" ? "where.exe" : "which";
-  const result = await runProcess(locator, [command], { allowFailure: true, timeoutMs: 5_000 }).catch(
+function defaultIsFile(file: string): boolean {
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+export async function commandExists(
+  command: string,
+  options: {
+    readonly platform?: NodeJS.Platform;
+    readonly isFile?: (file: string) => boolean;
+  } = {},
+): Promise<boolean> {
+  const platform = options.platform ?? process.platform;
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+  // `where.exe` on Windows rejects full paths (`C:\...\agy.exe`), so check
+  // explicit file paths directly before falling back to PATH lookup.
+  if (trimmed.includes("/") || trimmed.includes("\\") || path.win32.isAbsolute(trimmed)) {
+    if (options.isFile) return options.isFile(trimmed);
+    try {
+      if (!fs.statSync(trimmed).isFile()) return false;
+      if (platform !== "win32") fs.accessSync(trimmed, fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  const locator = platform === "win32" ? "where.exe" : "which";
+  const result = await runProcess(locator, [trimmed], { allowFailure: true, timeoutMs: 5_000 }).catch(
     () => null,
   );
   return result?.exitCode === 0;
 }
 
 /** The file `name` resolves to on `PATH` (with `PATHEXT` on Windows), or null. */
-export function resolveOnPath(name: string, env: NodeJS.ProcessEnv = process.env): string | null {
+export function resolveOnPath(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+  options: {
+    readonly platform?: NodeJS.Platform;
+    readonly isFile?: (file: string) => boolean;
+  } = {},
+): string | null {
+  const platform = options.platform ?? process.platform;
+  const isFile = options.isFile ?? defaultIsFile;
   const raw = env.PATH ?? env.Path ?? "";
-  const delimiter = process.platform === "win32" ? ";" : ":";
-  const exts = process.platform === "win32"
-    ? (env.PATHEXT ?? process.env.PATHEXT ?? ".EXE").split(";").filter((ext) => ext.length > 0)
+  const delimiter = platform === "win32" ? ";" : ":";
+  const join = platform === "win32" ? path.win32.join : path.join;
+  const rawExts = platform === "win32"
+    ? (env.PATHEXT ?? process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((ext) => ext.length > 0)
     : [""];
+  const exts = platform === "win32"
+    ? [...new Set(["", ...rawExts.flatMap((ext) => [ext, ext.toLowerCase()])])]
+    : rawExts;
   for (const dir of raw.split(delimiter).filter((entry) => entry.length > 0)) {
-    for (const ext of process.platform === "win32" ? ["", ...exts] : exts) {
-      const file = path.join(dir, `${name}${ext}`);
-      try {
-        if (fs.statSync(file).isFile()) return file;
-      } catch {
-        // Keep scanning.
-      }
+    for (const ext of exts) {
+      const file = join(dir, `${name}${ext}`);
+      if (isFile(file)) return file;
     }
   }
   return null;
+}
+
+export interface WindowsLaunchCommand {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+export interface WindowsLaunchOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly isFile?: (file: string) => boolean;
+  readonly readText?: (file: string) => string | null;
+  readonly standalone?: boolean;
+  readonly execPath?: string;
+}
+
+function defaultReadText(file: string): string | null {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function resolveNodeForShim(
+  shimDir: string,
+  env: NodeJS.ProcessEnv,
+  isFile: (file: string) => boolean,
+  standalone: boolean,
+  execPath: string,
+): { command: string; env?: NodeJS.ProcessEnv } {
+  const siblingNode = path.win32.join(shimDir, "node.exe");
+  if (isFile(siblingNode)) return { command: siblingNode };
+  const onPathNode = resolveOnPath("node", env, { platform: "win32", isFile });
+  if (onPathNode && /\.exe$/i.test(onPathNode)) return { command: onPathNode };
+  if (standalone) return { command: execPath, env: { BUN_BE_BUN: "1" } };
+  return { command: execPath };
+}
+
+function extractShimTarget(shimPath: string, content: string, isFile: (file: string) => boolean): string | null {
+  const dir = path.win32.dirname(shimPath);
+  // Well-known Node/npm CLI shims (`npx.cmd`, `npm.cmd`) ship next to `node_modules\npm\bin\*-cli.js`.
+  const base = path.win32.basename(shimPath).toLowerCase();
+  if (base === "npx.cmd" || base === "npx.ps1") {
+    const npxCli = path.win32.join(dir, "node_modules", "npm", "bin", "npx-cli.js");
+    if (isFile(npxCli)) return npxCli;
+  }
+  if (base === "npm.cmd" || base === "npm.ps1") {
+    const npmCli = path.win32.join(dir, "node_modules", "npm", "bin", "npm-cli.js");
+    if (isFile(npmCli)) return npmCli;
+  }
+  // Standard npm/pnpm/yarn/bun `.cmd` (`%dp0%\...`, `%~dp0\...`) and `.ps1` (`$basedir/...`, `$PSScriptRoot/...`) shims.
+  const pattern = /(?:%~?dp0%|\$basedir|\$PSScriptRoot)[\\/]([^"'\r\n]+?\.(?:cjs|mjs|js|exe|com))/giu;
+  for (const match of content.matchAll(pattern)) {
+    const rel = match[1]?.trim();
+    if (!rel) continue;
+    const candidate = path.win32.normalize(path.win32.join(dir, rel.replace(/\//gu, "\\")));
+    if (isFile(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Resolve and unwrap Windows `.cmd`/`.bat`/`.ps1` launcher shims so callers
+ * can spawn with `shell: false` (avoiding Node/Bun CVE-2024-27980 `EINVAL`
+ * without ever joining shell command strings).
+ */
+export function resolveWindowsLaunch(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  options: WindowsLaunchOptions = {},
+): WindowsLaunchCommand {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") return { command, args };
+  const isFile = options.isFile ?? defaultIsFile;
+  const readText = options.readText ?? defaultReadText;
+  const standalone = options.standalone ?? isStandaloneExecutable();
+  const execPath = options.execPath ?? process.execPath;
+
+  const resolved = path.win32.isAbsolute(command) || command.includes("\\") || command.includes("/")
+    ? command
+    : (resolveOnPath(command, env, { platform: "win32", isFile }) ?? command);
+
+  if (!/\.(cmd|bat|ps1)$/i.test(resolved)) {
+    return { command: resolved, args };
+  }
+
+  const content = readText(resolved) ?? "";
+  const target = extractShimTarget(resolved, content, isFile);
+  if (target) {
+    if (/\.(exe|com)$/i.test(target)) {
+      return { command: target, args };
+    }
+    const runtime = resolveNodeForShim(path.win32.dirname(resolved), env, isFile, standalone, execPath);
+    return {
+      command: runtime.command,
+      args: [target, ...args],
+      ...(runtime.env ? { env: runtime.env } : {}),
+    };
+  }
+
+  if (/\.ps1$/i.test(resolved)) {
+    const ps = resolveOnPath("powershell.exe", env, { platform: "win32", isFile }) ?? "powershell.exe";
+    return {
+      command: ps,
+      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolved, ...args],
+    };
+  }
+
+  const comspec = env.ComSpec || env.COMSPEC || "cmd.exe";
+  return {
+    command: comspec,
+    args: ["/d", "/c", resolved, ...args],
+  };
 }
 
 /** Whether `name` resolves to an executable on `PATH` (with `PATHEXT` on Windows). */

@@ -52,7 +52,7 @@ describe("ACP config & preset resolution", () => {
     expect(resolveAcpModel("gemini-2.5-pro")).toBe("gemini-2.5-pro");
   });
 
-  it("keeps argv intact in acpLaunchCommand on POSIX and Windows", () => {
+  it("keeps argv intact in acpLaunchCommand on POSIX and unwraps Windows .cmd shims", () => {
     expect(acpLaunchCommand("agy", ["acp", "--foo"], {}, "darwin")).toEqual({
       command: "agy",
       args: ["acp", "--foo"],
@@ -60,6 +60,23 @@ describe("ACP config & preset resolution", () => {
     expect(acpLaunchCommand("C:\\Tools\\agy.exe", ["acp"], {}, "win32")).toEqual({
       command: "C:\\Tools\\agy.exe",
       args: ["acp"],
+    });
+    const files = new Set([
+      "C:\\Program Files\\nodejs\\npx.cmd",
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js",
+    ]);
+    expect(
+      acpLaunchCommand(
+        "npx",
+        ["-y", "acp-agent"],
+        { PATH: "C:\\Program Files\\nodejs", PATHEXT: ".EXE;.CMD" },
+        "win32",
+        { isFile: (p) => files.has(p), readText: () => "" },
+      ),
+    ).toEqual({
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: ["C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js", "-y", "acp-agent"],
     });
   });
 });

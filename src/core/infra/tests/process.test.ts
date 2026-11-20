@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../errors.js";
-import { killProcessTree, runProcess } from "../process.js";
+import { commandExists, killProcessTree, resolveWindowsLaunch, runProcess } from "../process.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -122,4 +122,96 @@ describe("runProcess", () => {
       await vi.waitFor(() => expect(alive(pid)).toBe(false), { timeout: 10_000 });
     },
   );
+});
+
+describe("Windows shim unwrapping and path commandExists (MXN-448)", () => {
+  it("checks explicit Windows and POSIX file paths directly in commandExists without invoking where.exe", async () => {
+    const files = new Set(["C:\\Users\\aaron\\.local\\bin\\agy.exe"]);
+    expect(
+      await commandExists("C:\\Users\\aaron\\.local\\bin\\agy.exe", {
+        platform: "win32",
+        isFile: (p) => files.has(p),
+      }),
+    ).toBe(true);
+    expect(
+      await commandExists("C:\\Users\\aaron\\.local\\bin\\missing.exe", {
+        platform: "win32",
+        isFile: (p) => files.has(p),
+      }),
+    ).toBe(false);
+    expect(await commandExists(process.execPath)).toBe(true);
+  });
+
+  it("unwraps npx.cmd and npm .cmd/.ps1 shims on Windows without a shell", () => {
+    const files = new Set([
+      "C:\\Program Files\\nodejs\\npx.cmd",
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js",
+      "C:\\Users\\aaron\\AppData\\Roaming\\npm\\goose.cmd",
+      "C:\\Users\\aaron\\AppData\\Roaming\\npm\\node_modules\\@goose\\cli\\bin\\goose.js",
+      "C:\\Tools\\custom.bat",
+      "C:\\Tools\\script.ps1",
+    ]);
+    const contents = new Map<string, string>([
+      [
+        "C:\\Users\\aaron\\AppData\\Roaming\\npm\\goose.cmd",
+        '@ECHO off\r\n"%_prog%"  "%dp0%\\node_modules\\@goose\\cli\\bin\\goose.js" %*\r\n',
+      ],
+      ["C:\\Tools\\custom.bat", "@echo off\r\necho custom\r\n"],
+      ["C:\\Tools\\script.ps1", "Write-Host 'hi'\r\n"],
+    ]);
+    const env = {
+      PATH: "C:\\Program Files\\nodejs;C:\\Users\\aaron\\AppData\\Roaming\\npm",
+      PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      ComSpec: "C:\\Windows\\System32\\cmd.exe",
+    };
+
+    expect(
+      resolveWindowsLaunch("npx", ["-y", "@zed-industries/claude-code-acp"], env, {
+        platform: "win32",
+        isFile: (p) => files.has(p),
+        readText: (p) => contents.get(p) ?? null,
+      }),
+    ).toEqual({
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: [
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js",
+        "-y",
+        "@zed-industries/claude-code-acp",
+      ],
+    });
+
+    expect(
+      resolveWindowsLaunch("goose", ["acp"], env, {
+        platform: "win32",
+        isFile: (p) => files.has(p),
+        readText: (p) => contents.get(p) ?? null,
+      }),
+    ).toEqual({
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: ["C:\\Users\\aaron\\AppData\\Roaming\\npm\\node_modules\\@goose\\cli\\bin\\goose.js", "acp"],
+    });
+
+    expect(
+      resolveWindowsLaunch("C:\\Tools\\custom.bat", ["--flag", "two words"], env, {
+        platform: "win32",
+        isFile: (p) => files.has(p),
+        readText: (p) => contents.get(p) ?? null,
+      }),
+    ).toEqual({
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/c", "C:\\Tools\\custom.bat", "--flag", "two words"],
+    });
+
+    expect(
+      resolveWindowsLaunch("C:\\Tools\\script.ps1", ["--acp"], env, {
+        platform: "win32",
+        isFile: (p) => files.has(p),
+        readText: (p) => contents.get(p) ?? null,
+      }),
+    ).toEqual({
+      command: "powershell.exe",
+      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\Tools\\script.ps1", "--acp"],
+    });
+  });
 });

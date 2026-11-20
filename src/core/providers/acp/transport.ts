@@ -3,10 +3,8 @@
  * run a scripted peer over `createLinkedPair()` instead of a real CLI.
  * Never builds shell commands by joining strings (`shell: false`, argv array).
  */
-import path from "node:path";
-
 import { expandHome } from "../../config.js";
-import { resolveOnPath } from "../../infra/process.js";
+import { resolveWindowsLaunch, type WindowsLaunchCommand, type WindowsLaunchOptions } from "../../infra/process.js";
 import { JsonRpcPeer, nodeProcessSpawner, type ProcessSpawner } from "../stdio.js";
 
 export interface AcpAgentLaunchSpec {
@@ -43,13 +41,10 @@ export function acpLaunchCommand(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform = process.platform,
-): { command: string; args: readonly string[] } {
+  options: Omit<WindowsLaunchOptions, "platform"> = {},
+): WindowsLaunchCommand {
   const expanded = expandHome(command.trim());
-  if (platform !== "win32") return { command: expanded, args };
-  const resolved = path.win32.isAbsolute(expanded)
-    ? expanded
-    : resolveOnPath(expanded, env) ?? expanded;
-  return { command: resolved, args };
+  return resolveWindowsLaunch(expanded, args, env, { ...options, platform });
 }
 
 export class SpawnAcpTransport implements AcpTransport {
@@ -59,7 +54,7 @@ export class SpawnAcpTransport implements AcpTransport {
     const launch = acpLaunchCommand(options.agent.command, options.agent.args, baseEnv);
     const child = spawner.spawn(launch.command, launch.args, {
       cwd: options.cwd,
-      env: { ...baseEnv, ...(options.agent.env ?? {}) },
+      env: { ...baseEnv, ...(launch.env ?? {}), ...(options.agent.env ?? {}) },
     });
     return new JsonRpcPeer(child, { forceKillAfterMs: 2000 });
   }

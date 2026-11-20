@@ -6,6 +6,8 @@
  */
 import { spawn } from "node:child_process";
 
+import { killProcessTree } from "../../infra/process.js";
+import { acpLaunchCommand } from "../acp/transport.js";
 import type { RateLimitWindow } from "../spi.js";
 
 export interface AntigravityUsageSnapshot {
@@ -173,8 +175,9 @@ function defaultRunCommand(
     };
     let child;
     try {
-      child = spawn(command, [...args], {
-        env,
+      const launch = acpLaunchCommand(command, args, env);
+      child = spawn(launch.command, [...launch.args], {
+        env: launch.env ? { ...env, ...launch.env } : env,
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
       });
@@ -194,7 +197,7 @@ function defaultRunCommand(
     });
     const timer = setTimeout(() => {
       try {
-        child.kill();
+        killProcessTree(child, "SIGTERM");
       } catch {
         // Ignore already-exited processes.
       }
