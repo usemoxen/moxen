@@ -174,7 +174,12 @@ export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundl
   reasoningSummary?: "auto" | "concise" | "detailed" | "none";
 }
 
-/** One configured ACP agent entry (`providers.acp.agents[]`). */
+/** First-class Antigravity CLI (`agy`) provider configuration (`providers.antigravity.*`). */
+export interface AntigravityProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
+  launchArgs?: string;
+}
+
+/** One configured ACP profile entry (`providers.acp.agents[]`). */
 export interface AcpAgentConfig {
   readonly id: string;
   readonly name?: string;
@@ -187,9 +192,8 @@ export interface AcpAgentConfig {
   readonly defaultMode?: string;
 }
 
-/** Agent Client Protocol (ACP) provider configuration (`providers.acp.*`). */
-export interface AcpProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
-  launchArgs?: string;
+/** Agent Client Protocol (ACP) multi-profile provider configuration (`providers.acp.*`). */
+export interface AcpProviderConfig extends Omit<OpencodeProviderConfig, "binaryPath" | "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
   agents?: AcpAgentConfig[];
 }
 
@@ -198,6 +202,7 @@ export interface ProvidersConfig {
   claude?: ClaudeProviderConfig;
   opencode?: OpencodeProviderConfig;
   harness?: HarnessProviderConfig;
+  antigravity?: AntigravityProviderConfig;
   acp?: AcpProviderConfig;
 }
 
@@ -758,10 +763,11 @@ export interface WorkspaceResolution {
   branch: string | null;
 }
 
-/** The provider driver an instance id routes to (`opencode/<provider>`, `harness/<profile>`, `acp/<agent>`, and `claudeAgent`, the historical Claude id), or null for an id no driver owns. */
-export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "opencode" | "harness" | "acp" | null {
+/** The provider driver an instance id routes to (`opencode/<provider>`, `harness/<profile>`, `acp/<agent>`, `antigravity`, and `claudeAgent`, the historical Claude id), or null for an id no driver owns. */
+export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity" | null {
   const key = instanceId.trim().toLowerCase();
   if (key === "codex") return "codex";
+  if (key === "antigravity" || key === "agy") return "antigravity";
   if (key === "opencode" || key.startsWith("opencode/")) return "opencode";
   if (key === "harness" || key.startsWith("harness/")) return "harness";
   if (key === "acp" || key.startsWith("acp/")) return "acp";

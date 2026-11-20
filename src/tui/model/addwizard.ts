@@ -28,6 +28,23 @@ export function mcpDocument(target: string, secret?: { readonly env?: Readonly<R
   return JSON.stringify({ type: "stdio", command, ...(args.length > 0 ? { args } : {}), ...(env !== undefined && Object.keys(env).length > 0 ? { env } : {}) });
 }
 
+/** An ACP agent profile from a command line (binary plus arguments), optional display name and environment. */
+export function acpAgentDocument(
+  commandLine: string,
+  extra?: { readonly name?: string; readonly env?: Readonly<Record<string, string>> },
+): string {
+  const [command = "", ...args] = commandLine.trim().split(/\s+/);
+  const name = extra?.name?.trim();
+  const env = extra?.env;
+  return JSON.stringify({
+    ...(name ? { name } : {}),
+    command,
+    ...(args.length > 0 ? { args } : {}),
+    ...(env !== undefined && Object.keys(env).length > 0 ? { env } : {}),
+    enabled: true,
+  });
+}
+
 /** The entries whose label or id contains every word of `query`; all of them for an empty one. */
 export function filterEntries<T extends { readonly id: string; readonly label?: string }>(entries: readonly T[], query: string): T[] {
   const words = query.toLowerCase().split(/\s+/).filter((word) => word !== "");

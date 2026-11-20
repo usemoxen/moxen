@@ -78,7 +78,8 @@ export async function latestVersions(options: { readonly claudeBinaryPath?: stri
   const opencode = (): Promise<LatestVersion> =>
     cached("opencode", deps, async () => ({ latest: await tagVersion(PACKAGES.opencode, "latest", deps), channel: null }));
   const [claudeResult, opencodeResult, codex] = await Promise.all([claude(), opencode(), cached("codex", deps, async () => ({ latest: await tagVersion(PACKAGES.codex, "latest", deps), channel: null }))]);
-  return { claude: claudeResult, opencode: opencodeResult, codex };
+  // `agy` is a standalone native binary with no npm package; report unknown rather than guessing.
+  return { claude: claudeResult, opencode: opencodeResult, codex, antigravity: { latest: null, channel: null } };
 }
 
 /** Forget what was kept (tests). */

@@ -15,7 +15,7 @@ import type { WorktreeIsolation } from "../threads/isolation.js";
 import type { InteractionMode, ModelSelection, RuntimeMode } from "../types.js";
 
 /** Provider surfaces we own. */
-export type ProviderDriverKind = "claude" | "codex" | "opencode" | "harness" | "acp";
+export type ProviderDriverKind = "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity";
 
 export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = [
   "claude",
@@ -23,6 +23,7 @@ export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = [
   "opencode",
   "harness",
   "acp",
+  "antigravity",
 ];
 
 export function isProviderDriverKind(value: unknown): value is ProviderDriverKind {

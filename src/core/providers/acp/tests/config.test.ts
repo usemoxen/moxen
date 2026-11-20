@@ -5,40 +5,33 @@ import { normalizeAcpAgents, resolveAcpAgents, resolveAcpModel } from "../config
 import { acpLaunchCommand } from "../transport.js";
 
 describe("ACP config & preset resolution", () => {
-  it("resolves the built-in agy preset with binaryPath and tokenized launchArgs", () => {
-    const agents = resolveAcpAgents({ binaryPath: "/opt/bin/agy", launchArgs: '--flag "two words"' });
-    expect(agents).toEqual([
-      {
-        id: "agy",
-        name: "Antigravity (agy)",
-        command: "/opt/bin/agy",
-        args: ["acp", "--flag", "two words"],
-        isPreset: true,
-      },
-    ]);
+  it("returns no agents when none are configured under providers.acp.agents", () => {
+    expect(resolveAcpAgents(undefined)).toEqual([]);
+    expect(resolveAcpAgents({})).toEqual([]);
   });
 
-  it("lets a custom agy entry override or disable the built-in preset", () => {
-    const overridden = resolveAcpAgents({
-      agents: [{ id: "agy", name: "My AGY", command: "/custom/agy", args: ["acp", "--verbose"] }],
+  it("resolves enabled configured ACP agents and skips disabled ones", () => {
+    const enabled = resolveAcpAgents({
+      agents: [{ id: "cline", name: "Cline", command: "cline", args: ["--acp"], defaultModel: "gemini-pro" }],
     });
-    expect(overridden).toHaveLength(1);
-    expect(overridden[0]).toMatchObject({
-      id: "agy",
-      name: "My AGY",
-      command: "/custom/agy",
-      args: ["acp", "--verbose"],
-      isPreset: false,
-    });
+    expect(enabled).toEqual([
+      {
+        id: "cline",
+        name: "Cline",
+        command: "cline",
+        args: ["--acp"],
+        defaultModel: "gemini-pro",
+        isPreset: false,
+      },
+    ]);
 
-    const disabled = resolveAcpAgents({
+    const filtered = resolveAcpAgents({
       agents: [
-        { id: "agy", command: "agy", enabled: false },
+        { id: "disabled-agent", command: "foo", enabled: false },
         { id: "cline", name: "Cline", command: "cline", args: ["--acp"], defaultModel: "gemini-pro" },
       ],
     });
-    expect(disabled.map((a) => a.id)).toEqual(["cline"]);
-    expect(disabled[0]?.defaultModel).toBe("gemini-pro");
+    expect(filtered.map((a) => a.id)).toEqual(["cline"]);
   });
 
   it("rejects duplicate ids, invalid slugs, missing commands, and unterminated quotes", () => {

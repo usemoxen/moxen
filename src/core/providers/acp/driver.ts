@@ -79,6 +79,8 @@ import {
 } from "./transport.js";
 
 export interface AcpDriverOptions {
+  /** Provider kind emitted on runtime events (`"acp"` or `"antigravity"`). */
+  readonly provider?: "acp" | "antigravity";
   /** Configured ACP agents keyed by id (e.g. `agy`, `cline`). */
   readonly agents?: Readonly<Record<string, AcpAgentLaunchSpec>>;
   readonly env?: NodeJS.ProcessEnv;
@@ -253,7 +255,7 @@ function buildAnswerText(segments: readonly AcpMessageSegment[]): string {
 }
 
 export class AcpDriver implements ProviderAdapter<CliError> {
-  readonly provider = "acp" as const;
+  readonly provider: "acp" | "antigravity";
   readonly capabilities: ProviderAdapterCapabilities = {
     sessionModelSwitch: "in-session",
   };
@@ -269,6 +271,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
 
   constructor(options: AcpDriverOptions = {}) {
+    this.provider = options.provider ?? "acp";
     this.agents = new Map<string, AcpAgentLaunchSpec>([
       [AGY_ACP_LAUNCH_SPEC.id, AGY_ACP_LAUNCH_SPEC],
     ]);

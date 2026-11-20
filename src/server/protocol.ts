@@ -34,6 +34,7 @@ import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type Memor
 import { INTERACTION_MODES, requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
 import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
+import type { AcpRegistryPreset } from "../core/providers/acp/registry.js";
 import type {
   AskedTask,
   CancelledTask,
@@ -599,6 +600,8 @@ export type Query =
   | { readonly type: "thread.turn.await"; readonly threadId: string; readonly turnId: string }
   /** The live provider catalog, probed on every call, with hidden-model preferences applied. */
   | { readonly type: "providers.list" }
+  /** Agents advertised by the pinned v1 ACP Registry, with suggested launch commands for this platform. */
+  | { readonly type: "acp.registry.list"; readonly forceRefresh?: boolean }
   | { readonly type: "image-generation.availability"; readonly threadId: string }
   | { readonly type: "skills.manage.list"; readonly projectId?: string }
   | ({ readonly type: "skills.manage.read"; readonly projectId?: string } & SkillAddress)
@@ -826,6 +829,7 @@ export interface QueryResults {
   "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig; readonly problems: readonly ConfigProblem[] };
   "harness.profile.export": { readonly id: string; readonly text: string };
   "provider.latest": LatestVersions;
+  "acp.registry.list": { readonly agents: readonly AcpRegistryPreset[]; readonly source: "network" | "cache" | "empty" };
   "app.update.check": UpdateCheck;
   "git.overview": GitOverview;
   "workspace.git": { readonly stdout: string };
@@ -1773,6 +1777,9 @@ export function decodeQuery(value: unknown): Query {
       };
     case "providers.list":
     case "doctor":
+      return { type };
+    case "acp.registry.list":
+      return { type, ...optionalBoolean(record, "forceRefresh", type) };
     case "usage.card": {
       if (record.palette !== undefined && !isCardPalette(record.palette)) {
         throw new CliError("INVALID_QUERY", "usage.card palette must give background, text, dim, empty and muted as #rrggbb, and four levels.", { exitCode: 2 });

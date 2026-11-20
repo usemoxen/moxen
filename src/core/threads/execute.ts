@@ -27,6 +27,7 @@ import type { McpServerSpec } from "../mcp.js";
 
 import { resolveAcpAgentsMap } from "../providers/acp/config.js";
 import { AcpDriver } from "../providers/acp/driver.js";
+import { antigravityLaunchSpec } from "../providers/antigravity/config.js";
 import { CodexDriver } from "../providers/codex/driver.js";
 import { ClaudeDriver } from "../providers/claude/driver.js";
 import { locateSkillsMod } from "../providers/claude/skillsmod.js";
@@ -212,6 +213,7 @@ export interface TurnDriverFactories {
   readonly opencode?: () => TurnDriver;
   readonly harness?: () => TurnDriver;
   readonly acp?: () => TurnDriver;
+  readonly antigravity?: () => TurnDriver;
 }
 
 const driverCache = new WeakMap<object, WeakMap<object, Map<string, TurnDriver>>>();
@@ -222,9 +224,9 @@ const defaultFactories: TurnDriverFactories = {};
  * The driver an instance id routes to. `opencode/<provider>` entries share
  * one driver (the provider address travels in the model slug), `harness/<profile>`
  * entries share the harness driver (the profile is resolved per send), `acp/<agent>`
- * entries share the ACP driver (the agent id is resolved per session), and
- * `claudeAgent` is the historical id for the Claude surface that existing
- * threads and configs still carry.
+ * entries share the ACP driver (the agent id is resolved per session), `antigravity`
+ * runs the official `agy` CLI over ACP v1, and `claudeAgent` is the historical id
+ * for the Claude surface that existing threads and configs still carry.
  */
 export function driverKey(instanceId: string): string {
   const rawKey = instanceId.trim().toLowerCase();
@@ -234,9 +236,11 @@ export function driverKey(instanceId: string): string {
       ? "harness"
       : rawKey === "acp" || rawKey.startsWith("acp/")
         ? "acp"
-        : rawKey === "claudeagent"
-          ? "claude"
-          : rawKey;
+        : rawKey === "antigravity" || rawKey === "agy"
+          ? "antigravity"
+          : rawKey === "claudeagent"
+            ? "claude"
+            : rawKey;
 }
 
 /**
@@ -276,6 +280,7 @@ export function driverForInstance(
   else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
   else if (key === "harness") driver = factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
   else if (key === "acp") driver = factories.acp?.() ?? new AcpDriver({ agents: resolveAcpAgentsMap(providers?.acp) });
+  else if (key === "antigravity") driver = factories.antigravity?.() ?? new AcpDriver({ provider: "antigravity", agents: { antigravity: antigravityLaunchSpec(providers?.antigravity) } });
   if (!driver) {
     throw new CliError("PROVIDER_UNKNOWN", `No direct driver for provider "${instanceId}".`, {
       details: { instanceId },

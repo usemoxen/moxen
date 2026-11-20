@@ -326,3 +326,80 @@ export async function loadAcpRegistryCatalog(
     return { agents: [], source: "empty" };
   }
 }
+
+export interface AcpRegistryPreset {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly version: string;
+  readonly command: string | null;
+  readonly args: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+  readonly available: boolean;
+  readonly note: string | null;
+}
+
+/**
+ * Convert a registry agent into a client-ready preset with suggested argv
+ * launch fields for the current platform, even when the runtime is not yet
+ * installed on PATH.
+ */
+export function toRegistryPreset(
+  agent: AcpRegistryAgent,
+  options: Parameters<typeof resolveRegistryLaunchSpec>[1] = {},
+): AcpRegistryPreset {
+  const resolved = resolveRegistryLaunchSpec(agent, options);
+  if (resolved.ok) {
+    return {
+      id: agent.id,
+      name: agent.name,
+      description: agent.description,
+      version: agent.version,
+      command: resolved.spec.command,
+      args: resolved.spec.args,
+      ...(resolved.spec.env ? { env: resolved.spec.env } : {}),
+      available: true,
+      note: null,
+    };
+  }
+  if (resolved.reason === "missing-runtime") {
+    const dist = resolved.runtime === "npx" ? agent.distribution.npx : agent.distribution.uvx;
+    if (dist) {
+      return {
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        version: agent.version,
+        command: resolved.runtime,
+        args: resolved.runtime === "npx" ? ["-y", dist.package, ...dist.args] : [dist.package, ...dist.args],
+        ...(Object.keys(dist.env).length > 0 ? { env: dist.env } : {}),
+        available: false,
+        note: resolved.message,
+      };
+    }
+  }
+  if (resolved.reason === "uninstalled-binary") {
+    const cmd = resolved.target.cmd ? path.basename(resolved.target.cmd) : null;
+    return {
+      id: agent.id,
+      name: agent.name,
+      description: agent.description,
+      version: agent.version,
+      command: cmd,
+      args: resolved.target.args,
+      ...(Object.keys(resolved.target.env).length > 0 ? { env: resolved.target.env } : {}),
+      available: false,
+      note: resolved.message,
+    };
+  }
+  return {
+    id: agent.id,
+    name: agent.name,
+    description: agent.description,
+    version: agent.version,
+    command: null,
+    args: [],
+    available: false,
+    note: resolved.message,
+  };
+}

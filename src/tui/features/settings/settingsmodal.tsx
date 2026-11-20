@@ -90,14 +90,15 @@ const SECTION_CATEGORY: Record<SettingSection, string> = {
   "provider:codex": "Providers",
   "provider:claude": "Providers",
   "provider:opencode": "Providers",
-  "provider:acp": "Providers",
+  "provider:antigravity": "Providers",
+  "provider:acp": "ACP",
   "provider:harness": "Moxen Harness",
   mcp: "Integrations",
   skills: "Integrations",
 };
 
 /** Sections long enough to be split in the sidebar, one entry per heading on the page. */
-const PAGED_SECTIONS: ReadonlySet<SettingSection> = new Set<SettingSection>(["provider:harness"]);
+const PAGED_SECTIONS: ReadonlySet<SettingSection> = new Set<SettingSection>(["provider:harness", "provider:acp"]);
 
 /** One row of the sidebar: a section, or one heading of a paged section. */
 interface SidebarEntry {
@@ -118,7 +119,7 @@ interface SidebarEntry {
 }
 
 /** The list settings whose entries nest in the sidebar (model-server profiles, MCP servers), and open into a view of their own. */
-const NESTED_LISTS: readonly string[] = ["providers.harness.profiles", "mcpServers"];
+const NESTED_LISTS: readonly string[] = ["providers.harness.profiles", "providers.acp.agents", "mcpServers"];
 
 export function SettingsModal({
   client,
@@ -170,7 +171,7 @@ export function SettingsModal({
   onImport: (file: string) => void;
   notice: { readonly text: string; readonly error: boolean } | null;
   /** Each updatable provider's install, from the doctor query; null until it answers. */
-  versions: { readonly codex?: ProviderCheckView; readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView } | null;
+  versions: { readonly codex?: ProviderCheckView; readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView; readonly antigravity?: ProviderCheckView } | null;
   /** The newest release of each, from the registry; null until it answers. */
   latest: LatestVersions | null;
   /** The providers whose updater is running now. */
@@ -351,8 +352,8 @@ export function SettingsModal({
         continue;
       }
       const seen: string[] = [];
-      // Until a model server is added the Moxen Harness has nothing to configure but where its models come from.
-      const serverList = section === "provider:harness" ? nested.find((list) => list.section === section) : undefined;
+      // Until a model server or ACP agent is added, the section has nothing to configure but its profiles.
+      const serverList = PAGED_SECTIONS.has(section) ? nested.find((list) => list.section === section) : undefined;
       const bare = serverList !== undefined && serverList.items.length === 0;
       for (const setting of snapshot.settings) {
         const group = setting.descriptor.group;
@@ -720,6 +721,7 @@ export function SettingsModal({
                   onTest={(id, model) => (listItem.descriptor.key === "mcpServers" ? onTestMcp(id) : onTest(id, model))}
                   onProbe={onProbe}
                   onDiscover={onDiscover}
+                  {...(client ? { onAcpRegistry: () => client.query({ type: "acp.registry.list" }) } : {})}
                   onExport={onExport}
                   onImport={onImport}
                   notice={notice}
@@ -919,8 +921,8 @@ function BackButton({ onBack }: { onBack: () => void }) {
   );
 }
 
-const PROVIDER_NAME: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex" };
-const PROVIDER_UPDATER: Record<UpdatableProvider, string> = { claude: "claude update", opencode: "opencode upgrade", codex: "codex update" };
+const PROVIDER_NAME: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity" };
+const PROVIDER_UPDATER: Record<UpdatableProvider, string> = { claude: "claude update", opencode: "opencode upgrade", codex: "codex update", antigravity: "agy update" };
 
 /**
  * Where a provider's install stands, and the button that runs its own updater

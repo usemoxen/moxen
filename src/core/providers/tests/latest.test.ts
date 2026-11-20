@@ -45,6 +45,7 @@ describe("latestVersions", () => {
       claude: { latest: "2.1.293", channel: "latest" },
       opencode: { latest: "2.0.24", channel: null },
       codex: { latest: "0.164.0", channel: null },
+      antigravity: { latest: null, channel: null },
     });
     forgetLatestVersions();
     const stable = world(TAGS, "stable");
@@ -57,6 +58,7 @@ describe("latestVersions", () => {
       claude: { latest: null, channel: "latest" },
       opencode: { latest: null, channel: null },
       codex: { latest: null, channel: null },
+      antigravity: { latest: null, channel: null },
     });
     const garbage = world({ "@opencode%2Fcli/latest": null, "@anthropic-ai%2Fclaude-code/latest": "not a version" });
     const result = await latestVersions({}, garbage.deps);

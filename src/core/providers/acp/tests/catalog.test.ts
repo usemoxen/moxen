@@ -39,9 +39,14 @@ describe("ACP catalog discovery", () => {
 
   it("surfaces pinned ACP protocol version mismatches in provider status", async () => {
     const transport = new FakeAcpTransport({ protocolVersion: 2 });
-    const [agy] = await acpProviders(undefined, process.env, process.cwd(), transport);
-    expect(agy).toBeDefined();
-    expect(agy!.enabled).toBe(false);
-    expect(agy!.status).toMatch(/protocol v2.*only supports ACP protocol v1/i);
+    const [cline] = await acpProviders(
+      { agents: [{ id: "cline", name: "Cline", command: "cline", args: ["--acp"] }] },
+      process.env,
+      process.cwd(),
+      transport,
+    );
+    expect(cline).toBeDefined();
+    expect(cline!.enabled).toBe(false);
+    expect(cline!.status).toMatch(/protocol v2.*only supports ACP protocol v1/i);
   });
 });

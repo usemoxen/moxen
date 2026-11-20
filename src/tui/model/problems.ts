@@ -34,13 +34,13 @@ export interface ProblemRow {
 export function configResetKey(path: string): string | null {
   const mcp = /^mcpServers\.([A-Za-z0-9_-]+)$/.exec(path);
   if (mcp) return `mcpServers[${mcp[1]}]`;
-  const profile = /^providers\.harness\.profiles\[([^\]]+)\]$/.exec(path);
-  if (profile) {
+  const listEntry = /^providers\.(?:harness\.profiles|acp\.agents)\[([^\]]+)\]$/.exec(path);
+  if (listEntry) {
     // An index, not an id: the entry never parsed, so no key addresses it.
-    if (/^\d+$/.test(profile[1]!)) return null;
+    if (/^\d+$/.test(listEntry[1]!)) return null;
     return path;
   }
-  if (/^providers\.harness\.profiles$/.test(path)) return null;
+  if (/^providers\.(?:harness\.profiles|acp\.agents)$/.test(path)) return null;
   if (/^providers(\.|$)|^mcpServers$/.test(path)) return null;
   return path;
 }
