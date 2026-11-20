@@ -1150,7 +1150,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: threadId(),
         message: decodeMessage(record.message),
-        ...(record.queue !== undefined ? { queue: parseQueuePolicy(record.queue) } : {}),
+        ...(record.queue !== undefined ? { queue: parseQueuePolicy(record.queue, { deferReset: true }) } : {}),
         ...(selection ? { modelSelection: selection } : {}),
         // A one-off (`/research`, `/review`) runs this prompt in that mode; the thread keeps its own.
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type, INTERACTION_MODES) } : {}),
@@ -1176,7 +1176,7 @@ export function decodeCommand(value: unknown): Command {
     case "thread.protect":
       return { ...meta, type, threadId: threadId() };
     case "queue.edit":
-      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}), ...optionalBoolean(record, "notifyParent", type) };
+      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy, { deferReset: true }) } : {}), ...optionalBoolean(record, "notifyParent", type) };
     case "handoff.submit":
       return { ...meta, type, threadId: threadId(), requestId: requireField(record.requestId, type, "requestId"), summary: requireField(record.summary, type, "summary") };
     case "usage.queue":
@@ -1394,7 +1394,7 @@ export function decodeCommand(value: unknown): Command {
         message: requireField(record.message, type, "message"),
         ...(record.threadId !== undefined ? { threadId: requireThreadId(record.threadId) } : {}),
         ...optionalString(record, "at"),
-        ...(record.conditions !== undefined ? { conditions: parseQueuePolicy({ conditions: record.conditions }).conditions } : {}),
+        ...(record.conditions !== undefined ? { conditions: parseQueuePolicy({ conditions: record.conditions }, { deferReset: true }).conditions } : {}),
       };
     case "thread.background.stop":
       return {

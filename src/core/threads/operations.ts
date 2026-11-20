@@ -107,7 +107,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhausted, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { QUEUE_ADMISSION_LOCK, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
@@ -740,8 +740,13 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
       if (turn.handoff && (await ctx.store.readTurns(turn.handoff.destinationThreadId)).length) throw new CliError("HANDOFF_ALREADY_PREPARED", "The new thread is already prepared. Manage its queue entry instead.");
       const existing = turn.queue ?? parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
       const row = rows.find((candidate) => candidate.thread.id === threadId);
+      const editThread = row?.thread ?? await ctx.store.readThreadRecord(threadId);
+      const editSelection = turn.modelSelection ?? editThread?.modelSelection;
       const observed = row ? queueAdmission(row, turn, rows, ctx.config).latched : existing.latched ?? [];
-      let next: QueuePolicy = policy ? { ...existing, ...parseQueuePolicy(policy), eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => JSON.stringify(existing.conditions[index]) === JSON.stringify(policy.conditions[index])) } : existing;
+      const parsedPolicy = policy
+        ? (editSelection ? resolveQueueResetConditions(parseQueuePolicy(policy, { deferReset: true }), editSelection) : parseQueuePolicy(policy))
+        : undefined;
+      let next: QueuePolicy = parsedPolicy ? { ...existing, ...parsedPolicy, eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => JSON.stringify(existing.conditions[index]) === JSON.stringify(parsedPolicy.conditions[index])) } : existing;
       if (next.conditions.some((c) => c.type === "thread" && c.threadId === threadId || c.type === "entry" && c.threadId === threadId && c.turnId === turnId)) throw new CliError("QUEUE_DEPENDENCY_CYCLE", "An entry cannot wait for itself or its own thread.");
       if (action === "first" || action === "last") next = { ...next, order: action === "first" ? Math.min(...entries.map((e) => e.policy.order)) - 1 : Math.max(...entries.map((e) => e.policy.order)) + 1 };
       if (movedOrder !== undefined) next = { ...next, order: movedOrder };
@@ -872,7 +877,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   if (claimBlocked) return;
   if (turn.queue!.continuation === "model" && !handoff.summary && !handoff.fallback) {
     const summaryProvider = usageKeyForInstance(source.modelSelection.instanceId);
-    const exhausted = providerExhausted(summaryProvider, now);
+    const exhausted = providerExhausted(summaryProvider, now, source.modelSelection.model);
     if (!handoff.summaryTurnId && !exhausted) {
       if (openTurn(await store.readTurns(threadId))) return;
       const sent = await sendTurn(store, threadId, {
@@ -1489,7 +1494,7 @@ export function firstMessageNote(firstMessage: string | undefined): string {
 function continuedHoldApplies(pause: UsagePause, selection: ModelSelection, now = Date.now()): boolean {
   if (usageKeyForInstance(selection.instanceId) !== pause.provider) return false;
   if (pause.resetsAt !== null && Number.isFinite(Date.parse(pause.resetsAt)) && Date.parse(pause.resetsAt) <= now) return false;
-  return providerExhausted(pause.provider, now);
+  return providerExhausted(pause.provider, now, selection.model);
 }
 
 /**
@@ -2220,9 +2225,11 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const thread = await inspectThread(store, input.threadId);
   // Resolved before the ledger is touched: an unknown provider fails
   // without recording a turn.
-  const driver = ctx.driverFor((input.modelSelection ?? thread.modelSelection).instanceId);
+  const turnSelection = input.modelSelection ?? thread.modelSelection;
+  const driver = ctx.driverFor(turnSelection.instanceId);
   const { threadId: _threadId, driverPrompt, onEvent, ...send } = input;
-  const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(input.queue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : undefined;
+  const resolvedQueue = input.queue ? resolveQueueResetConditions(input.queue, turnSelection) : undefined;
+  const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(resolvedQueue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : resolvedQueue;
   const sent = await sendTurn(store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) });
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
@@ -3314,7 +3321,7 @@ async function parentMustWaitForUsage(ctx: OperationContext, parent: StoredThrea
   if (parentNotificationsHeld(parent)) return true;
   const turns = await ctx.store.readTurns(parent.id).catch(() => [] as StoredTurn[]);
   const selection = openTurn(turns)?.modelSelection ?? parent.modelSelection;
-  return providerExhausted(usageKeyForInstance(selection.instanceId));
+  return providerExhausted(usageKeyForInstance(selection.instanceId), Date.now(), selection.model);
 }
 
 /** Deliver a parent's pending notification batch, unless it still cannot receive it. */
@@ -3360,7 +3367,8 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     if (held !== null) {
       const turns = await ctx.store.readTurns(parentThreadId).catch(() => [] as StoredTurn[]);
       const running = openTurn(turns) !== null;
-      const spent = providerExhausted(usageKeyForInstance((openTurn(turns)?.modelSelection ?? held.modelSelection).instanceId));
+      const activeSelection = openTurn(turns)?.modelSelection ?? held.modelSelection;
+      const spent = providerExhausted(usageKeyForInstance(activeSelection.instanceId), Date.now(), activeSelection.model);
       // An archived or deleted parent can never receive again: drop the
       // batch at once instead of keeping what no flush could deliver.
       const receivable = held.archivedAt == null && held.deletedAt == null;
@@ -5013,7 +5021,7 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
   }
   const scheduledFor = input.at === undefined ? undefined : parseScheduledTime(input.at, new Date(), "at");
   const conditions = input.conditions ?? [];
-  const queue = conditions.length > 0 ? parseQueuePolicy({ conditions, sequential: ctx.config.usageRecovery === "sequential" }) : undefined;
+  const queue = conditions.length > 0 ? resolveQueueResetConditions(parseQueuePolicy({ conditions, sequential: ctx.config.usageRecovery === "sequential" }, { deferReset: true }), target.modelSelection) : undefined;
   const started = await startTurn(ctx, {
     threadId: targetId,
     prompt: `${self ? SELF_QUEUED_HEADER : TASK_MESSAGE_HEADER}\n\n${message}`,

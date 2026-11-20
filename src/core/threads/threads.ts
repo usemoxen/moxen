@@ -1411,7 +1411,8 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // (The usage-protection tick and the schedule timer admit queue-carrying
     // turns with their conditions; settle only takes bare automatic waits.)
     if (settleStartsHeldTurn(turn)) {
-      return !providerExhausted(usageKeyForInstance((turn.modelSelection ?? thread.modelSelection).instanceId), instant);
+      const selection = turn.modelSelection ?? thread.modelSelection;
+      return !providerExhausted(usageKeyForInstance(selection.instanceId), instant, selection.model);
     }
     if (turn.queue || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return false;
     // Plain turns never pass through the admission path, so their one
@@ -1419,7 +1420,8 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // display built on it — blocks any non-automatic turn on an exhausted
     // provider. Promoting regardless would start a turn the queue shows as
     // blocked, failing it into a hold instead of letting it wait.
-    return !providerExhausted(usageKeyForInstance((turn.modelSelection ?? thread.modelSelection).instanceId), instant);
+    const selection = turn.modelSelection ?? thread.modelSelection;
+    return !providerExhausted(usageKeyForInstance(selection.instanceId), instant, selection.model);
   });
   if (!next && admittedId === undefined) {
     // Settle starts nothing waiting here: hold every plain turn still queued

@@ -196,7 +196,10 @@ export function usageLimitsSnapshot(now: number = Date.now()): Record<string, Pr
   return result;
 }
 
-function antigravityWindowMatchesModel(window: RecordedWindow, model: string | null | undefined): boolean {
+function antigravityWindowMatchesModel(
+  window: { readonly id: string; readonly label: string },
+  model: string | null | undefined,
+): boolean {
   const id = window.id.toLowerCase();
   const label = window.label.toLowerCase();
   const is3pWindow = id.startsWith("3p-") || id.startsWith("claude-gpt") || /\bclaude\s*&\s*gpt\b/i.test(label);
@@ -216,6 +219,27 @@ function antigravityWindowMatchesModel(window: RecordedWindow, model: string | n
   // Third-party model (Claude / GPT / etc.) on Antigravity: only 3p or shared windows apply.
   if (isGeminiWindow && !is3pWindow) return false;
   return true;
+}
+
+/** Whether a provider's usage window applies to a given model (e.g. Antigravity's Gemini vs 3p pools). */
+export function usageWindowMatchesModel(
+  provider: string,
+  window: { readonly id: string; readonly label: string },
+  model?: string | null,
+): boolean {
+  return provider !== "antigravity" || antigravityWindowMatchesModel(window, model);
+}
+
+/** Snapshot windows for one provider filtered to those that govern `model`. */
+export function usageWindowsForModel(
+  provider: string,
+  now: number = Date.now(),
+  model?: string | null,
+): ProviderUsageWindow[] {
+  const windows = usageLimitsSnapshot(now)[provider]?.windows ?? [];
+  return provider === "antigravity"
+    ? windows.filter((window) => antigravityWindowMatchesModel(window, model))
+    : windows;
 }
 
 /**

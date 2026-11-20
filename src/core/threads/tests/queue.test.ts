@@ -26,10 +26,10 @@ async function world() {
   const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: (instance) => {
     const kind = driverKindOfInstance(instance)!;
     let driver = drivers.get(kind);
-    if (!driver) { driver = (kind === "harness" ? w.drivers.codex! : w.drivers[kind]!)(); drivers.set(kind, driver); }
+    if (!driver) { driver = (kind === "harness" ? w.drivers.codex! : w.drivers[kind] ?? w.drivers.codex!)(); drivers.set(kind, driver); }
     return driver;
   } };
-  const make = (provider = "codex") => createThread(w.store, { projectId: "p", title: `Work on ${provider}`, env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: provider, model: "test-model" } });
+  const make = (provider = "codex", model = "test-model") => createThread(w.store, { projectId: "p", title: `Work on ${provider}`, env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: provider, model } });
   return { ...w, ctx, sent, make };
 }
 
@@ -760,5 +760,86 @@ describe("admission of held plain queued turns", () => {
     await runWorkQueue(w.ctx, now); await settleRuns();
     expect(w.sent).toEqual([]);
     expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "queued", "queued"]);
+  });
+});
+
+describe("Antigravity quota-pool scoping", () => {
+  it("scopes reset, usage, and exhaustion checks to the thread's Antigravity model pool", async () => {
+    const w = await world();
+    const geminiThread = await w.make("antigravity", "gemini-4-neon");
+    const claudeThread = await w.make("antigravity", "claude-sonnet-5-5");
+    const now = Date.now();
+    const geminiReset = new Date(now + 60_000).toISOString();
+    const claudeReset = new Date(now + 5 * 3600_000).toISOString();
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 100, exhausted: true, resetsAt: geminiReset },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 0, exhausted: false, resetsAt: claudeReset },
+    ], now);
+
+    // Protocol decode defers `resetsAt` until startTurn knows the thread's model.
+    const deferred = parseQueuePolicy(
+      { conditions: [{ type: "reset", provider: "antigravity", window: "session", resetsAt: null }] },
+      { deferReset: true },
+    );
+    expect(deferred.conditions[0]).toMatchObject({ type: "reset", resetsAt: null });
+
+    const geminiQueued = await startTurn(w.ctx, {
+      threadId: geminiThread.id,
+      prompt: "Resume Gemini after its 5h reset",
+      queue: deferred,
+    });
+    expect(geminiQueued.turn.queue?.conditions[0]).toMatchObject({ type: "reset", resetsAt: geminiReset });
+
+    // A Claude-on-Antigravity thread waits for 3p-5h, not gemini-5h.
+    const claudeResetQueued = await startTurn(w.ctx, {
+      threadId: claudeThread.id,
+      prompt: "Resume 3p after 3p reset",
+      queue: deferred,
+    });
+    expect(claudeResetQueued.turn.queue?.conditions[0]).toMatchObject({ type: "reset", resetsAt: claudeReset });
+
+    // Before geminiReset, Gemini stays blocked; after geminiReset + grace it fires without waiting for 3p-5h.
+    await runWorkQueue(w.ctx, now + 30_000);
+    expect(w.sent).toEqual([]);
+    await runWorkQueue(w.ctx, now + 66_000);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([geminiThread.id]);
+
+    // Meanwhile a queued usage-conditioned turn on Claude-on-Antigravity is NOT blocked by gemini-5h being 100%.
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 120_000).toISOString() },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 0, exhausted: false, resetsAt: claudeReset },
+    ], now + 66_000);
+    const claudeReady = await w.make("antigravity", "claude-sonnet-5-5");
+    await sendTurn(w.store, claudeReady.id, {
+      prompt: "Run on 3p pool while Gemini is exhausted",
+      queue: parseQueuePolicy({ conditions: [{ type: "usage", provider: "antigravity", window: "session", minimum: 10 }] }),
+    });
+    await runWorkQueue(w.ctx, now + 66_000);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([geminiThread.id, claudeReady.id]);
+  });
+
+  it("scopes UsageProtection.wrap to each Antigravity thread's own model pool reset", async () => {
+    const w = await world();
+    const geminiThread = await w.make("antigravity", "gemini-4-neon");
+    const claudeThread = await w.make("antigravity", "claude-sonnet-5-5");
+    await sendTurn(w.store, geminiThread.id, { prompt: "running on gemini" });
+    await sendTurn(w.store, claudeThread.id, { prompt: "running on 3p" });
+    const now = Date.now();
+    const geminiReset = new Date(now + 120_000).toISOString();
+    const claudeReset = new Date(now + 5 * 3600_000).toISOString();
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 98, exhausted: false, resetsAt: geminiReset },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 10, exhausted: false, resetsAt: claudeReset },
+    ], now);
+    const guard = new UsageProtection(async () => w.ctx);
+    try {
+      await guard.wrap("antigravity");
+      expect((await w.store.readThreadRecord(geminiThread.id))?.usagePause?.resetsAt).toBe(geminiReset);
+      expect((await w.store.readThreadRecord(claudeThread.id))?.usagePause?.resetsAt).toBe(claudeReset);
+    } finally {
+      guard.close();
+    }
   });
 });

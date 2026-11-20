@@ -1,6 +1,6 @@
 import { CliError } from "../errors.js";
 import type { CliConfig } from "../types.js";
-import { usageKeyForInstance, usageLimitsSnapshot, usageSignal } from "../usage/limits.js";
+import { usageKeyForInstance, usageSignal, usageWindowsForModel } from "../usage/limits.js";
 import type { StoredThread, StoredTurn } from "./types.js";
 
 export const QUEUE_RESET_GRACE_MS = 5000;
@@ -10,10 +10,16 @@ export const QUEUE_ADMISSION_LOCK = "\0queue-admission";
  * The reset a `reset` queue condition waits for: the reset of the window it
  * asked about. `all` covers every reported window, so it waits for the latest
  * reset across them — a session reset does not release work that also waits
- * on the weekly window.
+ * on the weekly window. When `model` is given for a multi-pool provider
+ * (Antigravity), only windows governing that model pool are considered.
  */
-export function nextReset(provider: string, kind: "session" | "weekly" | "all", now = Date.now()): string | null {
-  const windows = usageLimitsSnapshot(now)[provider]?.windows.filter((window) => kind === "all" || window.kind === kind) ?? [];
+export function nextReset(
+  provider: string,
+  kind: "session" | "weekly" | "all",
+  now = Date.now(),
+  model?: string | null,
+): string | null {
+  const windows = usageWindowsForModel(provider, now, model).filter((window) => kind === "all" || window.kind === kind);
   if (!windows.length || windows.some((window) => window.resetsAt === null)) return null;
   return windows.map((window) => window.resetsAt!).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
 }
@@ -50,7 +56,13 @@ export interface WorkQueueEntry {
   readonly blocked: readonly string[]; readonly scheduledFor: string | null;
 }
 
-export function parseQueuePolicy(value: unknown): QueuePolicy {
+export interface ParseQueuePolicyOptions {
+  readonly model?: string | null | undefined;
+  /** Keep omitted `reset` timestamps null so the thread-aware caller can resolve them against the thread's model. */
+  readonly deferReset?: boolean | undefined;
+}
+
+export function parseQueuePolicy(value: unknown, options?: ParseQueuePolicyOptions): QueuePolicy {
   const bad = (): never => { throw new CliError("INVALID_QUEUE", "Queue conditions or options are invalid."); };
   if (!value || typeof value !== "object" || Array.isArray(value)) return bad();
   const r = value as Record<string, unknown>;
@@ -63,7 +75,12 @@ export function parseQueuePolicy(value: unknown): QueuePolicy {
     if (c.type === "usage" && id(c.provider) && ["session", "weekly", "all"].includes(String(c.window)) && typeof c.minimum === "number" && Number.isFinite(c.minimum) && c.minimum >= 0 && c.minimum <= 100) return { type: "usage", provider: c.provider, window: c.window as "session" | "weekly" | "all", minimum: c.minimum };
     if (c.type === "reset" && id(c.provider) && (c.window === "session" || c.window === "weekly" || c.window === "all")) {
       if (c.resetsAt !== undefined && c.resetsAt !== null && (typeof c.resetsAt !== "string" || !Number.isFinite(Date.parse(c.resetsAt)))) return bad();
-      return { type: "reset", provider: c.provider, window: c.window, resetsAt: typeof c.resetsAt === "string" ? c.resetsAt : nextReset(c.provider, c.window) };
+      const resetsAt = typeof c.resetsAt === "string"
+        ? c.resetsAt
+        : options?.deferReset === true
+          ? null
+          : nextReset(c.provider, c.window, Date.now(), options?.model);
+      return { type: "reset", provider: c.provider, window: c.window, resetsAt };
     }
     if (c.type === "provider" && id(c.provider) && (c.state === "exhausted" || c.state === "protected") && (c.mode === "after" || c.mode === "while")) return { type: "provider", provider: c.provider, state: c.state, mode: c.mode };
     if (c.type === "thread" && id(c.threadId)) return { type: "thread", threadId: c.threadId };
@@ -77,17 +94,34 @@ export function parseQueuePolicy(value: unknown): QueuePolicy {
   return { conditions, held: r.held === true, order: typeof r.order === "number" ? r.order : Date.now(), sequential: r.sequential !== false, continuation: (r.continuation ?? "same-thread") as QueuePolicy["continuation"] };
 }
 
-export function automaticUsageBlock(provider: string, config: CliConfig, now = Date.now()): string[] {
-  const limits = usageLimitsSnapshot(now)[provider];
+/** Resolve any `reset` conditions whose `resetsAt` was deferred during decode, scoped to the turn's model pool. */
+export function resolveQueueResetConditions(
+  policy: QueuePolicy,
+  selection: { readonly instanceId: string; readonly model?: string | null | undefined },
+  now = Date.now(),
+): QueuePolicy {
+  if (!policy.conditions.some((c) => c.type === "reset" && c.resetsAt === null)) return policy;
+  const threadProvider = usageKeyForInstance(selection.instanceId);
+  const conditions = policy.conditions.map((condition) => {
+    if (condition.type !== "reset" || condition.resetsAt !== null) return condition;
+    const model = condition.provider === threadProvider ? selection.model : null;
+    const resetsAt = nextReset(condition.provider, condition.window, now, model);
+    return resetsAt === null ? condition : { ...condition, resetsAt };
+  });
+  return { ...policy, conditions };
+}
+
+export function automaticUsageBlock(provider: string, config: CliConfig, now = Date.now(), model?: string | null): string[] {
+  const windows = usageWindowsForModel(provider, now, model);
   // Providers without a quota feed retain their normal usage-limit behavior.
-  return (limits?.windows ?? []).flatMap((window) => {
+  return windows.flatMap((window) => {
     const minimum = window.kind === "weekly" ? config.usageMinimumWeekly ?? 5 : window.kind === "session" ? config.usageMinimumSession ?? 3 : 0;
     return window.usedPercent >= 100 || 100 - window.usedPercent < minimum ? [`${provider}: ${window.label} needs ${minimum}% remaining`] : [];
   });
 }
 
-export function providerExhausted(provider: string, now = Date.now()): boolean {
-  return usageLimitsSnapshot(now)[provider]?.windows.some((window) => window.usedPercent >= 100) === true;
+export function providerExhausted(provider: string, now = Date.now(), model?: string | null): boolean {
+  return usageWindowsForModel(provider, now, model).some((window) => window.usedPercent >= 100);
 }
 
 /**
@@ -125,21 +159,26 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   if (row.thread.archivedAt || row.thread.deletedAt || row.thread.settledAt || snoozeActive(row.thread.snoozedUntil, now)) blocked.push("Thread is not active");
   if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) blocked.push("Waiting for your answer or approval");
   if (turn.scheduledFor && Date.parse(turn.scheduledFor) > now) blocked.push(`Scheduled for ${turn.scheduledFor}`);
-  const provider = usageKeyForInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId);
-  if (policy?.automatic || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") blocked.push(...automaticUsageBlock(provider, config, now));
-  else if (providerExhausted(provider, now)) blocked.push(`${provider}: usage exhausted`);
+  const selection = turn.modelSelection ?? row.thread.modelSelection;
+  const provider = usageKeyForInstance(selection.instanceId);
+  const model = selection.model;
+  if (policy?.automatic || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") blocked.push(...automaticUsageBlock(provider, config, now, model));
+  else if (providerExhausted(provider, now, model)) blocked.push(`${provider}: usage exhausted`);
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {
     if (condition.type === "at") { if (Date.parse(condition.at) > now) blocked.push(`Waiting until ${condition.at}`); }
     else if (condition.type === "usage") {
-      const windows = usageLimitsSnapshot(now)[condition.provider]?.windows.filter((w) => condition.window === "all" || w.kind === condition.window) ?? [];
+      const condModel = condition.provider === provider ? model : null;
+      const windows = usageWindowsForModel(condition.provider, now, condModel).filter((w) => condition.window === "all" || w.kind === condition.window);
       if (!windows.length) blocked.push(`${condition.provider}: usage unavailable`);
       else if (windows.some((w) => w.usedPercent >= 100 || 100 - w.usedPercent < condition.minimum)) blocked.push(`${condition.provider}: needs ${condition.minimum}% ${condition.window} remaining`);
     } else if (condition.type === "reset") {
-      const resetsAt = condition.resetsAt ?? nextReset(condition.provider, condition.window, now);
+      const condModel = condition.provider === provider ? model : null;
+      const resetsAt = condition.resetsAt ?? nextReset(condition.provider, condition.window, now, condModel);
       if (resetsAt && !condition.resetsAt) conditions[index] = { ...condition, resetsAt };
       if (!resetsAt || Date.parse(resetsAt) + QUEUE_RESET_GRACE_MS > now) blocked.push(`${condition.provider}: waiting for ${condition.window} reset`);
     } else if (condition.type === "provider") {
-      const met = condition.state === "exhausted" ? usageLimitsSnapshot(now)[condition.provider]?.windows.some((w) => w.usedPercent >= 100) === true
+      const condModel = condition.provider === provider ? model : null;
+      const met = condition.state === "exhausted" ? providerExhausted(condition.provider, now, condModel)
         : rows.some((r) => r.thread.usagePause?.provider === condition.provider && r.thread.usagePause.phase !== "resuming");
       const signal = usageSignal(condition.provider, condition.state);
       const happened = signal !== null && Date.parse(signal) >= Date.parse(policy?.eventAfter ?? turn.createdAt);

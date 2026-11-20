@@ -7,7 +7,7 @@ import { startTurn, editWorkQueue, flushTaskNotifications, noteAutoContinueCance
 import { interruptTurn, openTurn, sendTurn, isContinuationBusy } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
-import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
+import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive, usageWindowMatchesModel, usageWindowsForModel } from "./limits.js";
 import { UsageForecaster, type UsageForecast } from "./forecast.js";
 import { modelPriceFor, usageCost } from "./prices.js";
 
@@ -312,7 +312,7 @@ export class UsageProtection {
    * `ensureRecovery` is about to ask about. Null while that window's reset is
    * still unknown: the work stays held until the provider supplies one.
    */
-  private async recoveryResetAt(ctx: OperationContext, threadId: string, pause: UsagePause, windows: readonly { kind: string }[], now: number): Promise<string | null> {
+  private async recoveryResetAt(ctx: OperationContext, threadId: string, pause: UsagePause, windows: readonly { kind: string }[], now: number, model?: string | null): Promise<string | null> {
     let window: "session" | "weekly" | "all" | null = null;
     if (pause.recoveryTurnId) {
       const turns = await ctx.store.readTurns(threadId).catch(() => []);
@@ -325,19 +325,21 @@ export class UsageProtection {
       }
     }
     window ??= windows.some((candidate) => candidate.kind === "session") ? "session" : windows.some((candidate) => candidate.kind === "weekly") ? "weekly" : "all";
-    return nextReset(pause.provider, window, now);
+    return nextReset(pause.provider, window, now, model);
   }
 
   private async ensureRecovery(ctx: OperationContext, threadId: string, pause: UsagePause): Promise<void> {
-    if (!(await ctx.store.readThreadRecord(threadId))?.usagePause) return;
+    const thread = await ctx.store.readThreadRecord(threadId);
+    if (!thread?.usagePause) return;
     if (pause.forced || pause.recoveryTurnId || pause.error) return;
-    const windows = usageLimitsSnapshot()[pause.provider]?.windows ?? [];
+    const model = thread.modelSelection.model;
+    const windows = usageWindowsForModel(pause.provider, Date.now(), model);
     const recovery = await sendTurn(ctx.store, threadId, {
       prompt: RESUME_PROMPT, origin: "usage-continue",
       queue: { ...parseQueuePolicy({ conditions: [
         { type: "usage", provider: pause.provider, window: "all", minimum: 0 },
         ...(pause.resetsAt ? [{ type: "at", at: new Date(Date.parse(pause.resetsAt) + QUEUE_RESET_GRACE_MS).toISOString() }] : [{ type: "reset", provider: pause.provider, window: windows.some((w) => w.kind === "session") ? "session" : windows.some((w) => w.kind === "weekly") ? "weekly" : "all", resetsAt: null }]),
-      ], order: pause.order, sequential: ctx.config.usageRecovery === "sequential", continuation: pause.handoff ? "stored" : "same-thread" }), automatic: true, requestId: `usage:${pause.order}` },
+      ], order: pause.order, sequential: ctx.config.usageRecovery === "sequential", continuation: pause.handoff ? "stored" : "same-thread" }, { model }), automatic: true, requestId: `usage:${pause.order}` },
     }).catch((cause: unknown) => {
       if (cause instanceof CliError && cause.code === "USAGE_PROTECTION_OVERRIDDEN") return null;
       throw cause;
@@ -347,28 +349,46 @@ export class UsageProtection {
   }
 
   private async begin(ctx: OperationContext, rows: UsageRow[], provider: string, now = Date.now(), triggering?: readonly UsageForecast[]): Promise<void> {
-    const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
+    const windows = usageLimitsSnapshot(now)[provider]?.windows ?? [];
     const heldBefore = new Set(rows.filter(({ thread }) => thread.usagePause).map(({ thread }) => thread.id));
-    const relevant = triggering === undefined ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent
-      || (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)) - (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt))).slice(0, 1)
-      : windows.filter((window) => triggering.some((forecast) => forecast.windowId === window.id) || window.usedPercent >= 100);
-    const resets = (relevant.length ? relevant : windows).map((window) => window.resetsAt);
-    const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
-    const pauseWindows = relevant.map((window) => ({
-      id: window.id, kind: window.kind, label: window.label, resetsAt: window.resetsAt,
-    }));
-    const eligible = rows.filter(({ thread, turns }) =>
-      !thread.archivedAt && !usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now)
-      && !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming")
-      && usageKeyForInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider
-      && (openTurn(turns) || this.nativeWrap.has(thread.id))
-      && (provider !== "claude" || ctx.config.providers?.claude?.usageWrapUp !== "provider" || this.nativeWrap.has(thread.id)));
+    const relevantFor = (model?: string | null) => {
+      const scoped = windows.filter((window) => usageWindowMatchesModel(provider, window, model));
+      if (triggering === undefined) {
+        return [...scoped].sort((a, b) => b.usedPercent - a.usedPercent
+          || (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)) - (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt))).slice(0, 1);
+      }
+      return scoped.filter((window) => triggering.some((forecast) => forecast.windowId === window.id) || window.usedPercent >= 100);
+    };
+    const pauseMetaFor = (model?: string | null) => {
+      const scoped = windows.filter((window) => usageWindowMatchesModel(provider, window, model));
+      const relevant = relevantFor(model);
+      const source = relevant.length ? relevant : scoped;
+      const resets = source.map((window) => window.resetsAt);
+      const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
+      const pauseWindows = relevant.map((window) => ({
+        id: window.id, kind: window.kind, label: window.label, resetsAt: window.resetsAt,
+      }));
+      return { resetsAt, pauseWindows };
+    };
+    const eligible = rows.filter(({ thread, turns }) => {
+      const selection = openTurn(turns)?.modelSelection ?? thread.modelSelection;
+      if (thread.archivedAt || usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now)) return false;
+      if (openTurn(turns)?.queue?.summaryFor || (thread.usagePause && thread.usagePause.phase !== "resuming")) return false;
+      if (usageKeyForInstance(selection.instanceId) !== provider) return false;
+      if (!openTurn(turns) && !this.nativeWrap.has(thread.id)) return false;
+      if (provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" && !this.nativeWrap.has(thread.id)) return false;
+      if (triggering !== undefined && triggering.length > 0 && relevantFor(selection.model).length === 0) return false;
+      return true;
+    });
     if (eligible.length) recordUsageProtection(provider);
     // Hold every queue before interrupting anything: settlement must not promote queued work.
-    for (const [index, row] of eligible.entries()) await this.pause(ctx, row.thread.id, {
-      provider, windows: pauseWindows, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: false,
-      ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
-    }, now);
+    for (const [index, row] of eligible.entries()) {
+      const { resetsAt, pauseWindows } = pauseMetaFor((openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model);
+      await this.pause(ctx, row.thread.id, {
+        provider, windows: pauseWindows, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: false,
+        ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
+      }, now);
+    }
     for (const row of eligible) {
       await flushTaskNotifications(ctx, row.thread.id);
       const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
@@ -377,6 +397,7 @@ export class UsageProtection {
       if (!(await ctx.store.readThreadRecord(row.thread.id))?.usagePause) continue;
       try { await this.stop(ctx, row); }
       catch {
+        const { resetsAt, pauseWindows } = pauseMetaFor((openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model);
         await this.pause(ctx, row.thread.id, { provider, windows: pauseWindows, phase: "waiting", resetsAt, order: Date.now(), handoff: false, error: "Could not pause this thread. Inspect it before continuing." });
       }
     }
@@ -515,7 +536,8 @@ export class UsageProtection {
         }
       }
       if (pause.phase === "wrapping") {
-        const exhausted = usageLimitsSnapshot(now)[pause.provider]?.windows.some((window) => window.usedPercent >= 97) === true;
+        const rowModel = (openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model;
+        const exhausted = usageWindowsForModel(pause.provider, now, rowModel).some((window) => window.usedPercent >= 97);
         if (running && (pause.native || (!exhausted && now - Date.parse(running.createdAt) < 120_000))) busy.add(pause.provider);
         else {
           if (running) await this.stop(ctx, row);
@@ -527,7 +549,8 @@ export class UsageProtection {
     for (const row of queue) {
       const pause = row.thread.usagePause!;
       if (row.thread.settledAt || row.thread.snoozedUntil) continue;
-      const windows = usageLimitsSnapshot(now)[pause.provider]?.windows ?? [];
+      const rowModel = (openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model;
+      const windows = usageWindowsForModel(pause.provider, now, rowModel);
       if (pause.phase === "pending" && !busy.has(pause.provider)) {
         if (windows.some((window) => window.usedPercent >= 97) || openTurn(await ctx.store.readTurns(row.thread.id))) {
           await this.pause(ctx, row.thread.id, { ...pause, phase: "waiting" });
@@ -558,7 +581,7 @@ export class UsageProtection {
       if (pause.phase !== "waiting" || pause.error) continue;
       let waiting = pause;
       if (!pause.forced && pause.resetsAt === null) {
-        const resetsAt = await this.recoveryResetAt(ctx, row.thread.id, waiting, windows, now);
+        const resetsAt = await this.recoveryResetAt(ctx, row.thread.id, waiting, windows, now, rowModel);
         if (resetsAt !== null) {
           waiting = { ...waiting, resetsAt };
           await this.pause(ctx, row.thread.id, waiting);
