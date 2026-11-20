@@ -831,4 +831,164 @@ describe("ACP crash recovery & rollback", () => {
       await Effect.runPromise(driver.stopAll());
     }
   });
+
+  it("drains cancelled session/prompt updates on interruptTurn without phantom background turns, Turn 2 leaks, or stale context overwrites", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport, backgroundTurnIdleMs: 25 });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const sent1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "write essay" }));
+      const server = transport.sessions[0]!.server;
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Part 1" },
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "message.part.updated")).toBe(true));
+
+      await Effect.runPromise(driver.interruptTurn("thread-1", sent1.turnId));
+
+      // Start Turn 2 immediately while Turn 1's cancelled session/prompt is still flushing.
+      const send2Promise = Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "2+2?" }));
+
+      // Per ACP spec, agent flushes trailing chunks before replying stopReason: "cancelled" with usage.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: " trailing chunk" },
+      });
+      // Resolve Turn 1's session/prompt with cancelled + usage that must NOT overwrite session.context.
+      server.finishPrompt("cancelled", {
+        usage: { inputTokens: 99_999, outputTokens: 500 },
+      });
+
+      const sent2 = await send2Promise;
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "4" },
+      });
+      server.finishPrompt("end_turn");
+      const outcome2 = await driver.awaitTurn("thread-1", sent2.turnId);
+
+      expect(outcome2.text).toBe("4");
+      expect(events.filter((e) => e.type === "turn.started" && e.origin === "background")).toEqual([]);
+      expect(await driver.contextUsage("thread-1")).toBeNull();
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("rejects sendTurn with ACP_TURN_BUSY while a background wakeup turn is open and across concurrent set_config_option awaits", async () => {
+    const transport = new FakeAcpTransport({
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          name: "Model",
+          currentValue: "gemini-4-neon",
+          options: [
+            { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+            { value: "gemini-4-argon", name: "Gemini 4 Argon" },
+          ],
+        },
+      ],
+    });
+    const driver = new AcpDriver({ transport, backgroundTurnIdleMs: 200 });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const server = transport.sessions[0]!.server;
+
+      // 1. Open background turn rejects sendTurn so background chunks never leak into a user turn.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "[BG part 1]" },
+      });
+      await vi.waitFor(
+        () => expect(events.some((e) => e.type === "turn.started" && e.origin === "background")).toBe(true),
+        { interval: 5 },
+      );
+      const busyBgCode = await codeOf(() =>
+        Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "2+2?" })),
+      );
+      expect(busyBgCode).toBe("ACP_TURN_BUSY");
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "[BG part 2]" },
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "turn.completed")).toBe(true));
+      const bgStart = events.find((e) => e.type === "turn.started" && e.origin === "background")!;
+      if (bgStart.type === "turn.started") {
+        expect((await driver.awaitTurn("thread-1", bgStart.turnId)).text).toBe("[BG part 1][BG part 2]");
+      }
+
+      // 2. Concurrent sendTurn during awaited session/set_config_option rejects the second call with ACP_TURN_BUSY.
+      const p1 = Effect.runPromise(
+        driver.sendTurn({
+          threadId: "thread-1",
+          prompt: "turn 1",
+          modelSelection: { instanceId: "acp/agy", model: "gemini-4-argon" },
+        }),
+      );
+      const p2 = codeOf(() =>
+        Effect.runPromise(
+          driver.sendTurn({
+            threadId: "thread-1",
+            prompt: "turn 2",
+            modelSelection: { instanceId: "acp/agy", model: "gemini-4-argon" },
+          }),
+        ),
+      );
+      const [sent1, busyConcurrentCode] = await Promise.all([p1, p2]);
+      expect(busyConcurrentCode).toBe("ACP_TURN_BUSY");
+      expect(server.requestsTo("session/prompt")).toHaveLength(1);
+      server.finishPrompt("end_turn");
+      await driver.awaitTurn("thread-1", sent1.turnId);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("sends session/cancel and suppresses trailing updates when promptTimeoutMs expires", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({
+      transport,
+      promptTimeoutMs: 30,
+      backgroundTurnIdleMs: 20,
+      cancelQuietMs: 120,
+      cancelDrainTimeoutMs: 500,
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "slow" }));
+      const outcome = await driver.awaitTurn("thread-1", sent.turnId);
+      expect(outcome.status).toBe("failed");
+
+      const server = transport.sessions[0]!.server;
+      await vi.waitFor(() => expect(server.notificationsTo("session/cancel")).toHaveLength(1));
+
+      // Trailing chunks emitted after timeout must NOT spawn a phantom background turn.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "still running" },
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      expect(events.some((e) => e.type === "turn.started" && e.origin === "background")).toBe(false);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
 });

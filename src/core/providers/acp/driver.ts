@@ -107,6 +107,10 @@ export interface AcpDriverOptions {
   readonly backgroundTurnIdleMs?: number;
   /** Shorter settle grace (ms) after a `usage_update` following assistant text in a background turn. */
   readonly backgroundTurnPostUsageIdleMs?: number;
+  /** Max time (ms) to wait for an agent to drain a cancelled `session/prompt`. */
+  readonly cancelDrainTimeoutMs?: number;
+  /** Quiet window (ms) after a timed-out/background cancel before re-enabling out-of-turn wakeups. */
+  readonly cancelQuietMs?: number;
   /** Test seam for Antigravity `/usage` + `/credits` probing. */
   readonly probeUsage?: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
 }
@@ -183,6 +187,14 @@ interface ParkedAcpPermission {
   readonly resolve: (response: unknown) => void;
 }
 
+interface InFlightAcpPrompt {
+  readonly turn: AcpTranscriptTurn;
+  readonly done: Promise<void>;
+  readonly resolveDone: () => void;
+  abandoned: boolean;
+  graceTimer: ReturnType<typeof setTimeout> | null;
+}
+
 interface AcpSession {
   readonly threadId: ThreadId;
   readonly agent: AcpAgentLaunchSpec;
@@ -210,6 +222,11 @@ interface AcpSession {
   readonly backgroundTasks: Map<string, BackgroundTaskSummary>;
   readonly backgroundTimers: Map<string, ReturnType<typeof setTimeout>>;
   backgroundTurnIdleTimer: ReturnType<typeof setTimeout> | null;
+  sendingTurn: boolean;
+  inFlightPrompt: InFlightAcpPrompt | null;
+  suppressingCancelledStream: boolean;
+  cancelledStreamQuietTimer: ReturnType<typeof setTimeout> | null;
+  cancelledStreamHardTimer: ReturnType<typeof setTimeout> | null;
   usageRefreshInFlight: Promise<void> | null;
   lastForcedUsageRefreshAt: number;
   closed: boolean;
@@ -223,6 +240,8 @@ const DEFAULT_BACKGROUND_TURN_IDLE_MS = 10_000;
 // Once `agy` emits `usage_update` after assistant text, any follow-up `tool_call` lands
 // within milliseconds; settle promptly after a short grace window.
 const DEFAULT_BACKGROUND_TURN_POST_USAGE_IDLE_MS = 1_500;
+const DEFAULT_CANCEL_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_CANCEL_QUIET_MS = 500;
 const USAGE_REFRESH_COALESCE_MS = 2_000;
 
 function toCliError(code: string, message: string, cause: unknown, agentLabel?: string): CliError {
@@ -311,6 +330,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly promptTimeoutMs: number;
   private readonly backgroundTurnIdleMs: number;
   private readonly backgroundTurnPostUsageIdleMs: number;
+  private readonly cancelDrainTimeoutMs: number;
+  private readonly cancelQuietMs: number;
   private readonly probeUsageFn: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
   private readonly sessions = new Map<ThreadId, AcpSession>();
   /** ACP session id per Moxen thread, kept past session teardown for resume. */
@@ -335,6 +356,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.backgroundTurnPostUsageIdleMs =
       options.backgroundTurnPostUsageIdleMs ??
       Math.min(this.backgroundTurnIdleMs, DEFAULT_BACKGROUND_TURN_POST_USAGE_IDLE_MS);
+    this.cancelDrainTimeoutMs = options.cancelDrainTimeoutMs ?? DEFAULT_CANCEL_DRAIN_TIMEOUT_MS;
+    this.cancelQuietMs = options.cancelQuietMs ?? DEFAULT_CANCEL_QUIET_MS;
     // When tests inject a fake transport without a custom usage probe, avoid spawning a real `agy` binary.
     this.probeUsageFn =
       options.probeUsage
@@ -582,6 +605,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           backgroundTasks: new Map(),
           backgroundTimers: new Map(),
           backgroundTurnIdleTimer: null,
+          sendingTurn: false,
+          inFlightPrompt: null,
+          suppressingCancelledStream: false,
+          cancelledStreamQuietTimer: null,
+          cancelledStreamHardTimer: null,
           usageRefreshInFlight: null,
           lastForcedUsageRefreshAt: 0,
           closed: false,
@@ -616,99 +644,139 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   sendTurn = (input: ProviderSendTurnInput): Effect.Effect<ProviderTurnStartResult, CliError> =>
     this.attempt("ACP_TURN_FAILED", `Could not send turn on thread ${input.threadId}`, async () => {
       const session = this.requireSession(input.threadId);
-      const existingOpen = this.openTurn(session);
-      if (existingOpen) {
-        if (existingOpen.origin === "background") {
-          this.settleTurn(session, existingOpen, "completed", null);
-        } else {
+      if (session.sendingTurn || this.openTurn(session)) {
+        throw new CliError("ACP_TURN_BUSY", `Thread ${input.threadId} already has a running ACP turn.`);
+      }
+      session.sendingTurn = true;
+      try {
+        // Wait for any cancelled prompt to finish flushing so trailing chunks cannot leak into this turn.
+        if (session.inFlightPrompt?.abandoned) {
+          await session.inFlightPrompt.done;
+        }
+        if (session.closed) {
+          throw new CliError("SESSION_NOT_FOUND", `No active ACP session for thread ${input.threadId}.`);
+        }
+        if (this.openTurn(session)) {
           throw new CliError("ACP_TURN_BUSY", `Thread ${input.threadId} already has a running ACP turn.`);
         }
-      }
-      if (input.runtimeMode) session.runtimeMode = input.runtimeMode;
-      if (input.modelSelection) {
-        await this.applySelectionConfigOptions(session, input.modelSelection);
-      }
+        if (input.runtimeMode) session.runtimeMode = input.runtimeMode;
+        if (input.modelSelection) {
+          await this.applySelectionConfigOptions(session, input.modelSelection);
+        }
+        if (session.closed) {
+          throw new CliError("SESSION_NOT_FOUND", `No active ACP session for thread ${input.threadId}.`);
+        }
+        if (this.openTurn(session)) {
+          throw new CliError("ACP_TURN_BUSY", `Thread ${input.threadId} already has a running ACP turn.`);
+        }
 
-      const turnId: TurnId = `acp-turn-${randomUUID()}`;
-      const turn: AcpTranscriptTurn = {
-        id: turnId,
-        prompt: input.prompt,
-        origin: "user",
-        items: [{ kind: "user", text: input.prompt }],
-        status: "running",
-        text: "",
-        error: null,
-        segments: [],
-        activeSegment: null,
-        activeReasoning: null,
-        tools: new Map(),
-        usage: null,
-        sawUsageUpdate: false,
-        hasAssistantTextSinceLastTool: false,
-        awaitingPostUsageSettle: false,
-        generationChars: 0,
-        generationMs: 0,
-        generationStartedAt: null,
-      };
-      session.transcript.push(turn);
+        this.clearCancelledStreamSuppression(session);
 
-      const effectivePrompt = session.pendingInstructions
-        ? `${session.pendingInstructions}\n\n${input.prompt}`
-        : input.prompt;
-      session.pendingInstructions = null;
+        const turnId: TurnId = `acp-turn-${randomUUID()}`;
+        const turn: AcpTranscriptTurn = {
+          id: turnId,
+          prompt: input.prompt,
+          origin: "user",
+          items: [{ kind: "user", text: input.prompt }],
+          status: "running",
+          text: "",
+          error: null,
+          segments: [],
+          activeSegment: null,
+          activeReasoning: null,
+          tools: new Map(),
+          usage: null,
+          sawUsageUpdate: false,
+          hasAssistantTextSinceLastTool: false,
+          awaitingPostUsageSettle: false,
+          generationChars: 0,
+          generationMs: 0,
+          generationStartedAt: null,
+        };
+        session.transcript.push(turn);
 
-      const promptBlocks = buildAcpPromptBlocks(
-        effectivePrompt,
-        input.images,
-        session.capabilities.promptCapabilities.image,
-      );
+        const effectivePrompt = session.pendingInstructions
+          ? `${session.pendingInstructions}\n\n${input.prompt}`
+          : input.prompt;
+        session.pendingInstructions = null;
 
-      void session.peer
-        .request(
-          ACP_METHODS.sessionPrompt,
-          {
-            sessionId: session.acpSessionId,
-            prompt: promptBlocks,
-          },
-          this.promptTimeoutMs,
-        )
-        .then(
-          (result) => {
-            const record = asRecord(result);
-            const usage = parseAcpTurnUsage(record?.["usage"]);
-            if (usage) {
-              turn.usage = usage;
-              const fallbackUsed = usage.input + usage.cacheRead + usage.cacheCreate + usage.output;
-              const prev = session.context;
-              session.context = {
-                usedTokens: turn.sawUsageUpdate && prev ? prev.usedTokens : fallbackUsed,
-                maxTokens: prev?.maxTokens ?? null,
-                cachedInputTokens: usage.cacheRead > 0 ? usage.cacheRead : (prev?.cachedInputTokens ?? null),
-                autoCompactThreshold: prev?.autoCompactThreshold ?? null,
-                compactsAutomatically: prev?.compactsAutomatically ?? null,
-                ...(usage.costUsd !== undefined
-                  ? { costUsd: usage.costUsd }
-                  : prev?.costUsd !== undefined
-                    ? { costUsd: prev.costUsd }
-                    : {}),
-              };
-            }
-            const stopReason = record?.["stopReason"];
-            const status = acpStopReasonToStatus(stopReason);
-            const error = status === "failed" ? `ACP agent refused the turn (${String(stopReason)}).` : null;
-            this.settleTurn(session, turn, status, error, record ?? undefined);
-            if (this.provider === "antigravity") {
-              void this.refreshAntigravityUsage(session, true);
-            }
-          },
-          (cause) => {
-            const agentLabel = session.agent.name ?? session.agent.id;
-            const err = toCliError("ACP_TURN_FAILED", `ACP turn failed for ${agentLabel}`, cause, agentLabel);
-            this.settleTurn(session, turn, "failed", err.message, { code: err.code, message: err.message });
-          },
+        const promptBlocks = buildAcpPromptBlocks(
+          effectivePrompt,
+          input.images,
+          session.capabilities.promptCapabilities.image,
         );
 
-      return { threadId: input.threadId, turnId };
+        let resolveDone!: () => void;
+        const done = new Promise<void>((resolve) => {
+          resolveDone = resolve;
+        });
+        const inFlight: InFlightAcpPrompt = {
+          turn,
+          done,
+          resolveDone,
+          abandoned: false,
+          graceTimer: null,
+        };
+        session.inFlightPrompt = inFlight;
+
+        void session.peer
+          .request(
+            ACP_METHODS.sessionPrompt,
+            {
+              sessionId: session.acpSessionId,
+              prompt: promptBlocks,
+            },
+            this.promptTimeoutMs,
+          )
+          .then(
+            (result) => {
+              this.finishInFlightPrompt(session, inFlight);
+              if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
+              const record = asRecord(result);
+              const usage = parseAcpTurnUsage(record?.["usage"]);
+              if (usage) {
+                turn.usage = usage;
+                const fallbackUsed = usage.input + usage.cacheRead + usage.cacheCreate + usage.output;
+                const prev = session.context;
+                session.context = {
+                  usedTokens: turn.sawUsageUpdate && prev ? prev.usedTokens : fallbackUsed,
+                  maxTokens: prev?.maxTokens ?? null,
+                  cachedInputTokens: usage.cacheRead > 0 ? usage.cacheRead : (prev?.cachedInputTokens ?? null),
+                  autoCompactThreshold: prev?.autoCompactThreshold ?? null,
+                  compactsAutomatically: prev?.compactsAutomatically ?? null,
+                  ...(usage.costUsd !== undefined
+                    ? { costUsd: usage.costUsd }
+                    : prev?.costUsd !== undefined
+                      ? { costUsd: prev.costUsd }
+                      : {}),
+                };
+              }
+              const stopReason = record?.["stopReason"];
+              const status = acpStopReasonToStatus(stopReason);
+              const error = status === "failed" ? `ACP agent refused the turn (${String(stopReason)}).` : null;
+              this.settleTurn(session, turn, status, error, record ?? undefined);
+              if (this.provider === "antigravity") {
+                void this.refreshAntigravityUsage(session, true);
+              }
+            },
+            (cause) => {
+              this.finishInFlightPrompt(session, inFlight);
+              if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
+              if (cause instanceof CliError && cause.code === "PEER_REQUEST_TIMEOUT") {
+                this.cancelAllParked(session);
+                session.peer.notify(ACP_METHODS.sessionCancel, { sessionId: session.acpSessionId });
+                this.startCancelledStreamSuppression(session);
+              }
+              const agentLabel = session.agent.name ?? session.agent.id;
+              const err = toCliError("ACP_TURN_FAILED", `ACP turn failed for ${agentLabel}`, cause, agentLabel);
+              this.settleTurn(session, turn, "failed", err.message, { code: err.code, message: err.message });
+            },
+          );
+
+        return { threadId: input.threadId, turnId };
+      } finally {
+        session.sendingTurn = false;
+      }
     });
 
   awaitTurn(threadId: ThreadId, turnId: TurnId, signal?: AbortSignal): Promise<AcpTurnOutcome> {
@@ -740,6 +808,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       session.peer.notify(ACP_METHODS.sessionCancel, { sessionId: session.acpSessionId });
       const open = this.openTurn(session);
       if (open) {
+        if (session.inFlightPrompt && session.inFlightPrompt.turn === open) {
+          this.abandonInFlightPrompt(session, session.inFlightPrompt);
+        } else if (open.origin === "background") {
+          this.startCancelledStreamSuppression(session);
+        }
         this.settleTurn(session, open, "interrupted", null);
       }
     });
@@ -1031,6 +1104,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const content = asRecord(update["content"]);
       const delta = asString(content?.["text"]) ?? asString(update["text"]);
       if (!delta) return;
+      if (this.discardIfDrainingCancelledTurn(session)) return;
       const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
       turn.awaitingPostUsageSettle = false;
       this.promoteInProgressTools(session, turn);
@@ -1068,6 +1142,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const content = asRecord(update["content"]);
       const delta = asString(content?.["text"]) ?? asString(update["text"]);
       if (!delta) return;
+      if (this.discardIfDrainingCancelledTurn(session)) return;
       const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
       turn.awaitingPostUsageSettle = false;
       turn.hasAssistantTextSinceLastTool = true;
@@ -1097,6 +1172,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     }
 
     if (kind === "plan") {
+      if (this.discardIfDrainingCancelledTurn(session)) return;
       const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
       turn.awaitingPostUsageSettle = false;
       const rawEntries = Array.isArray(update["entries"]) ? update["entries"] : [];
@@ -1127,6 +1203,15 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       if (!toolCallId) return;
 
       const ownerTurn = this.findTurnWithTool(session, toolCallId);
+      const isTrackedBackground = ownerTurn !== null && session.backgroundTasks.has(toolCallId);
+      if (!isTrackedBackground && this.discardIfDrainingCancelledTurn(session)) return;
+      if (isTrackedBackground) {
+        const incomingStatus = asNonEmptyString(update["status"]);
+        if (incomingStatus === "completed" || incomingStatus === "failed") {
+          // A real background task just completed; re-enable out-of-turn wakeup delivery.
+          this.clearCancelledStreamSuppression(session);
+        }
+      }
       const turn = ownerTurn ?? this.openTurn(session) ?? this.startOutOfTurn(session);
       const activeOpen = this.openTurn(session);
       if (activeOpen) {
@@ -1607,10 +1692,82 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     }
   }
 
+  private finishInFlightPrompt(session: AcpSession, entry: InFlightAcpPrompt): void {
+    if (entry.graceTimer !== null) {
+      clearTimeout(entry.graceTimer);
+      entry.graceTimer = null;
+    }
+    if (session.inFlightPrompt === entry) {
+      session.inFlightPrompt = null;
+    }
+    entry.resolveDone();
+  }
+
+  private abandonInFlightPrompt(session: AcpSession, entry: InFlightAcpPrompt): void {
+    entry.abandoned = true;
+    if (entry.graceTimer !== null) return;
+    const timer = setTimeout(() => {
+      entry.graceTimer = null;
+      this.finishInFlightPrompt(session, entry);
+    }, this.cancelDrainTimeoutMs);
+    timer.unref?.();
+    entry.graceTimer = timer;
+  }
+
+  private startCancelledStreamSuppression(session: AcpSession): void {
+    this.clearCancelledStreamSuppression(session);
+    if (session.closed) return;
+    session.suppressingCancelledStream = true;
+    const hardTimer = setTimeout(() => {
+      this.clearCancelledStreamSuppression(session);
+    }, this.cancelDrainTimeoutMs);
+    hardTimer.unref?.();
+    session.cancelledStreamHardTimer = hardTimer;
+    this.bumpCancelledStreamQuietTimer(session);
+  }
+
+  private bumpCancelledStreamQuietTimer(session: AcpSession): void {
+    if (session.cancelledStreamQuietTimer !== null) {
+      clearTimeout(session.cancelledStreamQuietTimer);
+      session.cancelledStreamQuietTimer = null;
+    }
+    if (!session.suppressingCancelledStream || session.closed) return;
+    const timer = setTimeout(() => {
+      this.clearCancelledStreamSuppression(session);
+    }, this.cancelQuietMs);
+    timer.unref?.();
+    session.cancelledStreamQuietTimer = timer;
+  }
+
+  private clearCancelledStreamSuppression(session: AcpSession): void {
+    session.suppressingCancelledStream = false;
+    if (session.cancelledStreamQuietTimer !== null) {
+      clearTimeout(session.cancelledStreamQuietTimer);
+      session.cancelledStreamQuietTimer = null;
+    }
+    if (session.cancelledStreamHardTimer !== null) {
+      clearTimeout(session.cancelledStreamHardTimer);
+      session.cancelledStreamHardTimer = null;
+    }
+  }
+
+  private discardIfDrainingCancelledTurn(session: AcpSession): boolean {
+    if (session.inFlightPrompt?.abandoned) return true;
+    if (session.suppressingCancelledStream) {
+      this.bumpCancelledStreamQuietTimer(session);
+      return true;
+    }
+    return false;
+  }
+
   private closeSession(session: AcpSession, status: TerminalTurnStatus, error: string | null): void {
     if (session.closed) return;
     session.closed = true;
     this.clearBackgroundTurnIdleTimer(session);
+    this.clearCancelledStreamSuppression(session);
+    if (session.inFlightPrompt) {
+      this.finishInFlightPrompt(session, session.inFlightPrompt);
+    }
     for (const timer of session.backgroundTimers.values()) {
       clearTimeout(timer);
     }

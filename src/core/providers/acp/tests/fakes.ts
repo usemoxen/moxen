@@ -123,9 +123,9 @@ export class FakeAcpServer {
   }
 
   /** Finish the oldest pending `session/prompt` request. */
-  finishPrompt(stopReason = "end_turn"): void {
+  finishPrompt(stopReason = "end_turn", extra?: Record<string, unknown>): void {
     const resolve = this.promptResolvers.shift();
-    if (resolve) resolve({ stopReason });
+    if (resolve) resolve({ stopReason, ...extra });
   }
 
   notifyUpdate(sessionId: string, update: Record<string, unknown>): void {
