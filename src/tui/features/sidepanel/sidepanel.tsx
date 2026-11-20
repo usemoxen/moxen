@@ -710,8 +710,8 @@ export function BackgroundTab({
                 {started === null ? null : <text fg={COLOR.faint}>{started}</text>}
               </box>
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
-                <OverflowText fg={COLOR.faint} width={Math.max(4, inner - 12) + 2}>{`  ${task.command?.split("\n")[0] ?? ""}`}</OverflowText>
-                <ActionText label="stop" color={COLOR.danger} onClick={() => onStop(task.taskId)} />
+                <OverflowText fg={COLOR.faint} width={task.stoppable === false ? Math.max(4, inner - 2) : Math.max(4, inner - 12) + 2}>{`  ${task.command?.split("\n")[0] ?? ""}`}</OverflowText>
+                {task.stoppable === false ? null : <ActionText label="stop" color={COLOR.danger} onClick={() => onStop(task.taskId)} />}
               </box>
             </Row>
           );

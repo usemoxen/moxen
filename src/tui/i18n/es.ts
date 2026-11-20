@@ -1130,6 +1130,7 @@ export const es: Catalog = {
   "bgm.shells_monitors_and_background_02e7": "Los shells, monitores y agentes en segundo plano salen aquí mientras se ejecutan.",
   "bgm.running_b3be": "en marcha ",
   "bgm.esc_close_dcf7": "esc cierra",
+  "bgm.select_enter_view_esc": "↑/↓ seleccionar · intro ver · esc cierra",
   "bgm.select_enter_view_x_2458": "↑/↓ seleccionar · intro ver · x detener · esc cierra",
   "tasks.tasks_ef61": "Tareas",
   "answer.custom_answer_cd39": "✎ Respuesta personalizada…",

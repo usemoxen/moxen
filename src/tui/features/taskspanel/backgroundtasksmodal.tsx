@@ -215,7 +215,6 @@ export function BackgroundTasksModal({
             </box>
           </>
         ) : null}
-        {liveDetail?.stoppable === false ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("bgm.independentStopUnavailable")}</text> : null}
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between" }}>
           <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("bgm.output_29c2")}</text>
           <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
@@ -318,7 +317,13 @@ export function BackgroundTasksModal({
         </scrollbox>
       )}
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
-        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>{ordered.length === 0 ? t("bgm.esc_close_dcf7") : t("bgm.select_enter_view_x_2458")}</OverflowText>
+        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>
+          {ordered.length === 0
+            ? t("bgm.esc_close_dcf7")
+            : ordered[safeIndex]?.stoppable === false
+              ? t("bgm.select_enter_view_esc")
+              : t("bgm.select_enter_view_x_2458")}
+        </OverflowText>
       </box>
     </>,
   );

@@ -2271,16 +2271,18 @@ export function App({
                       onPick: () => (setBackgroundTaskId(undefined), setPicker("background-tasks")),
                     },
                   ]),
-              // One row per background task running in the session.
-              ...background.map((task) => ({
-                key: `background:stop:${task.taskId}`,
-                label: t("bg.stop", { title: backgroundTaskTitle(task) }),
-                meta: task.taskType === "local_agent" ? "agent" : "shell",
-                onPick: () => {
-                  closePicker("chat");
-                  stopBackgroundTask(task);
-                },
-              })),
+              // One row per stoppable background task running in the session.
+              ...background
+                .filter((task) => task.stoppable !== false)
+                .map((task) => ({
+                  key: `background:stop:${task.taskId}`,
+                  label: t("bg.stop", { title: backgroundTaskTitle(task) }),
+                  meta: task.taskType === "local_agent" ? "agent" : "shell",
+                  onPick: () => {
+                    closePicker("chat");
+                    stopBackgroundTask(task);
+                  },
+                })),
               deleteSupported
                 ? {
                     key: "thread:delete",
@@ -3368,7 +3370,7 @@ export function App({
                     onOpen={(taskId) => (setBackgroundTaskId(taskId), setPicker("background-tasks"))}
                     onStop={(taskId) => {
                       const task = background.find((row) => row.taskId === taskId);
-                      if (task !== undefined) stopBackgroundTask(task);
+                      if (task !== undefined && task.stoppable !== false) stopBackgroundTask(task);
                     }}
                   />
                 )}

@@ -1136,6 +1136,7 @@ export const en = {
   "bgm.shells_monitors_and_background_02e7": "Shells, monitors and background agents show up here while they run.",
   "bgm.running_b3be": "running ",
   "bgm.esc_close_dcf7": "esc close",
+  "bgm.select_enter_view_esc": "↑/↓ select · enter view · esc close",
   "bgm.select_enter_view_x_2458": "↑/↓ select · enter view · x stop · esc close",
   "tasks.tasks_ef61": "Tasks",
   "answer.custom_answer_cd39": "✎ Custom answer…",
