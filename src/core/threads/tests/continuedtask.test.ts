@@ -8,6 +8,7 @@ import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
 import { continueThread, continueOwnThread, cancelTask, describeTask, delegate, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, recoverTaskNotifications, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { openThreadStore } from "../store.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { StoredThread } from "../types.js";
@@ -1271,5 +1272,78 @@ describe("durable settle notices across a restart or hand-off (MXN-389)", () => 
     await flushTaskNotifications(w.ctx, nextParent.threadId);
     await recoverTaskNotifications(w.ctx);
     expect(await notificationsIn(w, nextParent.threadId)).toHaveLength(1);
+  }, 30_000);
+});
+
+describe("notice receipts and identities (MXN-389)", () => {
+  /** A review task whose settle notice is batched under its parent. */
+  async function settledReviewOnce(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, parentId, child.id);
+    return child;
+  }
+
+  it("records every identity a coalesced report consumed", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReviewOnce(w, parent.id);
+    const recheck = (await sendTurn(w.store, child.id, { prompt: "Re-check" })).turn;
+    await completeTurn(w.store, child.id, recheck.id, { text: "Re-checked the login form.\n\nVERDICT: MERGE" });
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+
+    // The pre-acknowledgement batch is what a crash before the acknowledgement
+    // would leave behind.
+    const batchesFile = path.join(w.root, "task-notification-batches.json");
+    const saved = await readFile(batchesFile, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    const delivered = (await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.notification?.notices).toHaveLength(2);
+
+    await writeFile(batchesFile, saved, "utf8");
+    const store = await openThreadStore(w.root);
+    await recoverTaskNotifications({ ...w.ctx, store });
+    const after = (await store.readMessages(parent.id)).filter((message) => message.origin === "task-notification");
+    expect(after).toHaveLength(1);
+  }, 30_000);
+
+  it("keeps a delivered receipt past many later notifications", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReviewOnce(w, parent.id);
+    const batchesFile = path.join(w.root, "task-notification-batches.json");
+    const saved = await readFile(batchesFile, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect((await notificationsIn(w, parent.id))).toHaveLength(1);
+
+    // Older receipts must not expire while their batch is still replayable.
+    for (let index = 0; index < 64; index += 1) {
+      await w.store.appendLedger(parent.id, "messages", {
+        id: `later-${index}`,
+        threadId: parent.id,
+        turnId: "later-turn",
+        role: "user",
+        text: "later",
+        origin: "task-notification",
+        notification: { tasks: [], notices: [`other:${index}`] },
+        createdAt: w.store.nowIso(),
+      });
+    }
+    await writeFile(batchesFile, saved, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    const receipts = (await w.store.readMessages(parent.id)).filter((message) =>
+      message.notification?.notices?.includes(`settle:${child.id}:1`),
+    );
+    expect(receipts).toHaveLength(1);
   }, 30_000);
 });

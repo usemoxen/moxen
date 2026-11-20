@@ -533,6 +533,9 @@ export function encodeDelegation(delegation: StoredDelegation): DelegationRow {
   if (prompt !== delegation.prompt) rest.originalText = delegation.prompt;
   if (delegation.modelSnapshot !== undefined) rest.modelSnapshot = delegation.modelSnapshot;
   if (delegation.review !== undefined) rest.review = delegation.review;
+  if (delegation.reviewTask === true) rest.reviewTask = true;
+  if (delegation.settleGeneration !== undefined) rest.settleGeneration = delegation.settleGeneration;
+  if (delegation.reportedGeneration !== undefined) rest.reportedGeneration = delegation.reportedGeneration;
   return {
     id: delegation.id,
     parent_thread_id: delegation.parentThreadId,
@@ -567,5 +570,12 @@ export function decodeDelegation(row: DelegationRow): StoredDelegation {
     ...(row.idempotency_key === null ? {} : { idempotencyKey: decodeScalar(row.idempotency_key) }),
     ...(rest.modelSnapshot === undefined ? {} : { modelSnapshot: rest.modelSnapshot as NonNullable<StoredDelegation["modelSnapshot"]> }),
     ...(rest.review === undefined ? {} : { review: rest.review as NonNullable<StoredDelegation["review"]> }),
+    ...(rest.reviewTask === true ? { reviewTask: true as const } : {}),
+    ...(typeof rest.settleGeneration === "number" && Number.isSafeInteger(rest.settleGeneration) && rest.settleGeneration >= 0
+      ? { settleGeneration: rest.settleGeneration }
+      : {}),
+    ...(typeof rest.reportedGeneration === "number" && Number.isSafeInteger(rest.reportedGeneration) && rest.reportedGeneration >= 0
+      ? { reportedGeneration: rest.reportedGeneration }
+      : {}),
   };
 }

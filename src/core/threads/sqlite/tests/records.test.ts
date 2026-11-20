@@ -142,6 +142,19 @@ describe.skipIf(!underBun)("row round trip", () => {
     expect(rows.map((row) => decodeDelegation(row))).toEqual([full, sparse]);
   });
 
+  it("round-trips the review flag and settle generations, and decodes rows without them", () => {
+    const db = storeWithThreads();
+    const withGenerations = { ...sparseDelegation(), id: "del-gen", reviewTask: true as const, settleGeneration: 3, reportedGeneration: 2 };
+    const legacy = { ...sparseDelegation(), id: "del-legacy" };
+    insertRow(db, INSERT_DELEGATION, encodeDelegation(withGenerations));
+    insertRow(db, INSERT_DELEGATION, encodeDelegation(legacy));
+    const read = (id: string) => decodeDelegation(db.query<DelegationRow, [string]>("SELECT * FROM delegations WHERE id = ?").get(id)!);
+    expect(read(withGenerations.id)).toEqual(withGenerations);
+    expect(read(legacy.id)).toEqual(legacy);
+    // A row written before these fields carries none in its rest column.
+    expect(JSON.parse(db.query<DelegationRow, [string]>("SELECT * FROM delegations WHERE id = ?").get(legacy.id)!.rest)).toEqual({});
+  });
+
   it("keeps a handoff summary's half-step queue order", () => {
     const db = storeWithThreads();
     insertRow(db, INSERT_TURN, encodeTurn(queuedTurn()));

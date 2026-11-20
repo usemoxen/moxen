@@ -3393,20 +3393,19 @@ type TaskNoticeRoute =
   | { readonly kind: "superseded" }
   | { readonly kind: "unowned" };
 
-/** How many of a parent's most recent notification messages a delivered-notice check reads. */
-const DELIVERED_NOTICE_SCAN = 64;
-
 /**
  * The notice identities a parent's recent notification messages already
  * reported. A message records them in the same ledger write that accepts its
  * turn, so a replayed batch, a moved notice or a regenerated successor notice
  * cannot post the same settle twice; a later settle has a new identity and
- * still reports.
+ * still reports. The lookup reads every notification receipt, not a window: a
+ * receipt that falls out of a window while its batch is still replayable
+ * would post the notice again.
  */
 async function deliveredTaskNoticeIds(ctx: OperationContext, parentThreadId: string): Promise<Set<string>> {
   const messages = await ctx.store.readMessages(parentThreadId).catch(() => [] as StoredMessage[]);
   const ids = new Set<string>();
-  for (const message of messages.filter((entry) => entry.notification?.notices !== undefined).slice(-DELIVERED_NOTICE_SCAN)) {
+  for (const message of messages) {
     for (const id of message.notification?.notices ?? []) ids.add(id);
   }
   return ids;
@@ -3934,13 +3933,18 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   for (const entry of arriving) if (!deliveredHere.has(entry.id)) byId.set(entry.id, entry);
   const mine = [...byId.values()];
   if (mine.length === 0) return;
-  // The identity each delivered task reports, recorded on the message so a
-  // later replay can tell it was already sent.
-  const noticeFor = new Map<string, string>();
-  for (const entry of mine) {
-    const key = `${pendingEntryKind(entry)}:${entry.child}`;
-    if (!noticeFor.has(key)) noticeFor.set(key, entry.id);
-  }
+  // Every identity a delivered task reports, recorded on the message so a
+  // later replay can tell it was already sent. A coalesced report covers all
+  // the generations it consumed: recording only the first would let the
+  // others replay as fresh.
+  const noticeIds = new Map<string, string[]>();
+  const rememberNotice = (kind: string, child: string, id: string): void => {
+    const key = `${kind}:${child}`;
+    const ids = noticeIds.get(key) ?? [];
+    if (!ids.includes(id)) ids.push(id);
+    noticeIds.set(key, ids);
+  };
+  for (const entry of mine) rememberNotice(pendingEntryKind(entry), entry.child, entry.id);
   // A task paused by a usage limit has not finished: its parent hears when the resumed run ends instead.
   // One that handed off to a new thread has not finished either: its parent hears from the continuation.
   const movedOn = (id: string) => rows.some((row) => row.childThreadId === id && row.parentThreadId === parentThreadId && row.continuedIn !== undefined);
@@ -3968,7 +3972,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     return null;
   }))).filter((entry): entry is PendingTaskNotification => entry !== null);
   pauseIds.push(...continuedPauses.map((entry) => entry.child));
-  for (const entry of continuedPauses) noticeFor.set(`pause:${entry.child}`, entry.id);
+  for (const entry of continuedPauses) rememberNotice("pause", entry.child, entry.id);
   const pauseEntries = [...mine, ...continuedPauses];
   const cancelIds = mine.filter((entry) => pendingEntryKind(entry) === "cancel" && !settled.has(entry.child) && !movedOn(entry.child)).map((entry) => entry.child);
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
@@ -4020,13 +4024,14 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
       const replacement = await taskNotificationOf(ctx, successor.childThreadId);
       if (replacement !== null) {
         kept.push(successor.continuesTaskId ? { ...replacement, continuedFrom: successor.continuesTaskId } : replacement);
-        noticeFor.set(`settle:${successor.childThreadId}`, notice.id);
+        rememberNotice("settle", successor.childThreadId, notice.id);
       }
       continue;
     }
     if (route.kind === "live" && route.parentThreadId !== parentThreadId) {
-      const id = noticeFor.get(`settle:${task.taskId}`) ?? taskNoticeId("settle", task.taskId, null);
-      await enqueueTaskNotification(ctx, route.parentThreadId, { id, child: task.taskId });
+      const ids = noticeIds.get(`settle:${task.taskId}`) ?? [];
+      if (ids.length === 0) await enqueueTaskNotification(ctx, route.parentThreadId, await newTaskNotice(ctx, task.taskId));
+      else for (const id of ids) await enqueueTaskNotification(ctx, route.parentThreadId, { id, child: task.taskId });
       continue;
     }
     kept.push(task);
@@ -4034,14 +4039,16 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   const delivered: TaskNotification[] = [];
   for (const task of kept) if (!delivered.some((other) => other.taskId === task.taskId)) delivered.push(task);
   // Drop anything another flush delivered while the facts were being built.
+  // A task is only dropped when every identity it would report is on record;
+  // a coalesced report records all of them.
   const deliveredNow = await deliveredTaskNoticeIds(ctx, parentThreadId);
-  const noticeIdOf = (task: TaskNotification): string | undefined => {
+  const noticeIdsOf = (task: TaskNotification): string[] => {
     const kind = task.cancelled === true ? "cancel" : task.resumesAt !== undefined ? "pause" : "settle";
-    return noticeFor.get(`${kind}:${task.taskId}`);
+    return noticeIds.get(`${kind}:${task.taskId}`) ?? [];
   };
   const fresh = [...delivered, ...pauseTasks, ...cancelTasks].filter((task) => {
-    const id = noticeIdOf(task);
-    return id === undefined || !deliveredNow.has(id);
+    const ids = noticeIdsOf(task);
+    return ids.length === 0 || ids.some((id) => !deliveredNow.has(id));
   });
   const all = fresh;
   if (all.length === 0) return;
@@ -4085,17 +4092,15 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   for (const task of all) {
     const owner = liveParentOf(owners, task.taskId);
     if (owner !== undefined && owner !== parentThreadId) {
-      const id = noticeIdOf(task);
-      await enqueueTaskNotification(ctx, owner, id === undefined ? await newTaskNotice(ctx, task.taskId) : { id, child: task.taskId });
+      const ids = noticeIdsOf(task);
+      if (ids.length === 0) await enqueueTaskNotification(ctx, owner, await newTaskNotice(ctx, task.taskId));
+      else for (const id of ids) await enqueueTaskNotification(ctx, owner, { id, child: task.taskId });
       continue;
     }
     staying.push(task);
   }
   if (staying.length === 0) return;
-  const finalNotices = staying.flatMap((task) => {
-    const id = noticeIdOf(task);
-    return id === undefined ? [] : [id];
-  });
+  const finalNotices = staying.flatMap((task) => noticeIdsOf(task));
   const steerable = running && (await canSteer(ctx, parent));
   await startTurn(ctx, {
     threadId: parentThreadId,

@@ -509,12 +509,16 @@ a task that has since continued is dropped rather than sent to the old
 parent; when its live continuation has already finished, the notice is
 regenerated for that thread, so a lost callback cannot leave the parent
 with nothing. Each notice carries an identity — the task, its kind and the
-settle generation — and the message that reports it records that identity,
-so a replayed batch, a moved notice or a regenerated continuation notice is
-delivered once, while a later settle has a new identity and still reports.
-A settle also records its generation on the delegation row, and startup
-recovery sends any generation no notice was queued for, so a process lost
-after a verdict was persisted does not strand it. Task lookup follows the
+settle generation — and the message that reports it records every identity
+it consumed, so a replayed batch, a moved notice or a regenerated
+continuation notice is delivered once, while a later settle has a new
+identity and still reports. A settle also records its generation on the
+delegation row, and startup recovery queues a notice for any generation
+with no receipt. In the JSONL store, crash recovery and hand-off races are
+not transactional: an interruption, a hand-off landing during delivery, or
+a crash between a turn and its delegation row can still duplicate or delay
+a notice. Those paths are tracked in MXN-416 and are not guaranteed yet.
+Task lookup follows the
 hand-off links with no hop cap — one
 pass over an indexed delegation ledger — so a task answers to its original
 id however many times it continued. Delegation ledger writes assume one
