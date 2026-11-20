@@ -401,7 +401,9 @@ pub fn prettify(slug: &str) -> String {
 /// The token a provider's name and mark are drawn in.
 pub fn provider_color(driver: &str, instance: &str) -> &'static str {
     let haystack = format!("{driver} {instance}").to_lowercase();
-    if haystack.contains("claude") {
+    if haystack.contains("antigravity") || haystack.contains("gemini") {
+        "label-2"
+    } else if haystack.contains("claude") {
         "provider-claude"
     } else if haystack.contains("opencode") {
         "provider-opencode"
@@ -658,5 +660,13 @@ mod tests {
             Some("max")
         );
         assert_eq!(Selection::from_json(&json!({ "model": "x" })), None);
+    }
+
+    #[test]
+    fn provider_color_gives_antigravity_its_own_blue_token() {
+        assert_eq!(provider_color("antigravity", "antigravity"), "label-2");
+        assert_eq!(provider_color("claude", "claudeAgent"), "provider-claude");
+        assert_eq!(provider_color("opencode", "opencode"), "provider-opencode");
+        assert_eq!(provider_color("codex", "codex"), "ink");
     }
 }

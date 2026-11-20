@@ -108,11 +108,27 @@ const MOMENTS: Record<SceneId, Moment[]> = {
     { name: "aurora", at: moonPhases(TODAY)[2]!.at },
   ],
   luna: [...moonPhases(TODAY), { name: "aurora-folds", at: TODAY + 8 }],
+  hydrogen: [
+    { name: "nebula", at: 0 },
+    { name: "pulse", at: 5 },
+  ],
+  neon: [
+    { name: "discharge", at: 0 },
+    { name: "excitation", at: 9 },
+  ],
+  argon: [
+    { name: "plasma", at: 0 },
+    { name: "surge", at: 8 },
+  ],
+  carbon: [
+    { name: "lattice", at: 0 },
+    { name: "caustic", at: 6 },
+  ],
 };
 
 // A lens, a bow shock, strings pressed aside, moths drawn to a lamp and
 // the pointer lighting a globe are easy to miss in a motionless gallery.
-for (const scene of ["opus", "sol", "sonnet", "fable", "mythos", "astra", "terra", "luna"] as const) {
+for (const scene of ["opus", "sol", "sonnet", "fable", "mythos", "astra", "terra", "luna", "hydrogen", "neon", "argon", "carbon"] as const) {
   MOMENTS[scene].push({ name: "pointer", at: scene === "fable" || scene === "mythos" ? 23 : TODAY, pointer: { x: 48, y: 18, strength: 1 } });
 }
 

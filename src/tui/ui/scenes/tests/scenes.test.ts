@@ -29,6 +29,16 @@ describe("model scenes", () => {
     ["GPT-6 Astra", "astra"],
     ["GPT-6 Terra", "terra"],
     ["GPT-6 Luna", "luna"],
+    ["Gemini 4 Hydrogen", "hydrogen"],
+    ["gemini-4-hydrogen", "hydrogen"],
+    ["Gemini 4 Neon", "neon"],
+    ["gemini-4-neon", "neon"],
+    ["Gemini 4 Argon", "argon"],
+    ["gemini-4-argon", "argon"],
+    ["Gemini 4 Carbon", "carbon"],
+    ["gemini-4-carbon", "carbon"],
+    ["Claude Sonnet 5.5 (Antigravity)", "sonnet"],
+    ["Claude Opus 5.5 (Antigravity)", "opus"],
     ["GPT-5 Codex", null],
     ["Console 2", null],
     ["Opusculum 2", null],
@@ -56,6 +66,11 @@ describe("model scenes", () => {
     ["luna", 1791500000, { x: 40, y: 20, strength: 1 }],
     // Sol's Sun rises across the seam; the pointer puts a planet there.
     ["sol", 1000, { x: 40, y: 44, strength: 1 }],
+    // Gemini 4 elements: pillars, neon arcs, argon tendrils and diamond lattice cross the seam.
+    ["hydrogen", 5, { x: 40, y: 24, strength: 1 }],
+    ["neon", 9, { x: 40, y: 24, strength: 1 }],
+    ["argon", 8, { x: 40, y: 24, strength: 1 }],
+    ["carbon", 6, { x: 40, y: 24, strength: 1 }],
   ] as const)("paints the same %s field from two adjacent windows as from one", (scene, t, pointer) => {
     // Every scene paints a window onto one field (the terminal): anything
     // computed in window-local coordinates shows as a seam the moment a

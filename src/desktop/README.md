@@ -246,7 +246,7 @@ platform build prerequisites apply. macOS was exercised; Windows/Linux were not.
     `thread.turn.start`. The catalog is read on connect and again whenever the
     picker opens, so a newly hidden model or a signed-in provider shows up.
   - The transcript's author line and the pill use the catalog's name and the
-    provider's colour (`provider-claude`, `provider-opencode`, else ink).
+    provider's colour (`provider-claude`, `provider-opencode`, `label-2` for Antigravity, else ink).
   Not done: arrow/Enter keyboard navigation in the picker, the per-thread model
   of each past turn (the thread's current model labels every turn), and the
   "default" tag following the settings' Model (only the catalog's default).
