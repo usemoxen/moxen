@@ -16,6 +16,7 @@
  * so a long thread still fits a context window.
  */
 import type { ThreadStore } from "./store.js";
+import { isTransferLanded } from "./queue.js";
 import type { StoredActivity, StoredMessage, StoredThread, StoredTurn } from "./types.js";
 
 /** Turns kept word for word; older ones become a one-line summary each. */
@@ -115,17 +116,43 @@ export interface HandoffOptions {
   readonly preferModelSummary?: boolean;
   readonly modelSummary?: string;
   readonly queuedTurnIds?: readonly string[];
+  /**
+   * The source turns visible when a manual continue claimed its moves: the
+   * handoff projects exactly this set, so source work accepted after the
+   * claim belongs only to the source — never assigned as destination work
+   * nor captured in its snapshot — while claimed moves stay excluded by
+   * their marker. Only the manual path passes it.
+   */
+  readonly knownTurnIds?: readonly string[];
+  /**
+   * Turns this call itself claimed for the move: hidden like moved turns,
+   * since the migration runs right after this read. Only the manual path
+   * passes it.
+   */
+  readonly excludedTurnIds?: readonly string[];
 }
 
 export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
   const thread = (await store.readThreadRecord(threadId)) as StoredThread | null;
   if (!thread) throw new Error(`No thread ${threadId}.`);
-  const [turns, messages, activities, checkpoints] = await Promise.all([
+  const [allTurns, messages, activities, checkpoints] = await Promise.all([
     store.readTurns(threadId),
     store.readMessages(threadId),
     store.readActivities(threadId),
     store.readCheckpoints(threadId),
   ]);
+  // A manual continue pins the projection to its claim: turns accepted after
+  // the claim belong only to the source, so neither history nor an
+  // immediate task here, whether still queued or already promoted.
+  const knownTurns = options.knownTurnIds ? new Set(options.knownTurnIds) : null;
+  const turns = knownTurns ? allTurns.filter((turn) => knownTurns.has(turn.id)) : allTurns;
+  // Turn-scoped rows follow the same boundary; thread-level rows (a null
+  // turn) stay. Checklists and file stats name their turn, so a late plan or
+  // checkpoint drops out while pre-claim ones remain.
+  const scopedActivities = activities.filter((activity) => activity.turnId == null || !knownTurns || knownTurns.has(activity.turnId));
+  const scopedCheckpoints = knownTurns
+    ? checkpoints.filter((checkpoint) => checkpoint.turnId == null || knownTurns.has(checkpoint.turnId))
+    : checkpoints;
 
   // A turn has reached the agent once it produced something. One that is
   // queued, or was promoted to `running` by a settle but never ran (the
@@ -137,7 +164,14 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   ]);
   const terminal = (turn: StoredTurn): boolean => turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted";
   const reached = (turn: StoredTurn): boolean => terminal(turn) || produced.has(turn.id);
-  const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor);
+  // Moved messages run as Work queue entries on the new thread: they are
+  // neither history to retell nor immediate work for this turn. Only landed
+  // moves count — a staged claim alone is not a move — plus the turns this
+  // call itself claimed, whose migration follows this read.
+  const excluded = new Set(options.excludedTurnIds ?? []);
+  const moved = turns.filter((turn) => isTransferLanded(turn) || excluded.has(turn.id));
+  const movedIds = new Set(moved.map((turn) => turn.id));
+  const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor && !movedIds.has(turn.id));
   const blocks: TurnBlock[] = sent.map((turn) => ({
     turn,
     prompts: messages.filter((message) => message.turnId === turn.id && message.role === "user"),
@@ -145,25 +179,26 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
   }));
   const unsent = turns
-    .filter((turn) => !reached(turn) && !(options.preferModelSummary && turn.scheduledFor) && (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)))
+    .filter((turn) => !reached(turn) && !movedIds.has(turn.id) && !(options.preferModelSummary && turn.scheduledFor) && (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)))
     .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary"));
 
   // Files the thread changed, summed across every turn's checkpoint.
   const files = new Map<string, { additions: number; deletions: number }>();
-  for (const checkpoint of checkpoints) {
+  for (const checkpoint of scopedCheckpoints) {
     for (const file of checkpoint.files ?? []) {
-      const known = files.get(file.path) ?? { additions: 0, deletions: 0 };
-      files.set(file.path, { additions: known.additions + file.additions, deletions: known.deletions + file.deletions });
+      const stat = files.get(file.path) ?? { additions: 0, deletions: 0 };
+      files.set(file.path, { additions: stat.additions + file.additions, deletions: stat.deletions + file.deletions });
     }
   }
 
   const userPrompts = blocks.flatMap((block) => block.prompts).filter((message) => !message.origin);
   const firstPrompt = userPrompts[0]?.text.trim() ?? null;
   const lastPrompt = userPrompts.at(-1)?.text.trim() ?? null;
-  const plan = openPlan(activities);
+  const plan = openPlan(scopedActivities);
   const stopped = stoppedBecause(blocks.at(-1), activities);
-  // Only a last turn that ran to completion, with nothing queued and no open checklist step, may be a finished task.
-  const finished = stopped.completed && unsent.length === 0 && plan.every((row) => row.startsWith("- [x]"));
+  // Only a last turn that ran to completion, with nothing queued, nothing
+  // moved, and no open checklist step, may be a finished task.
+  const finished = stopped.completed && unsent.length === 0 && moved.length === 0 && plan.every((row) => row.startsWith("- [x]"));
   const where = thread.env.branch ? `${thread.env.path} (branch ${thread.env.branch})` : thread.env.path;
 
   const head: string[] = [
@@ -183,6 +218,15 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   if (firstPrompt !== null && firstPrompt !== lastPrompt) head.push("", "The thread began with:", "", options.preferModelSummary || options.modelSummary ? firstPrompt : `> ${oneLine(firstPrompt, 400)}`);
   if (lastPrompt !== null) head.push("", "The last request, verbatim:", "", lastPrompt);
   if (plan.length > 0) head.push("", "Its checklist when it stopped (`[x]` done, `[~]` in progress, `[ ]` open):", "", ...plan);
+  if (moved.length > 0) {
+    head.push(
+      "",
+      moved.length === 1
+        ? "The user had queued a message that had not run; it moved to the new thread's Work queue with this continuation and will arrive as a follow-up turn — it is not part of this turn's work."
+        : `The user had queued ${moved.length} messages that had not run; they moved to the new thread's Work queue with this continuation and will arrive as follow-up turns — they are not part of this turn's work.`,
+      "",
+    );
+  }
   if (unsent.length > 0) {
     head.push("", "The user queued these and they were never sent — treat them as part of the task, in this order:", "");
     unsent.forEach((message, index) => head.push(`${index + 1}. ${message.text.trim()}`));
@@ -193,7 +237,10 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
       head.push(`- ${path} +${stat.additions} −${stat.deletions}`);
     }
   }
-  const images = messages.flatMap((message) => message.attachments ?? []).filter((attachment) => attachment.type === "image");
+  const images = messages
+    .filter((message) => !knownTurns || knownTurns.has(message.turnId))
+    .flatMap((message) => message.attachments ?? [])
+    .filter((attachment) => attachment.type === "image");
   if (images.length > 0) {
     head.push("", "## Original images", "", "These original image files remain on this server. Open them with your image/file tools when the task depends on visual input:", ...images.map((image) => `- ${JSON.stringify(image.name)}: ${JSON.stringify(image.path)}`));
   }
