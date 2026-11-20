@@ -48,6 +48,8 @@ export interface ProviderUsageWindow {
 export interface ProviderUsageLimits {
   checkedAt: string;
   windows: ProviderUsageWindow[];
+  /** Optional remaining credit balance (e.g. Antigravity `/credits`). Omitted when the provider has no credit pool. */
+  credits?: number;
   /** Set when the provider can never report usage (e.g. an API key account), or a probe failed. */
   unavailable: { reason: string; message: string | null } | null;
 }
@@ -218,12 +220,14 @@ function extractUsageLimits(raw: unknown): ProviderUsageLimits | null {
   if (!checkedAt) return null;
   const windows = entry && Array.isArray(entry.windows) ? entry.windows : [];
   const unavailable = entry ? asRecord(entry.unavailable) : null;
+  const credits = typeof entry?.credits === "number" && Number.isFinite(entry.credits) ? entry.credits : undefined;
   return {
     checkedAt,
     windows: windows.flatMap((window) => {
       const summary = extractUsageWindow(window);
       return summary ? [summary] : [];
     }),
+    ...(credits === undefined ? {} : { credits }),
     unavailable: unavailable
       ? { reason: asNonEmptyString(unavailable.reason) ?? "unsupported", message: asNonEmptyString(unavailable.message) }
       : null,

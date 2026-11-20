@@ -614,38 +614,46 @@ export function ContextTab({
         </>
       )}
       <Heading text={t("side.plan_usage_48f7")} {...(providerName === null ? {} : { meta: providerName })} />
-      {usageLimits === null || usageLimits.windows.length === 0 ? (
+      {usageLimits === null || (usageLimits.windows.length === 0 && typeof usageLimits.credits !== "number") ? (
         <text fg={COLOR.dim} wrapMode="word">
           {usageLimits?.unavailable?.message ?? t("side.no_subscription_usage_reported_fa47")}
         </text>
       ) : (
-        (() => {
-          // Inline like the heaviest tools: label, bar, reading in columns
-          // shared by every window, so the bars start and end together.
-          const rows = usageLimits.windows.map((window) => {
-            const resets = window.resetsAt === null ? null : new Date(window.resetsAt);
-            const resetLabel =
-              resets === null || Number.isNaN(resets.getTime()) ? null : `↻ ${untilLabel(resets, now).replace(/^in /u, "")}`;
-            return { window, percent: `${Math.round(window.usedPercent)}%`, resetLabel };
-          });
-          const labelWidth = Math.min(Math.max(...rows.map((row) => row.window.label.length)), Math.max(6, Math.floor(inner * 0.3)));
-          const percentWidth = Math.max(...rows.map((row) => row.percent.length));
-          const resetWidth = Math.max(0, ...rows.map((row) => row.resetLabel?.length ?? 0));
-          const valueWidth = percentWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
-          const barWidth = Math.max(4, inner - labelWidth - valueWidth - 2);
-          return rows.map(({ window, percent, resetLabel }) => {
-            const fraction = window.usedPercent / 100;
-            const color = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
-            return (
-              <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                <OverflowText fg={COLOR.text} width={labelWidth + 1} padToWidth suffix=" ">{window.label}</OverflowText>
-                <BarRow width={barWidth} fraction={fraction} filledColor={color} />
-                <text fg={COLOR.dim}>{` ${percent.padStart(percentWidth)}`}</text>
-                {resetWidth > 0 ? <text fg={COLOR.faint}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
-              </box>
-            );
-          });
-        })()
+        <>
+          {usageLimits.windows.length === 0 ? null : (() => {
+            // Inline like the heaviest tools: label, bar, reading in columns
+            // shared by every window, so the bars start and end together.
+            const rows = usageLimits.windows.map((window) => {
+              const resets = window.resetsAt === null ? null : new Date(window.resetsAt);
+              const resetLabel =
+                resets === null || Number.isNaN(resets.getTime()) ? null : `↻ ${untilLabel(resets, now).replace(/^in /u, "")}`;
+              return { window, percent: `${Math.round(window.usedPercent)}%`, resetLabel };
+            });
+            const labelWidth = Math.min(Math.max(...rows.map((row) => row.window.label.length)), Math.max(6, Math.floor(inner * 0.3)));
+            const percentWidth = Math.max(...rows.map((row) => row.percent.length));
+            const resetWidth = Math.max(0, ...rows.map((row) => row.resetLabel?.length ?? 0));
+            const valueWidth = percentWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
+            const barWidth = Math.max(4, inner - labelWidth - valueWidth - 2);
+            return rows.map(({ window, percent, resetLabel }) => {
+              const fraction = window.usedPercent / 100;
+              const color = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
+              return (
+                <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
+                  <OverflowText fg={COLOR.text} width={labelWidth + 1} padToWidth suffix=" ">{window.label}</OverflowText>
+                  <BarRow width={barWidth} fraction={fraction} filledColor={color} />
+                  <text fg={COLOR.dim}>{` ${percent.padStart(percentWidth)}`}</text>
+                  {resetWidth > 0 ? <text fg={COLOR.faint}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
+                </box>
+              );
+            });
+          })()}
+          {typeof usageLimits.credits === "number" ? (
+            <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between", ...(usageLimits.windows.length > 0 ? { marginTop: 1 } : {}) }}>
+              <text fg={COLOR.dim}>{t("side.remaining_credits_9c4e")}</text>
+              <text fg={COLOR.text}>{usageLimits.credits.toLocaleString()}</text>
+            </box>
+          ) : null}
+        </>
       )}
     </box>
   );

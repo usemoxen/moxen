@@ -109,7 +109,7 @@ export interface TurnDriver extends ProviderSessionTitles {
    * (the Harness, a non-Go OpenCode provider). Key is the usage-registry
    * entry the windows belong under (an account, or one OpenCode Go instance).
    */
-  refreshUsage?(): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow> } | null>;
+  refreshUsage?(): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow>; readonly credits?: number | null } | null>;
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
   steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[], steerId?: string): Effect.Effect<void, CliError>;
@@ -399,7 +399,7 @@ function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>>
       Effect.sync(() => {
         // Plan usage belongs to the account, not the thread: recorded here,
         // once per event, whoever (if anyone) watches the thread.
-        if (event.type === "rate-limits.updated") recordUsageWindows(event.instanceId ?? event.provider, event.windows);
+        if (event.type === "rate-limits.updated") recordUsageWindows(event.instanceId ?? event.provider, event.windows, undefined, { credits: event.credits });
         trackLiveText(buffers, event);
         for (const subscriber of subscribers.get("*") ?? []) deliverEvent(subscriber, event);
         for (const subscriber of subscribers.get(event.threadId) ?? []) deliverEvent(subscriber, event);

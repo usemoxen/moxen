@@ -1052,6 +1052,7 @@ export const en = {
   "side.usage_by_category_5014": "Usage by category",
   "side.heaviest_tools_a33c": "Heaviest tools",
   "side.plan_usage_48f7": "Plan usage",
+  "side.remaining_credits_9c4e": "Remaining credits",
   "side.no_subscription_usage_reported_fa47": "No subscription usage reported for this provider.",
   "side.shell_ea89": "Shell",
   "side.monitor_d298": "Monitor",

@@ -22,6 +22,7 @@ import { APP_VERSION } from "../../version.js";
 import { JsonRpcPeer } from "../stdio.js";
 import type {
   ApprovalRequestId,
+  ContextWindowUsage,
   ProviderAdapter,
   ProviderAdapterCapabilities,
   ProviderApprovalDecision,
@@ -32,10 +33,16 @@ import type {
   ProviderThreadSnapshot,
   ProviderTurnStartResult,
   ProviderUserInputAnswers,
+  RateLimitWindow,
   ThreadId,
   TokenUsageDelta,
   TurnId,
 } from "../spi.js";
+import {
+  parseAntigravityTier,
+  probeAntigravityUsage,
+  type AntigravityUsageSnapshot,
+} from "../antigravity/usage.js";
 import {
   parkTurnWaiter,
   settleAndPublishTurn,
@@ -66,6 +73,8 @@ import {
   parseAcpModelsState,
   parseAcpModesState,
   parseAcpPermissionOptions,
+  parseAcpTurnUsage,
+  parseAcpUsageUpdate,
   selectAcpPermissionOutcome,
   type AcpAgentCapabilities,
   type AcpAgentInfo,
@@ -92,6 +101,8 @@ export interface AcpDriverOptions {
   readonly transport?: AcpTransport;
   readonly initializeTimeoutMs?: number;
   readonly promptTimeoutMs?: number;
+  /** Test seam for Antigravity `/usage` + `/credits` probing. */
+  readonly probeUsage?: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
 }
 
 export interface AcpTurnOutcome {
@@ -144,6 +155,8 @@ interface AcpTranscriptTurn {
   activeSegment: AcpMessageSegment | null;
   activeReasoning: AcpReasoningState | null;
   readonly tools: Map<string, AcpToolState>;
+  usage: TokenUsageDelta | null;
+  sawUsageUpdate: boolean;
   generationChars: number;
   generationMs: number;
   generationStartedAt: number | null;
@@ -176,6 +189,8 @@ interface AcpSession {
   modes: AcpSessionModesState | null;
   configOptions: AcpConfigOption[];
   availableCommands: AcpAvailableCommand[];
+  context: ContextWindowUsage | null;
+  tier: string | null;
   readonly sessionAllowKeys: Set<string>;
   readonly transcript: AcpTranscriptTurn[];
   readonly waiters: TurnWaiters<AcpTurnOutcome>;
@@ -270,6 +285,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly transport: AcpTransport;
   private readonly initializeTimeoutMs: number;
   private readonly promptTimeoutMs: number;
+  private readonly probeUsageFn: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
   private readonly sessions = new Map<ThreadId, AcpSession>();
   /** ACP session id per Moxen thread, kept past session teardown for resume. */
   private readonly resumable = new Map<ThreadId, string>();
@@ -289,6 +305,12 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SpawnAcpTransport();
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
     this.promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
+    // When tests inject a fake transport without a custom usage probe, avoid spawning a real `agy` binary.
+    this.probeUsageFn =
+      options.probeUsage
+      ?? (options.transport !== undefined
+        ? async () => null
+        : (command, env, opts) => probeAntigravityUsage(command, env, opts));
   }
 
   get streamEvents(): Stream.Stream<ProviderRuntimeEvent> {
@@ -315,6 +337,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     readonly init: AcpInitializeResult;
     readonly models: ModelSummary[];
     readonly authError: boolean;
+    readonly tier: string | null;
   }> {
     const agent = this.resolveAgent(instanceId);
     const peer = this.transport.startPeer({ agent, cwd, env: this.baseEnv });
@@ -334,7 +357,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const init = parseAcpInitializeResult(raw, agent.name ?? agent.id);
       const wantModels = (options.shouldDiscover?.(init) ?? true) && init.agentCapabilities.canCloseSession;
       if (!wantModels) {
-        return { init, models: [], authError: false };
+        return { init, models: [], authError: false, tier: null };
       }
 
       let probeSessionId: string | null = null;
@@ -349,10 +372,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         const configOptions = parseAcpConfigOptions(newRec?.["configOptions"]);
         const modelsState = parseAcpModelsState(newRec?.["models"]);
         const models = parseAcpCatalogModels(configOptions, modelsState);
-        return { init, models, authError: false };
+        const tier = parseAntigravityTier(newRec);
+        return { init, models, authError: false, tier };
       } catch (cause) {
         const text = cause instanceof Error ? cause.message : String(cause);
-        return { init, models: [], authError: isAcpAuthErrorText(text) };
+        return { init, models: [], authError: isAcpAuthErrorText(text), tier: null };
       } finally {
         if (probeSessionId) {
           await peer.request(ACP_METHODS.sessionClose, { sessionId: probeSessionId }, 2_000).catch(() => undefined);
@@ -384,6 +408,25 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
   resumeCursor = (threadId: ThreadId): string | null => {
     return this.sessions.get(threadId)?.acpSessionId ?? this.resumable.get(threadId) ?? null;
+  };
+
+  readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
+    this.sessions.get(threadId)?.context ?? null;
+
+  readonly refreshUsage = async (): Promise<{
+    readonly key: string;
+    readonly windows: ReadonlyArray<RateLimitWindow>;
+    readonly credits?: number | null;
+  } | null> => {
+    if (this.provider !== "antigravity") return null;
+    const agent = this.agents.get("antigravity") ?? AGY_ACP_LAUNCH_SPEC;
+    const snapshot = await this.probeUsageFn(agent.command, this.baseEnv, { force: true }).catch(() => null);
+    if (!snapshot || (snapshot.windows.length === 0 && snapshot.credits === null)) return null;
+    return {
+      key: "antigravity",
+      windows: snapshot.windows,
+      ...(snapshot.credits === null ? {} : { credits: snapshot.credits }),
+    };
   };
 
   startSession = (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, CliError> =>
@@ -427,6 +470,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         let acpSessionId: string | null = null;
         let modes: AcpSessionModesState | null = null;
         let configOptions: AcpConfigOption[] = [];
+        let tier: string | null = null;
         let resumed = false;
 
         if (input.resumeCursor && init.agentCapabilities.loadSession) {
@@ -444,6 +488,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
             acpSessionId = asNonEmptyString(loadRec?.["sessionId"]) ?? input.resumeCursor;
             modes = parseAcpModesState(loadRec?.["modes"]);
             configOptions = parseAcpConfigOptions(loadRec?.["configOptions"]);
+            tier = parseAntigravityTier(loadRec);
             resumed = true;
           } catch (cause) {
             const text = cause instanceof Error ? cause.message : String(cause);
@@ -473,6 +518,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           }
           modes = parseAcpModesState(newRec?.["modes"]);
           configOptions = parseAcpConfigOptions(newRec?.["configOptions"]);
+          tier = parseAntigravityTier(newRec);
         }
 
         const startedAt = new Date().toISOString();
@@ -494,6 +540,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           modes,
           configOptions,
           availableCommands: [],
+          context: null,
+          tier,
           sessionAllowKeys: new Set(),
           transcript: [],
           waiters: new Map(),
@@ -508,6 +556,10 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         // Apply initial model and effort selections if the agent exposes config options.
         if (input.modelSelection) {
           await this.applySelectionConfigOptions(session, input.modelSelection);
+        }
+
+        if (this.provider === "antigravity") {
+          void this.refreshAntigravityUsage(session);
         }
 
         return {
@@ -546,6 +598,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         activeSegment: null,
         activeReasoning: null,
         tools: new Map(),
+        usage: null,
+        sawUsageUpdate: false,
         generationChars: 0,
         generationMs: 0,
         generationStartedAt: null,
@@ -575,10 +629,31 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         .then(
           (result) => {
             const record = asRecord(result);
+            const usage = parseAcpTurnUsage(record?.["usage"]);
+            if (usage) {
+              turn.usage = usage;
+              const fallbackUsed = usage.input + usage.cacheRead + usage.cacheCreate + usage.output;
+              const prev = session.context;
+              session.context = {
+                usedTokens: turn.sawUsageUpdate && prev ? prev.usedTokens : fallbackUsed,
+                maxTokens: prev?.maxTokens ?? null,
+                cachedInputTokens: usage.cacheRead > 0 ? usage.cacheRead : (prev?.cachedInputTokens ?? null),
+                autoCompactThreshold: prev?.autoCompactThreshold ?? null,
+                compactsAutomatically: prev?.compactsAutomatically ?? null,
+                ...(usage.costUsd !== undefined
+                  ? { costUsd: usage.costUsd }
+                  : prev?.costUsd !== undefined
+                    ? { costUsd: prev.costUsd }
+                    : {}),
+              };
+            }
             const stopReason = record?.["stopReason"];
             const status = acpStopReasonToStatus(stopReason);
             const error = status === "failed" ? `ACP agent refused the turn (${String(stopReason)}).` : null;
             this.settleTurn(session, turn, status, error, record ?? undefined);
+            if (this.provider === "antigravity") {
+              void this.refreshAntigravityUsage(session, true);
+            }
           },
           (cause) => {
             const agentLabel = session.agent.name ?? session.agent.id;
@@ -876,6 +951,27 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       session.configOptions = parseAcpConfigOptions(update["configOptions"]);
       return;
     }
+    if (kind === "usage_update") {
+      const parsed = parseAcpUsageUpdate(update);
+      if (parsed) {
+        const activeTurn = this.openTurn(session);
+        if (activeTurn) activeTurn.sawUsageUpdate = true;
+        const prev = session.context;
+        session.context = {
+          usedTokens: parsed.used,
+          maxTokens: parsed.size ?? prev?.maxTokens ?? null,
+          cachedInputTokens: prev?.cachedInputTokens ?? null,
+          autoCompactThreshold: prev?.autoCompactThreshold ?? null,
+          compactsAutomatically: prev?.compactsAutomatically ?? null,
+          ...(parsed.costUsd !== undefined
+            ? { costUsd: parsed.costUsd }
+            : prev?.costUsd !== undefined
+              ? { costUsd: prev.costUsd }
+              : {}),
+        };
+      }
+      return;
+    }
 
     const turn = this.openTurn(session);
     if (!turn) return;
@@ -1147,12 +1243,27 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     });
   }
 
+  private async refreshAntigravityUsage(session: AcpSession, force = false): Promise<void> {
+    if (this.provider !== "antigravity" || session.closed) return;
+    const snapshot = await this.probeUsageFn(session.agent.command, this.baseEnv, { force }).catch(() => null);
+    if (!snapshot || session.closed) return;
+    if (snapshot.windows.length === 0 && snapshot.credits === null) return;
+    this.publish({
+      type: "rate-limits.updated",
+      provider: this.provider,
+      threadId: session.threadId,
+      windows: snapshot.windows,
+      ...(snapshot.credits === null ? {} : { credits: snapshot.credits }),
+      ...(session.tier ? { raw: { subscriptionType: session.tier } } : {}),
+    });
+  }
+
   private outcomeOf(turn: AcpTranscriptTurn): AcpTurnOutcome {
     const status: TerminalTurnStatus = turn.status === "running" ? "interrupted" : turn.status;
     return {
       status,
       text: turn.text,
-      usage: null,
+      usage: turn.usage,
       ...(turn.generationChars > 0
         ? { generation: { characters: turn.generationChars, durationMs: turn.generationMs } }
         : {}),

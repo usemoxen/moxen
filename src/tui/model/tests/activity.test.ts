@@ -1009,3 +1009,46 @@ describe("webToolSource", () => {
     expect(webToolSource("bash")).toBeNull();
   });
 });
+
+describe("Antigravity ACP Read rows", () => {
+  it("resolves Read path from PascalCase Path and ACP locations instead of leaking the File title prefix", () => {
+    const row = describeActivity({
+      ...activity("tool-call.completed", {
+        itemType: "dynamic_tool_call",
+        status: "completed",
+        toolCallId: "call_1",
+        title: "File docs/contributing.md",
+        data: {
+          tool: "Read",
+          files: [{ path: "/Users/aaron/Documents/t3code-cli/docs/contributing.md" }],
+          state: {
+            status: "completed",
+            input: { Path: "/Users/aaron/Documents/t3code-cli/docs/contributing.md", StartLine: 10, EndLine: 25 },
+          },
+        },
+      }),
+      summary: "Read /Users/aaron/Documents/t3code-cli/docs/contributing.md",
+    } as unknown as ActivityEnvelope);
+    expect(row).toEqual({
+      kind: "read",
+      path: "docs/contributing.md",
+      startLine: 10,
+      endLine: 25,
+      running: false,
+    });
+  });
+
+  it("strips the File prefix when a stripped Read row only retains its ACP title", () => {
+    const row = describeActivity({
+      ...activity("tool-call.completed", {
+        itemType: "dynamic_tool_call",
+        status: "completed",
+        toolCallId: "call_2",
+        title: "File docs/contributing.md",
+        data: { tool: "Read", state: { status: "completed", input: {} } },
+      }),
+      summary: "Read docs/contributing.md",
+    } as unknown as ActivityEnvelope);
+    expect(row).toMatchObject({ kind: "read", path: "docs/contributing.md" });
+  });
+});

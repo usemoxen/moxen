@@ -474,4 +474,80 @@ describe("ACP crash recovery & rollback", () => {
     ]);
     await Effect.runPromise(driver.stopAll());
   });
+
+  it("records ACP usage_update context readings, turn token usage, and Antigravity plan usage with credits", async () => {
+    const transport = new FakeAcpTransport({
+      sessionMeta: { antigravity: { tier: { name: "Google AI Pro" } } },
+      onPrompt: (server) => {
+        server.notifyUpdate("acp-sess-1", {
+          sessionUpdate: "usage_update",
+          used: 12_400,
+          size: 1_000_000,
+          cost: 0.042,
+        });
+        return {
+          stopReason: "end_turn",
+          usage: {
+            inputTokens: 9_000,
+            cachedReadTokens: 3_000,
+            outputTokens: 400,
+            thoughtTokens: 150,
+            totalTokens: 12_550,
+          },
+        };
+      },
+    });
+    const probeUsage = vi.fn(async () => ({
+      windows: [
+        { id: "gemini-5h", label: "Session – Gemini", usedPercent: 80, exhausted: false, resetsAt: "2026-11-20T18:16:16.000Z" },
+      ],
+      credits: 25,
+    }));
+    const driver = new AcpDriver({
+      provider: "antigravity",
+      transport,
+      agents: { antigravity: { id: "antigravity", name: "Antigravity", command: "agy", args: ["acp"] } },
+      probeUsage,
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession({ ...START, modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" } }));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hello" }));
+      const outcome = await driver.awaitTurn("thread-1", sent.turnId);
+      expect(outcome.usage).toEqual({
+        input: 9_000,
+        cacheRead: 3_000,
+        cacheCreate: 0,
+        output: 400,
+        thinking: 150,
+      });
+      expect(await driver.contextUsage("thread-1")).toEqual({
+        usedTokens: 12_400,
+        maxTokens: 1_000_000,
+        cachedInputTokens: 3_000,
+        autoCompactThreshold: null,
+        compactsAutomatically: null,
+        costUsd: 0.042,
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "rate-limits.updated")).toBe(true));
+      expect(events.find((e) => e.type === "rate-limits.updated")).toMatchObject({
+        provider: "antigravity",
+        credits: 25,
+        raw: { subscriptionType: "Google AI Pro" },
+      });
+      expect(await driver.refreshUsage()).toEqual({
+        key: "antigravity",
+        windows: [
+          { id: "gemini-5h", label: "Session – Gemini", usedPercent: 80, exhausted: false, resetsAt: "2026-11-20T18:16:16.000Z" },
+        ],
+        credits: 25,
+      });
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
 });

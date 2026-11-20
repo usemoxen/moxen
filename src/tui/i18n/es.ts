@@ -1046,6 +1046,7 @@ export const es: Catalog = {
   "side.usage_by_category_5014": "Uso por categoría",
   "side.heaviest_tools_a33c": "Herramientas que más pesan",
   "side.plan_usage_48f7": "Uso del plan",
+  "side.remaining_credits_9c4e": "Créditos restantes",
   "side.no_subscription_usage_reported_fa47": "Este proveedor no da el uso de la suscripción.",
   "side.shell_ea89": "Shell",
   "side.monitor_d298": "Monitor",

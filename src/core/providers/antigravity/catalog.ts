@@ -22,6 +22,7 @@ interface CachedAntigravityModels {
   readonly key: string;
   readonly fetchedAt: number;
   readonly models: ModelSummary[];
+  readonly tier?: string | null;
 }
 
 const memoryCache = new Map<string, CachedAntigravityModels>();
@@ -47,7 +48,12 @@ async function readDiskCache(storeRoot: string | undefined): Promise<CachedAntig
     if (typeof rec["key"] !== "string" || typeof rec["fetchedAt"] !== "number" || !Array.isArray(rec["models"])) {
       return null;
     }
-    return { key: rec["key"], fetchedAt: rec["fetchedAt"], models: rec["models"] as ModelSummary[] };
+    return {
+      key: rec["key"],
+      fetchedAt: rec["fetchedAt"],
+      models: rec["models"] as ModelSummary[],
+      ...(typeof rec["tier"] === "string" && rec["tier"].trim().length > 0 ? { tier: rec["tier"].trim() } : {}),
+    };
   } catch {
     return null;
   }
@@ -75,8 +81,28 @@ export function isOmittedAntigravityModel(model: Pick<ModelSummary, "slug" | "na
   return model.slug.startsWith("gemini-pro-orchestrator-") || /^orchestrator\b/i.test(model.name.trim());
 }
 
+/**
+ * Disambiguate non-Gemini models offered through Antigravity (e.g. Claude
+ * Sonnet 5.5, Claude Opus 5.5) so they never collide visually with Claude Code
+ * or other providers in footers, turn headers, pickers, or Desktop views.
+ * Idempotent for cached entries.
+ */
+export function disambiguateAntigravityModelName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed || /\b(gemini|antigravity)\b/i.test(trimmed)) return trimmed;
+  if (trimmed.endsWith(")")) {
+    return `${trimmed.slice(0, -1)}, Antigravity)`;
+  }
+  return `${trimmed} (Antigravity)`;
+}
+
 function filterAntigravityModels(models: readonly ModelSummary[]): ModelSummary[] {
-  const kept = models.filter((model) => !isOmittedAntigravityModel(model));
+  const kept = models
+    .filter((model) => !isOmittedAntigravityModel(model))
+    .map((model) => {
+      const name = disambiguateAntigravityModelName(model.name);
+      return name === model.name ? model : { ...model, name };
+    });
   if (kept.length > 0 && !kept.some((model) => model.isDefault === true)) {
     return kept.map((model, index) => (index === 0 ? { ...model, isDefault: true } : model));
   }
@@ -144,7 +170,7 @@ export async function antigravityProvider(
     initializeTimeoutMs: 5_000,
   });
   try {
-    const { init, models: discovered, authError } = await driver.probeAgentCatalog("antigravity", cwd, {
+    const { init, models: discovered, authError, tier } = await driver.probeAgentCatalog("antigravity", cwd, {
       shouldDiscover: (initializeResult) => {
         if (!useCache) return true;
         const key = cacheKeyOf(spec.command, spec.args, initializeResult.agentInfo.version);
@@ -169,7 +195,8 @@ export async function antigravityProvider(
         status: "Run `agy` to sign in to Antigravity.",
       };
     }
-    const authStatus = init.authMethods.length > 0 ? init.authMethods[0]!.id : "ready";
+    const resolvedTier = tier ?? (cachedHit as CachedAntigravityModels | null)?.tier ?? null;
+    const authStatus = resolvedTier ?? (init.authMethods.length > 0 ? init.authMethods[0]!.id : "ready");
     let models: ModelSummary[];
     if (cachedHit) {
       models = filterAntigravityModels((cachedHit as CachedAntigravityModels).models);
@@ -177,7 +204,7 @@ export async function antigravityProvider(
       models = filterAntigravityModels(discovered);
       if (useCache && models.length > 0) {
         const key = cacheKeyOf(spec.command, spec.args, init.agentInfo.version);
-        const entry: CachedAntigravityModels = { key, fetchedAt: now, models };
+        const entry: CachedAntigravityModels = { key, fetchedAt: now, models, ...(tier ? { tier } : {}) };
         memoryCache.set(key, entry);
         await writeDiskCache(options.storeRoot, entry);
       }

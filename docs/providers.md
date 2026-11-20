@@ -70,7 +70,18 @@ negotiates any other protocol version is refused loudly
   advertises `sessionCapabilities.close`, probes `session/new` followed
   immediately by `session/close` (cached on disk under
   `<storeRoot>/cache/antigravity-models.json` per version) to surface the
-  agent's live models and per-model effort levels without reading credentials.
+  agent's live models, per-model effort levels, and subscription tier
+  (`_meta.antigravity.tier.name`) without reading credentials. Non-Gemini
+  models hosted through Antigravity (such as Claude Sonnet 5.5 and Claude Opus
+  5.5) carry an `(Antigravity)` suffix so they stay distinct from Claude Code's
+  own models across every client.
+- **Context, token & plan usage**: `AcpDriver` consumes ACP `usage_update`
+  notifications for live context-window readings (`contextUsage`) and per-turn
+  `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
+  Moxen also probes `agy --print /usage --output-format json` and
+  `agy --print /credits --output-format json` (zero-turn local slash commands,
+  no shell, no credential access) to report subscription quota windows and
+  remaining credits in the Context tab and `usage.limits`.
 
 ## Defaults
 

@@ -1026,7 +1026,9 @@ export class DirectConnection implements ClientApi {
         // the partial snapshot, and a late probe freshens the next call.
         const landed = (async () => await driver.refreshUsage?.())().then(
           (refreshed) => {
-            if (refreshed && refreshed.windows.length > 0) recordUsageWindows(refreshed.key, refreshed.windows);
+            if (refreshed && (refreshed.windows.length > 0 || typeof refreshed.credits === "number")) {
+              recordUsageWindows(refreshed.key, refreshed.windows, undefined, { credits: refreshed.credits });
+            }
             return refreshed;
           },
           () => null,

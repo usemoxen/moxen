@@ -24,6 +24,7 @@ export interface FakeAcpScript {
   readonly models?: unknown;
   readonly configOptions?: unknown[];
   readonly authMethods?: unknown[];
+  readonly sessionMeta?: unknown;
   readonly failRequests?: Record<string, string>;
   /** Custom handler for `session/prompt`; return `{ stopReason }` or hold until resolved. */
   readonly onPrompt?: (
@@ -85,6 +86,7 @@ export class FakeAcpServer {
           ...(this.script.modes ? { modes: this.script.modes } : {}),
           ...(this.script.models ? { models: this.script.models } : {}),
           ...(this.script.configOptions ? { configOptions: this.script.configOptions } : {}),
+          ...(this.script.sessionMeta ? { _meta: this.script.sessionMeta } : {}),
         };
       case "session/close":
         return {};

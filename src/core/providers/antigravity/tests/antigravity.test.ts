@@ -6,12 +6,20 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { updateProvider } from "../../update.js";
 import { FakeAcpTransport } from "../../acp/tests/fakes.js";
-import { antigravityProvider, forgetAntigravityCatalogCache } from "../catalog.js";
+import { antigravityProvider, disambiguateAntigravityModelName, forgetAntigravityCatalogCache } from "../catalog.js";
 import { ANTIGRAVITY_DEFAULT_MODEL_SLUG, antigravityLaunchSpec } from "../config.js";
+import {
+  forgetAntigravityUsageCache,
+  parseAntigravityCreditsJson,
+  parseAntigravityTier,
+  parseAntigravityUsageJson,
+  probeAntigravityUsage,
+} from "../usage.js";
 
 const tempDirs: string[] = [];
 afterEach(async () => {
   forgetAntigravityCatalogCache();
+  forgetAntigravityUsageCache();
   while (tempDirs.length > 0) {
     await rm(tempDirs.pop()!, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -177,5 +185,86 @@ describe("Antigravity first-class provider", () => {
       after: "1.3.0",
       updated: true,
     });
+  });
+
+  it("disambiguates non-Gemini Antigravity models and surfaces _meta.antigravity.tier.name as authStatus", async () => {
+    expect(disambiguateAntigravityModelName("Gemini 4 Neon")).toBe("Gemini 4 Neon");
+    expect(disambiguateAntigravityModelName("Claude Sonnet 5.5")).toBe("Claude Sonnet 5.5 (Antigravity)");
+    expect(disambiguateAntigravityModelName("Claude Sonnet 5.5 (Antigravity)")).toBe("Claude Sonnet 5.5 (Antigravity)");
+    expect(disambiguateAntigravityModelName("GPT-OSS 120B (Medium)")).toBe("GPT-OSS 120B (Medium, Antigravity)");
+
+    const transport = new FakeAcpTransport({
+      canCloseSession: true,
+      sessionMeta: { antigravity: { tier: { name: "Google AI Pro" } } },
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          name: "Model",
+          currentValue: "gemini-4-neon",
+          options: [
+            { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+            { value: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
+            { value: "claude-opus-5-5", name: "Claude Opus 5.5" },
+          ],
+        },
+      ],
+    });
+    const summary = await antigravityProvider({ binaryPath: "agy" }, process.env, process.cwd(), transport);
+    expect(summary.authStatus).toBe("Google AI Pro");
+    expect(summary.models.map((m) => [m.slug, m.name])).toEqual([
+      ["gemini-4-neon", "Gemini 4 Neon"],
+      ["claude-sonnet-5-5", "Claude Sonnet 5.5 (Antigravity)"],
+      ["claude-opus-5-5", "Claude Opus 5.5 (Antigravity)"],
+    ]);
+  });
+
+  it("parses agy /usage and /credits JSON into Moxen rate-limit windows and credits", async () => {
+    const usageJson = JSON.stringify({
+      command: {
+        name: "usage",
+        data: {
+          groups: [
+            {
+              name: "Gemini Models",
+              buckets: [
+                { id: "gemini-weekly", window: "weekly", remaining_fraction: 0.565, reset_time: "2026-11-27T03:05:29Z" },
+                { id: "gemini-5h", window: "5h", remaining_fraction: 0.2, reset_time: "2026-11-20T18:16:16Z" },
+              ],
+            },
+            {
+              name: "Claude and GPT models",
+              buckets: [
+                { id: "3p-5h", window: "5h", remaining_fraction: 0, reset_time: "2026-11-20T20:34:39Z" },
+              ],
+            },
+            {
+              name: "Gemini 4 Argon",
+              buckets: [
+                { id: "gemini-argon-wtu-weekly", window: "weekly", remaining_fraction: 1, reset_time: "2026-11-27T15:49:49Z" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const creditsJson = JSON.stringify({
+      command: { name: "credits", data: { remaining_credits: 42 } },
+    });
+
+    expect(parseAntigravityUsageJson(usageJson)).toEqual([
+      { id: "gemini-weekly", label: "Weekly – Gemini", usedPercent: 43.5, exhausted: false, resetsAt: "2026-11-27T03:05:29.000Z" },
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 80, exhausted: false, resetsAt: "2026-11-20T18:16:16.000Z" },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 100, exhausted: true, resetsAt: "2026-11-20T20:34:39.000Z" },
+      { id: "gemini-argon-wtu-weekly", label: "Weekly – Argon", usedPercent: 0, exhausted: false, resetsAt: "2026-11-27T15:49:49.000Z" },
+    ]);
+    expect(parseAntigravityCreditsJson(creditsJson)).toBe(42);
+    expect(parseAntigravityTier({ _meta: { antigravity: { tier: { name: "Google AI Ultra" } } } })).toBe("Google AI Ultra");
+
+    const probed = await probeAntigravityUsage("agy", process.env, {
+      run: async (_cmd, args) => (args.includes("/usage") ? usageJson : creditsJson),
+    });
+    expect(probed).toMatchObject({ credits: 42 });
+    expect(probed?.windows).toHaveLength(4);
   });
 });

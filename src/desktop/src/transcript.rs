@@ -456,7 +456,11 @@ fn call_step(call: &Call) -> Message {
         }
         "file_change" => {
             let path = text(input, &["file_path"])
+                .or_else(|| text(input, &["filePath"]))
+                .or_else(|| text(input, &["path"]))
+                .or_else(|| text(input, &["Path"]))
                 .or_else(|| text(input, &["notebook_path"]))
+                .or_else(|| p.pointer("/data/files/0/path").and_then(Value::as_str))
                 .unwrap_or("file");
             let (added, removed, shown) = changed(tool, input);
             step(
@@ -474,7 +478,12 @@ fn call_step(call: &Call) -> Message {
         }
         _ => match tool {
             "Read" => {
-                let path = text(input, &["file_path"]).unwrap_or("file");
+                let path = text(input, &["file_path"])
+                    .or_else(|| text(input, &["filePath"]))
+                    .or_else(|| text(input, &["path"]))
+                    .or_else(|| text(input, &["Path"]))
+                    .or_else(|| p.pointer("/data/files/0/path").and_then(Value::as_str))
+                    .unwrap_or("file");
                 let lines = output.lines().count();
                 let header = format!("{lines} lines · {path}");
                 step(
@@ -983,5 +992,31 @@ mod tests {
             (tasks[0].title.as_str(), tasks[0].duration_ms),
             ("Backfill", Some(92_000))
         );
+    }
+
+    #[test]
+    fn antigravity_read_uses_pascal_case_path_and_files_fallback() {
+        let value = json!({
+            "messages": [],
+            "activities": [
+                activity("a1", "tool-call.completed", "2026-11-20T15:37:24.000Z", json!({
+                    "itemType": "dynamic_tool_call",
+                    "status": "completed",
+                    "toolCallId": "c1",
+                    "title": "File docs/contributing.md",
+                    "data": {
+                        "tool": "Read",
+                        "files": [{"path": "/Users/aaron/repo/docs/contributing.md"}],
+                        "state": {"status": "completed", "input": {"Path": "/Users/aaron/repo/docs/contributing.md"}}
+                    }
+                })),
+            ],
+        });
+        let rows = project(&value);
+        let Message::Tool { name, summary, .. } = &rows[0].message else {
+            panic!("expected read tool row");
+        };
+        assert_eq!(name, "read");
+        assert_eq!(summary, "…/repo/docs/contributing.md");
     }
 }

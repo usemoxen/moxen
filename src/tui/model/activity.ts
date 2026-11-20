@@ -497,10 +497,17 @@ function commonDir(paths: readonly string[]): string | null {
 function readRange(input: Record<string, unknown>): { startLine: number | null; endLine: number | null } {
   const offset = asNumber(input.offset);
   const limit = asNumber(input.limit);
-  const startLine =
-    offset !== null && offset >= 1 ? Math.floor(offset) : limit !== null && limit > 0 ? 1 : null;
-  const endLine =
-    startLine !== null && limit !== null && limit > 0 ? startLine + Math.floor(limit) - 1 : null;
+  if (offset !== null || limit !== null) {
+    const startLine =
+      offset !== null && offset >= 1 ? Math.floor(offset) : limit !== null && limit > 0 ? 1 : null;
+    const endLine =
+      startLine !== null && limit !== null && limit > 0 ? startLine + Math.floor(limit) - 1 : null;
+    return { startLine, endLine };
+  }
+  const rawStart = asNumber(input.StartLine) ?? asNumber(input.startLine) ?? asNumber(input.start_line);
+  const rawEnd = asNumber(input.EndLine) ?? asNumber(input.endLine) ?? asNumber(input.end_line);
+  const startLine = rawStart !== null && rawStart >= 1 ? Math.floor(rawStart) : rawEnd !== null && rawEnd >= 1 ? 1 : null;
+  const endLine = rawEnd !== null && rawEnd >= 1 ? Math.floor(rawEnd) : null;
   return { startLine, endLine };
 }
 
@@ -1104,7 +1111,7 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
     const files = Array.isArray(data.files) ? data.files : [];
     const firstFile = asString(asRecord(files[0])?.path);
     // OpenCode v2's `edit`/`write` name the file `path`.
-    const inputPath = asString(input.file_path) ?? asString(input.filePath) ?? asString(input.path);
+    const inputPath = asString(input.file_path) ?? asString(input.filePath) ?? asString(input.path) ?? asString(input.Path);
     const titlePath = looksLikePath(title) ? title : null;
     // In-flight rows ("edit" title, empty input) genuinely have no path yet;
     // completed provider-native rows recover it from the `detail` echo.
@@ -1229,8 +1236,21 @@ export function describeActivity(activity: ActivityEnvelope): ActivityView {
       // In-flight rows have no path anywhere (empty input, bare title), so
       // they render `Read(…)` until the completed row resolves — a bare
       // title like "Tool call" is never a path and must not leak in.
+      const files = Array.isArray(data.files) ? data.files : [];
+      const firstFile = asString(asRecord(files[0])?.path);
+      // ACP agents (e.g. Antigravity's `read_file`) pass PascalCase `Path` and
+      // ACP `locations` (`data.files[0].path`) while setting `title` to
+      // `"File <path>"`. Prefer structured input/location paths, and strip any
+      // `"File "`/`"Read "` label prefix when falling back to a stripped title.
+      const cleanTitle = title.replace(/^(?:File|Read)\s+/iu, "");
       const readPath =
-        asString(input.file_path) ?? asString(input.filePath) ?? asString(input.path) ?? (looksLikePath(title) ? title : null) ?? "…";
+        asString(input.file_path)
+        ?? asString(input.filePath)
+        ?? asString(input.path)
+        ?? asString(input.Path)
+        ?? firstFile
+        ?? (looksLikePath(cleanTitle) ? cleanTitle : null)
+        ?? "…";
       // OpenCode v2's `read` lists a directory too, and says so up front.
       const output = asString(state.output) ?? asString(payload.detail) ?? "";
       if (readPath !== "…" && output.startsWith("Read directory ")) return { kind: "list", path: shortenPath(readPath), running };

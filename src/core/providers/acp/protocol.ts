@@ -704,3 +704,86 @@ export function isAcpAuthErrorText(text: string): boolean {
 export function isAcpSessionNotFoundText(text: string): boolean {
   return /\b(session\s+not\s+found|unknown\s+session|no\s+such\s+session|invalid\s+session|not\s+found)\b/i.test(text);
 }
+
+export interface AcpUsageUpdate {
+  readonly used: number;
+  readonly size: number | null;
+  readonly costUsd?: number;
+}
+
+function finiteNonNeg(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function parseAcpCostUsd(raw: unknown): number | undefined {
+  const direct = finiteNonNeg(raw);
+  if (direct !== null) return direct;
+  const rec = asRecord(raw);
+  const amount = finiteNonNeg(rec?.["amount"]);
+  return amount === null ? undefined : amount;
+}
+
+/**
+ * Parse an ACP `sessionUpdate: "usage_update"` payload (`{ used, size, cost? }`).
+ */
+export function parseAcpUsageUpdate(update: unknown): AcpUsageUpdate | null {
+  const rec = asRecord(update);
+  if (!rec) return null;
+  const used = finiteNonNeg(rec["used"]);
+  if (used === null) return null;
+  const rawSize = finiteNonNeg(rec["size"]);
+  const size = rawSize !== null && rawSize > 0 ? Math.round(rawSize) : null;
+  const costUsd = parseAcpCostUsd(rec["cost"]);
+  return {
+    used: Math.round(used),
+    size,
+    ...(costUsd === undefined ? {} : { costUsd }),
+  };
+}
+
+/**
+ * Parse per-turn token usage from an ACP `session/prompt` result (`result.usage`).
+ * Accepts both ACP v1 camelCase (`inputTokens`, `cachedReadTokens`, `thoughtTokens`)
+ * and snake_case variants defensively.
+ */
+export function parseAcpTurnUsage(raw: unknown): {
+  readonly input: number;
+  readonly cacheRead: number;
+  readonly cacheCreate: number;
+  readonly output: number;
+  readonly thinking: number;
+  readonly costUsd?: number;
+} | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+  const input = finiteNonNeg(rec["inputTokens"]) ?? finiteNonNeg(rec["input_tokens"]);
+  const output = finiteNonNeg(rec["outputTokens"]) ?? finiteNonNeg(rec["output_tokens"]);
+  const cacheRead =
+    finiteNonNeg(rec["cachedReadTokens"])
+    ?? finiteNonNeg(rec["cacheReadTokens"])
+    ?? finiteNonNeg(rec["cache_read_tokens"])
+    ?? 0;
+  const cacheCreate =
+    finiteNonNeg(rec["cachedWriteTokens"])
+    ?? finiteNonNeg(rec["cacheWriteTokens"])
+    ?? finiteNonNeg(rec["cache_write_tokens"])
+    ?? 0;
+  const thinking =
+    finiteNonNeg(rec["thoughtTokens"])
+    ?? finiteNonNeg(rec["thinkingTokens"])
+    ?? finiteNonNeg(rec["thinking_tokens"])
+    ?? 0;
+  const total = finiteNonNeg(rec["totalTokens"]) ?? finiteNonNeg(rec["total_tokens"]);
+  if (input === null && output === null && total === null && cacheRead === 0 && cacheCreate === 0 && thinking === 0) {
+    return null;
+  }
+  const costUsd = parseAcpCostUsd(rec["cost"] ?? rec["costUsd"] ?? rec["cost_usd"]);
+  return {
+    input: Math.round(input ?? 0),
+    cacheRead: Math.round(cacheRead),
+    cacheCreate: Math.round(cacheCreate),
+    output: Math.round(output ?? 0),
+    thinking: Math.round(thinking),
+    ...(costUsd === undefined ? {} : { costUsd }),
+  };
+}

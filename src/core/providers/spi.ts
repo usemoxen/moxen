@@ -504,6 +504,8 @@ export type ProviderRuntimeEvent =
        * OpenCode provider). Absent means the driver's own account.
        */
       readonly instanceId?: string;
+      /** Optional remaining credit balance reported alongside quota windows (e.g. Antigravity `/credits`). */
+      readonly credits?: number | null;
       readonly raw?: unknown;
     }
   | {

@@ -217,7 +217,7 @@ function itemTypeForTool(tool: string): string {
 function summarize(native: NativeToolCall, itemType: string): string {
   const input = native.input;
   const path = asString(input.file_path) ?? asString(input.filePath) ?? asString(input.path)
-    ?? native.files[0]?.path ?? null;
+    ?? asString(input.Path) ?? native.files[0]?.path ?? null;
   if (itemType === "command_execution") {
     const command = asString(input.command) ?? native.title ?? native.tool;
     return `$ ${command}`.slice(0, 200);

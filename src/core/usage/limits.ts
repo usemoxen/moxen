@@ -35,6 +35,7 @@ interface RecordedProvider {
   protectedAt?: string;
   checkedAt: string;
   windows: RecordedWindow[];
+  credits?: number;
 }
 
 export interface UsageProtectionOverride {
@@ -109,8 +110,14 @@ export function persistUsageLimits(storeRoot: string): void {
  * percentage (a live event that only says "allowed") keeps the last known
  * one; a window never seen with a percentage is left out.
  */
-export function recordUsageWindows(provider: string, windows: ReadonlyArray<RateLimitWindow>, at: number = Date.now()): void {
-  const previous = recorded.get(provider)?.windows ?? [];
+export function recordUsageWindows(
+  provider: string,
+  windows: ReadonlyArray<RateLimitWindow>,
+  at: number = Date.now(),
+  options?: { readonly credits?: number | null | undefined },
+): void {
+  const existing = recorded.get(provider);
+  const previous = existing?.windows ?? [];
   const merged = new Map(previous.map((window) => [window.id, window] as const));
   let changed = false;
   for (const window of windows) {
@@ -120,8 +127,21 @@ export function recordUsageWindows(provider: string, windows: ReadonlyArray<Rate
     merged.set(window.id, { id: window.id, label: window.label, usedPercent, resetsAt: window.resetsAt ?? known?.resetsAt ?? null });
     changed = true;
   }
+  const credits =
+    typeof options?.credits === "number" && Number.isFinite(options.credits)
+      ? options.credits
+      : existing?.credits;
+  if (typeof options?.credits === "number" && Number.isFinite(options.credits)) {
+    changed = true;
+  }
   if (!changed) return;
-  recorded.set(provider, { ...recorded.get(provider), checkedAt: new Date(at).toISOString(), windows: [...merged.values()], ...(windows.some((window) => window.exhausted || (window.usedPercent ?? 0) >= 100) ? { exhaustedAt: new Date(at).toISOString() } : {}) });
+  recorded.set(provider, {
+    ...existing,
+    checkedAt: new Date(at).toISOString(),
+    windows: [...merged.values()],
+    ...(credits === undefined ? {} : { credits }),
+    ...(windows.some((window) => window.exhausted || (window.usedPercent ?? 0) >= 100) ? { exhaustedAt: new Date(at).toISOString() } : {}),
+  });
   persistRecorded();
 }
 
@@ -166,7 +186,12 @@ export function usageLimitsSnapshot(now: number = Date.now()): Record<string, Pr
     });
     const rank: Record<string, number> = { session: 0, weekly: 1, monthly: 2, other: 3 };
     windows.sort((left, right) => (rank[left.kind] ?? 3) - (rank[right.kind] ?? 3));
-    result[provider] = { checkedAt: entry.checkedAt, windows, unavailable: null };
+    result[provider] = {
+      checkedAt: entry.checkedAt,
+      windows,
+      ...(typeof entry.credits === "number" && Number.isFinite(entry.credits) ? { credits: entry.credits } : {}),
+      unavailable: null,
+    };
   }
   return result;
 }

@@ -130,10 +130,12 @@ impl UsageWindow {
 }
 
 /// A provider's account limits, as `usage.limits` reports them: the windows,
-/// or why nothing can be reported (an API key account, or a failed probe).
+/// optional remaining credits (Antigravity), or why nothing can be reported
+/// (an API key account, or a failed probe).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProviderLimits {
     pub windows: Vec<UsageWindow>,
+    pub credits: Option<f64>,
     pub unavailable: Option<String>,
 }
 
@@ -152,8 +154,13 @@ impl ProviderLimits {
             .and_then(Value::as_array)
             .map(|windows| windows.iter().filter_map(UsageWindow::from_json).collect())
             .unwrap_or_default();
+        let credits = value
+            .get("credits")
+            .and_then(Value::as_f64)
+            .filter(|credits| credits.is_finite() && *credits >= 0.);
         Self {
             windows,
+            credits,
             unavailable,
         }
     }
@@ -1365,7 +1372,7 @@ fn plan_usage(
             crate::language::message("side.no_subscription_usage_reported_fa47"),
         ));
     };
-    if limits.windows.is_empty() {
+    if limits.windows.is_empty() && limits.credits.is_none() {
         return section.child(
             div().text_size(px(13.)).text_color(color("ink-2")).child(
                 limits
@@ -1374,6 +1381,28 @@ fn plan_usage(
                     .unwrap_or_else(|| NO_DATA.to_string()),
             ),
         );
+    }
+    let credits_row = limits.credits.map(|credits| {
+        let formatted = if credits.fract() == 0. {
+            format!("{}", credits as i64)
+        } else {
+            format!("{credits:.1}")
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .font_family(theme::MONO)
+            .text_size(px(12.))
+            .child(
+                div()
+                    .text_color(color("ink-2"))
+                    .child(crate::language::message("side.remaining_credits_9c4e")),
+            )
+            .child(div().text_color(color("ink")).child(formatted))
+    });
+    if limits.windows.is_empty() {
+        return section.children(credits_row);
     }
     let rows: Vec<(String, f64, Option<String>)> = limits
         .windows
@@ -1399,45 +1428,47 @@ fn plan_usage(
         .max()
         .unwrap_or(0);
     let label_width = ((longest as f32) * 7.5).clamp(64., 116.);
-    section.child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .children(rows.into_iter().map(move |(label, percent, reset)| {
-                let fraction = (percent / 100.).clamp(0., 1.) as f32;
-                // The mockup paints every plan window the same blue: urgency
-                // belongs to the gauges and the protection banner, and only
-                // the `vu` meter uses `held` and `broken`.
-                let token = "label-2";
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .font_family(theme::MONO)
-                    .text_size(px(12.))
-                    .child(div().w(px(label_width)).flex_shrink_0().child(label))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h(px(6.))
-                            .rounded(px(3.))
-                            .bg(color("sunk"))
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(fraction))
-                                    .rounded(px(3.))
-                                    .bg(color(token)),
-                            ),
-                    )
-                    .child(div().text_color(color("ink")).child(format!(
-                        "{:>percent_width$}",
-                        format!("{}%", percent.round() as i64)
-                    )))
-                    .children(reset.map(|reset| div().text_color(color("ink-2")).child(reset)))
-            })),
-    )
+    section
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .children(rows.into_iter().map(move |(label, percent, reset)| {
+                    let fraction = (percent / 100.).clamp(0., 1.) as f32;
+                    // The mockup paints every plan window the same blue: urgency
+                    // belongs to the gauges and the protection banner, and only
+                    // the `vu` meter uses `held` and `broken`.
+                    let token = "label-2";
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .font_family(theme::MONO)
+                        .text_size(px(12.))
+                        .child(div().w(px(label_width)).flex_shrink_0().child(label))
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(6.))
+                                .rounded(px(3.))
+                                .bg(color("sunk"))
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(fraction))
+                                        .rounded(px(3.))
+                                        .bg(color(token)),
+                                ),
+                        )
+                        .child(div().text_color(color("ink")).child(format!(
+                            "{:>percent_width$}",
+                            format!("{}%", percent.round() as i64)
+                        )))
+                        .children(reset.map(|reset| div().text_color(color("ink-2")).child(reset)))
+                })),
+        )
+        .children(credits_row)
 }
 
 #[cfg(test)]
@@ -1836,5 +1867,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("list_issues", 16)]
         );
+    }
+
+    #[test]
+    fn provider_limits_decodes_optional_antigravity_credits() {
+        let limits = LimitsData::from_json(&json!({
+            "providers": {
+                "antigravity": {
+                    "windows": [
+                        { "id": "gemini-5h", "kind": "session", "label": "Session – Gemini", "usedPercent": 80.0, "resetsAt": null }
+                    ],
+                    "credits": 12
+                }
+            }
+        }));
+        let agy = limits
+            .for_instance("antigravity")
+            .expect("antigravity limits");
+        assert_eq!(agy.credits, Some(12.0));
+        assert_eq!(agy.windows.len(), 1);
     }
 }
