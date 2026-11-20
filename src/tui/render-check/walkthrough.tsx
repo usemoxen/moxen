@@ -54,6 +54,7 @@ import { runHarnessProfiles } from "./scenarios/harnessProfiles.js";
 import { runMcpAccess } from "./scenarios/mcpAccess.js";
 import { runSkillsManagement } from "./scenarios/skillsManagement.js";
 import { runHandoffModels } from "./scenarios/handoffModels.js";
+import { runModelPrices } from "./scenarios/modelPrices.js";
 import { runSettingsSidebarScroll } from "./scenarios/settingsSidebarScroll.js";
 import { runQueueAndSide } from "./scenarios/queueAndSide.js";
 import { runSidebarTree } from "./scenarios/sidebarTree.js";
@@ -144,6 +145,7 @@ export async function runWalkthrough(): Promise<void> {
   await runMcpAccess();
   await runSkillsManagement();
   await runHandoffModels();
+  await runModelPrices();
   await runSettingsSidebarScroll();
   await runQueueAndSide();
   await runNoticeBanner();

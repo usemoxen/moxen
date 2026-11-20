@@ -95,10 +95,11 @@ pub fn snapshot_fixture() -> Snapshot {
                 "section": "provider:harness", "group": "Sessions",
                 "kind": {"type": "integer", "min": 1, "max": 64}},
              "explicit": false, "effective": {"label": "No limit"}},
-            {"descriptor": {"key": "providers.harness.modelInputPrices", "label": "Input price",
-                "description": "What one million input tokens cost on Moxen Harness models, as model=USD pairs (qwen3.8-flash-next=0.5). Beats the shipped price for those models. A model with no price anywhere stays unpriced.",
-                "section": "provider:harness", "group": "Model prices", "kind": {"type": "string", "multiline": true}},
-             "explicit": false},
+            {"descriptor": {"key": "providers.harness.modelInputPrices", "label": "Prices per model",
+                "description": "What one million tokens cost on Moxen Harness models, per model: input, output, cache read and cache write in USD. Beats Moxen's shipped prices; a model with no price anywhere stays unpriced. In the config file and `moxen config set`, each kind takes model=USD pairs (qwen3.8-flash-next=0.5).",
+                "section": "provider:harness", "group": "Model prices", "kind": {"type": "string", "multiline": true, "source": "model-prices", "providerKind": "harness"}},
+             "explicit": false,
+             "shippedPrices": {"claude-opus-5": {"input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25}}},
     ]);
     let mut additional = json!([
             {"descriptor": {"key": "ui.theme", "label": "Theme", "description": "The colours of the interface.",

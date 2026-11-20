@@ -195,6 +195,22 @@ describe("where settings live", () => {
     });
   });
 
+  it("exposes one per-model prices editor per provider while keeping all four underlying keys settable", () => {
+    const views = describeSettings(DEFAULT_CONFIG);
+    for (const kind of ["claude", "codex", "opencode", "harness", "antigravity", "acp"]) {
+      const input = views.find((entry) => entry.descriptor.key === `providers.${kind}.modelInputPrices`)!;
+      expect(input.descriptor.hidden, kind).not.toBe(true);
+      expect(input.descriptor.label, kind).toBe("Prices per model");
+      expect(input.descriptor.kind, kind).toMatchObject({ type: "string", source: "model-prices", providerKind: kind });
+      expect(input.shippedPrices?.["claude-opus-5"]).toMatchObject({ input: 5, output: 25 });
+      for (const sibling of ["modelOutputPrices", "modelCacheReadPrices", "modelCacheWritePrices"]) {
+        expect(settingDescriptor(`providers.${kind}.${sibling}`)?.hidden, `${kind}.${sibling}`).toBe(true);
+      }
+    }
+    const updated = setConfigValue(DEFAULT_CONFIG, "providers.antigravity.modelOutputPrices", "gemini-4-neon=12");
+    expect(updated.providers?.antigravity?.modelOutputPrices).toEqual({ "gemini-4-neon": 12 });
+  });
+
   it("names no tab in a description: a cross-reference is generated where it is shown", () => {
     const tabs = /\b(Turns|New threads|General|Defaults|Sessions|Agent context|Interface|Git and forges|Moxen Harness|Claude Code|OpenCode) tab\b/;
     expect(SETTINGS.filter((descriptor) => tabs.test(descriptor.description)).map((descriptor) => descriptor.key)).toEqual([]);

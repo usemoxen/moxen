@@ -24,6 +24,7 @@ import { CliError } from "./errors.js";
 import { webOrderEntries, webOrderUnavailable, type WebOrderEntry, type WebRole } from "./webservers.js";
 import { CODEX_NATIVE_TOOLS, CLAUDE_NATIVE_TOOLS, DEFAULT_DISABLED_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
 import { formatHandoffModels, formatModeModels } from "./handoffmodels.js";
+import { DEFAULT_MODEL_PRICES, type ModelPrice } from "./usage/prices.js";
 import { numberLabel } from "./configformat.js";
 import {
   COMPACTION_MODES,
@@ -128,7 +129,7 @@ export type SettingKind =
        * instance, a model slug, an effort level). A client offers what the
        * catalog lists rather than a text box; the file still holds the id.
        */
-      readonly source?: "provider" | "model" | "effort" | "mcp-server" | "model-overrides" | "native-tools" | "web-order";
+      readonly source?: "provider" | "model" | "effort" | "mcp-server" | "model-overrides" | "model-prices" | "native-tools" | "web-order";
       /** With `source` web-order: which tools the order ranks. */
       readonly web?: WebRole;
       /** With `source` native-tools: the provider's own tools this setting can switch off (`core/nativetools.ts`). */
@@ -634,27 +635,36 @@ const PRICE_EXAMPLE: Readonly<Record<"claude" | "codex" | "opencode" | "harness"
   acp: "claude-sonnet=3",
 };
 
-/** One Model prices group per provider, from one template so the provider tabs cannot drift: what a million tokens of each kind cost for this provider's models. */
+/** One Model prices group per provider, from one template so the provider tabs cannot drift: one per-model editor backed by the four underlying price maps. */
 function priceSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const example = PRICE_EXAMPLE[kind];
   const section = `provider:${kind}` as const;
   const group = "Model prices";
-  const row = (leaf: "modelInputPrices" | "modelOutputPrices" | "modelCacheReadPrices" | "modelCacheWritePrices", label: string, tokens: string): SettingDescriptor => ({
+  const hiddenRow = (leaf: "modelOutputPrices" | "modelCacheReadPrices" | "modelCacheWritePrices", label: string, tokens: string): SettingDescriptor => ({
     key: `providers.${kind}.${leaf}`,
     label,
     description: `What one million ${tokens} tokens cost on ${name} models, as model=USD pairs (${example}). Beats the shipped price for those models. A model with no price anywhere stays unpriced.`,
     section,
     group,
+    hidden: true,
     kind: { type: "string", placeholder: "model=2", multiline: true },
     defaultValue: undefined,
     fallback: { text: "Moxen's shipped prices" },
   });
   return [
-    row("modelInputPrices", "Input price", "input"),
-    row("modelOutputPrices", "Output price", "output"),
-    row("modelCacheReadPrices", "Cache read price", "cache-read"),
-    row("modelCacheWritePrices", "Cache write price", "cache-write"),
+    {
+      key: `providers.${kind}.modelInputPrices`,
+      label: "Prices per model",
+      description: `What one million tokens cost on ${name} models, per model: input, output, cache read and cache write in USD. Beats Moxen's shipped prices; a model with no price anywhere stays unpriced. In the config file and \`moxen config set\`, each kind takes model=USD pairs (${example}).`,
+      section,
+      group,
+      kind: { type: "string", placeholder: "model=2", multiline: true, source: "model-prices", providerKind: kind },
+      defaultValue: undefined,
+    },
+    hiddenRow("modelOutputPrices", "Output price", "output"),
+    hiddenRow("modelCacheReadPrices", "Cache read price", "cache-read"),
+    hiddenRow("modelCacheWritePrices", "Cache write price", "cache-write"),
   ];
 }
 
@@ -2141,6 +2151,8 @@ export interface SettingView {
   readonly unavailable?: string;
   /** For a web order: the tools it can rank, with the ones this provider cannot use marked. */
   readonly order?: readonly WebOrderEntry[];
+  /** For model prices: Moxen's shipped USD-per-million-tokens table, keyed by model slug. */
+  readonly shippedPrices?: Readonly<Record<string, ModelPrice>>;
   /** What applies while the setting is unset (from its `fallback`), so a page's Default can name it. Absent when set, or when nothing more is known. */
   readonly effective?: SettingEffective;
   /** What the setting amounts to with everything else taken into account, set or not ("Served by Moxen from its own folder"); a page shows it beneath. */
@@ -2314,6 +2326,7 @@ export function describeSettings(config: CliConfig): readonly SettingView[] {
     const value = readSetting(config, descriptor.key);
     const effective = value === undefined || value === "" ? effectiveOf(config, descriptor) : undefined;
     const inForce = IN_FORCE[descriptor.key]?.(config);
+    const shippedPrices = descriptor.kind.type === "string" && descriptor.kind.source === "model-prices" ? DEFAULT_MODEL_PRICES : undefined;
     return {
       descriptor,
       value,
@@ -2321,6 +2334,7 @@ export function describeSettings(config: CliConfig): readonly SettingView[] {
       ...(items ? { items } : {}),
       ...(unavailable ? { unavailable } : {}),
       ...(web ? { order: webOrderEntries(config, web.provider, web.role) } : {}),
+      ...(shippedPrices ? { shippedPrices } : {}),
       ...(effective ? { effective } : {}),
       ...(inForce ? { inForce } : {}),
     };

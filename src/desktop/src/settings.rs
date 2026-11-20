@@ -12,6 +12,8 @@
 //! reference (or unset), and secret pair values as `KEY=<hidden>`. Display
 //! helpers below keep it that way — they name a stored key, never its value.
 
+use std::collections::{BTreeMap, HashMap};
+
 use serde_json::Value;
 
 fn text(value: &Value, key: &str) -> Option<String> {
@@ -147,6 +149,9 @@ pub enum SettingKind {
         provider_key: Option<String>,
         provider_kinds: Vec<String>,
     },
+    ModelPrices {
+        provider_kind: Option<String>,
+    },
     Integer {
         min: f64,
         max: f64,
@@ -184,6 +189,9 @@ impl SettingKind {
                     provider_kind: text(kind, "providerKind"),
                     provider_key: text(kind, "providerKey"),
                     provider_kinds: strings(&kind["providerKinds"]),
+                },
+                Some("model-prices") => Self::ModelPrices {
+                    provider_kind: text(kind, "providerKind"),
                 },
                 _ => Self::Text {
                     multiline: boolean(kind, "multiline").unwrap_or(false),
@@ -401,6 +409,266 @@ pub struct SettingView {
     pub effective: Option<Effective>,
     pub in_force: Option<String>,
     pub items: Vec<ListItem>,
+    pub shipped_prices: BTreeMap<String, ModelPrice>,
+}
+
+/// USD per million tokens for one model; any field may be absent.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ModelPrice {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+}
+
+impl ModelPrice {
+    fn from_json(value: &Value) -> Self {
+        Self {
+            input: number(value, "input"),
+            output: number(value, "output"),
+            cache_read: number(value, "cacheRead"),
+            cache_write: number(value, "cacheWrite"),
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.input.is_some()
+            || self.output.is_some()
+            || self.cache_read.is_some()
+            || self.cache_write.is_some()
+    }
+
+    pub fn field(self, field: ModelPriceField) -> Option<f64> {
+        match field {
+            ModelPriceField::Input => self.input,
+            ModelPriceField::Output => self.output,
+            ModelPriceField::CacheRead => self.cache_read,
+            ModelPriceField::CacheWrite => self.cache_write,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelPriceField {
+    Input,
+    Output,
+    CacheRead,
+    CacheWrite,
+}
+
+impl ModelPriceField {
+    pub const ALL: [Self; 4] = [Self::Input, Self::Output, Self::CacheRead, Self::CacheWrite];
+
+    pub fn leaf(self) -> &'static str {
+        match self {
+            Self::Input => "modelInputPrices",
+            Self::Output => "modelOutputPrices",
+            Self::CacheRead => "modelCacheReadPrices",
+            Self::CacheWrite => "modelCacheWritePrices",
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Input => "mp.field.input",
+            Self::Output => "mp.field.output",
+            Self::CacheRead => "mp.field.cacheRead",
+            Self::CacheWrite => "mp.field.cacheWrite",
+        }
+    }
+}
+
+/// One model row in the per-model prices editor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelPriceEntry {
+    pub slug: String,
+    pub name: String,
+    pub offered: bool,
+    pub custom: ModelPrice,
+    pub shipped: ModelPrice,
+}
+
+fn shipped_prices_from_json(value: Option<&Value>) -> BTreeMap<String, ModelPrice> {
+    let Some(map) = value.and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    map.iter()
+        .map(|(slug, row)| (slug.clone(), ModelPrice::from_json(row)))
+        .collect()
+}
+
+pub fn format_usd(usd: f64) -> String {
+    format!("${}", SettingValue::Number(usd).wire())
+}
+
+pub fn parse_price_map(text: &str) -> Vec<(String, f64)> {
+    let mut out: Vec<(String, f64)> = Vec::new();
+    for part in text.split(['\n', ',']) {
+        let Some((slug, raw)) = part.rsplit_once('=') else {
+            continue;
+        };
+        let slug = slug.trim();
+        let raw = raw.trim();
+        if slug.is_empty() || raw.is_empty() {
+            continue;
+        }
+        if let Ok(value) = raw.parse::<f64>()
+            && value.is_finite()
+            && value >= 0.
+        {
+            if let Some(existing) = out.iter_mut().find(|(k, _)| k == slug) {
+                existing.1 = value;
+            } else {
+                out.push((slug.to_string(), value));
+            }
+        }
+    }
+    out
+}
+
+pub fn format_price_map(entries: &[(String, f64)]) -> String {
+    entries
+        .iter()
+        .map(|(slug, price)| format!("{slug}={}", SettingValue::Number(*price).wire()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn with_model_price(current: &str, slug: &str, next: Option<f64>) -> String {
+    let mut entries = parse_price_map(current);
+    match next {
+        None => entries.retain(|(k, _)| k != slug),
+        Some(value) => {
+            if let Some(existing) = entries.iter_mut().find(|(k, _)| k == slug) {
+                existing.1 = value;
+            } else {
+                entries.push((slug.to_string(), value));
+            }
+        }
+    }
+    format_price_map(&entries)
+}
+
+pub fn parse_usd_input(raw: &str) -> Result<Option<f64>, String> {
+    let trimmed = raw.trim().trim_start_matches('$').trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value: f64 = trimmed
+        .parse()
+        .map_err(|_| crate::language::message("mp.invalidPrice").to_string())?;
+    if !value.is_finite() || value < 0. {
+        return Err(crate::language::message("mp.invalidPrice").to_string());
+    }
+    Ok(Some(value))
+}
+
+pub fn model_price_entries(
+    view: &SettingView,
+    snapshot: Option<&Snapshot>,
+    catalog: Option<&crate::catalog::Catalog>,
+    provider_kind: Option<&str>,
+) -> Vec<ModelPriceEntry> {
+    let prefix = view
+        .key
+        .rfind('.')
+        .map(|at| &view.key[..=at])
+        .unwrap_or_default();
+    let read_map = |field: ModelPriceField| -> HashMap<String, f64> {
+        let raw = if field == ModelPriceField::Input {
+            view.value.wire()
+        } else {
+            snapshot
+                .and_then(|snap| snap.find(&format!("{prefix}{}", field.leaf())))
+                .map(|entry| entry.value.wire())
+                .unwrap_or_default()
+        };
+        parse_price_map(&raw).into_iter().collect()
+    };
+    let inputs = read_map(ModelPriceField::Input);
+    let outputs = read_map(ModelPriceField::Output);
+    let cache_reads = read_map(ModelPriceField::CacheRead);
+    let cache_writes = read_map(ModelPriceField::CacheWrite);
+    let custom_of = |slug: &str| ModelPrice {
+        input: inputs.get(slug).copied(),
+        output: outputs.get(slug).copied(),
+        cache_read: cache_reads.get(slug).copied(),
+        cache_write: cache_writes.get(slug).copied(),
+    };
+    let shipped_of = |slug: &str| view.shipped_prices.get(slug).copied().unwrap_or_default();
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Some(catalog) = catalog {
+        for provider in &catalog.providers {
+            if provider_kind.is_some_and(|kind| provider.settings_kind() != kind) {
+                continue;
+            }
+            let mut models: Vec<_> = provider.models.iter().collect();
+            models.sort_by_key(|model| !model.default);
+            for model in models {
+                if model.hidden || !seen.insert(model.slug.clone()) {
+                    continue;
+                }
+                out.push(ModelPriceEntry {
+                    custom: custom_of(&model.slug),
+                    shipped: shipped_of(&model.slug),
+                    slug: model.slug.clone(),
+                    name: model.name.clone(),
+                    offered: true,
+                });
+            }
+        }
+    }
+    let known = catalog.is_some();
+    let mut named: Vec<String> = inputs
+        .keys()
+        .chain(outputs.keys())
+        .chain(cache_reads.keys())
+        .chain(cache_writes.keys())
+        .cloned()
+        .collect();
+    named.sort();
+    named.dedup();
+    for slug in named {
+        if seen.insert(slug.clone()) {
+            out.push(ModelPriceEntry {
+                custom: custom_of(&slug),
+                shipped: shipped_of(&slug),
+                name: if known {
+                    format!("{slug} (not offered)")
+                } else {
+                    slug.clone()
+                },
+                slug,
+                offered: !known,
+            });
+        }
+    }
+    out
+}
+
+pub fn custom_price_model_count(view: &SettingView, snapshot: Option<&Snapshot>) -> usize {
+    let prefix = view
+        .key
+        .rfind('.')
+        .map(|at| &view.key[..=at])
+        .unwrap_or_default();
+    let mut slugs = std::collections::HashSet::new();
+    for field in ModelPriceField::ALL {
+        let raw = if field == ModelPriceField::Input {
+            view.value.wire()
+        } else {
+            snapshot
+                .and_then(|snap| snap.find(&format!("{prefix}{}", field.leaf())))
+                .map(|entry| entry.value.wire())
+                .unwrap_or_default()
+        };
+        for (slug, _) in parse_price_map(&raw) {
+            slugs.insert(slug);
+        }
+    }
+    slugs.len()
 }
 
 impl SettingView {
@@ -435,6 +703,7 @@ impl SettingView {
                 .and_then(Value::as_array)
                 .map(|items| items.iter().filter_map(ListItem::from_json).collect())
                 .unwrap_or_default(),
+            shipped_prices: shipped_prices_from_json(view.get("shippedPrices")),
         })
     }
 
@@ -722,6 +991,7 @@ pub fn normalize_setting_value(kind: &SettingKind, text: &str) -> Result<String,
         SettingKind::Secret
         | SettingKind::Text { .. }
         | SettingKind::Catalog { .. }
+        | SettingKind::ModelPrices { .. }
         | SettingKind::Duration(_)
         | SettingKind::Line(_)
         | SettingKind::List(_)
@@ -1773,5 +2043,69 @@ mod tests {
         assert_eq!(SettingValue::from_json(&json!(null)), SettingValue::Unset);
         let field = ListFieldValue::from_json(&json!({"path": "x"})).expect("field");
         assert_eq!(field.value, SettingValue::Unset);
+    }
+
+    #[test]
+    fn model_prices_parse_update_and_combine_shipped_with_custom() {
+        assert_eq!(
+            super::with_model_price("a=1, b=2", "b", Some(3.5)),
+            "a=1, b=3.5"
+        );
+        assert_eq!(super::with_model_price("a=1, b=2", "a", None), "b=2");
+        assert_eq!(super::parse_usd_input("").unwrap(), None);
+        assert_eq!(super::parse_usd_input("$2.5").unwrap(), Some(2.5));
+        assert_eq!(super::parse_usd_input("0").unwrap(), Some(0.));
+        assert!(super::parse_usd_input("-1").is_err());
+        assert!(super::parse_usd_input("nope").is_err());
+
+        let snapshot = Snapshot::from_json(&json!({
+            "path": "/config.json",
+            "exists": true,
+            "settings": [
+                {
+                    "descriptor": {
+                        "key": "providers.claude.modelInputPrices",
+                        "label": "Prices per model",
+                        "description": "Prices",
+                        "section": "provider:claude",
+                        "group": "Model prices",
+                        "kind": {"type": "string", "multiline": true, "source": "model-prices", "providerKind": "claude"}
+                    },
+                    "value": "claude-opus-5=6, retired=1",
+                    "explicit": true,
+                    "shippedPrices": {
+                        "claude-opus-5": {"input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25}
+                    }
+                },
+                {
+                    "descriptor": {
+                        "key": "providers.claude.modelOutputPrices",
+                        "label": "Output price",
+                        "description": "Output",
+                        "section": "provider:claude",
+                        "group": "Model prices",
+                        "hidden": true,
+                        "kind": {"type": "string", "multiline": true}
+                    },
+                    "value": "claude-opus-5=30",
+                    "explicit": true
+                }
+            ]
+        }))
+        .expect("snapshot");
+        let view = snapshot.find("providers.claude.modelInputPrices").unwrap();
+        assert_eq!(
+            view.kind,
+            SettingKind::ModelPrices {
+                provider_kind: Some("claude".into())
+            }
+        );
+        assert_eq!(super::custom_price_model_count(view, Some(&snapshot)), 2);
+        let entries = super::model_price_entries(view, Some(&snapshot), None, Some("claude"));
+        let opus = entries.iter().find(|e| e.slug == "claude-opus-5").unwrap();
+        assert_eq!(opus.custom.input, Some(6.));
+        assert_eq!(opus.custom.output, Some(30.));
+        assert_eq!(opus.shipped.input, Some(5.));
+        assert_eq!(opus.shipped.cache_read, Some(0.5));
     }
 }

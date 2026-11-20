@@ -10,6 +10,7 @@ import { McpAccessEditor } from "./mcpaccess.js";
 import { SkillsPanel } from "./skillspanel.js";
 import { WebOrderEditor } from "./weborder.js";
 import { HandoffModelsEditor } from "./handoffmodels.js";
+import { ModelPricesEditor } from "./modelprices.js";
 import { MemoryRuntimePanel, useMemoryRuntime } from "../memory/memoryruntime.js";
 import { MemoryManagerModal } from "../memory/memorymanager.js";
 import { UpdateModal } from "../update/updatemodal.js";
@@ -29,7 +30,7 @@ import type { UpdateView } from "../../model/update.js";
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
 import { splitInlineCode } from "../../model/inlinecode.js";
-import { nextToggleValue, moxenVersionLine, providerVersionLine, settingControl, withModelOverride, MODEL_OVERRIDE_KEY, settingValueLabel, updatableProviderOf, type LatestView, type MoxenVersionLine, type ProviderCheckView, type SettingControl, type SettingOption } from "../../model/settings.js";
+import { nextToggleValue, moxenVersionLine, providerVersionLine, settingControl, withModelOverride, withModelPrice, MODEL_OVERRIDE_KEY, MODEL_PRICE_KEY, settingValueLabel, updatableProviderOf, type LatestView, type MoxenVersionLine, type ProviderCheckView, type SettingControl, type SettingOption } from "../../model/settings.js";
 import type { LatestVersions, UpdatableProvider } from "../../../core/catalog/update.js";
 import {
   SECTION_LABEL,
@@ -233,6 +234,8 @@ export function SettingsModal({
   const [showUpdate, setShowUpdate] = useState(false);
   /** The per-model hand-off setting whose editor fills the right pane. */
   const [handoffOpen, setHandoffOpen] = useState<string | null>(null);
+  /** The per-model prices setting whose editor fills the right pane. */
+  const [pricesOpen, setPricesOpen] = useState<string | null>(null);
 
   const sections = useMemo(
     () => SETTING_SECTIONS.filter((section) => section === "skills" || snapshot?.settings.some((view) => view.descriptor.section === section && view.descriptor.hidden !== true) === true),
@@ -378,6 +381,7 @@ export function SettingsModal({
     setPicking(null);
     setAccessOpen(null);
     setHandoffOpen(null);
+    setPricesOpen(null);
     setListOpen(listKey);
     setEditorScreen({ profile: entryId, model: null });
     setEditorHeading(shownHeading(listKey, entryId, heading));
@@ -410,6 +414,7 @@ export function SettingsModal({
     setPicking(null);
     setAccessOpen(null);
     setHandoffOpen(null);
+    setPricesOpen(null);
     setEditorScreen({ profile: null, model: null });
     setEditorHeading(null);
     // A page that is only a list opens on the list.
@@ -436,6 +441,10 @@ export function SettingsModal({
     }
     if (item.control.kind === "handoff") {
       setHandoffOpen(item.descriptor.key);
+      return;
+    }
+    if (item.control.kind === "prices") {
+      setPricesOpen(item.descriptor.key);
       return;
     }
     if (item.control.kind === "toggle") {
@@ -498,12 +507,13 @@ export function SettingsModal({
   };
   const accessItem = accessOpen === null ? undefined : items.find((item) => item.descriptor.key === accessOpen);
   const handoffItem = handoffOpen === null ? undefined : items.find((item) => item.descriptor.key === handoffOpen);
+  const pricesItem = pricesOpen === null ? undefined : items.find((item) => item.descriptor.key === pricesOpen);
 
   useKeyboard((key) => {
     if (managing || showUpdate) return;
     if (tab === "skills" && key.name !== "tab") return;
     // The list editor owns every key while it is open, and one it has already acted on is not ours.
-    if (listOpen !== null || accessOpen !== null || handoffOpen !== null || key.defaultPrevented) return;
+    if (listOpen !== null || accessOpen !== null || handoffOpen !== null || pricesOpen !== null || key.defaultPrevented) return;
     const escape = key.name === "escape" || key.name === "esc";
     const enter = key.name === "return" || key.name === "enter";
     if (editing !== null) {
@@ -591,7 +601,7 @@ export function SettingsModal({
     return () => clearTimeout(timer);
   }, [sideActive, entries.length]);
   // Coming back from a list editor shows the page again in a new scroll box, still at the top: scroll to the row we left from.
-  const showingPage = listOpen === null && handoffOpen === null;
+  const showingPage = listOpen === null && handoffOpen === null && pricesOpen === null;
   useEffect(() => {
     if (!showingPage || scrollTarget === null) return;
     const timer = setTimeout(() => scrollRef.current?.scrollChildIntoView(scrollTarget), 40);
@@ -612,7 +622,7 @@ export function SettingsModal({
         : current?.control.kind === "toggle"
           ? t("settings.hint.toggle")
           : t("settings.hint.open");
-  const hint = tab === "skills" ? t("skills.settingsHint") : listOpen !== null || handoffOpen !== null ? "" : picking === null && (updatable !== null || (tab === "general" && moxenUpdate !== undefined)) ? t("settings.hint.update", { hint: base }) : base;
+  const hint = tab === "skills" ? t("skills.settingsHint") : listOpen !== null || handoffOpen !== null || pricesOpen !== null ? "" : picking === null && (updatable !== null || (tab === "general" && moxenUpdate !== undefined)) ? t("settings.hint.update", { hint: base }) : base;
 
   return (
     <>
@@ -683,6 +693,21 @@ export function SettingsModal({
                     void onSet(key, withModelOverride(field, current, slug, next));
                   }}
                   onExit={() => setHandoffOpen(null)}
+                />
+              ) : pricesItem !== undefined && pricesItem.control.kind === "prices" ? (
+                <ModelPricesEditor
+                  title={pricesItem.descriptor.label}
+                  description={pricesItem.descriptor.description}
+                  models={pricesItem.control.models}
+                  width={paneWidth}
+                  catalogReady={providers !== null}
+                  onChange={(field, slug, next) => {
+                    // Each field writes to its own key beside the row's (`modelInputPrices`, `modelOutputPrices`, …).
+                    const key = `${pricesItem.descriptor.key.slice(0, pricesItem.descriptor.key.lastIndexOf(".") + 1)}${MODEL_PRICE_KEY[field]}`;
+                    const current = snapshot.settings.find((view) => view.descriptor.key === key)?.value;
+                    void onSet(key, withModelPrice(current, slug, next));
+                  }}
+                  onExit={() => setPricesOpen(null)}
                 />
               ) : accessItem !== undefined && accessItem.control.kind === "order" ? (
                 <WebOrderEditor
@@ -1036,7 +1061,7 @@ function valueText(item: SettingItem): string {
   const label = settingValueLabel(item.descriptor, item.value, item.control, item.entries?.length);
   if (item.control.kind === "list") return `${label}  ›`;
   if (item.control.kind === "toggle") return item.value === true ? `● ${t("settings.on")}` : item.value === undefined && item.control.tristate === true ? `◌ ${label}` : `○ ${t("settings.off")}`;
-  if (item.control.kind === "pick" || item.control.kind === "handoff" || item.control.kind === "order") return `${label}  ›`;
+  if (item.control.kind === "pick" || item.control.kind === "handoff" || item.control.kind === "prices" || item.control.kind === "order") return `${label}  ›`;
   return label;
 }
 

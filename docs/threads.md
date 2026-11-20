@@ -1383,12 +1383,14 @@ above, so the instances stored as running totals are the Claude ones
 
 ### Model prices
 
-Each provider's settings page, under Model prices, values that provider's
-models in USD per million tokens: an input, output, cache-read and
-cache-write price per model, as `model=price` pairs
+Each provider's settings page, under Model prices → Prices per model, edits
+that provider's models in USD per million tokens (input, output, cache read
+and cache write per model). In the config file and CLI, the four underlying
+keys (`modelInputPrices`, `modelOutputPrices`, `modelCacheReadPrices`,
+`modelCacheWritePrices`) take `model=price` pairs
 (`moxen config set providers.opencode.modelInputPrices 'opencode-go/muse-spark-1.3-contributor=2'`).
-A row you set beats Moxen's shipped price for those fields on that provider,
-so the same model can cost differently on two providers; clearing a row, or a
-model from it, returns to the shipped price. A price with only some fields
+A price you set beats Moxen's shipped price for those fields on that provider,
+so the same model can cost differently on two providers; clearing a field or
+resetting a model returns to the shipped price. A price with only some fields
 values what it names and counts the rest as zero. Models match by the string
 Stats buckets them under, slash included.

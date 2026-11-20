@@ -40,6 +40,13 @@ pub enum SettingsForm {
         multiline: bool,
         previous: String,
     },
+    /// One USD/1M price field for a single model.
+    ModelPrice {
+        row_key: String,
+        target_key: String,
+        slug: String,
+        title: String,
+    },
     /// The new id a `settings.duplicate` copies under.
     Duplicate { key: String, id: String },
     /// A model added to a Harness profile's nested list.
@@ -66,13 +73,17 @@ pub enum SettingsForm {
 
 impl SettingsForm {
     fn inline(&self) -> bool {
-        matches!(self, Self::Scalar { .. } | Self::Field { .. })
+        matches!(
+            self,
+            Self::Scalar { .. } | Self::Field { .. } | Self::ModelPrice { .. }
+        )
     }
 
     fn title(&self) -> String {
         match self {
-            Self::Scalar { title, .. } => title.clone(),
-            Self::Field { title, .. } => title.clone(),
+            Self::Scalar { title, .. }
+            | Self::Field { title, .. }
+            | Self::ModelPrice { title, .. } => title.clone(),
             Self::Duplicate { id, .. } => format!("Copy “{id}” under a new name"),
             Self::AddModel { .. } => "Name the model".into(),
             Self::Import => "Import a profile".into(),
@@ -236,6 +247,7 @@ impl Workspace {
         self.settings_open = false;
         self.settings_rail_tip = None;
         self.settings_editor = None;
+        self.settings_price_model = None;
         self.settings_form = None;
         self.settings_form_saving = false;
         self.settings_confirm = None;
@@ -368,6 +380,7 @@ impl Workspace {
     fn toggle_settings_editor(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.settings_editor.as_deref() == Some(key);
         self.settings_editor = (!open).then(|| key.to_owned());
+        self.settings_price_model = None;
         self.settings_form = None;
         self.settings_form_saving = false;
         self.settings_error = None;
@@ -434,6 +447,24 @@ impl Workspace {
                     },
                 }
             }
+            SettingsForm::ModelPrice {
+                target_key, slug, ..
+            } => match settings::parse_usd_input(&text) {
+                Err(message) => self.settings_error = Some(message),
+                Ok(parsed) => {
+                    let current = self
+                        .source
+                        .settings()
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.as_ref().as_ref().ok())
+                        .and_then(|snapshot| snapshot.find(&target_key))
+                        .map(|view| view.value.wire())
+                        .unwrap_or_default();
+                    let next = settings::with_model_price(&current, &slug, parsed);
+                    self.source.set_setting(&target_key, &next);
+                    self.settings_form_saving = true;
+                }
+            },
             SettingsForm::Duplicate { key, id } => {
                 if text.is_empty() {
                     self.settings_error = Some("Type a name.".into());
@@ -1022,11 +1053,19 @@ fn setting_row(
     let key = view.key.clone();
     let picking = w.settings_editor.as_deref() == Some(key.as_str());
     let choices = match &view.kind {
-        SettingKind::Enum(_) | SettingKind::Catalog { .. } => true,
+        SettingKind::Enum(_) | SettingKind::Catalog { .. } | SettingKind::ModelPrices { .. } => {
+            true
+        }
         SettingKind::Duration(presets) | SettingKind::Line(presets) => !presets.is_empty(),
         _ => false,
     };
-    let label = setting_row_value(view);
+    let label = setting_row_value_in(
+        view,
+        w.source
+            .settings()
+            .as_deref()
+            .and_then(|snapshot| snapshot.as_ref().ok()),
+    );
     let unavailable = view.unavailable.as_deref();
     let control = match &view.kind {
         SettingKind::Boolean => switch_control(
@@ -1111,6 +1150,15 @@ fn setting_row(
             _ => None,
         };
         row = row.child(form_bar(w, form, stepper, cx));
+    }
+    if let Some(
+        form @ SettingsForm::ModelPrice {
+            row_key: form_key, ..
+        },
+    ) = &w.settings_form
+        && form_key == &key
+    {
+        row = row.child(form_bar(w, form, None, cx));
     }
     row
 }
@@ -1454,6 +1502,20 @@ fn scalar_picker(w: &Workspace, view: &settings::SettingView, cx: &mut Context<W
                 .max_w(px(540.))
                 .child(option_list(key, &current, options, cx));
         }
+        SettingKind::ModelPrices { provider_kind } => {
+            let snapshot = w.source.settings();
+            let catalog = w.catalog();
+            panel = panel.max_w(px(620.)).child(model_prices_picker(
+                w,
+                view,
+                snapshot
+                    .as_deref()
+                    .and_then(|snapshot| snapshot.as_ref().ok()),
+                catalog.as_deref(),
+                provider_kind.as_deref(),
+                cx,
+            ));
+        }
         _ => {}
     }
     panel
@@ -1638,13 +1700,272 @@ fn setting_label(view: &crate::settings::SettingView) -> String {
     crate::language::tr(&view.label).into_owned()
 }
 
+#[cfg(test)]
 fn setting_row_value(view: &crate::settings::SettingView) -> String {
+    setting_row_value_in(view, None)
+}
+
+fn setting_row_value_in(
+    view: &crate::settings::SettingView,
+    snapshot: Option<&Snapshot>,
+) -> String {
+    if matches!(view.kind, SettingKind::ModelPrices { .. }) {
+        let count = settings::custom_price_model_count(view, snapshot);
+        return if count == 0 {
+            crate::language::message("mp.shippedSummary").into()
+        } else {
+            let count_str = count.to_string();
+            let key = if count == 1 {
+                "settings.models.one"
+            } else {
+                "settings.models.other"
+            };
+            crate::language::fill(key, &[("{count}", count_str.as_str())])
+        };
+    }
     if let (SettingKind::Enum(choices), SettingValue::Text(value)) = (&view.kind, &view.value)
         && let Some(choice) = choices.iter().find(|choice| choice.value == *value)
     {
         return crate::language::tr(&choice.label).into_owned();
     }
     settings::display_value(view)
+}
+
+fn model_price_summary(entry: &settings::ModelPriceEntry) -> String {
+    use crate::language::{fill, message};
+    let custom = entry.custom.any();
+    if !custom && !entry.shipped.any() {
+        return message("mp.unpriced").into();
+    }
+    let input = entry.custom.input.or(entry.shipped.input);
+    let output = entry.custom.output.or(entry.shipped.output);
+    let cache_read = entry.custom.cache_read.or(entry.shipped.cache_read);
+    let cache_write = entry.custom.cache_write.or(entry.shipped.cache_write);
+    let core = if let (Some(i), Some(o)) = (input, output) {
+        format!("{} / {}", settings::format_usd(i), settings::format_usd(o))
+    } else {
+        let mut parts = Vec::new();
+        if let Some(i) = input {
+            let price = settings::format_usd(i);
+            parts.push(fill("mp.inShort", &[("{price}", price.as_str())]));
+        }
+        if let Some(o) = output {
+            let price = settings::format_usd(o);
+            parts.push(fill("mp.outShort", &[("{price}", price.as_str())]));
+        }
+        if input.is_none() && output.is_none() {
+            if let Some(cr) = cache_read {
+                let price = settings::format_usd(cr);
+                parts.push(fill("mp.cacheReadShort", &[("{price}", price.as_str())]));
+            }
+            if let Some(cw) = cache_write {
+                let price = settings::format_usd(cw);
+                parts.push(fill("mp.cacheWriteShort", &[("{price}", price.as_str())]));
+            }
+        }
+        parts.join(" · ")
+    };
+    if custom {
+        core
+    } else {
+        fill("mp.shippedSummaryRow", &[("{prices}", core.as_str())])
+    }
+}
+
+fn model_prices_picker(
+    w: &Workspace,
+    view: &settings::SettingView,
+    snapshot: Option<&Snapshot>,
+    catalog: Option<&crate::catalog::Catalog>,
+    provider_kind: Option<&str>,
+    cx: &mut Context<Workspace>,
+) -> Stateful<Div> {
+    use crate::language::{fill, message};
+    let entries = settings::model_price_entries(view, snapshot, catalog, provider_kind);
+    let row_key = view.key.clone();
+    let prefix = view
+        .key
+        .rfind('.')
+        .map(|at| view.key[..=at].to_string())
+        .unwrap_or_default();
+    let mut list = div()
+        .id(format!("settings-prices-{}", view.key))
+        .max_h(px(340.))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(2.));
+    if entries.is_empty() {
+        let empty = if catalog.is_some() {
+            message("ho.noModels")
+        } else {
+            message("settings.loadingCatalog")
+        };
+        return list.child(sub_line(empty).px(px(8.)).py(px(6.)));
+    }
+    for (index, entry) in entries.into_iter().enumerate() {
+        let expanded = w.settings_price_model.as_deref() == Some(entry.slug.as_str());
+        let custom = entry.custom.any();
+        let slug_toggle = entry.slug.clone();
+        let summary = model_price_summary(&entry);
+        let mut header = div()
+            .id(ElementId::NamedInteger(
+                format!("settings-price-model-{}", view.key).into(),
+                index as u64,
+            ))
+            .plain_control()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(5.))
+            .rounded(px(theme::px_token("radius", "radius-xs")))
+            .when(expanded, |row| row.bg(color("raised")))
+            .child(ui::icon(
+                if expanded {
+                    "chevron-down"
+                } else {
+                    "chevron-right"
+                },
+                "ink-2",
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(entry.name.clone()),
+            )
+            .child(
+                div()
+                    .font_family(theme::MONO)
+                    .text_size(px(12.))
+                    .text_color(color(if custom { "live" } else { "ink-2" }))
+                    .child(summary),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.settings_price_model =
+                    if this.settings_price_model.as_deref() == Some(slug_toggle.as_str()) {
+                        None
+                    } else {
+                        Some(slug_toggle.clone())
+                    };
+                cx.notify();
+            }));
+        if custom {
+            let prefix_reset = prefix.clone();
+            let slug_reset = entry.slug.clone();
+            let custom_values = entry.custom;
+            header = header.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        format!("settings-price-reset-model-{}", view.key).into(),
+                        index as u64,
+                    ))
+                    .quiet()
+                    .text_color(color("ink-2"))
+                    .text_size(px(11.5))
+                    .child(message("mp.reset"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.reset_model_prices(&prefix_reset, &slug_reset, custom_values, cx);
+                    })),
+            );
+        }
+        list = list.child(header);
+        if expanded {
+            let mut fields_box = div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .pl(px(22.))
+                .pr(px(4.))
+                .pb(px(6.));
+            fields_box = fields_box.child(
+                sub_line(&fill("mp.modelPage", &[("{slug}", entry.slug.as_str())])).pb(px(4.)),
+            );
+            for (field_index, field) in settings::ModelPriceField::ALL.into_iter().enumerate() {
+                let custom_val = entry.custom.field(field);
+                let shipped_val = entry.shipped.field(field);
+                let value_text = if let Some(v) = custom_val {
+                    let price = settings::format_usd(v);
+                    fill("mp.perMillion", &[("{price}", price.as_str())])
+                } else if let Some(v) = shipped_val {
+                    let price = settings::format_usd(v);
+                    fill("mp.shippedValue", &[("{price}", price.as_str())])
+                } else {
+                    message("mp.unpricedCap").into()
+                };
+                let target_key = format!("{prefix}{}", field.leaf());
+                let field_label = message(field.label_key()).to_string();
+                let edit_row_key = row_key.clone();
+                let edit_target_key = target_key.clone();
+                let edit_slug = entry.slug.clone();
+                let edit_title = format!("{field_label}: {}", entry.name);
+                let initial = custom_val
+                    .map(|v| SettingValue::Number(v).wire())
+                    .unwrap_or_default();
+                let mut field_row = div()
+                    .id(ElementId::NamedInteger(
+                        format!("settings-price-field-{}-{}", view.key, entry.slug).into(),
+                        field_index as u64,
+                    ))
+                    .plain_control()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(theme::px_token("radius", "radius-xs")))
+                    .child(div().flex_1().child(field_label))
+                    .child(
+                        div()
+                            .font_family(theme::MONO)
+                            .text_size(px(12.))
+                            .text_color(color(if custom_val.is_some() {
+                                "live"
+                            } else {
+                                "ink-2"
+                            }))
+                            .child(value_text),
+                    )
+                    .child(ui::icon("pencil", "ink-2"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_model_price_form(
+                            &edit_row_key,
+                            &edit_target_key,
+                            &edit_slug,
+                            &edit_title,
+                            &initial,
+                            window,
+                            cx,
+                        );
+                    }));
+                if custom_val.is_some() {
+                    let reset_target_key = target_key.clone();
+                    let reset_slug = entry.slug.clone();
+                    field_row = field_row.child(
+                        div()
+                            .id(ElementId::NamedInteger(
+                                format!("settings-price-reset-field-{}-{}", view.key, entry.slug)
+                                    .into(),
+                                field_index as u64,
+                            ))
+                            .quiet()
+                            .text_color(color("ink-2"))
+                            .text_size(px(11.5))
+                            .child(message("mp.reset"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.clear_model_price_field(&reset_target_key, &reset_slug, cx);
+                            })),
+                    );
+                }
+                fields_box = fields_box.child(field_row);
+            }
+            list = list.child(fields_box);
+        }
+    }
+    list
 }
 
 fn sub_line(text: &str) -> Div {
@@ -2371,6 +2692,61 @@ impl Workspace {
         }
         let focus = self.settings_input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_model_price_form(
+        &mut self,
+        row_key: &str,
+        target_key: &str,
+        slug: &str,
+        title: &str,
+        initial: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_form(
+            SettingsForm::ModelPrice {
+                row_key: row_key.into(),
+                target_key: target_key.into(),
+                slug: slug.into(),
+                title: title.into(),
+            },
+            initial,
+            cx,
+        );
+        self.settings_input
+            .update(cx, |input, _| input.height = 24.);
+        let focus = self.settings_input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    }
+
+    fn clear_model_price_field(&mut self, target_key: &str, slug: &str, cx: &mut Context<Self>) {
+        let current = self
+            .source
+            .settings()
+            .as_ref()
+            .and_then(|snapshot| snapshot.as_ref().as_ref().ok())
+            .and_then(|snapshot| snapshot.find(target_key))
+            .map(|view| view.value.wire())
+            .unwrap_or_default();
+        let next = settings::with_model_price(&current, slug, None);
+        self.write_setting(target_key, &next, cx);
+    }
+
+    fn reset_model_prices(
+        &mut self,
+        prefix: &str,
+        slug: &str,
+        custom: settings::ModelPrice,
+        cx: &mut Context<Self>,
+    ) {
+        for field in settings::ModelPriceField::ALL {
+            if custom.field(field).is_some() {
+                let target_key = format!("{prefix}{}", field.leaf());
+                self.clear_model_price_field(&target_key, slug, cx);
+            }
+        }
     }
 
     fn open_field_form(

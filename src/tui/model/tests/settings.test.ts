@@ -564,3 +564,65 @@ describe("Antigravity and ACP settings controls", () => {
     expect(acpMcp.kind === "servers" && acpMcp.servers.map((s) => s.name)).toEqual(["fs"]);
   });
 });
+
+describe("per-model prices control", () => {
+  it("lists catalog models with shipped and custom prices, keeps non-offered configured slugs, and formats clean summaries", async () => {
+    const { parseUsdInput, withModelPrice } = await import("../settings.js");
+    expect(parseUsdInput("")).toEqual({ ok: true, value: null });
+    expect(parseUsdInput("$2.5")).toEqual({ ok: true, value: 2.5 });
+    expect(parseUsdInput("0")).toEqual({ ok: true, value: 0 });
+    expect(parseUsdInput("-1")).toEqual({ ok: false });
+    expect(parseUsdInput("abc")).toEqual({ ok: false });
+    expect(withModelPrice("a=1, b=2", "b", 3.5)).toBe("a=1, b=3.5");
+    expect(withModelPrice("a=1, b=2", "a", null)).toBe("b=2");
+
+    const providers = [
+      {
+        instanceId: "claudeAgent",
+        driver: "claudeAgent" as const,
+        displayName: "Claude",
+        enabled: true,
+        installed: true,
+        status: null,
+        authStatus: null,
+        models: [
+          { slug: "claude-opus-5", name: "Claude Opus 5", isCustom: false, isDefault: true, isHidden: false, efforts: [] },
+          { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", isCustom: false, isDefault: false, isHidden: false, efforts: [] },
+          { slug: "claude-hidden", name: "Hidden", isCustom: false, isDefault: false, isHidden: true, efforts: [] },
+        ],
+        supportedRuntimeModes: null,
+        usageLimits: null,
+        skills: [],
+      },
+    ];
+    const priceDesc = settingDescriptor("providers.claude.modelInputPrices")!;
+    const emptySettings = describeSettings(DEFAULT_CONFIG);
+    const emptyControl = settingControl(priceDesc, undefined, emptySettings, providers);
+    expect(emptyControl.kind).toBe("prices");
+    expect(settingValueLabel(priceDesc, undefined, emptyControl)).toBe("Shipped prices");
+
+    const configured = normalizeConfig({
+      providers: {
+        claude: {
+          modelInputPrices: { "claude-opus-5": 6, "old-model": 1 },
+          modelOutputPrices: { "claude-opus-5": 30 },
+        },
+      },
+    });
+    const settings = describeSettings(configured);
+    const value = settings.find((v) => v.descriptor.key === priceDesc.key)!.value;
+    const control = settingControl(priceDesc, value, settings, providers);
+    expect(control.kind).toBe("prices");
+    expect(settingValueLabel(priceDesc, value, control)).toBe("2 models");
+    if (control.kind === "prices") {
+      expect(control.models.map((m) => m.slug)).toEqual(["claude-opus-5", "claude-sonnet-5-5", "old-model"]);
+      expect(control.models[0]).toMatchObject({
+        slug: "claude-opus-5",
+        custom: { input: 6, output: 30, cacheRead: null, cacheWrite: null },
+        shipped: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+      });
+      expect(control.models[1]?.shipped).toMatchObject({ input: 2, output: 10 });
+      expect(control.models[2]).toMatchObject({ slug: "old-model", name: "old-model (not offered)", offered: false });
+    }
+  });
+});
