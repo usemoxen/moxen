@@ -58,12 +58,32 @@ negotiates any other protocol version is refused loudly
   `enabled`, `defaultModel`, `defaultMode`). Each enabled profile appears as
   `acp/<id>` in the model picker. Launch arguments are tokenized into argv
   arrays and never joined into a shell string.
-- **Worktree isolation & permissions**: when Antigravity or an ACP agent
-  delegates `fs/*` or `terminal/*` to the client, Moxen enforces worktree
+- **Worktree isolation, permissions & questions**: when Antigravity or an ACP
+  agent delegates `fs/*` or `terminal/*` to the client, Moxen enforces worktree
   isolation on writes and commands and spawns processes with `shell: false`.
-  Permission requests (`session/request_permission`) surface in Moxen's
-  approval panel, honor `acceptForSession`, and unblock cleanly on
-  `interruptTurn`.
+  Permission requests (`session/request_permission`) normalize both ACP and
+  PascalCase `agy` tool inputs before enforcing worktree isolation, honor
+  `approval-required`, `auto-accept-edits`, `auto`, and `full-access` (including
+  for delegated threads and live `setRuntimeMode` / `session/set_mode`
+  switches and configured `defaultMode`), reply with `allow_once` on automatic
+  approvals and isolated sessions so agents cannot cache approvals past
+  Moxen's gates, and cancel parked prompts when a turn settles or is
+  interrupted. Form elicitations (`elicitation/create`, e.g. `agy`'s
+  `ask_question`) surface in Moxen's interactive answer panel (`respondToUserInput`),
+  while URL/OAuth elicitations and delegated sessions decline cleanly.
+- **Session lifecycle, steering, compaction & skills**: `AcpDriver` registers
+  peer handlers before `session/new` / `session/load` / `session/resume` so
+  startup updates (`available_commands_update`, `usage_update`,
+  `config_option_update`, `current_mode_update`, `session_info_update`) are
+  never dropped, prefers `session/resume` over `session/load` when advertised,
+  sends best-effort `session/close` on session teardown, adopts provider titles
+  from `session_info_update` (`sessionTitle`), and refreshes cached agent
+  profiles live when `providers.acp.agents` changes. For Antigravity, Moxen
+  wires mid-turn steering (`steerTurn` via concurrent `session/prompt`) and
+  `/compact` compaction (`session.notice: "compacted"`), merges local
+  `.claude/skills` / `.agents/skills` with live `available_commands_update` in
+  `skillInventory`, and computes estimated `contextBreakdown` from the live
+  transcript since the last compaction.
 - **Diagnostics & discovery**: `moxen doctor` probes `agy`, and the Settings
   page checks Antigravity's latest GitHub Release alongside Claude Code,
   OpenCode and Codex. Catalog discovery runs `initialize`, and when the agent
@@ -96,8 +116,13 @@ negotiates any other protocol version is refused loudly
   `stopBackgroundTask` for client-terminal-backed tasks (while agent-internal
   tasks like `agy`'s `run_command` remain `stoppable: false`), and records
   out-of-turn tool completions and reactive wakeup turns
-  (`origin: "background"`). ACP v1 has no conversation rewind RPC, so
-  `AcpDriver` declares `supportsConversationRollback: false`.
+  (`origin: "background"`). Native `invoke_subagent` (`Agent`) tool calls also
+  publish `subagent.updated` (`started` / `stopped`) so they appear in the
+  Agents view with their role and summary; full child subagent transcript
+  inspection (`subagentHistory`) is not available because ACP v1 and `agy` do
+  not expose child session IDs or subagent history RPCs. ACP v1 has no
+  conversation rewind RPC, so `AcpDriver` declares
+  `supportsConversationRollback: false`.
 
 ## Defaults
 

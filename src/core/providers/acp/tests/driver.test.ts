@@ -1996,3 +1996,75 @@ describe("ACP session/resume, session/close, steering, compaction, skills invent
     }
   });
 });
+
+describe("ACP native subagent status events (MXN-445)", () => {
+  it("emits subagent.updated started and stopped for invoke_subagent Agent calls without duplicates", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "research" }));
+      const server = transport.sessions[0]!.server;
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "sub-1",
+        kind: "other",
+        title: "Run invoke_subagent",
+        status: "in_progress",
+        rawInput: {
+          TypeName: "research",
+          Role: "Codebase Researcher",
+          Prompt: "Inspect ACP protocol handlers",
+        },
+      });
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === "subagent.updated" && e.status === "started")).toBe(true),
+      );
+      expect(events.find((e) => e.type === "subagent.updated" && e.status === "started")).toMatchObject({
+        provider: "antigravity",
+        threadId: "thread-1",
+        turnId: sent.turnId,
+        agentId: "sub-1",
+        agentType: "Codebase Researcher",
+        description: "Inspect ACP protocol handlers",
+        lastMessage: null,
+      });
+
+      // Intermediate update does not emit a second "started" event.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "sub-1",
+        status: "in_progress",
+      });
+      // Completion emits "stopped" with lastMessage summary (even when title/rawInput omitted).
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "sub-1",
+        status: "completed",
+        rawOutput: { output: "Found 4 protocol handlers." },
+      });
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === "subagent.updated" && e.status === "stopped")).toBe(true),
+      );
+      const subEvents = events.filter((e) => e.type === "subagent.updated");
+      expect(subEvents).toHaveLength(2);
+      expect(subEvents[1]).toMatchObject({
+        agentId: "sub-1",
+        agentType: "Codebase Researcher",
+        status: "stopped",
+        lastMessage: "Found 4 protocol handlers.",
+      });
+
+      server.finishPrompt("end_turn");
+      await driver.awaitTurn("thread-1", sent.turnId);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+});

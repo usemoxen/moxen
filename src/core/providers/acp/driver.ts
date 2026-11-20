@@ -170,6 +170,8 @@ interface AcpToolState {
   startedAt: number;
   endedAt: number | null;
   recordedInItems: boolean;
+  subagentStarted: boolean;
+  subagentStopped: boolean;
 }
 
 interface AcpReasoningState {
@@ -2042,6 +2044,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         startedAt: existing?.startedAt ?? now,
         endedAt: terminal ? (existing?.endedAt ?? now) : null,
         recordedInItems,
+        subagentStarted: existing?.subagentStarted ?? false,
+        subagentStopped: existing?.subagentStopped ?? false,
       };
       turn.tools.set(toolCallId, state);
 
@@ -2089,7 +2093,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       if (terminal) {
         this.clearBackgroundPromotionTimer(session, toolCallId);
         this.finishBackgroundTask(session, state, state.turnId);
+        this.publishSubagentUpdate(session, state, true);
       } else {
+        this.publishSubagentUpdate(session, state, false);
         this.scheduleBackgroundPromotion(session, state);
       }
 
@@ -2267,6 +2273,48 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       threadId: session.threadId,
       tasks: [...session.backgroundTasks.values()],
     });
+  }
+
+  private publishSubagentUpdate(session: AcpSession, state: AcpToolState, terminal: boolean): void {
+    if (state.canonicalTool !== "Agent") return;
+    const agentType =
+      asNonEmptyString(
+        state.input["Role"] ??
+          state.input["role"] ??
+          state.input["subagent_type"] ??
+          state.input["TypeName"],
+      ) ??
+      (state.title.trim() || "subagent");
+    const description = asNonEmptyString(
+      state.input["Prompt"] ?? state.input["prompt"] ?? state.input["description"],
+    );
+    if (!state.subagentStarted) {
+      state.subagentStarted = true;
+      this.publish({
+        type: "subagent.updated",
+        provider: this.provider,
+        threadId: session.threadId,
+        turnId: state.turnId,
+        agentId: state.toolCallId,
+        agentType,
+        status: "started",
+        lastMessage: null,
+        ...(description ? { description } : {}),
+      });
+    }
+    if (terminal && !state.subagentStopped) {
+      state.subagentStopped = true;
+      this.publish({
+        type: "subagent.updated",
+        provider: this.provider,
+        threadId: session.threadId,
+        turnId: state.turnId,
+        agentId: state.toolCallId,
+        agentType,
+        status: "stopped",
+        lastMessage: state.rawOutput?.trim() || null,
+      });
+    }
   }
 
   private finishBackgroundTask(session: AcpSession, state: AcpToolState, turnId: TurnId | null): void {
@@ -2644,6 +2692,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           endMs: state.endedAt,
         },
       });
+      this.publishSubagentUpdate(session, state, true);
     }
   }
 
