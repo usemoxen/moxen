@@ -68,6 +68,25 @@ export class UsageProtection {
     }
   }
 
+  /**
+   * Persist a provider's hook issue receipt at the boundary it arrives, not at
+   * the next coordinator tick: a restart between the two must not reissue a
+   * warning the hook already returned. This records hook issuance, not model
+   * receipt.
+   */
+  async persistNoticeIssued(event: Extract<ProviderRuntimeEvent, { type: "usage.notice.issued" }>): Promise<void> {
+    try {
+      const ctx = await this.context();
+      const thread = await ctx.store.readThreadRecord(event.threadId);
+      for (const [provider, notice] of Object.entries(thread?.usageNotices ?? {})) {
+        if (notice.key !== event.key) continue;
+        await markUsageNoticeDelivered(ctx.store, event.threadId, provider, notice.key, "runtime", event.attemptId);
+      }
+    } catch {
+      // The next tick retries; losing one receipt must not fail the session.
+    }
+  }
+
   close(): void { this.closed = true; this.unsubscribe?.(); this.unsubscribe = null; }
 
   read(): UsageProtectionSnapshot { return { ...this.snapshot, forecasts: this.enabled ? this.snapshot.forecasts : [] }; }

@@ -9,7 +9,7 @@ import { ClaudeDriver } from "../../providers/claude/driver.js";
 import { FakeTransport, initMessage, successResult } from "../../providers/claude/tests/fakes.js";
 import { testHarness } from "../../testing/harness.js";
 import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, failUnstartedTurn, startBackgroundTurn, settleThread, updateThreadMeta, trackContinuation, untrackContinuation } from "../../threads/threads.js";
-import { flushTurnRunners, usageNoticeReserved, type TurnDriver } from "../../threads/execute.js";
+import { dispatchUsageNotice, flushTurnRunners, usageNoticeReserved, type TurnDriver } from "../../threads/execute.js";
 import { continueThread, editWorkQueue, flushTaskNotifications, queueTaskNotification, recoverTaskNotifications, runDueScheduledTurn, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
 import { openThreadStore } from "../../threads/store.js";
@@ -1089,6 +1089,118 @@ describe("usage protection", () => {
       await flushTurnRunners();
       w.guard.close();
     }
+  });
+
+  it("persists a Claude issue receipt at the boundary, before a restart can reissue it", async () => {
+    const w = await world("codex", undefined, { notices: { codex: "queued" } });
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("receipt");
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, attemptId: "a1", windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    const event = { type: "usage.notice.issued" as const, provider: "codex" as const, threadId: id, key: `codex:session@${reset}`, attemptId: "a1" };
+    await w.guard.persistNoticeIssued(event);
+    expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ delivered: "runtime", waiting: true });
+    // A restarted coordinator sees the persisted receipt without a tick.
+    w.guard.close();
+    const restarted = new UsageProtection(async () => w.ctx);
+    try {
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ delivered: "runtime" });
+      await restarted.tick();
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ delivered: "runtime", attemptId: "a1" });
+    } finally {
+      restarted.close();
+    }
+  });
+
+  it("never lets a competing dispatch overwrite and then delete another reservation", async () => {
+    const w = await world();
+    const id = await w.make("reservation owner");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const entered = deferred();
+    const gate = deferred();
+    const base = {
+      store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
+      prompt: "task", provenance: "automatic" as const, kind: "message" as const, trigger: "dispatch" as const,
+    };
+    try {
+      const a = dispatchUsageNotice({
+        ...base,
+        mode: async () => { entered.resolve(); await gate.promise; return "notify"; },
+      });
+      await entered.promise;
+      const b = dispatchUsageNotice({ ...base, prompt: "second", mode: async () => "notify" });
+      gate.resolve();
+      const first = await a;
+      await first.finish(false);
+      const second = await b;
+      // B owns its own reservation; A's rejection must not have removed it.
+      expect(usageNoticeReserved(id)).toBe(true);
+      await second.finish(false);
+      expect(usageNoticeReserved(id)).toBe(false);
+    } finally {
+      gate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("discards a prepared runtime notice when the mode changes before send", async () => {
+    const noticeGate = deferred();
+    const noticeEntered = deferred();
+    const clears: string[] = [];
+    const w = await world("codex", undefined, {
+      notices: { codex: "delivered" },
+      onNoticeCleared: (threadId) => clears.push(threadId),
+      noticeGate: async () => { noticeEntered.resolve(); await noticeGate.promise; },
+    });
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("mode switch");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const started = startTurn(w.ctx, { threadId: id, prompt: "task text", origin: "task-notification" });
+      await noticeEntered.promise;
+      w.ctx.config.usageProtection = "notify-user";
+      noticeGate.resolve();
+      await started;
+      await expect.poll(() => clears, { timeout: 10_000 }).not.toHaveLength(0);
+      await expect.poll(() => usageNoticeReserved(id), { timeout: 10_000 }).toBe(false);
+      expect(w.prompts.at(-1)).toBe("task text");
+    } finally {
+      noticeGate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("discards a prepared text prefix when the mode changes before send", async () => {
+    const w = await world();
+    let mode: "notify" | "notify-user" = "notify";
+    const id = await w.make("text mode switch");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    const notice = await dispatchUsageNotice({
+      store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
+      prompt: "task text", provenance: "automatic", kind: "message", trigger: "dispatch",
+      mode: async () => mode,
+    });
+    expect(notice.prompt).toContain("<moxen-usage-notice>");
+    mode = "notify-user";
+    expect(await notice.revalidate()).toBe("task text");
+    await notice.finish(false);
+    await flushTurnRunners();
+    w.guard.close();
   });
 
   it("holds a follow-up promoted by an unstarted failure, and admission sends it once", async () => {

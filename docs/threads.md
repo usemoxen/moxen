@@ -310,7 +310,8 @@ offers:
 |---|---|---|
 | Claude Code | an in-process hook's `additionalContext` | Moxen injects it outside the conversation; the provider serializes it as user-role text, the same convention as Moxen's other tagged runtime blocks |
 | OpenCode | a `moxen-usage-notice` session instruction entry | an instruction entry outside the user's messages |
-| Codex, Moxen Harness | ordinary text in the running turn or next prompt | no runtime-context channel exists, so its tag is the marker |
+| Codex | tagged text in the running turn or next prompt | Codex 0.169.0 exposes `thread/inject_items` developer-role items; Moxen does not use them yet, so the tagged block is prepended to the user input (moving to developer items is MXN-418) |
+| Moxen Harness | ordinary text in the running turn or next prompt | no runtime-context channel is used, so its tag is the marker |
 
 The notice has the same provenance as Moxen's other tagged runtime blocks: text
 of that shape in user content is not authenticated, and ending the wait is

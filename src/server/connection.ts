@@ -929,7 +929,10 @@ export class DirectConnection implements ClientApi {
   startScheduling(): void {
     if (this.schedulingStarted || this.closed) return;
     this.schedulingStarted = true;
-    for (const driver of this.ownedDrivers) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
+    for (const driver of this.ownedDrivers) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => {
+      this.usageProtection.observe(event);
+      if (event.type === "usage.notice.issued") void this.usageProtection.persistNoticeIssued(event);
+    }));
     const usageTick = async (): Promise<void> => {
       if (this.closed || this.usageTickRunning) return;
       this.usageTickRunning = true;
@@ -1005,7 +1008,10 @@ export class DirectConnection implements ClientApi {
     // The harness reads its profiles on every turn, so it is handed the config this operation saw.
     // Profiles are edited while the server runs; the harness driver reads its config on every use.
     if (driver instanceof HarnessDriver) driver.setConfig(this.lastProviders?.harness, this.lastWeb);
-    if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
+    if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => {
+      this.usageProtection.observe(event);
+      if (event.type === "usage.notice.issued") void this.usageProtection.persistNoticeIssued(event);
+    }));
     this.ownedDrivers.add(driver);
     return driver;
   }

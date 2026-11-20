@@ -64,6 +64,7 @@ class HarnessDriver implements TurnDriver {
       readonly onNotice?: (threadId: string, text: string) => void;
       readonly onClear?: (threadId: string) => void;
       readonly onSignal?: (threadId: string, signal?: AbortSignal) => void;
+      readonly gate?: (threadId: string, request: NoticeReconcileRequest) => Promise<void>;
     },
     private readonly gates?: {
       readonly send?: (input: SentTurn) => Promise<void>;
@@ -86,14 +87,18 @@ class HarnessDriver implements TurnDriver {
           if (request.kind === "arm") notice.onNotice?.(threadId, request.text);
           return Effect.never;
         }
-        return Effect.sync(() => {
-          if (signal?.aborted === true) return "skipped" as const;
-          if (request.kind === "clear") {
-            notice.onClear?.(threadId);
-            return "cleared" as const;
-          }
-          notice.onNotice?.(threadId, request.text);
-          return notice.mode === "queued" ? "armed" as const : "issued" as const;
+        return Effect.tryPromise({
+          try: async () => {
+            await notice.gate?.(threadId, request);
+            if (signal?.aborted === true) return "skipped" as const;
+            if (request.kind === "clear") {
+              notice.onClear?.(threadId);
+              return "cleared" as const;
+            }
+            notice.onNotice?.(threadId, request.text);
+            return notice.mode === "queued" ? "armed" as const : "issued" as const;
+          },
+          catch: (cause) => new CliError("NOTICE_FAILED", "Harness driver could not reconcile the notice.", { cause }),
         });
       };
     }
@@ -229,6 +234,8 @@ export interface TestHarnessOptions {
   readonly onNoticeCleared?: (threadId: string) => void;
   /** Sees the abort signal handed to a provider notice reconciliation. */
   readonly onNoticeSignal?: (threadId: string, signal?: AbortSignal) => void;
+  /** Holds a provider notice reconciliation before it returns. */
+  readonly noticeGate?: (threadId: string, request: NoticeReconcileRequest) => Promise<void>;
   /** Answers `/btw` for these providers; the others have no `sideQuestion`, so they are `SIDE_QUESTION_UNSUPPORTED`. */
   readonly sideQuestions?: Partial<Record<"claude" | "codex" | "opencode" | "harness", (input: SideQuestionInput) => Promise<SideAnswer>>>;
   /** Holds a provider send before it resolves (the acceptance boundary). */
@@ -244,7 +251,7 @@ function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
     const sideQuestion = kind === undefined ? undefined : options.sideQuestions?.[kind];
     const noticeMode = kind === undefined ? undefined : options.notices?.[kind];
     const notice = noticeMode
-      ? { mode: noticeMode, ...(options.onNotice ? { onNotice: options.onNotice } : {}), ...(options.onNoticeCleared ? { onClear: options.onNoticeCleared } : {}), ...(options.onNoticeSignal ? { onSignal: options.onNoticeSignal } : {}) }
+      ? { mode: noticeMode, ...(options.onNotice ? { onNotice: options.onNotice } : {}), ...(options.onNoticeCleared ? { onClear: options.onNoticeCleared } : {}), ...(options.onNoticeSignal ? { onSignal: options.onNoticeSignal } : {}), ...(options.noticeGate ? { gate: options.noticeGate } : {}) }
       : undefined;
     const gates = options.sendGate || options.answerGate
       ? { ...(options.sendGate ? { send: options.sendGate } : {}), ...(options.answerGate ? { answer: options.answerGate } : {}) }

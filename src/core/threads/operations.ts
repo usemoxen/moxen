@@ -530,6 +530,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       storeTurnId: turn.id,
       prompt: notice.prompt,
       onNoticeDispatch: notice.finish,
+      revalidateNotice: notice.revalidate,
       ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
       usageNoticeMode: mode,
       ...(setup.fresh ? { freshConversation: true } : {}),
@@ -2263,7 +2264,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       store, driver, threadId: thread.id, instanceId: sendSelection.instanceId, prompt: text,
       provenance: automatic ? "automatic" : "explicit", kind: control ? "control" : "message", trigger: "dispatch", mode,
     });
-    const steered = await deliverSteer(driver, thread.id, notice.prompt, providerImages(uploads), sent.messageId);
+    const steered = await deliverSteer(driver, thread.id, await notice.revalidate(), providerImages(uploads), sent.messageId);
     await notice.finish(steered);
     return { ...sent, run: null, steerDelivered: steered };
   }
@@ -2381,6 +2382,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       storeTurnId: sent.turn.id,
       prompt: notice.prompt,
       onNoticeDispatch: notice.finish,
+      revalidateNotice: notice.revalidate,
       ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
       ...(setup.fresh ? { freshConversation: true } : {}),
       ...(images.length > 0 ? { images } : {}),
