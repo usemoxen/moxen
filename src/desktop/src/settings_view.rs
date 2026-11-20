@@ -733,7 +733,9 @@ fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
     for section in snapshot.sections() {
         let category = match section {
             "provider:harness" => "Moxen Harness",
-            "provider:claude" | "provider:codex" | "provider:opencode" | "provider:acp" => "Providers",
+            "provider:claude" | "provider:codex" | "provider:opencode" | "provider:acp" => {
+                "Providers"
+            }
             "mcp" | "skills" => "Integrations",
             _ => "Moxen",
         };
