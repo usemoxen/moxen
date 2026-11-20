@@ -1335,4 +1335,93 @@ describe("driver event pump", () => {
     );
     expect(misattributed).toEqual([]);
   });
+
+  it("attaches late background.task and tool completion rows to their originating turn even after a later turn ran", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-bg-origin-turn-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Background origin turn",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+    let turnNum = 0;
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => {
+        turnNum += 1;
+        return Effect.succeed({ threadId: input.threadId, turnId: `driver-turn-${turnNum}` });
+      },
+      interruptTurn: () => Effect.void,
+      awaitTurn: async (_tid, driverTurnId) => {
+        if (driverTurnId === "driver-turn-1") {
+          await Effect.runPromise(
+            Queue.offer(queue, {
+              type: "background.task",
+              provider: "antigravity",
+              threadId: thread.id,
+              turnId: "driver-turn-1",
+              taskId: "bg-from-t1",
+              status: "started",
+              description: "long build",
+              taskType: "local_bash",
+              toolUseId: "bg-from-t1",
+              summary: null,
+            }),
+          );
+        }
+        return { status: "completed", text: `Done ${driverTurnId}`, usage: null, error: null };
+      },
+      streamEvents: Stream.fromQueue(queue),
+    };
+    watchDriverSession(store, driver, thread.id, root);
+
+    const { turn: turn1 } = await sendTurn(store, thread.id, { prompt: "start bg" });
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn1.id, prompt: "start bg", workingDirectory: root });
+
+    const { turn: turn2 } = await sendTurn(store, thread.id, { prompt: "unrelated turn 2" });
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn2.id, prompt: "unrelated turn 2", workingDirectory: root });
+
+    // Background task from Turn 1 completes after Turn 2 settled.
+    await Effect.runPromise(
+      Queue.offer(queue, {
+        type: "tool.execute.completed",
+        provider: "antigravity",
+        threadId: thread.id,
+        turnId: "driver-turn-1",
+        tool: "Bash",
+        raw: { toolCallId: "bg-from-t1", title: "long build", status: "completed", output: "ok" },
+      }),
+    );
+    await Effect.runPromise(
+      Queue.offer(queue, {
+        type: "background.task",
+        provider: "antigravity",
+        threadId: thread.id,
+        turnId: "driver-turn-1",
+        taskId: "bg-from-t1",
+        status: "completed",
+        description: "long build",
+        taskType: "local_bash",
+        toolUseId: "bg-from-t1",
+        summary: null,
+      }),
+    );
+
+    await expect
+      .poll(async () => {
+        const rows = await store.readActivities(thread.id);
+        return rows.some((row) => row.kind === "background.completed");
+      })
+      .toBe(true);
+
+    const rows = await store.readActivities(thread.id);
+    const bgDone = rows.find((row) => row.kind === "background.completed");
+    const toolDone = rows.find((row) => row.kind === "tool-call.completed" && row.payload["toolCallId"] === "bg-from-t1");
+    expect(bgDone?.turnId).toBe(turn1.id);
+    expect(toolDone?.turnId).toBe(turn1.id);
+  });
 });

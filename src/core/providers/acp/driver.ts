@@ -139,6 +139,8 @@ interface AcpToolState {
   readonly toolCallId: string;
   readonly turnId: TurnId;
   canonicalTool: string;
+  rawTitle: string | null;
+  rawKind: string | null;
   title: string;
   kind: string | null;
   status: "pending" | "in_progress" | "completed" | "failed";
@@ -149,6 +151,7 @@ interface AcpToolState {
   patch: string | null;
   startedAt: number;
   endedAt: number | null;
+  recordedInItems: boolean;
 }
 
 interface AcpReasoningState {
@@ -1134,7 +1137,6 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       if (this.discardIfDrainingCancelledTurn(session)) return;
       const turn = this.openTurn(session) ?? this.startOutOfTurn(session);
       turn.awaitingPostUsageSettle = false;
-      this.promoteInProgressTools(session, turn);
       this.pauseGenerationTimer(turn);
       if (!turn.activeReasoning) {
         const reasoningId = `acp-reason-${randomUUID()}`;
@@ -1239,7 +1241,53 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           this.clearCancelledStreamSuppression(session);
         }
       }
-      const turn = ownerTurn ?? this.openTurn(session) ?? this.startOutOfTurn(session);
+
+      const openNow = this.openTurn(session);
+      // A stray `tool_call_update` for an unknown pre-restart tool call (with no open turn)
+      // must not open an empty phantom background turn; emit a standalone update/completion instead.
+      if (kind === "tool_call_update" && ownerTurn === null && openNow === null) {
+        const rawKind = asNonEmptyString(update["kind"]);
+        const rawTitle = asNonEmptyString(update["title"]);
+        const rawStatus = asNonEmptyString(update["status"]);
+        const status: AcpToolState["status"] =
+          rawStatus === "completed" || rawStatus === "failed" || rawStatus === "in_progress" || rawStatus === "pending"
+            ? rawStatus
+            : "completed";
+        const rawInput = asRecord(update["rawInput"]) ?? {};
+        const normalized = normalizeAcpToolCall(rawKind, rawTitle, rawInput);
+        const extracted = extractAcpToolContent(update["content"], update["locations"]);
+        const rawOutputFromField =
+          typeof update["rawOutput"] === "string"
+            ? update["rawOutput"]
+            : update["rawOutput"] !== undefined && update["rawOutput"] !== null
+              ? JSON.stringify(update["rawOutput"])
+              : null;
+        const output = extracted.output ?? rawOutputFromField ?? null;
+        const terminal = status === "completed" || status === "failed";
+        const now = Date.now();
+        this.publish({
+          type: terminal ? "tool.execute.completed" : "tool.execute.updated",
+          provider: this.provider,
+          threadId: session.threadId,
+          turnId: null,
+          tool: normalized.canonicalTool,
+          raw: {
+            toolCallId,
+            title: normalized.title,
+            kind: normalized.kind,
+            status,
+            input: normalized.input,
+            output,
+            files: extracted.files,
+            patch: extracted.patch,
+            startMs: now,
+            endMs: terminal ? now : null,
+          },
+        });
+        return;
+      }
+
+      const turn = ownerTurn ?? openNow ?? this.startOutOfTurn(session);
       const activeOpen = this.openTurn(session);
       if (activeOpen) {
         activeOpen.awaitingPostUsageSettle = false;
@@ -1254,15 +1302,30 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const existing = turn.tools.get(toolCallId);
       const isNew = !existing;
       const now = Date.now();
-      const rawKind = asNonEmptyString(update["kind"]) ?? existing?.kind ?? null;
-      const rawTitle = asNonEmptyString(update["title"]) ?? existing?.title ?? null;
+      const incomingKind = asNonEmptyString(update["kind"]);
+      const incomingTitle = asNonEmptyString(update["title"]);
+      const incomingInput = asRecord(update["rawInput"]);
+      const hasIncomingInput = incomingInput !== null && Object.keys(incomingInput).length > 0;
+      const rawKind = incomingKind ?? existing?.rawKind ?? existing?.kind ?? null;
+      const rawTitle = incomingTitle ?? existing?.rawTitle ?? null;
+      const rawInput = hasIncomingInput
+        ? { ...(existing?.rawInput ?? {}), ...incomingInput }
+        : existing?.rawInput ?? {};
+      const shouldNormalize =
+        !existing || incomingKind !== null || incomingTitle !== null || hasIncomingInput;
+      const normalized = shouldNormalize
+        ? normalizeAcpToolCall(rawKind, rawTitle, rawInput)
+        : {
+            canonicalTool: existing.canonicalTool,
+            title: existing.title,
+            kind: existing.kind,
+            input: existing.input,
+          };
       const rawStatus = asNonEmptyString(update["status"]);
       const status: AcpToolState["status"] =
         rawStatus === "completed" || rawStatus === "failed" || rawStatus === "in_progress" || rawStatus === "pending"
           ? rawStatus
           : existing?.status ?? "in_progress";
-      const rawInput = asRecord(update["rawInput"]) ?? existing?.rawInput ?? {};
-      const normalized = normalizeAcpToolCall(rawKind, rawTitle, rawInput);
       const extracted = extractAcpToolContent(update["content"], update["locations"]);
       const rawOutputFromField =
         typeof update["rawOutput"] === "string"
@@ -1274,11 +1337,23 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       const files = extracted.files.length > 0 ? extracted.files : existing?.files ?? [];
       const patch = extracted.patch ?? existing?.patch ?? null;
       const terminal = status === "completed" || status === "failed";
+      let recordedInItems = existing?.recordedInItems ?? false;
+
+      if (terminal && !recordedInItems) {
+        recordedInItems = true;
+        turn.items.push({
+          kind: "tool",
+          tool: normalized.canonicalTool,
+          text: output ?? normalized.title,
+        });
+      }
 
       const state: AcpToolState = {
         toolCallId,
         turnId: turn.id,
         canonicalTool: normalized.canonicalTool,
+        rawTitle,
+        rawKind,
         title: normalized.title,
         kind: normalized.kind,
         status,
@@ -1289,6 +1364,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         patch,
         startedAt: existing?.startedAt ?? now,
         endedAt: terminal ? (existing?.endedAt ?? now) : null,
+        recordedInItems,
       };
       turn.tools.set(toolCallId, state);
 
@@ -1298,14 +1374,6 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         : isNew
           ? "tool.execute.started"
           : "tool.execute.updated";
-
-      if (terminal) {
-        turn.items.push({
-          kind: "tool",
-          tool: canonicalTool,
-          text: state.rawOutput ?? state.title,
-        });
-      }
 
       this.publish({
         type: eventType,
@@ -1329,7 +1397,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
       if (terminal) {
         this.clearBackgroundPromotionTimer(session, toolCallId);
-        this.finishBackgroundTask(session, state, this.openTurn(session)?.id ?? turn.id);
+        this.finishBackgroundTask(session, state, state.turnId);
       } else {
         this.scheduleBackgroundPromotion(session, state);
       }
@@ -1441,14 +1509,16 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           ? Number(rawWait)
           : null;
     if (waitMs === null || session.backgroundTimers.has(state.toolCallId)) return;
+    const toolCallId = state.toolCallId;
     const timer = setTimeout(() => {
-      session.backgroundTimers.delete(state.toolCallId);
-      if (state.status === "in_progress" || state.status === "pending") {
-        this.promoteToolToBackground(session, state);
+      session.backgroundTimers.delete(toolCallId);
+      const current = this.findTurnWithTool(session, toolCallId)?.tools.get(toolCallId);
+      if (current && (current.status === "in_progress" || current.status === "pending")) {
+        this.promoteToolToBackground(session, current);
       }
     }, waitMs);
     timer.unref?.();
-    session.backgroundTimers.set(state.toolCallId, timer);
+    session.backgroundTimers.set(toolCallId, timer);
   }
 
   private promoteInProgressTools(session: AcpSession, turn: AcpTranscriptTurn): void {
@@ -1486,7 +1556,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       type: "background.task",
       provider: this.provider,
       threadId: session.threadId,
-      turnId: this.openTurn(session)?.id ?? state.turnId,
+      turnId: state.turnId,
       taskId: state.toolCallId,
       status: "started",
       description,
@@ -1683,6 +1753,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.clearBackgroundTurnIdleTimer(session);
     if (status === "completed") {
       this.promoteInProgressTools(session, turn);
+    } else {
+      this.failInProgressForegroundTools(session, turn, status, error);
     }
     this.finishReasoning(session, turn);
     this.pauseGenerationTimer(turn);
@@ -1703,6 +1775,50 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       publish: (event) => this.publish(event),
       event: (turnId) => terminalTurnEvent(this.provider, session.threadId, turnId, status, raw),
     });
+  }
+
+  private failInProgressForegroundTools(
+    session: AcpSession,
+    turn: AcpTranscriptTurn,
+    status: "interrupted" | "failed",
+    error: string | null,
+  ): void {
+    const now = Date.now();
+    for (const state of turn.tools.values()) {
+      if (state.status !== "in_progress" && state.status !== "pending") continue;
+      this.clearBackgroundPromotionTimer(session, state.toolCallId);
+      if (session.backgroundTasks.has(state.toolCallId)) continue;
+      state.status = "failed";
+      state.endedAt = now;
+      state.rawOutput = state.rawOutput ?? (status === "interrupted" ? "Interrupted." : (error ?? "Turn failed."));
+      if (!state.recordedInItems) {
+        state.recordedInItems = true;
+        turn.items.push({
+          kind: "tool",
+          tool: state.canonicalTool,
+          text: state.rawOutput ?? state.title,
+        });
+      }
+      this.publish({
+        type: "tool.execute.completed",
+        provider: this.provider,
+        threadId: session.threadId,
+        turnId: turn.id,
+        tool: state.canonicalTool,
+        raw: {
+          toolCallId: state.toolCallId,
+          title: state.title,
+          kind: state.kind,
+          status: state.status,
+          input: state.input,
+          output: state.rawOutput,
+          files: state.files,
+          patch: state.patch,
+          startMs: state.startedAt,
+          endMs: state.endedAt,
+        },
+      });
+    }
   }
 
   private cancelAllParked(session: AcpSession): void {

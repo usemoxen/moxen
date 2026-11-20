@@ -1010,4 +1010,189 @@ describe("ACP crash recovery & rollback", () => {
       await Effect.runPromise(driver.stopAll());
     }
   });
+
+  it("preserves canonicalTool, rawInput, and deduplicates turn.items across two-step tool_call -> tool_call_update", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      const server = transport.sessions[0]!.server;
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-agent",
+        kind: "other",
+        title: "Run invoke_subagent",
+        status: "in_progress",
+        rawInput: { Role: "Codebase Researcher", Prompt: "Inspect driver" },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-agent",
+        status: "completed",
+        rawOutput: "Done",
+      });
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-web",
+        kind: "search",
+        title: '"acp spec" on Web',
+        status: "in_progress",
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-web",
+        status: "completed",
+      });
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-glob",
+        kind: "search",
+        title: 'Files named "*.ts"',
+        status: "in_progress",
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-glob",
+        status: "completed",
+      });
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-list",
+        kind: "read",
+        title: "Directory src/core",
+        status: "in_progress",
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-list",
+        status: "completed",
+      });
+
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-write",
+        kind: "edit",
+        title: "File src/new.ts",
+        status: "in_progress",
+        rawInput: { Path: "src/new.ts", Content: "export const x = 1;\n" },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-write",
+        status: "completed",
+        rawInput: {},
+      });
+      // Duplicate terminal update must not push a second item onto turn.items.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-write",
+        status: "completed",
+        rawOutput: "written",
+      });
+
+      server.finishPrompt("end_turn");
+      await driver.awaitTurn("thread-1", sent.turnId);
+
+      const started = events.filter((e) => e.type === "tool.execute.started").map((e) => e.tool);
+      const completed = events.filter((e) => e.type === "tool.execute.completed");
+      expect(started).toEqual(["Agent", "WebSearch", "Glob", "List", "Write"]);
+      expect(completed.map((e) => e.tool)).toEqual(["Agent", "WebSearch", "Glob", "List", "Write", "Write"]);
+      const writeCompleted = completed.find(
+        (e) => (e.raw as Record<string, unknown>)["toolCallId"] === "tc-write",
+      )!;
+      expect((writeCompleted.raw as Record<string, unknown>)["input"]).toMatchObject({
+        Path: "src/new.ts",
+        Content: "export const x = 1;\n",
+      });
+
+      const snapshot = await Effect.runPromise(driver.readThread("thread-1"));
+      const toolItems = snapshot.turns[0]!.items.filter(
+        (item) => (item as { kind: string }).kind === "tool",
+      );
+      expect(toolItems).toHaveLength(5);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("does not promote foreground Bash on thought chunks, settles in-progress tools on interrupt, and ignores unknown pre-restart tool_call_update without phantom turns", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport, backgroundTurnIdleMs: 30 });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const server = transport.sessions[0]!.server;
+
+      // 1. Unknown pre-restart tool_call_update with no open turn must not spawn a phantom background turn.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-pre-restart",
+        kind: "execute",
+        title: "old cmd",
+        status: "completed",
+        rawOutput: "done",
+      });
+      await vi.waitFor(
+        () =>
+          expect(
+            events.some(
+              (e) =>
+                e.type === "tool.execute.completed" &&
+                (e.raw as Record<string, unknown>)["toolCallId"] === "tc-pre-restart",
+            ),
+          ).toBe(true),
+        { interval: 5 },
+      );
+      expect(events.filter((e) => e.type === "turn.started" && e.origin === "background")).toEqual([]);
+
+      // 2. Foreground Bash is NOT promoted on agent_thought_chunk; interrupt fails both Read and foreground Bash.
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-fg-bash",
+        kind: "execute",
+        title: "bun test",
+        status: "in_progress",
+        rawInput: { CommandLine: "bun test", WaitMsBeforeAsync: 60_000 },
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-fg-read",
+        kind: "read",
+        title: "File src/a.ts",
+        status: "in_progress",
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Waiting..." },
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "reasoning.delta")).toBe(true), { interval: 5 });
+
+      expect(driver.backgroundTasks("thread-1")).toEqual([]);
+
+      await Effect.runPromise(driver.interruptTurn("thread-1", sent.turnId));
+      await vi.waitFor(() => {
+        const terminalIds = events
+          .filter((e) => e.type === "tool.execute.completed")
+          .map((e) => (e.raw as Record<string, unknown>)["toolCallId"]);
+        expect(terminalIds).toEqual(expect.arrayContaining(["tc-fg-bash", "tc-fg-read"]));
+      });
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
 });

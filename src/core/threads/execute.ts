@@ -745,6 +745,33 @@ interface ActiveTurnRecorder {
   driverTurnId: string | null;
 }
 const recordingTurns = new Map<string, Set<ActiveTurnRecorder>>();
+/** Maps a driver turn id back to its originating store turn id for late out-of-turn events. */
+const driverTurnIds = new WeakMap<TurnDriver, Map<string, Map<string, string>>>();
+const MAX_TRACKED_DRIVER_TURNS = 64;
+
+function rememberDriverTurn(driver: TurnDriver, threadId: string, driverTurnId: string, storeTurnId: string): void {
+  let byThread = driverTurnIds.get(driver);
+  if (!byThread) {
+    byThread = new Map();
+    driverTurnIds.set(driver, byThread);
+  }
+  let map = byThread.get(threadId);
+  if (!map) {
+    map = new Map();
+    byThread.set(threadId, map);
+  }
+  map.set(driverTurnId, storeTurnId);
+  while (map.size > MAX_TRACKED_DRIVER_TURNS) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+function storeTurnForDriverTurn(driver: TurnDriver, threadId: string, driverTurnId: string | null | undefined): string | null {
+  if (!driverTurnId) return null;
+  return driverTurnIds.get(driver)?.get(threadId)?.get(driverTurnId) ?? null;
+}
 
 function isRecordedByActiveTurn(threadId: string, driverTurnId: string | null): boolean {
   const recorders = recordingTurns.get(threadId);
@@ -794,19 +821,30 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
   let lastTasks = "";
   let capturedWakeUp = false;
   const lateQuestions = new Set<string>();
+  const taskOriginTurn = new Map<string, string | null>();
   let chain: Promise<void> = Promise.resolve();
   const latestTurnId = async (): Promise<string | null> => {
     const turns = await store.readTurns(threadId);
     return (openTurn(turns) ?? turns.at(-1))?.id ?? null;
   };
-  const record = (kind: string, summary: string, payload: Record<string, unknown>): void => {
+  const record = (
+    kind: string,
+    summary: string,
+    payload: Record<string, unknown>,
+    options?: { readonly driverTurnId?: string | null; readonly storeTurnId?: string | null; readonly onResolvedTurnId?: (turnId: string | null) => void },
+  ): void => {
     chain = chain.then(async () => {
       const createdAt = store.nowIso();
+      const resolvedTurnId =
+        options?.storeTurnId !== undefined
+          ? options.storeTurnId
+          : storeTurnForDriverTurn(driver, threadId, options?.driverTurnId) ?? (await latestTurnId());
+      options?.onResolvedTurnId?.(resolvedTurnId);
       await store
         .appendLedger(threadId, "activity", {
           id: store.newId(),
           threadId,
-          turnId: await latestTurnId(),
+          turnId: resolvedTurnId,
           kind,
           summary,
           payload,
@@ -867,15 +905,34 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
     if (event.type === "turn.started") chain = chain.then(() => { capturedWakeUp = false; });
     if (event.type === "background.task") {
       const verb = event.status === "started" ? "Started" : event.status === "completed" ? "Finished" : event.status === "failed" ? "Failed" : "Stopped";
-      record(`background.${event.status}`, `${verb} in the background: ${event.description || event.taskId}`, {
-        title: event.description || event.taskId,
-        taskId: event.taskId,
-        status: event.status,
-        description: event.description,
-        taskType: event.taskType,
-        toolUseId: event.toolUseId,
-        summary: event.summary,
-      });
+      const mappedStoreTurn =
+        event.status === "started"
+          ? storeTurnForDriverTurn(driver, threadId, event.turnId)
+          : (taskOriginTurn.get(event.taskId) ?? storeTurnForDriverTurn(driver, threadId, event.turnId));
+      if (event.status !== "started") taskOriginTurn.delete(event.taskId);
+      record(
+        `background.${event.status}`,
+        `${verb} in the background: ${event.description || event.taskId}`,
+        {
+          title: event.description || event.taskId,
+          taskId: event.taskId,
+          status: event.status,
+          description: event.description,
+          taskType: event.taskType,
+          toolUseId: event.toolUseId,
+          summary: event.summary,
+        },
+        {
+          ...(mappedStoreTurn !== null ? { storeTurnId: mappedStoreTurn } : { driverTurnId: event.turnId }),
+          ...(event.status === "started"
+            ? {
+                onResolvedTurnId: (resolved) => {
+                  if (resolved !== null) taskOriginTurn.set(event.taskId, resolved);
+                },
+              }
+            : {}),
+        },
+      );
       return;
     }
     if (event.type === "background.tasks.changed") {
@@ -910,7 +967,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
         return;
       }
       if (row !== null) {
-        record(row.kind, row.summary, row.payload);
+        record(row.kind, row.summary, row.payload, { driverTurnId: event.turnId });
       }
       return;
     }
@@ -933,6 +990,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
   const stop = (): void => {
     unsubscribe();
     byThread!.delete(threadId);
+    driverTurnIds.get(driver)?.delete(threadId);
     forgetSession(driver, threadId);
   };
   byThread.set(threadId, stop);
@@ -1404,6 +1462,9 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     });
   };
   const recorder: ActiveTurnRecorder = { driverTurnId: args.driverTurnId ?? null };
+  if (args.driverTurnId) {
+    rememberDriverTurn(driver, threadId, args.driverTurnId, storeTurnId);
+  }
   const unsubscribe = subscribeDriverThread(driver, threadId, (event) => {
     const eventTurnId = "turnId" in event ? event.turnId : null;
     if (recorder.driverTurnId !== null && eventTurnId !== null && eventTurnId !== recorder.driverTurnId) {
@@ -1465,6 +1526,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
           }),
         );
     recorder.driverTurnId = sent.turnId;
+    rememberDriverTurn(driver, threadId, sent.turnId, storeTurnId);
     if (!args.driverTurnId && controller.signal.aborted) {
       // The stop landed while the prompt was going out: `onAbort`'s
       // interrupt found no open turn yet. Stop the run that just started —
