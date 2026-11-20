@@ -66,6 +66,23 @@ async function writeDiskCache(storeRoot: string | undefined, entry: CachedAntigr
   }
 }
 
+/**
+ * Antigravity's internal orchestrator models run opaque sub-loops inside `agy`
+ * outside Moxen's tracked threads/subagents, so Moxen omits them from the
+ * offered catalog (existing threads with an explicit slug still pass through).
+ */
+export function isOmittedAntigravityModel(model: Pick<ModelSummary, "slug" | "name">): boolean {
+  return model.slug.startsWith("gemini-pro-orchestrator-") || /^orchestrator\b/i.test(model.name.trim());
+}
+
+function filterAntigravityModels(models: readonly ModelSummary[]): ModelSummary[] {
+  const kept = models.filter((model) => !isOmittedAntigravityModel(model));
+  if (kept.length > 0 && !kept.some((model) => model.isDefault === true)) {
+    return kept.map((model, index) => (index === 0 ? { ...model, isDefault: true } : model));
+  }
+  return kept;
+}
+
 function fallbackModels(): ModelSummary[] {
   return [
     {
@@ -155,10 +172,10 @@ export async function antigravityProvider(
     const authStatus = init.authMethods.length > 0 ? init.authMethods[0]!.id : "ready";
     let models: ModelSummary[];
     if (cachedHit) {
-      models = (cachedHit as CachedAntigravityModels).models;
+      models = filterAntigravityModels((cachedHit as CachedAntigravityModels).models);
     } else if (discovered.length > 0) {
-      models = discovered;
-      if (useCache) {
+      models = filterAntigravityModels(discovered);
+      if (useCache && models.length > 0) {
         const key = cacheKeyOf(spec.command, spec.args, init.agentInfo.version);
         const entry: CachedAntigravityModels = { key, fetchedAt: now, models };
         memoryCache.set(key, entry);
@@ -169,8 +186,9 @@ export async function antigravityProvider(
         ? (memoryCache.get(cacheKeyOf(spec.command, spec.args, init.agentInfo.version)) ??
             (diskCache && diskCache.key === cacheKeyOf(spec.command, spec.args, init.agentInfo.version) ? diskCache : null))
         : null;
-      models = stale && stale.models.length > 0 ? stale.models : fallbackModels();
+      models = stale ? filterAntigravityModels(stale.models) : [];
     }
+    if (models.length === 0) models = fallbackModels();
     return {
       ...base,
       enabled: true,

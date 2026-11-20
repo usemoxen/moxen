@@ -92,6 +92,11 @@ the default outright.
   holds (a stored `Agent` or `Task` entry changes nothing), and the settings
   tool list leaves both out so neither can be switched back on. Fan out through
   Moxen's `delegate` tool instead, which Moxen tracks.
+- Antigravity's internal orchestrator models (`gemini-pro-orchestrator-neon` /
+  "Orchestrator (Neon)" and `gemini-pro-orchestrator-g1-pro` / "Orchestrator
+  (Argon)") are omitted from Moxen's offered Antigravity catalog for the same
+  reason: their orchestration stays opaque inside `agy` rather than creating
+  tracked Moxen threads. Use Moxen's `delegate` tool for multi-thread work.
 - After a 5-hour limit Anthropic may keep serving a subscription on spare
   capacity (Claude Code's `/low-priority`). Moxen cannot drive that lane:
   the SDK never forwards the offer, only the slash command reaches us as

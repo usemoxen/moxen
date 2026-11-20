@@ -72,6 +72,8 @@ describe("Antigravity first-class provider", () => {
             { value: "gemini-4-neon", name: "Gemini 4 Neon" },
             { value: "gemini-4-argon", name: "Gemini 4 Argon" },
             { value: "gemini-pro-orchestrator-neon", name: "Orchestrator (Neon)" },
+            { value: "gemini-pro-orchestrator-g1-pro", name: "Orchestrator (Argon)" },
+            { value: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
           ],
         },
         {
@@ -98,15 +100,18 @@ describe("Antigravity first-class provider", () => {
           { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)" },
           { modelId: "gemini-4-argon-high", name: "Gemini 4 Argon (High)" },
           { modelId: "gemini-pro-orchestrator-neon", name: "Orchestrator (Neon)" },
+          { modelId: "gemini-pro-orchestrator-g1-pro", name: "Orchestrator (Argon)" },
+          { modelId: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
         ],
       },
     });
 
     const summary = await antigravityProvider({ binaryPath: "agy" }, process.env, process.cwd(), transport, { storeRoot });
+    // Internal Orchestrator models are omitted from the offered catalog; GPT-OSS stays with empty efforts.
     expect(summary.models.map((m) => m.slug)).toEqual([
       "gemini-4-neon",
       "gemini-4-argon",
-      "gemini-pro-orchestrator-neon",
+      "gpt-oss-120b-medium",
     ]);
     expect(summary.models[0]).toMatchObject({
       slug: "gemini-4-neon",

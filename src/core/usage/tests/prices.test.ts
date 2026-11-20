@@ -51,4 +51,14 @@ describe("model prices", () => {
     const price = modelPriceFor({ providers: {} }, "codex", "gpt-6.1-sol");
     expect(usageCost(price, usage, true)!.usd).toBeCloseTo(usageCost(price, usage)!.usd * 2, 9);
   });
+
+  it("ships API-equivalent prices for Antigravity's Gemini and Claude models while leaving GPT-OSS unpriced", () => {
+    expect(modelPriceFor({ providers: {} }, "antigravity", "gemini-4-neon")).toEqual({ input: 3, cacheRead: 0.15, output: 15 });
+    expect(modelPriceFor({ providers: {} }, "antigravity", "gemini-4-argon")).toEqual({ input: 2, cacheRead: 0.1, output: 10 });
+    expect(modelPriceFor({ providers: {} }, "antigravity", "gemini-4-hydrogen")).toEqual({ input: 1.5, cacheRead: 0.075, output: 7.5 });
+    expect(modelPriceFor({ providers: {} }, "antigravity", "gemini-3.8-flash")).toEqual({ input: 0.75, cacheRead: 0.075, output: 3.75 });
+    expect(modelPriceFor({ providers: {} }, "antigravity", "claude-opus-5-5")).toEqual({ input: 4, cacheRead: 0.2, cacheWrite: 5, output: 20 });
+    expect(modelPriceFor({ providers: {} }, "antigravity", "claude-sonnet-5-5")).toEqual({ input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 });
+    expect(modelPriceFor({ providers: {} }, "antigravity", "gpt-oss-120b-medium")).toBeNull();
+  });
 });
