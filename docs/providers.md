@@ -116,13 +116,22 @@ negotiates any other protocol version is refused loudly
   `stopBackgroundTask` for client-terminal-backed tasks (while agent-internal
   tasks like `agy`'s `run_command` remain `stoppable: false`), and records
   out-of-turn tool completions and reactive wakeup turns
-  (`origin: "background"`). Native `invoke_subagent` (`Agent`) tool calls also
-  publish `subagent.updated` (`started` / `stopped`) so they appear in the
-  Agents view with their role and summary; full child subagent transcript
-  inspection (`subagentHistory`) is not available because ACP v1 and `agy` do
-  not expose child session IDs or subagent history RPCs. ACP v1 has no
-  conversation rewind RPC, so `AcpDriver` declares
-  `supportsConversationRollback: false`.
+  (`origin: "background"`). Because ACP cannot see internal `schedule` timers or
+  pre-restart background tasks inside an agent, background task lists for `acp`
+  and `antigravity` are marked `partial: true` alongside `opencode`. Native
+  `invoke_subagent` (`Agent`) tool calls also publish `subagent.updated`
+  (`started` / `stopped`) so they appear in the Agents view with their role and
+  summary; full child subagent transcript inspection (`subagentHistory`) is not
+  available because ACP v1 and `agy` do not expose child session IDs or subagent
+  history RPCs.
+- **ACP v1 protocol boundaries**: `AcpDriver` declares
+  `supportsConversationRollback: false` (no conversation rewind RPC), forks
+  sessions via `session/fork` automatically whenever an agent advertises
+  `agentCapabilities.sessionCapabilities.fork` (failing cleanly with
+  `FORK_UNSUPPORTED` when unadvertised, as in `agy acp` v1.5.13), and leaves
+  operations without ACP v1 RPCs unadvertised (`sideQuestion` / `/btw`, prompt
+  improver `completeText`, client-side session rename/title regeneration, and
+  live mid-session MCP/tool updates).
 
 ## Defaults
 

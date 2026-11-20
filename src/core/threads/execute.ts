@@ -184,7 +184,7 @@ export interface TurnDriver extends ProviderSessionTitles {
    * conversation. Resolves to the copy's handle. Absent where the provider
    * cannot fork.
    */
-  forkSession?(cursor: string, workingDirectory: string): Promise<string>;
+  forkSession?(cursor: string, workingDirectory: string, instanceId?: string): Promise<string>;
   /** Drop the provider's last `numTurns` prompts. */
   rollbackThread?(threadId: string, numTurns: number): Effect.Effect<unknown, CliError>;
   /**

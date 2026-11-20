@@ -3166,7 +3166,7 @@ async function forkParentSession(
       details: { threadId: parentThreadId },
     });
   }
-  return { key, cursor: await driver.forkSession(cursor, workingDirectory) };
+  return { key, cursor: await driver.forkSession(cursor, workingDirectory, childSelection.instanceId) };
 }
 
 // -- task notifications -----------------------------------------------------------
@@ -3534,8 +3534,9 @@ async function taskBackgroundState(
     return unknown;
   }
   const forgottenAfter = backgroundForgottenAfterMs(ctx.config);
+  const kind = driverKey(modelSelection.instanceId);
   return {
-    unknown: driver.backgroundTasks === undefined || driverKey(modelSelection.instanceId) === "opencode",
+    unknown: driver.backgroundTasks === undefined || kind === "opencode" || kind === "acp" || kind === "antigravity",
     tasks: summaries.map((task) => {
       const startedAt = task.startedAt ?? null;
       const rawAge = startedAt === null ? null : nowMs - Date.parse(startedAt);

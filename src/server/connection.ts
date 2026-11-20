@@ -2377,13 +2377,15 @@ export class DirectConnection implements ClientApi {
       case "thread.background.list": {
         const driver = await this.sessionDriver(query.threadId);
         if (!driver) return { live: false, partial: false, tasks: [] };
-        // OpenCode reports only the background shells and subagents its own
-        // server started: a live empty list from it never proves nothing runs.
+        // OpenCode and ACP/Antigravity cannot report every background process
+        // (OpenCode only sees its own server; ACP cannot see schedule timers or
+        // pre-restart tasks inside agy), so an empty list never proves nothing runs.
         const store = await this.store();
         const thread = await store.readThreadRecord(query.threadId);
         const turns = await store.readTurns(query.threadId);
         const latest = [...turns].reverse().find((turn) => turn.modelSelection)?.modelSelection ?? thread?.modelSelection;
-        const partial = latest !== undefined && driverKey(latest.instanceId) === "opencode";
+        const latestDriver = latest !== undefined ? driverKey(latest.instanceId) : null;
+        const partial = latestDriver === "opencode" || latestDriver === "acp" || latestDriver === "antigravity";
         return { live: true, partial, tasks: driver.backgroundTasks?.(query.threadId) ?? [] };
       }
       case "thread.context-reading":

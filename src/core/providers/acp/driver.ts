@@ -643,6 +643,91 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     return null;
   };
 
+  /**
+   * Fork an existing ACP session when the agent advertises `sessionCapabilities.fork`
+   * (`session/fork`). Agents without `session/fork` (such as `agy acp` v1.5.13)
+   * fail honestly with `FORK_UNSUPPORTED`.
+   */
+  readonly forkSession = async (
+    cursor: string,
+    workingDirectory: string,
+    instanceId?: string,
+  ): Promise<string> => {
+    for (const session of this.sessions.values()) {
+      if (session.closed || session.acpSessionId !== cursor) continue;
+      if (!session.capabilities.canForkSession) {
+        throw new CliError(
+          "FORK_UNSUPPORTED",
+          `${session.agent.name ?? session.agent.id} does not support ACP session/fork; delegate without fork.`,
+          { exitCode: 4 },
+        );
+      }
+      const raw = await session.peer.request(
+        ACP_METHODS.sessionFork,
+        { sessionId: cursor, cwd: workingDirectory, mcpServers: [] },
+        Math.max(this.initializeTimeoutMs, 10_000),
+      );
+      const forkedId = asNonEmptyString(asRecord(raw)?.["sessionId"]);
+      if (!forkedId) {
+        throw new CliError("ACP_FORK_FAILED", "ACP agent returned no sessionId from session/fork.");
+      }
+      return forkedId;
+    }
+
+    let agent: AcpAgentLaunchSpec;
+    try {
+      const targetInstance =
+        instanceId ??
+        (this.provider === "acp" && this.agents.size === 1
+          ? `acp/${[...this.agents.keys()][0]!}`
+          : this.provider);
+      agent = this.resolveAgent(targetInstance);
+    } catch {
+      throw new CliError(
+        "FORK_UNSUPPORTED",
+        `${instanceId ?? this.provider} cannot resolve an ACP agent to fork; delegate without fork.`,
+        { exitCode: 4 },
+      );
+    }
+
+    const peer = this.transport.startPeer({ agent, cwd: workingDirectory, env: this.baseEnv });
+    try {
+      const rawInit = await peer.request(
+        ACP_METHODS.initialize,
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+            terminal: true,
+            elicitation: { form: {} },
+          },
+          clientInfo: { name: "moxen", title: "Moxen", version: APP_VERSION },
+        },
+        this.initializeTimeoutMs,
+      );
+      const init = parseAcpInitializeResult(rawInit, agent.name ?? agent.id);
+      if (!init.agentCapabilities.canForkSession) {
+        throw new CliError(
+          "FORK_UNSUPPORTED",
+          `${agent.name ?? agent.id} does not support ACP session/fork; delegate without fork.`,
+          { exitCode: 4 },
+        );
+      }
+      const rawFork = await peer.request(
+        ACP_METHODS.sessionFork,
+        { sessionId: cursor, cwd: workingDirectory, mcpServers: [] },
+        Math.max(this.initializeTimeoutMs, 10_000),
+      );
+      const forkedId = asNonEmptyString(asRecord(rawFork)?.["sessionId"]);
+      if (!forkedId) {
+        throw new CliError("ACP_FORK_FAILED", "ACP agent returned no sessionId from session/fork.");
+      }
+      return forkedId;
+    } finally {
+      peer.close();
+    }
+  };
+
   /** Probe an ACP agent's initialize handshake (protocol version, capabilities, auth methods) without creating a session. */
   async probeAgent(instanceId: string, cwd: string): Promise<AcpInitializeResult> {
     const result = await this.probeAgentCatalog(instanceId, cwd, { shouldDiscover: () => false });

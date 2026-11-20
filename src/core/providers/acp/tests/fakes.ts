@@ -14,7 +14,9 @@ export interface FakeAcpScript {
   readonly protocolVersion?: unknown;
   readonly loadSession?: boolean;
   readonly canResumeSession?: boolean;
+  readonly canForkSession?: boolean;
   readonly canCloseSession?: boolean;
+  readonly forkedSessionId?: string;
   readonly version?: string;
   readonly imageCapability?: boolean;
   readonly mcpHttp?: boolean;
@@ -71,11 +73,12 @@ export class FakeAcpServer {
             "protocolVersion" in this.script ? this.script.protocolVersion : ACP_PROTOCOL_VERSION,
           agentCapabilities: {
             loadSession: this.script.loadSession ?? true,
-            ...(this.script.canCloseSession || this.script.canResumeSession
+            ...(this.script.canCloseSession || this.script.canResumeSession || this.script.canForkSession
               ? {
                   sessionCapabilities: {
                     ...(this.script.canCloseSession ? { close: {} } : {}),
                     ...(this.script.canResumeSession ? { resume: {} } : {}),
+                    ...(this.script.canForkSession ? { fork: {} } : {}),
                   },
                 }
               : {}),
@@ -105,6 +108,15 @@ export class FakeAcpServer {
       }
       case "session/close":
         return {};
+      case "session/fork": {
+        const sessionId = (params as { sessionId?: string } | null)?.sessionId;
+        if (!sessionId || this.script.lostSessions?.includes(sessionId)) {
+          throw new Error(`session not found: ${String(sessionId)}`);
+        }
+        return {
+          sessionId: this.script.forkedSessionId ?? `${sessionId}-fork`,
+        };
+      }
       case "session/resume":
       case "session/load": {
         const sessionId = (params as { sessionId?: string } | null)?.sessionId;

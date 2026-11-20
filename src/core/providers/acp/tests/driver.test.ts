@@ -2099,4 +2099,47 @@ describe("ACP native subagent status events (MXN-445)", () => {
       await Effect.runPromise(driver.stopAll());
     }
   });
+
+  it("forks via session/fork when advertised (live or cold) and refuses with FORK_UNSUPPORTED otherwise (MXN-451)", async () => {
+    // 1. Agent without sessionCapabilities.fork fails cleanly with FORK_UNSUPPORTED.
+    const noForkTransport = new FakeAcpTransport({ canForkSession: false });
+    const noForkDriver = new AcpDriver({ provider: "antigravity", transport: noForkTransport });
+    try {
+      await Effect.runPromise(noForkDriver.startSession({ threadId: "thread-1", workingDirectory: process.cwd() }));
+      await expect(noForkDriver.forkSession("acp-sess-1", process.cwd(), "antigravity")).rejects.toMatchObject({
+        code: "FORK_UNSUPPORTED",
+      });
+    } finally {
+      await Effect.runPromise(noForkDriver.stopAll());
+    }
+
+    // 2. Agent advertising sessionCapabilities.fork uses session/fork both on a live session and cold peer.
+    const forkTransport = new FakeAcpTransport({ canForkSession: true, forkedSessionId: "acp-sess-fork-42" });
+    const forkDriver = new AcpDriver({
+      provider: "acp",
+      agents: { custom: { id: "custom", command: "custom", args: ["--acp"] } },
+      transport: forkTransport,
+    });
+    try {
+      await Effect.runPromise(
+        forkDriver.startSession({
+          threadId: "thread-2",
+          workingDirectory: process.cwd(),
+          modelSelection: { instanceId: "acp/custom", model: "default" },
+        }),
+      );
+      expect(await forkDriver.forkSession("acp-sess-1", process.cwd(), "acp/custom")).toBe("acp-sess-fork-42");
+      expect(forkTransport.sessions[0]?.server.requestsTo("session/fork").map((r) => r.params)).toEqual([
+        { sessionId: "acp-sess-1", cwd: process.cwd(), mcpServers: [] },
+      ]);
+
+      // Cold fork (cursor not in live sessions) initializes a short-lived peer and forks.
+      expect(await forkDriver.forkSession("acp-sess-cold", process.cwd(), "acp/custom")).toBe("acp-sess-fork-42");
+      expect(forkTransport.sessions[1]?.server.requestsTo("session/fork").map((r) => r.params)).toEqual([
+        { sessionId: "acp-sess-cold", cwd: process.cwd(), mcpServers: [] },
+      ]);
+    } finally {
+      await Effect.runPromise(forkDriver.stopAll());
+    }
+  });
 });

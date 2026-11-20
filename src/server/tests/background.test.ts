@@ -151,4 +151,44 @@ describe("background work through ClientApi", () => {
       await connection.close();
     }
   });
+
+  it("marks thread.background.list as partial for antigravity and acp threads (MXN-451)", async () => {
+    const driver = new BackgroundDriver();
+    const harness = await testHarness({
+      drivers: {
+        antigravity: () => driver,
+        acp: () => driver,
+      },
+    });
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    try {
+      const agy = await connection.dispatch({
+        type: "thread.handover",
+        cwd: harness.work,
+        prompt: "Watch on agy",
+        wait: true,
+        threadEnvMode: "local",
+        modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      });
+      expect(await connection.query({ type: "thread.background.list", threadId: agy.threadId })).toMatchObject({
+        live: true,
+        partial: true,
+      });
+
+      const acp = await connection.dispatch({
+        type: "thread.handover",
+        cwd: harness.work,
+        prompt: "Watch on acp",
+        wait: true,
+        threadEnvMode: "local",
+        modelSelection: { instanceId: "acp/cline", model: "default" },
+      });
+      expect(await connection.query({ type: "thread.background.list", threadId: acp.threadId })).toMatchObject({
+        live: true,
+        partial: true,
+      });
+    } finally {
+      await connection.close();
+    }
+  });
 });
