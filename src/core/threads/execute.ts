@@ -25,6 +25,7 @@ import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
 import type { McpServerSpec } from "../mcp.js";
 
+import { resolveAcpAgentsMap } from "../providers/acp/config.js";
 import { AcpDriver } from "../providers/acp/driver.js";
 import { CodexDriver } from "../providers/codex/driver.js";
 import { ClaudeDriver } from "../providers/claude/driver.js";
@@ -274,7 +275,7 @@ export function driverForInstance(
   else if (key === "codex") driver = factories.codex?.() ?? new CodexDriver({ ...(providers?.codex ? { settings: providers.codex } : {}) });
   else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
   else if (key === "harness") driver = factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
-  else if (key === "acp") driver = factories.acp?.() ?? new AcpDriver();
+  else if (key === "acp") driver = factories.acp?.() ?? new AcpDriver({ agents: resolveAcpAgentsMap(providers?.acp) });
   if (!driver) {
     throw new CliError("PROVIDER_UNKNOWN", `No direct driver for provider "${instanceId}".`, {
       details: { instanceId },

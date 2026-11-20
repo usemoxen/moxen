@@ -249,6 +249,7 @@ function pageOf(descriptor: SettingDescriptor): string {
     "provider:codex": "Codex",
     "provider:claude": "Claude Code",
     "provider:opencode": "OpenCode",
+    "provider:acp": "ACP",
     "provider:harness": "Model servers",
     mcp: "MCP servers",
   };

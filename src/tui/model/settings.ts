@@ -146,7 +146,7 @@ export type ModelOverrideValues = Readonly<Record<ModelOverrideField, SettingVal
  * for it, then any model they name that the catalog does not, so a stale or
  * hand-written override can still be seen and cleared.
  */
-export function modelOverrideEntries(providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "opencode" | "harness" | undefined, values: ModelOverrideValues): ModelOverrideEntry[] {
+export function modelOverrideEntries(providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "opencode" | "harness" | "acp" | undefined, values: ModelOverrideValues): ModelOverrideEntry[] {
   const text = (field: ModelOverrideField) => (values[field] === undefined ? "" : String(values[field]));
   const sizes = { handoffAt: handoffModelsFromText(text("handoffAt")), compactAt: handoffModelsFromText(text("compactAt")) };
   const modes = { handoff: modesFromText(text("handoff")), compaction: modesFromText(text("compaction")) };
@@ -273,7 +273,7 @@ export function configuredDefaultModel(settings: readonly SettingView[], instanc
 }
 
 /** Whose models a model setting picks from, for a warning: the provider of its page, else the global Provider. */
-function catalogName(settings: readonly SettingView[], providers: readonly ProviderSummary[], providerKind: "claude" | "codex" | "opencode" | "harness" | undefined): string {
+function catalogName(settings: readonly SettingView[], providers: readonly ProviderSummary[], providerKind: "claude" | "codex" | "opencode" | "harness" | "acp" | undefined): string {
   const aimed = valueOf(settings, "provider");
   const provider = providers.find((entry) => (providerKind !== undefined ? driverKindOfInstance(entry.instanceId) === providerKind : entry.instanceId === aimed));
   return provider?.displayName ?? provider?.instanceId ?? t("settings.theProvider");
@@ -647,7 +647,7 @@ export function moxenVersionLine(view: UpdateView): MoxenVersionLine {
 }
 
 /** The "Per model" row: every model with its four overrides, read from the four settings beside it, and what its Compaction can be. */
-function modelOverridesControl(descriptor: SettingDescriptor, value: SettingValue, settings: readonly SettingView[], providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "opencode" | "harness" | undefined): SettingControl {
+function modelOverridesControl(descriptor: SettingDescriptor, value: SettingValue, settings: readonly SettingView[], providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "opencode" | "harness" | "acp" | undefined): SettingControl {
   const prefix = descriptor.key.slice(0, descriptor.key.lastIndexOf(".") + 1);
   const read = (field: ModelOverrideField) => settings.find((view) => view.descriptor.key === `${prefix}${MODEL_OVERRIDE_KEY[field]}`)?.value;
   // The row's own key holds the hand-off sizes; the other three sit beside it.

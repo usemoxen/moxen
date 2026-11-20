@@ -174,8 +174,24 @@ export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundl
   reasoningSummary?: "auto" | "concise" | "detailed" | "none";
 }
 
+/** One configured ACP agent entry (`providers.acp.agents[]`). */
+export interface AcpAgentConfig {
+  readonly id: string;
+  readonly name?: string;
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly launchArgs?: string;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly enabled?: boolean;
+  readonly defaultModel?: string;
+  readonly defaultMode?: string;
+}
+
 /** Agent Client Protocol (ACP) provider configuration (`providers.acp.*`). */
-export interface AcpProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {}
+export interface AcpProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
+  launchArgs?: string;
+  agents?: AcpAgentConfig[];
+}
 
 export interface ProvidersConfig {
   codex?: CodexProviderConfig;

@@ -3,6 +3,10 @@
  * run a scripted peer over `createLinkedPair()` instead of a real CLI.
  * Never builds shell commands by joining strings (`shell: false`, argv array).
  */
+import path from "node:path";
+
+import { expandHome } from "../../config.js";
+import { resolveOnPath } from "../../infra/process.js";
 import { JsonRpcPeer, nodeProcessSpawner, type ProcessSpawner } from "../stdio.js";
 
 export interface AcpAgentLaunchSpec {
@@ -32,11 +36,27 @@ export interface AcpTransport {
   startPeer(options: AcpSpawnOptions): JsonRpcPeer;
 }
 
+/** Resolve an ACP agent executable cleanly across macOS and Windows without a shell. */
+export function acpLaunchCommand(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: readonly string[] } {
+  const expanded = expandHome(command.trim());
+  if (platform !== "win32") return { command: expanded, args };
+  const resolved = path.win32.isAbsolute(expanded)
+    ? expanded
+    : resolveOnPath(expanded, env) ?? expanded;
+  return { command: resolved, args };
+}
+
 export class SpawnAcpTransport implements AcpTransport {
   startPeer(options: AcpSpawnOptions): JsonRpcPeer {
     const spawner = options.spawner ?? nodeProcessSpawner();
     const baseEnv = options.env ?? process.env;
-    const child = spawner.spawn(options.agent.command, options.agent.args, {
+    const launch = acpLaunchCommand(options.agent.command, options.agent.args, baseEnv);
+    const child = spawner.spawn(launch.command, launch.args, {
       cwd: options.cwd,
       env: { ...baseEnv, ...(options.agent.env ?? {}) },
     });

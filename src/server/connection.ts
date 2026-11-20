@@ -439,6 +439,7 @@ export class DirectConnection implements ClientApi {
       return await buildDirectProviders({
         harness: providers?.harness,
         ...(providers?.codex ? { codex: providers.codex } : {}),
+        ...(providers?.acp ? { acp: providers.acp } : {}),
         fetchClaudeModels: () => fetchLiveModels({ transport: new SdkTransport(), binaryPath: claudeBinary }),
       });
     });
@@ -2357,7 +2358,7 @@ export class DirectConnection implements ClientApi {
         return { providers: withLiveUsage(await this.providers()) };
       case "doctor": {
         const providers = (await this.loadConfig()).providers;
-        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath);
+        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath, providers?.acp?.binaryPath);
       }
       case "thread.background.list": {
         const driver = await this.sessionDriver(query.threadId);

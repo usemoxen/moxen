@@ -6,6 +6,7 @@ import path from "node:path";
 import { CliError } from "./errors.js";
 import { FIRST_FORMAT_VERSION, formatTooNew, formatVersionOf, migrateFormat, type FormatMigration } from "./format.js";
 import { parseMcpServers, parseNameList, type McpServerEntry } from "./mcp.js";
+import { normalizeAcpAgent, normalizeAcpAgents } from "./providers/acp/config.js";
 import { normalizeHarnessConfig, parseHarnessProfile } from "./providers/harness/profiles.js";
 import { STICKY_INTERACTION_MODES } from "./interactionmode.js";
 import { HIDDEN_VALUE, writeListValue } from "./configlist.js";
@@ -14,6 +15,7 @@ import { listTarget, parseSettingValue, secretKeyName, settingDescriptor, writeS
 import { isSecretRef, secretRef, writeSecret } from "./secrets.js";
 import { normalizePriceMap } from "./modelprices.js";
 import type {
+  AcpProviderConfig,
   ClaudeProviderConfig,
   CodexProviderConfig,
   CliConfig,
@@ -700,9 +702,40 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     const prices = modelPricesOf(input.harness, "providers.harness", skipped);
     if (withProfiles || defaults || models || prices) result.harness = { ...defaults, ...withProfiles, ...models, ...prices };
   });
+  if (input.acp !== undefined) guarded(skipped, "providers.acp", input.acp, () => {
+    const rawAcp = input.acp as Record<string, unknown>;
+    let agents: AcpProviderConfig["agents"];
+    if (rawAcp.agents !== undefined) {
+      if (skipped === undefined) {
+        agents = normalizeAcpAgents(rawAcp.agents);
+      } else if (!Array.isArray(rawAcp.agents)) {
+        skipped.push({ path: "providers.acp.agents", message: "providers.acp.agents must be a list.", value: rawAcp.agents });
+      } else {
+        const parsed: NonNullable<AcpProviderConfig["agents"]> = [];
+        const seen = new Set<string>();
+        rawAcp.agents.forEach((entry, index) => {
+          const entryPath = entry !== null && typeof entry === "object" && typeof (entry as Record<string, unknown>).id === "string"
+            ? `providers.acp.agents[${(entry as Record<string, unknown>).id}]`
+            : `providers.acp.agents[${index}]`;
+          guarded(skipped, entryPath, entry, () => {
+            const item = normalizeAcpAgent(entry, entryPath);
+            if (seen.has(item.id)) throw new CliError("INVALID_CONFIG", `providers.acp.agents uses id "${item.id}" twice.`);
+            seen.add(item.id);
+            parsed.push(item);
+          });
+        });
+        if (parsed.length > 0) agents = parsed;
+      }
+    }
+    const acp = normalizeSection<AcpProviderConfig>(input.acp, "providers.acp", ["binaryPath", "launchArgs", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"], skipped);
+    if (acp) delete (acp as unknown as Record<string, unknown>).agents;
+    const models = handoffModelsOf(input.acp, "providers.acp", skipped);
+    const prices = modelPricesOf(input.acp, "providers.acp", skipped);
+    if (acp || agents || models || prices) result.acp = { ...acp, ...(agents ? { agents } : {}), ...models, ...prices };
+  });
   // A newer build's extra providers stay in the file untouched.
   for (const [kind, value] of Object.entries(input)) {
-    if (kind !== "claude" && kind !== "codex" && kind !== "opencode" && kind !== "harness") {
+    if (kind !== "claude" && kind !== "codex" && kind !== "opencode" && kind !== "harness" && kind !== "acp") {
       (result as Record<string, unknown>)[kind] = value;
     }
   }

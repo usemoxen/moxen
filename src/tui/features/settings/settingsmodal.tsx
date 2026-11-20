@@ -90,6 +90,7 @@ const SECTION_CATEGORY: Record<SettingSection, string> = {
   "provider:codex": "Providers",
   "provider:claude": "Providers",
   "provider:opencode": "Providers",
+  "provider:acp": "Providers",
   "provider:harness": "Moxen Harness",
   mcp: "Integrations",
   skills: "Integrations",

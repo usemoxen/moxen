@@ -69,6 +69,7 @@ export const SETTING_SECTIONS = [
   "provider:claude",
   "provider:opencode",
   "provider:codex",
+  "provider:acp",
   "provider:harness",
   "mcp",
   "skills",
@@ -88,6 +89,7 @@ export const SECTION_LABEL: Record<SettingSection, string> = {
   "provider:codex": "Codex",
   "provider:claude": "Claude Code",
   "provider:opencode": "OpenCode",
+  "provider:acp": "ACP",
   "provider:harness": "Moxen Harness",
   mcp: "MCP servers",
   skills: "Skills",
@@ -128,7 +130,7 @@ export type SettingKind =
       /** With `source` native-tools: the provider's own tools this setting can switch off (`core/nativetools.ts`). */
       readonly tools?: readonly NativeTool[];
       /** With `source` model or effort: offer only this provider's models (the setting belongs to its page). */
-      readonly providerKind?: "claude" | "codex" | "opencode" | "harness";
+      readonly providerKind?: "claude" | "codex" | "opencode" | "harness" | "acp";
       /** With `source` model: whose value names the provider instance this setting's models belong to, instead of the global Provider. */
       readonly providerKey?: string;
       /** With `source` provider or model: offer only providers with these drivers. */
@@ -350,6 +352,11 @@ const COMPACTION_TEXT: Readonly<Record<LongThreadKind, { readonly own: string; r
     description:
       "Who compacts a thread as it fills. Automatic: past 'Compact at', between turns and in the middle of a long one, and when the server refuses a prompt as too long. Asking offers a card at the line instead, but a delegated task, or a thread halfway from the line to full, is compacted unasked. Off leaves /compact and the rescue for a refused prompt.",
   },
+  acp: {
+    own: "ACP agent",
+    description:
+      "Who compacts a thread as it fills. ACP agent: the agent handles its own context. Moxen can compact at the chosen line, asking first or automatically. Off disables automatic compaction.",
+  },
 };
 
 const COMPACTION_CHOICE_LABEL: Readonly<Record<Exclude<CompactionMode, "provider">, string>> = { ask: "Moxen asks", auto: "Moxen does it", off: "Off" };
@@ -357,14 +364,14 @@ const COMPACTION_CHOICE_LABEL: Readonly<Record<Exclude<CompactionMode, "provider
 /** The sentence every Long threads group ends on, so the two lines are never read apart. */
 const LINES_INTERACT = "Handing off is offered first when its line is lower than compaction's; past both, the lower one acts first.";
 
-const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "opencode" | "harness", string>> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode", harness: "Moxen Harness" };
+const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "opencode" | "harness" | "acp", string>> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode", harness: "Moxen Harness", acp: "ACP" };
 
 /**
  * One Tools group per provider, from one template so the three tabs cannot drift: Moxen's own tools
  * and skills, MCP reach, the to-do list, and (Claude Code, OpenCode) the web orders and the
  * provider's own tools to switch off.
  */
-function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
+function toolSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   const base = { section, group: "Tools", appliesAt: "next-session" } as const;
@@ -423,7 +430,7 @@ function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): Settin
       defaultValue: true,
     },
   ];
-  if (kind === "harness") return settings;
+  if (kind === "harness" || kind === "acp") return settings;
   const advice = "It is advice in the prompt: no tool is switched off, and the model may still pick another.";
   return [
     ...settings,
@@ -456,7 +463,7 @@ function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): Settin
 }
 
 /** A provider's switch for the skills Moxen used to ship (MXN-138): kept so older configs still load, and does nothing. */
-function moxenSkillsSetting(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor {
+function moxenSkillsSetting(kind: "claude" | "codex" | "opencode" | "harness" | "acp"): SettingDescriptor {
   return {
     key: `providers.${kind}.moxenSkills`,
     label: "Moxen's skills",
@@ -474,7 +481,7 @@ function moxenSkillsSetting(kind: "claude" | "codex" | "opencode" | "harness"): 
  * One Sessions group per provider, the global Sessions settings narrowed to it: instructions that only this
  * provider's threads get, and whether a usage limit is waited out. Unset, each follows the global one.
  */
-function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
+function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   return [
@@ -491,7 +498,7 @@ function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness"): Set
     {
       key: `providers.${kind}.sessionTtl`,
       label: "Idle session lifetime",
-      description: `How long ${kind === "claude" ? "a" : kind === "opencode" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back." }[kind]}`,
+      description: `How long ${kind === "opencode" || kind === "acp" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back.", acp: "Each is an ACP agent process." }[kind]}`,
       section,
       group: "Sessions",
       kind: { type: "duration", presets: DURATION_PRESETS, ends: { low: "Shorter", high: "Longer" } },
@@ -502,7 +509,7 @@ function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness"): Set
     {
       key: `providers.${kind}.autoContinueAtUsageLimit`,
       label: "Continue after a usage limit",
-      description: `When a plan limit stops ${kind === "opencode" ? "an" : "a"} ${name} turn, schedule a continue for just after it resets. Limits are per account, so this can be on for a subscription and off for a metered key.`,
+      description: `When a plan limit stops ${kind === "opencode" || kind === "acp" ? "an" : "a"} ${name} turn, schedule a continue for just after it resets. Limits are per account, so this can be on for a subscription and off for a metered key.`,
       section,
       group: "Sessions",
       kind: { type: "boolean" },
@@ -610,7 +617,7 @@ function perModelSettings(kind: LongThreadKind): SettingDescriptor[] {
 }
 
 /** One Model prices group per provider, from one template so the four tabs cannot drift: what a million tokens of each kind cost for this provider's models. */
-function priceSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
+function priceSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   const group = "Model prices";
@@ -1503,6 +1510,57 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     defaultValue: field === "binaryPath" ? "codex" : undefined,
     appliesAt: "server-restart",
   })),
+  // -- ACP -------------------------------------------------------------------
+  {
+    key: "providers.acp.runtimeMode",
+    label: "Permissions",
+    description: "How much a new ACP thread may do without asking.",
+    section: "provider:acp",
+    group: "Defaults",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("approval-required", "Supervised", "Ask before every edit and command."),
+        choice("auto-accept-edits", "Auto-accept edits", "Reads and edits go through; commands still ask."),
+        choice("auto", "Auto", "The ACP agent's own rules judge each call."),
+        choice("full-access", "Full access", "No prompts at all."),
+      ],
+    },
+    defaultValue: undefined,
+    fallback: { key: "runtimeMode" },
+  },
+  {
+    key: "providers.acp.model",
+    label: "Model",
+    description: "The model a new ACP thread starts with, when neither the request nor the project names one.",
+    section: "provider:acp",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "model", providerKind: "acp" },
+    defaultValue: undefined,
+    fallback: { resolver: "providerModel" },
+  },
+  {
+    key: "providers.acp.thinkingEffort",
+    label: "Effort",
+    description: "The reasoning effort a new ACP thread starts at, for models that take one.",
+    section: "provider:acp",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "effort", providerKind: "acp" },
+    defaultValue: undefined,
+    fallback: { key: "thinkingEffort" },
+  },
+  ...toolSettings("acp"),
+  ...sessionSettings("acp"),
+  ...longThreadSettings("acp"),
+  ...priceSettings("acp"),
+  ...(["binaryPath", "launchArgs"] as const).map((field): SettingDescriptor => ({
+    key: `providers.acp.${field}`,
+    label: { binaryPath: "Executable", launchArgs: "Launch arguments" }[field],
+    description: { binaryPath: "The Antigravity (agy) executable to run for the built-in ACP preset.", launchArgs: "Extra arguments passed to `agy acp`." }[field],
+    section: "provider:acp", group: "Runtime", kind: { type: "string" },
+    defaultValue: field === "binaryPath" ? "agy" : undefined,
+    appliesAt: "server-restart",
+  })),
   {
     key: "providers.opencode.runtimeMode",
     label: "Permissions",
@@ -2049,7 +2107,7 @@ function settingPlace(from: SettingDescriptor, to: SettingDescriptor): string {
 
 /** The provider a Long threads row is on; undefined for the global one. */
 const longThreadKindOf = (descriptor: SettingDescriptor): LongThreadKind | undefined =>
-  /^providers\.(claude|codex|opencode|harness)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
+  /^providers\.(claude|codex|opencode|harness|acp)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
 
 /** What a long-thread rule found, said on `descriptor`'s page: the value as that page writes it, and where it is set (nothing for the built-in default). */
 function sourcedEffective(descriptor: SettingDescriptor, value: string, key: string | null): SettingEffective {
@@ -2061,7 +2119,7 @@ function sourcedEffective(descriptor: SettingDescriptor, value: string, key: str
 const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, descriptor: SettingDescriptor) => SettingEffective | undefined>> = {
   /** A provider's delegation tools or web_fetch, unset: the older all-at-once `moxenTools` (`moxenToolsOf`), else on. */
   moxenTools(config, descriptor) {
-    const kind = /^providers\.(claude|codex|opencode|harness)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "opencode" | "harness" | undefined;
+    const kind = /^providers\.(claude|codex|opencode|harness|acp)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "opencode" | "harness" | "acp" | undefined;
     const legacy = kind === undefined ? undefined : config.providers?.[kind]?.moxenTools;
     return legacy === false ? { value: false, label: "Off", origin: `from providers.${kind}.moxenTools in the config file` } : { value: true, label: "On" };
   },
