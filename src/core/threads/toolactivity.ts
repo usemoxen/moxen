@@ -428,6 +428,44 @@ function fromCodex(event: ToolRuntimeEvent, raw: Record<string, unknown>): Nativ
   return null;
 }
 
+function fromAcp(event: ToolRuntimeEvent, raw: Record<string, unknown>): NativeToolCall | null {
+  const callId = asString(raw.toolCallId);
+  if (callId === null) return null;
+  const rawStatus = asString(raw.status);
+  const status: ToolCallStatus =
+    rawStatus === "failed"
+      ? "failed"
+      : rawStatus === "completed"
+        ? "completed"
+        : rawStatus === "pending" || rawStatus === "in_progress"
+          ? "inProgress"
+          : statusOfEvent(event.type);
+  const input = asRecord(raw.input) ?? {};
+  const rawFiles = Array.isArray(raw.files) ? raw.files : [];
+  const files: Array<{ path: string; diff?: string }> = [];
+  for (const entry of rawFiles) {
+    const rec = asRecord(entry);
+    const filePath = rec ? asString(rec.path) : null;
+    if (!filePath) continue;
+    const diff = rec ? asString(rec.diff) : null;
+    files.push(diff ? { path: filePath, diff } : { path: filePath });
+  }
+  return {
+    callId,
+    tool: event.tool,
+    input,
+    output: asString(raw.output),
+    status,
+    exit: asNumber(raw.exit),
+    startMs: asNumber(raw.startMs),
+    endMs: asNumber(raw.endMs),
+    files,
+    patch: asString(raw.patch),
+    title: asString(raw.title),
+    itemType: null,
+  };
+}
+
 export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null {
   const raw = asRecord(event.raw);
   if (raw === null) return null;
@@ -445,6 +483,9 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
     case "harness":
       // The harness publishes Claude's shape (`toolUseId`, `input`, `output`, `isError`) on purpose.
       native = fromClaude(event, raw);
+      break;
+    case "acp":
+      native = fromAcp(event, raw);
       break;
     default:
       native = null;

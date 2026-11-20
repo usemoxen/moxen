@@ -1,0 +1,406 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { CliError } from "../../../errors.js";
+import { permissionActivityRow, type PermissionRuntimeEvent } from "../../../threads/requestactivity.js";
+import { toolActivityRow, type ToolRuntimeEvent } from "../../../threads/toolactivity.js";
+import type { ProviderRuntimeEvent } from "../../spi.js";
+import { AcpDriver } from "../driver.js";
+import { ACP_PROTOCOL_VERSION } from "../protocol.js";
+import { FakeAcpTransport } from "./fakes.js";
+
+const START = { threadId: "thread-1", workingDirectory: path.resolve("repo") };
+
+async function codeOf(run: () => Promise<unknown>): Promise<string> {
+  try {
+    await run();
+  } catch (cause) {
+    if (cause instanceof CliError) return cause.code;
+    throw cause;
+  }
+  throw new Error("expected a CliError");
+}
+
+const tempDirs: string[] = [];
+afterEach(async () => {
+  while (tempDirs.length > 0) {
+    const dir = tempDirs.pop()!;
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+describe("ACP handshake & protocol version pinning", () => {
+  it("sends pinned protocolVersion=1 and refuses a newer or mismatched agent version", async () => {
+    const transport = new FakeAcpTransport({ protocolVersion: 2 });
+    const driver = new AcpDriver({ transport });
+    const code = await codeOf(() => Effect.runPromise(driver.startSession(START)));
+    expect(code).toBe("ACP_PROTOCOL_VERSION_UNSUPPORTED");
+    expect(transport.sessions[0]!.server.requestsTo("initialize")[0]!.params).toMatchObject({
+      protocolVersion: ACP_PROTOCOL_VERSION,
+    });
+    expect(transport.sessions[0]!.client.closed).toBe(true);
+    expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(false);
+  });
+
+  it("routes acp/<agent-id> to the configured launch spec and rejects unknown ids", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({
+      transport,
+      agents: {
+        cline: { id: "cline", name: "Cline", command: "cline", args: ["--acp"] },
+      },
+    });
+    await Effect.runPromise(
+      driver.startSession({
+        ...START,
+        modelSelection: { instanceId: "acp/cline", model: "default" },
+      }),
+    );
+    expect(transport.sessions[0]!.server.spawnOptions.agent).toMatchObject({
+      id: "cline",
+      command: "cline",
+      args: ["--acp"],
+    });
+    await Effect.runPromise(driver.stopAll());
+
+    const unknownCode = await codeOf(() =>
+      Effect.runPromise(
+        driver.startSession({
+          threadId: "thread-2",
+          workingDirectory: START.workingDirectory,
+          modelSelection: { instanceId: "acp/nope", model: "default" },
+        }),
+      ),
+    );
+    expect(unknownCode).toBe("ACP_AGENT_UNKNOWN");
+  });
+});
+
+describe("ACP session resume", () => {
+  it("does not silently replace a conversation when session/load fails for authentication", async () => {
+    const transport = new FakeAcpTransport({
+      failRequests: { "session/load": "authentication required" },
+    });
+    const driver = new AcpDriver({ transport });
+    const code = await codeOf(() =>
+      Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-old" })),
+    );
+    expect(code).toBe("ACP_AUTH_REQUIRED");
+    expect(transport.sessions[0]!.server.requestsTo("session/new")).toEqual([]);
+  });
+
+  it("reattaches via session/load when resumeCursor is valid", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-old" }));
+    const server = transport.sessions[0]!.server;
+    expect(server.requestsTo("session/load")[0]!.params).toMatchObject({
+      sessionId: "acp-old",
+      cwd: START.workingDirectory,
+    });
+    expect(server.requestsTo("session/new")).toEqual([]);
+    expect(driver.resumeCursor("thread-1")).toBe("acp-old");
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("falls back to session/new when the agent lost the previous session", async () => {
+    const transport = new FakeAcpTransport({ lostSessions: ["acp-old"] });
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-old" }));
+    expect(transport.sessions[0]!.server.requestsTo("session/new")).toHaveLength(1);
+    expect(driver.resumeCursor("thread-1")).toBe("acp-sess-1");
+    await Effect.runPromise(driver.stopAll());
+  });
+});
+
+describe("ACP streaming, notes, reasoning, tools & plans (UI/UX parity)", () => {
+  it("streams interim notes, reasoning, tool diffs, plans, and measures generation excluding tools/reasoning", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "fix it" }));
+    const server = transport.sessions[0]!.server;
+
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Thinking carefully..." },
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "reasoning.delta")).toBe(true));
+
+      now = 2_000;
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Checking file." },
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "message.part.updated")).toBe(true));
+
+      now = 2_500;
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-1",
+        title: "Edit src/a.ts",
+        kind: "edit",
+        status: "in_progress",
+        rawInput: { file_path: "src/a.ts" },
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "assistant.note")).toBe(true));
+      await vi.waitFor(() => expect(events.some((e) => e.type === "tool.execute.started")).toBe(true));
+
+      // Long tool execution should NOT inflate generation durationMs.
+      now = 22_500;
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-1",
+        status: "completed",
+        content: [{ type: "diff", path: "src/a.ts", oldText: "a\n", newText: "b\n" }],
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "plan",
+        entries: [
+          { content: "Edit file", status: "completed", priority: "high" },
+          { content: "Run tests", status: "in_progress", priority: "medium" },
+        ],
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "All done." },
+      });
+      await vi.waitFor(() =>
+        expect(events.filter((e) => e.type === "message.part.updated")).toHaveLength(2),
+      );
+      now = 23_000;
+      server.finishPrompt("end_turn");
+
+      const outcome = await driver.awaitTurn("thread-1", sent.turnId);
+      expect(outcome.status).toBe("completed");
+      expect(outcome.text).toBe("All done.");
+      expect(outcome.generation).toEqual({ characters: "Checking file.".length + "All done.".length, durationMs: 1_000 });
+
+      // Verify tool activity row normalizes identically for TUI/Desktop rendering.
+      const completedTool = events.find((e): e is ToolRuntimeEvent => e.type === "tool.execute.completed");
+      expect(completedTool).toBeDefined();
+      const row = toolActivityRow(completedTool!);
+      expect(row).not.toBeNull();
+      expect(row!.kind).toBe("tool-call.completed");
+      expect(row!.payload["itemType"]).toBe("file_change");
+
+      // Verify plan row matches the tasks panel shape.
+      const planEvent = events.find((e) => e.type === "turn.plan.updated");
+      expect(planEvent).toMatchObject({
+        raw: {
+          plan: [
+            { step: "Edit file", status: "completed" },
+            { step: "Run tests", status: "in_progress" },
+          ],
+        },
+      });
+    } finally {
+      clock.mockRestore();
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+});
+
+describe("ACP permissions, cancellation & worktree isolation", () => {
+  it("parks permission requests, renders through permissionActivityRow, and honors acceptForSession", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, runtimeMode: "approval-required" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    const server = transport.sessions[0]!.server;
+    const options = [
+      { optionId: "once", name: "Allow once", kind: "allow_once" },
+      { optionId: "always", name: "Allow always", kind: "allow_always" },
+      { optionId: "deny", name: "Reject", kind: "reject_once" },
+    ];
+
+    const pending = server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: { toolCallId: "tc-1", title: "Run tests", kind: "execute", rawInput: { command: "bun test" } },
+      options,
+    });
+    await vi.waitFor(() => expect(events.some((e) => e.type === "permission.request.opened")).toBe(true));
+    const opened = events.find((e) => e.type === "permission.request.opened") as PermissionRuntimeEvent;
+    const row = permissionActivityRow(opened);
+    expect(row.kind).toBe("permission.requested");
+    expect(row.payload["toolName"]).toBe("Bash");
+    expect(row.payload["detail"]).toBe("bun test");
+
+    await Effect.runPromise(driver.respondToRequest("thread-1", opened.requestId, { kind: "acceptForSession" }));
+    expect(await pending).toEqual({ outcome: { outcome: "selected", optionId: "always" } });
+
+    // Second identical request is auto-approved without parking.
+    const second = await server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: { toolCallId: "tc-2", title: "Run tests", kind: "execute", rawInput: { command: "bun test" } },
+      options,
+    });
+    expect(second).toEqual({ outcome: { outcome: "selected", optionId: "always" } });
+
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("unblocks parked permissions on interruptTurn so the peer never deadlocks", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, runtimeMode: "approval-required" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "run" }));
+    const server = transport.sessions[0]!.server;
+
+    const pending = server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: { toolCallId: "tc-1", title: "Shell", kind: "execute", rawInput: { command: "echo hi" } },
+      options: [{ optionId: "once", name: "Allow", kind: "allow_once" }],
+    });
+    await vi.waitFor(() => expect(events.some((e) => e.type === "permission.request.opened")).toBe(true));
+
+    await Effect.runPromise(driver.interruptTurn("thread-1", sent.turnId));
+    expect(await pending).toEqual({ outcome: { outcome: "cancelled" } });
+    expect((await driver.awaitTurn("thread-1", sent.turnId)).status).toBe("interrupted");
+    expect(server.notificationsTo("session/cancel")).toHaveLength(1);
+
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("enforces worktree isolation on permissions, fs/write_text_file, and terminal/create even in full-access", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-iso-"));
+    tempDirs.push(base);
+    const mainDir = path.join(base, "main");
+    const wtDir = path.join(base, "wt");
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(
+      driver.startSession({
+        threadId: "thread-1",
+        workingDirectory: wtDir,
+        runtimeMode: "full-access",
+        isolation: { worktreeRoot: wtDir, protectedRoots: [mainDir] },
+      }),
+    );
+    const server = transport.sessions[0]!.server;
+
+    // 1. Permission targeting main checkout is declined even in full-access.
+    const perm = await server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: {
+        toolCallId: "tc-1",
+        title: "Edit main",
+        kind: "edit",
+        locations: [{ path: path.join(mainDir, "secret.ts") }],
+      },
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    });
+    expect(perm).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
+
+    // 2. fs/write_text_file into main checkout is rejected; write inside worktree succeeds.
+    await expect(
+      server.ask("fs/write_text_file", { path: path.join(mainDir, "a.txt"), content: "nope" }),
+    ).rejects.toThrow(/worktree/i);
+    const insideFile = path.join(wtDir, "ok.txt");
+    await server.ask("fs/write_text_file", { path: insideFile, content: "line1\nline2\nline3" });
+    expect(await readFile(insideFile, "utf8")).toBe("line1\nline2\nline3");
+    expect(await server.ask("fs/read_text_file", { path: insideFile, line: 2, limit: 1 })).toEqual({
+      content: "line2",
+    });
+
+    // 3. terminal/create targeting main checkout is rejected; running inside worktree succeeds.
+    await expect(
+      server.ask("terminal/create", { command: process.execPath, args: ["-e", "process.exit(0)"], cwd: mainDir }),
+    ).rejects.toThrow(/worktree/i);
+    const created = (await server.ask("terminal/create", {
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('hello-acp')"],
+      cwd: wtDir,
+    })) as { terminalId: string };
+    const exit = await server.ask("terminal/wait_for_exit", { terminalId: created.terminalId });
+    expect(exit).toEqual({ exitCode: 0, signal: null });
+    const out = await server.ask("terminal/output", { terminalId: created.terminalId });
+    expect(out).toMatchObject({ output: "hello-acp", truncated: false });
+    await server.ask("terminal/release", { terminalId: created.terminalId });
+
+    await Effect.runPromise(driver.stopAll());
+  });
+});
+
+describe("ACP crash recovery & rollback", () => {
+  it("settles an open turn as failed when the ACP peer exits unexpectedly", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+    const outcomePromise = driver.awaitTurn("thread-1", sent.turnId);
+    // Simulate unexpected crash of the agent process.
+    transport.sessions[0]!.client.close();
+    const outcome = await outcomePromise;
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toBeTruthy();
+  });
+
+  it("supports readThread and rollbackThread on the session transcript", async () => {
+    const transport = new FakeAcpTransport({
+      onPrompt: () => ({ stopReason: "end_turn" }),
+    });
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    await driver.awaitTurn("thread-1", t1.turnId);
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    await driver.awaitTurn("thread-1", t2.turnId);
+
+    expect((await Effect.runPromise(driver.readThread("thread-1"))).turns).toHaveLength(2);
+    expect((await Effect.runPromise(driver.rollbackThread("thread-1", 1))).turns).toHaveLength(1);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("prepends runtime instructions only on the first turn of a fresh session", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-inst-"));
+    tempDirs.push(dir);
+    await writeFile(path.join(dir, "readme.txt"), "hi", "utf8");
+    const transport = new FakeAcpTransport({
+      onPrompt: () => ({ stopReason: "end_turn" }),
+    });
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(
+      driver.startSession({
+        threadId: "thread-1",
+        workingDirectory: dir,
+        instructions: "# Runtime\nStay in worktree.",
+      }),
+    );
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "first" }));
+    await driver.awaitTurn("thread-1", t1.turnId);
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "second" }));
+    await driver.awaitTurn("thread-1", t2.turnId);
+
+    const prompts = transport.sessions[0]!.server.requestsTo("session/prompt");
+    expect(JSON.stringify(prompts[0]!.params)).toContain("Stay in worktree.");
+    expect(JSON.stringify(prompts[1]!.params)).not.toContain("Stay in worktree.");
+    await Effect.runPromise(driver.stopAll());
+  });
+});

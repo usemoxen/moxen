@@ -132,7 +132,7 @@ export type SettingKind =
       /** With `source` model: whose value names the provider instance this setting's models belong to, instead of the global Provider. */
       readonly providerKey?: string;
       /** With `source` provider or model: offer only providers with these drivers. */
-      readonly providerKinds?: readonly ("claude" | "codex" | "opencode" | "harness")[];
+      readonly providerKinds?: readonly ("claude" | "codex" | "opencode" | "harness" | "acp")[];
     }
   /**
    * `unit` is appended when the value is shown ("20" -> "20s"). `presets`

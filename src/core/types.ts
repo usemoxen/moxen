@@ -174,11 +174,15 @@ export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundl
   reasoningSummary?: "auto" | "concise" | "detailed" | "none";
 }
 
+/** Agent Client Protocol (ACP) provider configuration (`providers.acp.*`). */
+export interface AcpProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {}
+
 export interface ProvidersConfig {
   codex?: CodexProviderConfig;
   claude?: ClaudeProviderConfig;
   opencode?: OpencodeProviderConfig;
   harness?: HarnessProviderConfig;
+  acp?: AcpProviderConfig;
 }
 
 /** Moxen Harness: our own agent loop against endpoints the user configures. */
@@ -738,12 +742,13 @@ export interface WorkspaceResolution {
   branch: string | null;
 }
 
-/** The provider driver an instance id routes to (`opencode/<provider>`, `harness/<profile>`, and `claudeAgent`, the historical Claude id), or null for an id no driver owns. */
-export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "opencode" | "harness" | null {
+/** The provider driver an instance id routes to (`opencode/<provider>`, `harness/<profile>`, `acp/<agent>`, and `claudeAgent`, the historical Claude id), or null for an id no driver owns. */
+export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "opencode" | "harness" | "acp" | null {
   const key = instanceId.trim().toLowerCase();
   if (key === "codex") return "codex";
   if (key === "opencode" || key.startsWith("opencode/")) return "opencode";
   if (key === "harness" || key.startsWith("harness/")) return "harness";
+  if (key === "acp" || key.startsWith("acp/")) return "acp";
   if (key === "claudeagent" || key === "claude") return "claude";
   return null;
 }
