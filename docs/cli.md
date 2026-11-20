@@ -187,7 +187,7 @@ moxen config set providers.opencode.modelInputPrices 'opencode-go/muse-spark-1.3
 moxen config set providers.opencode.modelOutputPrices 'opencode-go/muse-spark-1.3-contributor=10'
 ```
 
-A price you set beats Moxen's shipped price list for that model on that provider; clearing a field or resetting a model returns to the shipped price. Stats and usage protection price turns that recorded no cost at these current values; a turn with a recorded cost keeps it, and a model with no price anywhere stays unpriced. A partial price values the fields it names and counts the rest as zero. On each provider's settings page, Model prices → Prices per model opens a per-model editor backed by these four keys.
+A price you set beats Moxen's shipped price list (API-equivalent prices, including generated OpenCode Go / Zen rows from `bun run update:opencode-prices` with per-turn context-size tiers) for that model on that provider; clearing a field or resetting a model returns to the shipped price. Stats and usage protection price turns that recorded no cost at these current values; a turn with a recorded cost keeps it, free models priced at zero display as `free`, and a model with no price anywhere stays unpriced. A partial price values the fields it names and counts the rest as zero. On each provider's settings page, Model prices → Prices per model opens a per-model editor backed by these four keys.
 
 **Theme.** `ui.theme` picks the interface colours: `moxen` (default), `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `dracula`, `nord`, `gruvbox` or `tokyo-night`. Settings changes apply without restarting. The desktop maps these palettes onto its design-system colour roles.
 

@@ -145,11 +145,12 @@ impl Bucket {
         )
     }
 
-    /// The cost in words: the figure (with a plus where some turns reported
-    /// none), or that nobody did.
+    /// The cost in words: free, the figure (with a plus where some turns
+    /// reported none), or that nobody did.
     pub fn cost_text(&self) -> String {
         match self.cost_usd {
             None => "unpriced".to_string(),
+            Some(cost) if cost == 0. && self.unpriced_turns == 0 => "free".to_string(),
             Some(cost) if self.unpriced_turns > 0 => format!("{}+", format_cost(cost)),
             Some(cost) => format_cost(cost),
         }
@@ -762,6 +763,7 @@ fn overview(w: &Workspace, data: &StatsData) -> impl IntoElement {
     let today = today_key(crate::live::now_ms());
     let cost = match data.cost_usd {
         None => "unpriced".to_string(),
+        Some(cost) if cost == 0. && data.unpriced_turns == 0 => "free".to_string(),
         Some(cost) if data.unpriced_turns > 0 => format!("{}+", format_cost(cost)),
         Some(cost) => format_cost(cost),
     };
@@ -811,7 +813,7 @@ fn overview(w: &Workspace, data: &StatsData) -> impl IntoElement {
         .child(stat_row(
             vec![
                 ("Best streak".to_string(), days),
-                ("Cost".to_string(), cost),
+                ("Cost (API eq.)".to_string(), cost),
                 ("Turns".to_string(), data.turns.to_string()),
             ],
             528.,
@@ -1421,6 +1423,8 @@ mod tests {
     #[test]
     fn cost_words_and_model_names_cover_the_missing_cases() {
         assert_eq!(bucket("m", 10, None, 0, 0.1).cost_text(), "unpriced");
+        assert_eq!(bucket("m", 10, Some(0.), 0, 0.1).cost_text(), "free");
+        assert_eq!(bucket("m", 10, Some(0.), 1, 0.1).cost_text(), "$0.00+");
         assert_eq!(bucket("m", 10, Some(2.), 0, 0.1).cost_text(), "$2.00");
         assert_eq!(
             bucket("unknown", 10, Some(2.), 0, 0.1).model_name(0),

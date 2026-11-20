@@ -1394,3 +1394,18 @@ so the same model can cost differently on two providers; clearing a field or
 resetting a model returns to the shipped price. A price with only some fields
 values what it names and counts the rest as zero. Models match by the string
 Stats buckets them under, slash included.
+
+Moxen's shipped list reports **API-equivalent prices**, not subscription charges:
+- OpenAI, Anthropic and Gemini rows are hand-maintained in `src/core/usage/prices.ts`.
+- OpenCode Go (`opencode-go/<id>`) and OpenCode Zen (`opencode/<id>`) rows live
+  in `src/core/usage/opencode-prices.generated.json`, regenerated at build time
+  from `models.dev` by `bun run update:opencode-prices` (and a scheduled weekly
+  PR workflow). Nothing downloads prices at runtime, and hand-edited rows in
+  `prices.ts` always take precedence over generated rows.
+- `@opencode/client` exposes only `info.cost` (not `opencode.allowance` or
+  `opencode.list_cost`), so Moxen keeps a turn's reported cost when present and
+  falls back to the shipped price table otherwise.
+- Models with context-size tiers (such as `opencode-go/qwen3.7-plus` above 256k)
+  are priced per turn from that turn's prompt size (`input + cacheRead + cacheCreate`),
+  applying the matching tier above its threshold.
+- Free models priced at zero show as `free`, distinct from `unpriced`.

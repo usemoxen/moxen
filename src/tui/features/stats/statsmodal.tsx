@@ -51,9 +51,10 @@ function shortDate(day: Date): string {
   return day.toLocaleDateString(currentLanguage(), { month: "short", day: "numeric" });
 }
 
-/** The cost of a bucket in words: a figure (with a plus where some turns reported none), or that nobody did. */
+/** The cost of a bucket in words: free, a dollar figure (with a plus where some turns reported none), or unpriced. */
 function costText(costUsd: number | null, unpricedTurns: number): string {
   if (costUsd === null) return t("stats.unpriced");
+  if (costUsd === 0 && unpricedTurns === 0) return t("stats.free");
   return unpricedTurns > 0 ? `${formatCost(costUsd)}+` : formatCost(costUsd);
 }
 
@@ -355,7 +356,15 @@ export function StatsModal({
           <HoverButton label={t("stats.copyCard")} fg={COLOR.dim} hoverFg={COLOR.bright} onClick={() => onCopyCard(range)} />
           <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={Math.max(0, inner - 40)}>{` · ${t("stats.hint")}`}</OverflowText>
         </box>
-        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{loading ? t("stats.updating") : stats !== null && stats.unpricedTurns > 0 && stats.costUsd !== null ? t("stats.costNote") : ""}</text>
+        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
+          {loading
+            ? t("stats.updating")
+            : stats !== null && stats.costUsd !== null
+              ? stats.unpricedTurns > 0
+                ? t("stats.costNote")
+                : t("stats.apiNote")
+              : ""}
+        </text>
       </box>
     </ModalShell>
   );
