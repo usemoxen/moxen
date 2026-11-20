@@ -176,6 +176,12 @@ after instruction-update comparison; it does not change the shared instruction
 text or trigger repeat-turn updates. Instruction previews built without a
 thread id omit the line.
 
+The shared runtime instructions allow relevant read-only Moxen CLI inspection.
+They tell agents to use the agent tools for thread and task management, not to
+bypass their restrictions, and to get explicit authorization for the action and
+target before changing another thread through the CLI. This guidance does not
+change CLI permissions or override server or sandbox denials.
+
 Thinking summaries default to Detailed (`providers.codex.reasoningSummary`),
 with Automatic, Concise and Off also available. Moxen preserves the reported
 sections and renders their markdown; the amount of reasoning exposed remains

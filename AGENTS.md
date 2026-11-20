@@ -37,6 +37,10 @@ Keep this file under 200 lines and 10,000 characters.
   `.private/docs/agent-desktop.md`, how it should look is
   `.private/mockups/agent-desktop/`).
 - If you change behavior a doc describes, update the doc.
+- Settle a delegated subthread once it is no longer needed: its work is
+  merged, its report has been used, or it was superseded or stopped. Remove
+  its worktree when settling, unless the branch still holds unmerged work.
+  Don't settle a thread that is running or still has work you will act on.
 
 ## Cross-platform
 
@@ -61,6 +65,14 @@ All work has a Linear issue (team Moxen, `MXN-n`, project Moxen Agent).
 
 - Search for an existing issue first. If there is none, show the user the issue
   you'd create (title, labels, description) and wait for a yes.
+- Exception: when you run as the orchestrator (Orchestrate mode), you may file
+  issues and sub-issues for clearly wanted work without waiting for a yes:
+  bugs you or your workers find, review findings, and steps of a plan the user
+  approved. Still search first and follow every rule below. Say in your reply
+  what you filed. A new product direction or a change of scope still needs a
+  yes.
+- Assign every issue and sub-issue to `@me` in Linear. Set a priority other
+  than `No priority` and fill in Linear's size estimate field.
 - The user writes the main issue and its title is the subject of the work.
   Don't rewrite that subject. A small edit is fine when the scope moved a
   little and the subject stays the same: a typo, a word, a clarified qualifier.
@@ -83,9 +95,10 @@ All work has a Linear issue (team Moxen, `MXN-n`, project Moxen Agent).
     `tui: image viewer pan, zoom and stepping through a set`, or
     `core+tui: ...` when more than one area is involved. Keep the user's own
     words when they wrote the issue; add the area, don't rename.
-  - Labels: one type (`Feature`, `Improvement`, `Bug`) plus every area that
-    applies (`TUI`, `Desktop`, `Cleanup`, `macOS`, `Windows`). Label
-    sub-issues the same way.
+  - Labels: give every issue and sub-issue exactly one type (`Feature`,
+    `Improvement`, or `Bug`) and all applicable area labels, including on
+    archived issues. Reuse existing labels first. Create a label only when
+    none fits, and make it general enough to reuse across issues.
   - Description: the problem in prose, then optional `## Design`,
     `## Out of scope` and `## Open` sections. Link related issues, and start a
     sub-issue with "Part of MXN-n".

@@ -525,12 +525,14 @@ describe("session setup", () => {
         "Showing images",
         "Layouts, charts and states",
         "Shell",
+        "Managing Moxen threads",
         "Messages from Moxen",
         "Memory",
         "Web",
       ]);
       // The layouts reach a session as it starts: the language the reply's block is tagged with, and a schema the parser reads.
       expect(instructions).toContain("```moxen-ui");
+      expect(instructions).toContain("Do not change another thread through the CLI without explicit user authorization.");
       // One provenance sentence for every block Moxen sends, and the web tips last.
       expect(instructions).toContain("Some messages come from Moxen, not from the person you are talking to.");
       expect(instructions).toContain("<task-notification>");

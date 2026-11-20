@@ -306,6 +306,16 @@ export const KNOWLEDGE_GUIDANCE =
   "Reference defaults are not current settings: inspect live state as documented. Reading grants no permission to make changes; " +
   "follow the user's request and existing approval rules. Never put credentials in tool arguments or files.";
 
+export const THREAD_CLI_GUIDANCE = [
+  "Use Moxen’s agent tools to manage threads and tasks. You may use the Moxen CLI for read-only inspection when it is relevant to the user’s request. Do not use the CLI, a script, or the server API to bypass a restriction in an agent tool.",
+  "Do not change another thread through the CLI without explicit user authorization. This includes sending, scheduling, steering, restarting, interrupting, or cancelling work; starting or continuing a thread; launching a delegated task; and changing a thread’s status or ownership. The authorization must cover the action and the target thread, or the thread to be created. Knowing a thread ID, having shell access, or being asked to finish a broader task does not grant that permission.",
+  "If an agent tool refuses an action or cannot target a thread, stop. Tell the user what you couldn’t do. Don’t retry through another route unless the user explicitly authorizes that route for the specific action. An authorization does not override a server or sandbox denial.",
+].join("\n\n");
+
+export const BACKGROUND_WAIT_GUIDANCE =
+  "When background work will notify and resume this thread on completion, do any independent work, then end your turn if nothing else can proceed. " +
+  "Do not poll, sleep, or keep the turn open just to wait. Say what is still pending, then read the result and continue when the notification arrives.";
+
 /** "Claude Code", "OpenCode", "Moxen Harness": the harness a provider instance runs in, as its users call it. */
 export function harnessName(instanceId: string): string {
   const key = instanceId.trim().toLowerCase();
@@ -352,7 +362,8 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
     if (input.checklist !== false) add("Checklist", CHECKLIST_GUIDANCE);
     add("Subagents", OPENCODE_SUBAGENT_GUIDANCE);
   }
-  add("Shell", buildShellGuidance({ ...(input.shell ?? detectShells()), harness }));
+  add("Shell", `${buildShellGuidance({ ...(input.shell ?? detectShells()), harness })}\n\n${BACKGROUND_WAIT_GUIDANCE}`);
+  add("Managing Moxen threads", THREAD_CLI_GUIDANCE);
 
   const messages = [MESSAGES_GUIDANCE, ...(input.delegationTools === true && !delegation ? [TASK_NOTIFICATION_LINE] : [])].join("\n");
   // Claude Code's MCP results are wrapped by a hook; the other providers say so in their own prompts.
