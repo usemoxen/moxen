@@ -9,7 +9,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../../errors.js";
 import { driverForInstance } from "../../../threads/execute.js";
-import { permissionActivityRow, type PermissionRuntimeEvent } from "../../../threads/requestactivity.js";
+import {
+  permissionActivityRow,
+  userInputActivityRow,
+  type PermissionRuntimeEvent,
+  type UserInputRuntimeEvent,
+} from "../../../threads/requestactivity.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "../../../threads/toolactivity.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
 import { AcpDriver } from "../driver.js";
@@ -1658,5 +1663,165 @@ describe("ACP session titles, startup notifications, and live agent config sync 
       args: ["acp"],
     });
     await Effect.runPromise((updated as AcpDriver).stopAll());
+  });
+});
+
+describe("ACP elicitation/create (ask_question) & respondToUserInput (MXN-443)", () => {
+  it("advertises form elicitation, converts requestedSchema through userInputActivityRow, and resolves typed answers, dismissals, URL/delegated declines, and turn settle cancellation", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const server = transport.sessions[0]!.server;
+
+      // 1. Initialize advertises form elicitation (and not url).
+      expect(server.requestsTo("initialize")[0]!.params).toMatchObject({
+        clientCapabilities: {
+          elicitation: { form: {} },
+        },
+      });
+
+      // 2. URL elicitation is declined immediately without parking.
+      expect(
+        await server.ask("elicitation/create", {
+          sessionId: "acp-sess-1",
+          mode: "url",
+          url: "https://example.test/oauth",
+          message: "Sign in",
+        }),
+      ).toEqual({ action: "decline" });
+
+      // 3. Form elicitation with single-select oneOf, multi-select array anyOf, boolean, and integer fields.
+      const pending = server.ask("elicitation/create", {
+        sessionId: "acp-sess-1",
+        mode: "form",
+        message: "Clarify setup",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            db: {
+              type: "string",
+              title: "Which database?",
+              oneOf: [
+                { const: "pg", title: "PostgreSQL" },
+                { const: "sqlite", title: "SQLite" },
+              ],
+            },
+            features: {
+              type: "array",
+              title: "Which features?",
+              items: {
+                anyOf: [
+                  { const: "auth", title: "Auth" },
+                  { const: "search", title: "Search" },
+                ],
+              },
+            },
+            strict: { type: "boolean", title: "Enable strict mode?" },
+            retries: { type: "integer", title: "Max retries" },
+          },
+        },
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "user-input.request.opened")).toBe(true));
+      const opened = events.find((e) => e.type === "user-input.request.opened") as UserInputRuntimeEvent;
+      const row = userInputActivityRow(opened);
+      expect(row).not.toBeNull();
+      expect(row!.kind).toBe("user-input.requested");
+      expect(row!.payload["questions"]).toMatchObject([
+        {
+          id: "db",
+          question: "Which database?",
+          multiSelect: false,
+          options: [
+            { label: "PostgreSQL", value: "pg" },
+            { label: "SQLite", value: "sqlite" },
+          ],
+        },
+        {
+          id: "features",
+          question: "Which features?",
+          multiSelect: true,
+          options: [
+            { label: "Auth", value: "auth" },
+            { label: "Search", value: "search" },
+          ],
+        },
+        {
+          id: "strict",
+          question: "Enable strict mode?",
+          multiSelect: false,
+          allowCustomAnswer: false,
+        },
+        {
+          id: "retries",
+          question: "Max retries",
+          multiSelect: false,
+        },
+      ]);
+
+      await Effect.runPromise(
+        driver.respondToUserInput("thread-1", opened.requestId, {
+          db: "pg",
+          features: "auth, search",
+          strict: "true",
+          retries: "3",
+        }),
+      );
+      expect(await pending).toEqual({
+        action: "accept",
+        content: { db: "pg", features: ["auth", "search"], strict: true, retries: 3 },
+      });
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === "user-input.request.resolved" && e.requestId === opened.requestId)).toBe(true),
+      );
+
+      // 4. Dismissal routes through respondToRequest(..., { kind: "decline" }) and replies { action: "decline" }.
+      const dismissPending = server.ask("elicitation/create", {
+        sessionId: "acp-sess-1",
+        mode: "form",
+        message: "Optional question",
+        requestedSchema: { type: "object", properties: { note: { type: "string", title: "Any notes?" } } },
+      });
+      await vi.waitFor(() =>
+        expect(events.filter((e) => e.type === "user-input.request.opened")).toHaveLength(2),
+      );
+      const opened2 = events.filter((e) => e.type === "user-input.request.opened")[1] as UserInputRuntimeEvent;
+      await Effect.runPromise(driver.respondToRequest("thread-1", opened2.requestId, { kind: "decline" }));
+      expect(await dismissPending).toEqual({ action: "decline" });
+
+      // 5. Turn settle cancels parked user-input requests.
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "ask me" }));
+      const settlePending = server.ask("elicitation/create", {
+        sessionId: "acp-sess-1",
+        mode: "form",
+        message: "Will settle",
+      });
+      await vi.waitFor(() =>
+        expect(events.filter((e) => e.type === "user-input.request.opened")).toHaveLength(3),
+      );
+      server.finishPrompt("end_turn");
+      expect(await settlePending).toEqual({ action: "cancel" });
+      await driver.awaitTurn("thread-1", sent.turnId);
+
+      // 6. Delegated sessions decline elicitations immediately without parking.
+      await Effect.runPromise(
+        driver.startSession({ threadId: "thread-delegated", workingDirectory: START.workingDirectory, delegated: true }),
+      );
+      const delServer = transport.sessions[1]!.server;
+      expect(
+        await delServer.ask("elicitation/create", {
+          sessionId: "acp-sess-1",
+          mode: "form",
+          message: "Need user",
+        }),
+      ).toEqual({ action: "decline" });
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
   });
 });

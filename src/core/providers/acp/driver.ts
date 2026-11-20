@@ -62,6 +62,7 @@ import {
   asNonEmptyString,
   asRecord,
   asString,
+  buildAcpElicitationResponse,
   buildAcpPromptBlocks,
   extractAcpToolContent,
   extractSelectionEffort,
@@ -72,6 +73,7 @@ import {
   parseAcpAvailableCommands,
   parseAcpCatalogModels,
   parseAcpConfigOptions,
+  parseAcpElicitationQuestions,
   parseAcpInitializeResult,
   parseAcpModelsState,
   parseAcpModesState,
@@ -193,6 +195,13 @@ interface ParkedAcpPermission {
   readonly resolve: (response: unknown) => void;
 }
 
+interface ParkedAcpUserInput {
+  readonly requestId: ApprovalRequestId;
+  readonly threadId: ThreadId;
+  readonly params: unknown;
+  readonly resolve: (response: unknown) => void;
+}
+
 interface InFlightAcpPrompt {
   readonly turn: AcpTranscriptTurn;
   readonly done: Promise<void>;
@@ -226,6 +235,7 @@ interface AcpSession {
   readonly transcript: AcpTranscriptTurn[];
   readonly waiters: TurnWaiters<AcpTurnOutcome>;
   readonly parked: Map<ApprovalRequestId, ParkedAcpPermission>;
+  readonly parkedInputs: Map<ApprovalRequestId, ParkedAcpUserInput>;
   readonly backgroundTasks: Map<string, BackgroundTaskSummary>;
   readonly backgroundTimers: Map<string, ReturnType<typeof setTimeout>>;
   backgroundTurnIdleTimer: ReturnType<typeof setTimeout> | null;
@@ -577,6 +587,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           clientCapabilities: {
             fs: { readTextFile: true, writeTextFile: true },
             terminal: true,
+            elicitation: { form: {} },
           },
           clientInfo: { name: "moxen", title: "Moxen", version: APP_VERSION },
         },
@@ -807,6 +818,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
             clientCapabilities: {
               fs: { readTextFile: true, writeTextFile: true },
               terminal: true,
+              elicitation: { form: {} },
             },
             clientInfo: { name: "moxen", title: "Moxen", version: APP_VERSION },
           },
@@ -902,6 +914,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           transcript: [],
           waiters: new Map(),
           parked: new Map(),
+          parkedInputs: new Map(),
           backgroundTasks: new Map(),
           backgroundTimers: new Map(),
           backgroundTurnIdleTimer: null,
@@ -1173,36 +1186,68 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.attempt("ACP_APPROVAL_FAILED", `Could not answer permission request ${requestId}`, async () => {
       const session = this.requireSession(threadId);
       const parked = session.parked.get(requestId);
-      if (!parked) {
-        throw new CliError("APPROVAL_NOT_FOUND", `No pending ACP approval ${requestId} on thread ${threadId}.`);
+      if (parked) {
+        session.parked.delete(requestId);
+        if (decision.kind === "acceptForSession") {
+          session.sessionAllowKeys.add(parked.sessionKey);
+        }
+        // Keep isolated sessions using `allow_once` on the wire so the agent never
+        // caches `allow_always` past Moxen's worktree isolation checks.
+        const wireDecision: ProviderApprovalDecision =
+          decision.kind === "acceptForSession" && session.isolation ? { kind: "accept" } : decision;
+        const response = selectAcpPermissionOutcome(wireDecision, parked.options);
+        parked.resolve(response);
+        this.publish({
+          type: "permission.request.resolved",
+          provider: this.provider,
+          threadId,
+          requestId,
+          raw: {
+            toolName: parked.toolName,
+            behavior: decision.kind === "accept" || decision.kind === "acceptForSession" ? "allow" : "deny",
+          },
+        });
+        return;
       }
-      session.parked.delete(requestId);
-      if (decision.kind === "acceptForSession") {
-        session.sessionAllowKeys.add(parked.sessionKey);
+      // Question dismissal (`userInputDismiss`) routes through `respondToRequest(..., { kind: "decline" })`.
+      const parkedInput = session.parkedInputs.get(requestId);
+      if (parkedInput) {
+        session.parkedInputs.delete(requestId);
+        parkedInput.resolve({ action: decision.kind === "cancel" ? "cancel" : "decline" });
+        this.publish({
+          type: "user-input.request.resolved",
+          provider: this.provider,
+          threadId,
+          requestId,
+          raw: { toolName: "AskUserQuestion", behavior: "deny" },
+        });
+        return;
       }
-      // Keep isolated sessions using `allow_once` on the wire so the agent never
-      // caches `allow_always` past Moxen's worktree isolation checks.
-      const wireDecision: ProviderApprovalDecision =
-        decision.kind === "acceptForSession" && session.isolation ? { kind: "accept" } : decision;
-      const response = selectAcpPermissionOutcome(wireDecision, parked.options);
-      parked.resolve(response);
-      this.publish({
-        type: "permission.request.resolved",
-        provider: this.provider,
-        threadId,
-        requestId,
-        raw: {
-          toolName: parked.toolName,
-          behavior: decision.kind === "accept" || decision.kind === "acceptForSession" ? "allow" : "deny",
-        },
-      });
+      throw new CliError("APPROVAL_NOT_FOUND", `No pending ACP approval ${requestId} on thread ${threadId}.`);
     });
 
   respondToUserInput = (
-    _threadId: ThreadId,
-    _requestId: ApprovalRequestId,
-    _answers: ProviderUserInputAnswers,
-  ): Effect.Effect<void, CliError> => Effect.void;
+    threadId: ThreadId,
+    requestId: ApprovalRequestId,
+    answers: ProviderUserInputAnswers,
+  ): Effect.Effect<void, CliError> =>
+    this.attempt("ACP_USER_INPUT_FAILED", `Could not answer user input request ${requestId}`, async () => {
+      const session = this.requireSession(threadId);
+      const parked = session.parkedInputs.get(requestId);
+      if (!parked) {
+        throw new CliError("REQUEST_UNKNOWN", `No pending ACP user input request ${requestId} on thread ${threadId}.`);
+      }
+      const response = buildAcpElicitationResponse(parked.params, answers);
+      session.parkedInputs.delete(requestId);
+      parked.resolve(response);
+      this.publish({
+        type: "user-input.request.resolved",
+        provider: this.provider,
+        threadId,
+        requestId,
+        raw: { toolName: "AskUserQuestion", behavior: "allow" },
+      });
+    });
 
   stopSession = (threadId: ThreadId): Effect.Effect<void, CliError> =>
     Effect.sync(() => {
@@ -1384,6 +1429,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private async handlePeerRequest(session: AcpSession, method: string, params: unknown): Promise<unknown> {
     if (method === ACP_METHODS.requestPermission) {
       return this.handlePermissionRequest(session, params);
+    }
+    if (method === ACP_METHODS.elicitationCreate) {
+      return this.handleElicitationRequest(session, params);
     }
     const clientCtx = {
       workingDirectory: session.workingDirectory,
@@ -1962,6 +2010,36 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     });
   }
 
+  private async handleElicitationRequest(session: AcpSession, params: unknown): Promise<unknown> {
+    const rec = asRecord(params);
+    // URL/OAuth elicitations need a browser flow Moxen cannot host, and delegated sessions have no user.
+    if (asNonEmptyString(rec?.["mode"]) === "url" || session.delegated) {
+      return { action: "decline" };
+    }
+    const parsed = parseAcpElicitationQuestions(params);
+    const requestId: ApprovalRequestId = `acp-elicit-${randomUUID()}`;
+    return new Promise<unknown>((resolve) => {
+      session.parkedInputs.set(requestId, {
+        requestId,
+        threadId: session.threadId,
+        params,
+        resolve,
+      });
+      this.publish({
+        type: "user-input.request.opened",
+        provider: this.provider,
+        threadId: session.threadId,
+        requestId,
+        raw: {
+          toolName: "AskUserQuestion",
+          message: parsed.message,
+          questions: parsed.questions,
+          requestedSchema: rec?.["requestedSchema"],
+        },
+      });
+    });
+  }
+
   private publishPermissionDenied(session: AcpSession, title: string, detail: string): void {
     const turn = this.openTurn(session);
     this.publish({
@@ -2293,6 +2371,17 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         threadId: session.threadId,
         requestId,
         raw: { toolName: parked.toolName, behavior: "deny" },
+      });
+    }
+    for (const [requestId, parked] of [...session.parkedInputs]) {
+      session.parkedInputs.delete(requestId);
+      parked.resolve({ action: "cancel" });
+      this.publish({
+        type: "user-input.request.resolved",
+        provider: this.provider,
+        threadId: session.threadId,
+        requestId,
+        raw: { toolName: "AskUserQuestion", behavior: "deny" },
       });
     }
   }

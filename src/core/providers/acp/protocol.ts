@@ -36,6 +36,7 @@ export const ACP_METHODS = {
   sessionUpdate: "session/update",
   // Agent -> Client requests
   requestPermission: "session/request_permission",
+  elicitationCreate: "elicitation/create",
   fsReadTextFile: "fs/read_text_file",
   fsWriteTextFile: "fs/write_text_file",
   terminalCreate: "terminal/create",
@@ -961,6 +962,211 @@ export function selectAcpPermissionOutcome(
     }
   }
   return { outcome: { outcome: "cancelled" } };
+}
+
+export interface AcpElicitationOption {
+  readonly label: string;
+  readonly value: string;
+  readonly description?: string;
+}
+
+export interface AcpElicitationQuestion {
+  readonly id: string;
+  readonly question: string;
+  readonly header: string;
+  readonly multiSelect: boolean;
+  readonly allowCustomAnswer: boolean;
+  readonly options: ReadonlyArray<AcpElicitationOption>;
+}
+
+function parseSchemaChoices(raw: unknown): AcpElicitationOption[] {
+  if (!Array.isArray(raw)) return [];
+  const options: AcpElicitationOption[] = [];
+  for (const entry of raw) {
+    const rec = asRecord(entry);
+    if (!rec) continue;
+    const rawConst = rec["const"];
+    if (rawConst === undefined || rawConst === null) continue;
+    const value = String(rawConst);
+    const label = asNonEmptyString(rec["title"]) ?? value;
+    const description = asNonEmptyString(rec["description"]);
+    options.push({
+      label,
+      value,
+      ...(description ? { description } : {}),
+    });
+  }
+  return options;
+}
+
+function parseEnumChoices(rawEnum: unknown, rawNames: unknown): AcpElicitationOption[] {
+  if (!Array.isArray(rawEnum)) return [];
+  const names = Array.isArray(rawNames) ? rawNames : [];
+  const options: AcpElicitationOption[] = [];
+  for (let i = 0; i < rawEnum.length; i += 1) {
+    const entry = rawEnum[i];
+    if (entry === undefined || entry === null) continue;
+    const value = String(entry);
+    const label = asNonEmptyString(names[i]) ?? value;
+    options.push({ label, value });
+  }
+  return options;
+}
+
+/**
+ * Convert an ACP `elicitation/create` form payload (`{ message, requestedSchema }`)
+ * into Moxen's normalized question list for `user-input.request.opened`.
+ */
+export function parseAcpElicitationQuestions(params: unknown): {
+  readonly message: string;
+  readonly questions: AcpElicitationQuestion[];
+} {
+  const rec = asRecord(params) ?? {};
+  const message = asNonEmptyString(rec["message"]) ?? "Agent requested input";
+  const schema = asRecord(rec["requestedSchema"]);
+  const properties = asRecord(schema?.["properties"]);
+  const entries = properties ? Object.entries(properties) : [];
+
+  if (entries.length === 0) {
+    return {
+      message,
+      questions: [
+        {
+          id: "response",
+          question: message,
+          header: "Question",
+          multiSelect: false,
+          allowCustomAnswer: true,
+          options: [],
+        },
+      ],
+    };
+  }
+
+  const questions: AcpElicitationQuestion[] = [];
+  for (const [id, rawField] of entries) {
+    const field = asRecord(rawField) ?? {};
+    const type = asNonEmptyString(field["type"]);
+    const title = asNonEmptyString(field["title"]);
+    const description = asNonEmptyString(field["description"]);
+    const question = title ?? description ?? (entries.length === 1 ? message : id);
+    const header = title ? id : "Question";
+
+    let multiSelect = false;
+    let allowCustomAnswer = true;
+    let options: AcpElicitationOption[] = [];
+
+    if (type === "boolean") {
+      allowCustomAnswer = false;
+      options = [
+        { label: "Yes", value: "true" },
+        { label: "No", value: "false" },
+      ];
+    } else if (type === "array") {
+      multiSelect = true;
+      const items = asRecord(field["items"]);
+      options = parseSchemaChoices(items?.["anyOf"] ?? items?.["oneOf"]);
+      if (options.length === 0) {
+        options = parseEnumChoices(items?.["enum"], items?.["enumNames"]);
+      }
+    } else {
+      options = parseSchemaChoices(field["oneOf"] ?? field["anyOf"]);
+      if (options.length === 0) {
+        options = parseEnumChoices(field["enum"], field["enumNames"]);
+      }
+    }
+
+    questions.push({
+      id,
+      question,
+      header,
+      multiSelect,
+      allowCustomAnswer,
+      options,
+    });
+  }
+
+  return { message, questions };
+}
+
+function splitMultiSelectAnswer(value: string, knownValues: readonly string[]): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  if (knownValues.includes(trimmed)) return [trimmed];
+  // Match known values greedily in case an option value itself contains ", ".
+  if (knownValues.length > 0) {
+    const sorted = [...knownValues].sort((a, b) => b.length - a.length);
+    const matched: string[] = [];
+    let rest = trimmed;
+    while (rest.length > 0) {
+      const hit = sorted.find(
+        (candidate) =>
+          rest === candidate ||
+          rest.startsWith(`${candidate}, `) ||
+          rest.startsWith(`${candidate},`),
+      );
+      if (hit) {
+        matched.push(hit);
+        rest = rest.slice(hit.length).replace(/^,\s*/, "").trim();
+      } else {
+        const comma = rest.indexOf(",");
+        if (comma === -1) {
+          matched.push(rest);
+          break;
+        }
+        const part = rest.slice(0, comma).trim();
+        if (part) matched.push(part);
+        rest = rest.slice(comma + 1).trim();
+      }
+    }
+    return matched;
+  }
+  return trimmed
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * Convert submitted Moxen `ProviderUserInputAnswers` into an ACP `elicitation/create`
+ * `{ action: "accept", content }` payload conforming to `requestedSchema`.
+ */
+export function buildAcpElicitationResponse(
+  params: unknown,
+  answers: Readonly<Record<string, string>>,
+): { readonly action: "accept"; readonly content: Record<string, unknown> } {
+  const schema = asRecord(asRecord(params)?.["requestedSchema"]);
+  const properties = asRecord(schema?.["properties"]);
+  const content: Record<string, unknown> = {};
+
+  for (const [key, rawValue] of Object.entries(answers)) {
+    const field = asRecord(properties?.[key]);
+    const type = asNonEmptyString(field?.["type"]);
+    if (type === "boolean") {
+      const lower = rawValue.trim().toLowerCase();
+      content[key] = lower === "true" || lower === "yes" || lower === "1";
+    } else if (type === "number" || type === "integer") {
+      const num = Number(rawValue);
+      if (!Number.isFinite(num) || (type === "integer" && !Number.isInteger(num))) {
+        throw new CliError("INVALID_ANSWER", `Field "${key}" requires a ${type}.`);
+      }
+      content[key] = num;
+    } else if (type === "array") {
+      const items = asRecord(field?.["items"]);
+      const choices = [
+        ...parseSchemaChoices(items?.["anyOf"] ?? items?.["oneOf"]),
+        ...parseEnumChoices(items?.["enum"], items?.["enumNames"]),
+      ];
+      content[key] = splitMultiSelectAnswer(
+        rawValue,
+        choices.map((choice) => choice.value),
+      );
+    } else {
+      content[key] = rawValue;
+    }
+  }
+
+  return { action: "accept", content };
 }
 
 export function isAcpAuthErrorText(text: string): boolean {
