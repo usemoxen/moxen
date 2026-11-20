@@ -105,19 +105,42 @@ class Cdp {
   }
 
   static async connect(url: string, timeoutMs: number): Promise<Cdp> {
-    const socket = new WebSocket(url);
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("The browser did not accept a connection.")), timeoutMs);
-      socket.addEventListener("open", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      socket.addEventListener("error", () => {
-        clearTimeout(timer);
-        reject(new Error("The browser did not accept a connection."));
-      });
-    });
-    return new Cdp(socket);
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("The browser did not accept a connection.");
+      const socket = new WebSocket(url);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            try {
+              socket.close();
+            } catch {
+              // Ignore close errors on timeout.
+            }
+            reject(new Error("The browser did not accept a connection."));
+          }, remaining);
+          socket.addEventListener("open", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+          socket.addEventListener("error", () => {
+            clearTimeout(timer);
+            reject(new Error("The browser did not accept a connection."));
+          });
+        });
+        return new Cdp(socket);
+      } catch (cause) {
+        try {
+          socket.close();
+        } catch {
+          // Ignore close errors on retry.
+        }
+        const wait = Math.min(100, deadline - Date.now());
+        if (wait <= 0) throw cause;
+        await new Promise<void>((resolve) => setTimeout(resolve, wait));
+      }
+    }
   }
 
   send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
