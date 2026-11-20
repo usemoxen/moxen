@@ -30,15 +30,15 @@ describe("user skills management", () => {
   it("keeps provider choices with a disabled package and refuses invalid provider names", async () => {
     const dir = path.join(roots.agents, address.folder);
     await packageAt(dir);
-    for (const kind of ["claude", "codex", "opencode", "harness"] as const) expect(skillOfferedTo(dir, kind)).toBe(true);
-    await setManagedSkillProviders(roots, address, ["codex", "codex"]);
-    expect((await listManagedSkills(roots))[0]?.providers).toEqual(["codex"]);
+    for (const kind of ["claude", "codex", "opencode", "harness", "acp", "antigravity"] as const) expect(skillOfferedTo(dir, kind)).toBe(true);
+    await setManagedSkillProviders(roots, address, ["codex", "antigravity", "acp", "codex"]);
+    expect((await listManagedSkills(roots))[0]?.providers).toEqual(["codex", "antigravity", "acp"]);
     await setManagedSkillEnabled(roots, address, false);
-    expect(skillProviders(dir)).toEqual(["codex"]);
+    expect(skillProviders(dir)).toEqual(["codex", "antigravity", "acp"]);
     await expect(setManagedSkillProviders(roots, address, ["invalid" as "codex"])).rejects.toThrow("providers must be a list");
-    expect(JSON.parse(await readFile(path.join(dir, SKILL_ROUTING_FILE), "utf8"))).toEqual({ providers: ["codex"] });
+    expect(JSON.parse(await readFile(path.join(dir, SKILL_ROUTING_FILE), "utf8"))).toEqual({ providers: ["codex", "antigravity", "acp"] });
     await setManagedSkillProviders(roots, address, []);
-    for (const kind of ["claude", "codex", "opencode", "harness"] as const) expect(skillOfferedTo(dir, kind)).toBe(true);
+    for (const kind of ["claude", "codex", "opencode", "harness", "acp", "antigravity"] as const) expect(skillOfferedTo(dir, kind)).toBe(true);
     expect((await listManagedSkills(roots))[0]?.providers).toBeUndefined();
   });
 

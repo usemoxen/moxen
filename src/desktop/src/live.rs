@@ -604,6 +604,8 @@ struct State {
     skill_texts: HashMap<(String, String), Arc<Result<String, String>>>,
     /// The embeddings engine behind semantic search, once read.
     embeddings: Option<Arc<Result<Embeddings, String>>>,
+    /// The ACP Registry catalog, once read for the Add Agent picker.
+    acp_registry: Option<Arc<Result<crate::settings::AcpRegistryCatalog, String>>>,
     /// Remote access and the paired devices, once read.
     remote: Option<Arc<Result<RemoteState, String>>>,
     /// The providers' newest versions and Moxen's own update check, once read.
@@ -3212,6 +3214,17 @@ impl ThreadSource for ServerSource {
             .embeddings
             .clone()
     }
+    fn read_acp_registry(&mut self, force_refresh: bool) {
+        read_acp_registry_catalog(&self.shared, force_refresh);
+    }
+    fn acp_registry(&self) -> Option<Arc<Result<crate::settings::AcpRegistryCatalog, String>>> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .acp_registry
+            .clone()
+    }
     fn setup_embeddings(&mut self, all: bool) {
         send_embeddings(&self.shared, "memory.embeddings.setup", all);
     }
@@ -4913,6 +4926,26 @@ fn read_embeddings_status(shared: &Arc<Shared>) {
                 })
         },
         move |state, embeddings| state.embeddings = Some(Arc::new(embeddings)),
+    );
+}
+
+/// Reads the ACP Registry catalog for the Add Agent picker.
+fn read_acp_registry_catalog(shared: &Arc<Shared>, force_refresh: bool) {
+    settings_read(
+        shared,
+        Some(("acp.registry.list", None)),
+        move |wire| {
+            wire.query(
+                "acp.registry.list",
+                json!({ "forceRefresh": force_refresh }),
+            )
+            .map_err(|error| error.message)
+            .and_then(|value| {
+                crate::settings::AcpRegistryCatalog::from_json(&value)
+                    .ok_or_else(|| "The server's ACP Registry answer was unreadable.".to_string())
+            })
+        },
+        move |state, catalog| state.acp_registry = Some(Arc::new(catalog)),
     );
 }
 

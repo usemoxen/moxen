@@ -433,18 +433,26 @@ pub fn window_percent(used: i64, max: i64) -> i64 {
     (used as f64 / max as f64 * 100.).round() as i64
 }
 
-/// `mcp__claude_ai_Linear__list_issues` → `Linear · List issues`; any other
-/// name as it is (`prettyToolName` in `src/tui/model/activity.ts`).
+/// `mcp__claude_ai_Linear__list_issues` → `Linear · List issues`;
+/// `mcp_brave-search_brave_image_search` → `Brave Search · Brave image search`;
+/// any other name as it is (`prettyToolName` in `src/tui/model/activity.ts`).
 pub fn pretty_tool_name(name: &str) -> String {
-    let name = name.trim();
-    let Some(rest) = name.strip_prefix("mcp__") else {
-        return name.to_string();
-    };
-    let Some((server, tool)) = rest.split_once("__") else {
-        return name.to_string();
+    let trimmed = name.trim();
+    let clean = trimmed.strip_prefix("Run ").unwrap_or(trimmed);
+    let parsed = clean
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .or_else(|| {
+            clean
+                .strip_prefix("mcp_")
+                .filter(|rest| !rest.starts_with('_'))
+                .and_then(|rest| rest.split_once('_'))
+        });
+    let Some((server, tool)) = parsed else {
+        return clean.to_string();
     };
     if server.is_empty() || tool.is_empty() {
-        return name.to_string();
+        return clean.to_string();
     }
     format!("{} · {}", pretty_mcp_server(server), pretty_mcp_tool(tool))
 }

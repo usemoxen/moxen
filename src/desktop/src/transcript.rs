@@ -473,10 +473,11 @@ fn call_step(call: &Call) -> Message {
                 .or_else(|| text(input, &["filePath"]))
                 .or_else(|| text(input, &["path"]))
                 .or_else(|| text(input, &["Path"]))
+                .or_else(|| text(input, &["TargetFile"]))
                 .or_else(|| text(input, &["notebook_path"]))
                 .or_else(|| p.pointer("/data/files/0/path").and_then(Value::as_str))
                 .unwrap_or("file");
-            let (added, removed, shown) = changed(tool, input);
+            let (added, removed, shown) = changed(tool, input, p);
             step(
                 "edit",
                 short_path(path),
@@ -496,6 +497,7 @@ fn call_step(call: &Call) -> Message {
                     .or_else(|| text(input, &["filePath"]))
                     .or_else(|| text(input, &["path"]))
                     .or_else(|| text(input, &["Path"]))
+                    .or_else(|| text(input, &["TargetFile"]))
                     .or_else(|| p.pointer("/data/files/0/path").and_then(Value::as_str))
                     .unwrap_or("file");
                 let lines = output.lines().count();
@@ -505,6 +507,77 @@ fn call_step(call: &Call) -> Message {
                     short_path(path),
                     cap(&format!("{header}\n{output}")),
                     meta(format!("{lines} lines")),
+                    failed,
+                    running,
+                )
+            }
+            "List" => {
+                let path = text(input, &["DirectoryPath"])
+                    .or_else(|| text(input, &["directoryPath"]))
+                    .or_else(|| text(input, &["path"]))
+                    .or_else(|| text(input, &["Path"]))
+                    .or_else(|| text(input, &["file_path"]))
+                    .or_else(|| p.pointer("/data/files/0/path").and_then(Value::as_str))
+                    .or_else(|| {
+                        text(p, &["title"]).map(|t| t.strip_prefix("Directory ").unwrap_or(t))
+                    })
+                    .unwrap_or(".");
+                let entries = output.lines().filter(|l| !l.trim().is_empty()).count();
+                step(
+                    "read",
+                    clip(&format!("List {}", short_path(path))),
+                    cap(output),
+                    meta(if entries > 0 {
+                        format!("{entries} entries")
+                    } else {
+                        elapsed(None)
+                    }),
+                    failed,
+                    running,
+                )
+            }
+            "WebFetch" => {
+                let url = text(input, &["url"])
+                    .or_else(|| text(input, &["Url"]))
+                    .or_else(|| text(input, &["URL"]))
+                    .or_else(|| text(p, &["title"]).map(|t| t.strip_prefix("URL ").unwrap_or(t)))
+                    .unwrap_or_default();
+                step(
+                    "search",
+                    clip(&format!("WebFetch {url}")),
+                    cap(output),
+                    meta(elapsed(None)),
+                    failed,
+                    running,
+                )
+            }
+            "Agent" => {
+                let role = text(input, &["subagent_type"])
+                    .or_else(|| text(input, &["Role"]))
+                    .or_else(|| text(input, &["role"]))
+                    .or_else(|| text(input, &["TypeName"]))
+                    .or_else(|| {
+                        text(p, &["title"]).filter(|t| *t != "Agent" && *t != "Run invoke_subagent")
+                    });
+                let prompt = text(input, &["description"])
+                    .or_else(|| text(input, &["Prompt"]))
+                    .or_else(|| text(input, &["prompt"]));
+                let summary = match (role, prompt) {
+                    (Some(r), Some(p)) => format!("Agent · {r}  {p}"),
+                    (Some(r), None) => format!("Agent · {r}"),
+                    (None, Some(p)) => format!("Delegating to subagent  {p}"),
+                    (None, None) => "Delegating to subagent".to_string(),
+                };
+                let body = if output.is_empty() {
+                    compact(input)
+                } else {
+                    output.to_string()
+                };
+                step(
+                    "tool",
+                    clip(&summary),
+                    cap(&body),
+                    meta(elapsed(None)),
                     failed,
                     running,
                 )
@@ -549,7 +622,42 @@ fn acp_mcp_tool(p: &Value, input: &Value) -> Option<String> {
     Some(format!("mcp__{}__{tool}", server.unwrap_or("mcp")))
 }
 
-/// `mcp__linear__get_issue` reads as `linear · get_issue`; the call's first
+fn friendly_tool_title(clean: &str) -> Option<&'static str> {
+    match clean.to_ascii_lowercase().as_str() {
+        "toolsearch" => Some("Searching for tools"),
+        "notebookedit" => Some("Editing notebook"),
+        "bashoutput" => Some("Checking background output"),
+        "killshell" => Some("Stopping background shell"),
+        "slashcommand" => Some("Running command"),
+        "enterplanmode" => Some("Entering plan mode"),
+        "exitplanmode" => Some("Exiting plan mode"),
+        "agent" | "invokesubagent" | "invoke_subagent" => Some("Delegating to subagent"),
+        "schedulewakeup" | "schedule" => Some("Scheduling wakeup"),
+        "listagents" => Some("Listing agents"),
+        "sendmessage" | "send_message" => Some("Messaging agent"),
+        "reportfindings" => Some("Reporting findings"),
+        "enterworktree" => Some("Entering worktree"),
+        "exitworktree" => Some("Exiting worktree"),
+        "designsync" => Some("Syncing design"),
+        "croncreate" => Some("Scheduling cron job"),
+        "cronlist" => Some("Listing cron jobs"),
+        "crondelete" => Some("Deleting cron job"),
+        "remotetrigger" => Some("Triggering remote job"),
+        "pushnotification" => Some("Sending notification"),
+        "monitor" => Some("Monitoring process"),
+        "taskoutput" => Some("Checking task output"),
+        "taskstop" => Some("Stopping task"),
+        "managetask" | "manage_task" => Some("Managing background task"),
+        "definesubagent" | "define_subagent" => Some("Defining subagent"),
+        "managesubagents" | "manage_subagents" => Some("Managing subagents"),
+        "runworkflow" | "run_workflow" => Some("Running workflow"),
+        "swarm" => Some("Managing swarm"),
+        "askquestion" | "ask_question" => Some("Asking question"),
+        _ => None,
+    }
+}
+
+/// `mcp__linear__get_issue` reads as `Linear · Get issue`; the call's first
 /// short string argument follows, as a hint at what it was for.
 fn tool_label(tool: &str, input: &Value) -> String {
     let clean = tool.trim().strip_prefix("Run ").unwrap_or(tool.trim());
@@ -568,16 +676,10 @@ fn tool_label(tool: &str, input: &Value) -> String {
             _ => format!("Checking output of {task}"),
         };
     }
-    let name = match clean
-        .strip_prefix("mcp__")
-        .and_then(|rest| rest.split_once("__"))
-        .or_else(|| {
-            clean
-                .strip_prefix("mcp_")
-                .and_then(|rest| rest.split_once('_'))
-        }) {
-        Some((server, name)) => format!("{server} · {name}"),
-        None => clean.to_string(),
+    let name = if let Some(friendly) = friendly_tool_title(clean) {
+        friendly.to_string()
+    } else {
+        crate::usage::pretty_tool_name(clean)
     };
     let hint = input.as_object().and_then(|fields| {
         fields.values().find_map(|v| {
@@ -591,8 +693,24 @@ fn tool_label(tool: &str, input: &Value) -> String {
     }
 }
 
+fn unified_diff_counts(diff: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    (added, removed)
+}
+
 /// How many lines an edit added and removed, and the change as `-`/`+` lines.
-fn changed(tool: &str, input: &Value) -> (usize, usize, String) {
+fn changed(tool: &str, input: &Value, payload: &Value) -> (usize, usize, String) {
     let lines = |value: &str| value.lines().count();
     let mut shown = String::new();
     let (mut added, mut removed) = (0, 0);
@@ -631,6 +749,30 @@ fn changed(tool: &str, input: &Value) -> (usize, usize, String) {
                 .or_else(|| text(input, &["Content"]))
                 .unwrap_or_default();
             one(old, new);
+        }
+    }
+    if added == 0 && removed == 0 && shown.is_empty() {
+        let meta_diff = payload
+            .pointer("/data/state/metadata/diff")
+            .and_then(Value::as_str)
+            .filter(|d| !d.trim().is_empty())
+            .map(str::to_string);
+        let files_diff = if meta_diff.is_none() {
+            let parts: Vec<&str> = payload
+                .pointer("/data/files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f.get("diff").and_then(Value::as_str))
+                .filter(|d| !d.trim().is_empty())
+                .collect();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        } else {
+            None
+        };
+        if let Some(diff) = meta_diff.or(files_diff) {
+            let (a, r) = unified_diff_counts(&diff);
+            return (a, r, diff);
         }
     }
     (added, removed, shown)
@@ -866,7 +1008,7 @@ mod tests {
         };
         assert_eq!(
             (summary.as_str(), meta.as_str(), *running),
-            ("linear · get_issue  MXN-30", "", true)
+            ("Linear · Get issue  MXN-30", "", true)
         );
     }
 
@@ -1141,10 +1283,149 @@ mod tests {
         assert_eq!(
             summaries,
             vec![
-                ("tool", "linear_linear · save_comment  MXN-432"),
+                ("tool", "Linear · Save comment  MXN-432"),
                 ("tool", "Checking output of task-339"),
-                ("tool", "linear · get_issue  MXN-432"),
+                ("tool", "Linear · Get issue  MXN-432"),
             ]
         );
+    }
+
+    #[test]
+    fn antigravity_acp_diffs_list_webfetch_agent_and_friendly_titles_render() {
+        let unified = "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,2 +1,3 @@\n const a = 1;\n-const b = 2;\n+const b = 3;\n+const c = 4;";
+        let value = json!({
+            "messages": [],
+            "activities": [
+                activity("a1", "tool-call.completed", "2026-11-20T17:10:00.000Z", json!({
+                    "itemType": "file_change",
+                    "status": "completed",
+                    "toolCallId": "c1",
+                    "data": {
+                        "tool": "Edit",
+                        "files": [{"path": "/Users/aaron/repo/src/app.ts", "diff": unified}],
+                        "state": {
+                            "status": "completed",
+                            "input": {"TargetFile": "/Users/aaron/repo/src/app.ts"},
+                            "metadata": {"diff": unified}
+                        }
+                    }
+                })),
+                activity("a2", "tool-call.completed", "2026-11-20T17:10:01.000Z", json!({
+                    "itemType": "dynamic_tool_call",
+                    "status": "completed",
+                    "toolCallId": "c2",
+                    "title": "Directory src/core",
+                    "data": {
+                        "tool": "List",
+                        "state": {
+                            "status": "completed",
+                            "input": {"DirectoryPath": "/Users/aaron/repo/src/core"},
+                            "output": "a.ts\nb.ts\n"
+                        }
+                    }
+                })),
+                activity("a3", "tool-call.completed", "2026-11-20T17:10:02.000Z", json!({
+                    "itemType": "dynamic_tool_call",
+                    "status": "completed",
+                    "toolCallId": "c3",
+                    "data": {
+                        "tool": "WebFetch",
+                        "state": {
+                            "status": "completed",
+                            "input": {"url": "https://agentclientprotocol.com/spec"}
+                        }
+                    }
+                })),
+                activity("a4", "tool-call.completed", "2026-11-20T17:10:03.000Z", json!({
+                    "itemType": "dynamic_tool_call",
+                    "status": "completed",
+                    "toolCallId": "c4",
+                    "data": {
+                        "tool": "Agent",
+                        "state": {
+                            "status": "completed",
+                            "input": {"Role": "Codebase Researcher", "Prompt": "Audit ACP handlers"}
+                        }
+                    }
+                })),
+                activity("a5", "tool-call.completed", "2026-11-20T17:10:04.000Z", json!({
+                    "itemType": "dynamic_tool_call",
+                    "status": "completed",
+                    "toolCallId": "c5",
+                    "data": {
+                        "tool": "Run mcp_brave-search_brave_image_search",
+                        "state": {
+                            "status": "completed",
+                            "input": {"query": "acp"}
+                        }
+                    }
+                })),
+                activity("a6", "tool-call.completed", "2026-11-20T17:10:05.000Z", json!({
+                    "itemType": "dynamic_tool_call",
+                    "status": "completed",
+                    "toolCallId": "c6",
+                    "data": {
+                        "tool": "Run schedule",
+                        "state": {
+                            "status": "completed",
+                            "input": {"Prompt": "Check status"}
+                        }
+                    }
+                })),
+            ],
+        });
+        let rows = project(&value);
+        assert_eq!(rows.len(), 6);
+        let Message::Tool {
+            name,
+            summary,
+            output,
+            meta,
+            ..
+        } = &rows[0].message
+        else {
+            panic!("expected edit row");
+        };
+        assert_eq!(name, "edit");
+        assert_eq!(summary, "…/repo/src/app.ts");
+        assert_eq!(meta, "+2 −1");
+        assert!(output.contains("+const c = 4;"));
+
+        let Message::Tool {
+            name,
+            summary,
+            meta,
+            ..
+        } = &rows[1].message
+        else {
+            panic!("expected list row");
+        };
+        assert_eq!(name, "read");
+        assert_eq!(summary, "List …/repo/src/core");
+        assert_eq!(meta, "2 entries");
+
+        let Message::Tool { name, summary, .. } = &rows[2].message else {
+            panic!("expected webfetch row");
+        };
+        assert_eq!(name, "search");
+        assert_eq!(summary, "WebFetch https://agentclientprotocol.com/spec");
+
+        let Message::Tool { name, summary, .. } = &rows[3].message else {
+            panic!("expected agent row");
+        };
+        assert_eq!(name, "tool");
+        assert_eq!(summary, "Agent · Codebase Researcher  Audit ACP handlers");
+
+        let Message::Tool { name, summary, .. } = &rows[4].message else {
+            panic!("expected hyphenated mcp row");
+        };
+        assert_eq!(name, "tool");
+        assert_eq!(summary, "Brave Search · Brave image search  acp");
+
+        let Message::Tool { name, summary, .. } = &rows[5].message else {
+            panic!("expected friendly title row");
+        };
+        assert_eq!(name, "tool");
+        assert_eq!(summary, "Scheduling wakeup  Check status");
     }
 }

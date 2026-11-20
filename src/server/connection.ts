@@ -2413,7 +2413,13 @@ export class DirectConnection implements ClientApi {
         // Off by choice (`updates.checkLatest`): nothing is asked, and the answer says so.
         const config = await this.loadConfig();
         if (config.updates?.checkLatest === false) {
-          return { enabled: false, claude: { latest: null, channel: null }, opencode: { latest: null, channel: null }, codex: { latest: null, channel: null } };
+          return {
+            enabled: false,
+            claude: { latest: null, channel: null },
+            opencode: { latest: null, channel: null },
+            codex: { latest: null, channel: null },
+            antigravity: { latest: null, channel: null },
+          };
         }
         return { enabled: true, ...(await this.readLatestVersions(config.providers?.claude?.binaryPath)) };
       }

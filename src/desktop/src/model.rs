@@ -807,6 +807,11 @@ pub trait ThreadSource {
     fn embeddings(&self) -> Option<Arc<Result<Embeddings, String>>> {
         None
     }
+    /// Reads the ACP Registry catalog for the Add ACP Agent picker.
+    fn read_acp_registry(&mut self, _force_refresh: bool) {}
+    fn acp_registry(&self) -> Option<Arc<Result<crate::settings::AcpRegistryCatalog, String>>> {
+        None
+    }
     fn setup_embeddings(&mut self, _all: bool) {}
     fn rebuild_embeddings(&mut self, _all: bool) {}
     fn unload_embeddings(&mut self) {}

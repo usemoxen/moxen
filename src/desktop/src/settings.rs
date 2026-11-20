@@ -1148,6 +1148,136 @@ pub fn acp_agent_document(target: &str) -> Result<String, String> {
     Ok(Value::Object(document).to_string())
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct AcpRegistryPreset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub version: Option<String>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub available: bool,
+    pub note: Option<String>,
+}
+
+impl AcpRegistryPreset {
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let id = value.get("id")?.as_str()?.trim();
+        let name = value.get("name")?.as_str()?.trim();
+        if id.is_empty() || name.is_empty() {
+            return None;
+        }
+        let env = value
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: value
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            version: value
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            command: value
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            args: value
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            env,
+            available: value
+                .get("available")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            note: value
+                .get("note")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
+    pub fn command_line(&self) -> String {
+        let Some(command) = self.command.as_deref() else {
+            return String::new();
+        };
+        if self.args.is_empty() {
+            command.to_string()
+        } else {
+            format!("{command} {}", self.args.join(" "))
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AcpRegistryCatalog {
+    pub agents: Vec<AcpRegistryPreset>,
+    pub source: String,
+}
+
+impl AcpRegistryCatalog {
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let agents = value
+            .get("agents")?
+            .as_array()?
+            .iter()
+            .filter_map(AcpRegistryPreset::from_json)
+            .collect();
+        let source = value
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("cache")
+            .to_string();
+        Some(Self { agents, source })
+    }
+}
+
+pub fn acp_agent_document_from_preset(preset: &AcpRegistryPreset) -> Result<String, String> {
+    let command = preset
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "This registry entry has no launch command for this platform.".to_string()
+        })?;
+    let mut document = serde_json::Map::new();
+    document.insert("name".into(), Value::String(preset.name.clone()));
+    document.insert("command".into(), Value::String(command.into()));
+    if !preset.args.is_empty() {
+        document.insert(
+            "args".into(),
+            Value::Array(preset.args.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !preset.env.is_empty() {
+        let mut env = serde_json::Map::new();
+        for (k, v) in &preset.env {
+            env.insert(k.clone(), Value::String(v.clone()));
+        }
+        document.insert("env".into(), Value::Object(env));
+    }
+    document.insert("enabled".into(), Value::Bool(true));
+    Ok(Value::Object(document).to_string())
+}
+
 /// A line the settings window shows after an export or import.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsNotice {
@@ -2107,5 +2237,53 @@ mod tests {
         assert_eq!(opus.custom.output, Some(30.));
         assert_eq!(opus.shipped.input, Some(5.));
         assert_eq!(opus.shipped.cache_read, Some(0.5));
+    }
+
+    #[test]
+    fn acp_registry_catalog_decodes_presets_and_builds_agent_documents() {
+        let catalog = super::AcpRegistryCatalog::from_json(&json!({
+            "source": "network",
+            "agents": [
+                {
+                    "id": "cline",
+                    "name": "Cline",
+                    "description": "Autonomous agent",
+                    "version": "1.2.3",
+                    "command": "npx",
+                    "args": ["-y", "cline", "--acp"],
+                    "env": { "FOO": "bar" },
+                    "available": true,
+                    "note": null
+                },
+                {
+                    "id": "missing",
+                    "name": "Missing",
+                    "description": "Not installed",
+                    "command": null,
+                    "args": [],
+                    "available": false,
+                    "note": "No compatible build."
+                }
+            ]
+        }))
+        .expect("catalog");
+        assert_eq!(catalog.source, "network");
+        assert_eq!(catalog.agents.len(), 2);
+        assert_eq!(catalog.agents[0].command_line(), "npx -y cline --acp");
+        let doc: serde_json::Value = serde_json::from_str(
+            &super::acp_agent_document_from_preset(&catalog.agents[0]).expect("preset doc"),
+        )
+        .expect("json");
+        assert_eq!(
+            doc,
+            json!({
+                "name": "Cline",
+                "command": "npx",
+                "args": ["-y", "cline", "--acp"],
+                "env": { "FOO": "bar" },
+                "enabled": true
+            })
+        );
+        assert!(super::acp_agent_document_from_preset(&catalog.agents[1]).is_err());
     }
 }

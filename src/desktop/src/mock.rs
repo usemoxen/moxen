@@ -68,6 +68,7 @@ pub struct MockSource {
     managed_skills: Option<Vec<ManagedSkill>>,
     skill_texts: HashMap<(String, String), String>,
     embeddings: Option<Embeddings>,
+    acp_registry: Option<crate::settings::AcpRegistryCatalog>,
     remote: Option<RemoteState>,
     updates: Option<UpdateState>,
     experience: Value,
@@ -401,6 +402,7 @@ impl MockSource {
             managed_skills: None,
             skill_texts: HashMap::new(),
             embeddings: None,
+            acp_registry: None,
             remote: None,
             updates: None,
             experience: json!({"onboardingCompleted":true,"seenReleases":["0.1.2"],"version":"0.1.5","releases":[
@@ -1459,6 +1461,40 @@ impl ThreadSource for MockSource {
     }
     fn embeddings(&self) -> Option<Arc<Result<Embeddings, String>>> {
         self.embeddings.clone().map(|state| Arc::new(Ok(state)))
+    }
+    fn read_acp_registry(&mut self, _force_refresh: bool) {
+        if self.acp_registry.is_none() {
+            self.acp_registry = Some(crate::settings::AcpRegistryCatalog {
+                source: "cache".into(),
+                agents: vec![
+                    crate::settings::AcpRegistryPreset {
+                        id: "cline".into(),
+                        name: "Cline".into(),
+                        description: "Autonomous coding agent via ACP".into(),
+                        version: Some("1.0.0".into()),
+                        command: Some("npx".into()),
+                        args: vec!["-y".into(), "cline".into(), "--acp".into()],
+                        env: vec![],
+                        available: true,
+                        note: None,
+                    },
+                    crate::settings::AcpRegistryPreset {
+                        id: "goose".into(),
+                        name: "Goose".into(),
+                        description: "Open-source developer agent".into(),
+                        version: Some("1.2.0".into()),
+                        command: Some("goose".into()),
+                        args: vec!["acp".into()],
+                        env: vec![],
+                        available: false,
+                        note: Some("Goose binary is not installed on PATH.".into()),
+                    },
+                ],
+            });
+        }
+    }
+    fn acp_registry(&self) -> Option<Arc<Result<crate::settings::AcpRegistryCatalog, String>>> {
+        self.acp_registry.clone().map(|cat| Arc::new(Ok(cat)))
     }
     fn setup_embeddings(&mut self, _all: bool) {
         self.read_embeddings();

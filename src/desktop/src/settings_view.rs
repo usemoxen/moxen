@@ -2155,13 +2155,23 @@ fn add_buttons(
                 } else {
                     "Add an MCP server"
                 },
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
                     this.settings_mcp_new = Some(McpWizard {
                         list_key: add.clone(),
                         ..Default::default()
                     });
+                    if is_acp {
+                        this.source.read_acp_registry(false);
+                    }
                     this.settings_form = None;
                     this.settings_error = None;
+                    this.settings_input.update(cx, |input, cx| {
+                        input.masked = false;
+                        input.height = 44.;
+                        input.placeholder = "";
+                        input.set_text(String::new(), cx);
+                        window.focus(&input.focus, cx);
+                    });
                     cx.notify();
                 }),
             )
@@ -3322,7 +3332,8 @@ fn mcp_wizard_bar(w: &Workspace, wizard: &McpWizard, cx: &mut Context<Workspace>
     let is_acp = wizard.list_key == "providers.acp.agents";
     let step = if wizard.step == 0 {
         if is_acp {
-            "Name the ACP agent (lowercase id, becomes acp/<id>)".to_string()
+            "Pick an ACP Registry agent or type a custom lowercase id (becomes acp/<id>)"
+                .to_string()
         } else {
             "Name the server".to_string()
         }
@@ -3337,7 +3348,161 @@ fn mcp_wizard_bar(w: &Workspace, wizard: &McpWizard, cx: &mut Context<Workspace>
             wizard.name
         )
     };
-    wizard_shell(w, &step, true).child(wizard_input_row("Next", "Go to the next step", cx))
+    let mut bar = wizard_shell(w, &step, true);
+    if is_acp && wizard.step == 0 {
+        bar = bar.child(acp_registry_picker(w, cx));
+    }
+    bar.child(wizard_input_row("Next", "Go to the next step", cx))
+}
+
+fn acp_registry_picker(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let query = w.settings_input.read(cx).text().trim().to_ascii_lowercase();
+    let header = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(color("ink-3"))
+                .child("ACP Registry"),
+        )
+        .child(small_button(
+            ("settings-acp-registry-refresh", 0),
+            "Refresh",
+            "Refresh the ACP Registry catalog",
+            cx.listener(|this, _, _, cx| {
+                this.source.read_acp_registry(true);
+                cx.notify();
+            }),
+        ));
+    let mut list = div()
+        .id("settings-acp-registry-list")
+        .max_h(px(180.))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(4.));
+    match w.source.acp_registry() {
+        None => {
+            list = list.child(sub_line("Loading ACP Registry…"));
+        }
+        Some(result) => match result.as_ref() {
+            Err(error) => {
+                list = list.child(div().text_color(color("broken")).child(error.clone()));
+            }
+            Ok(catalog) => {
+                let matches: Vec<settings::AcpRegistryPreset> = catalog
+                    .agents
+                    .iter()
+                    .filter(|agent| {
+                        query.is_empty()
+                            || agent.id.to_ascii_lowercase().contains(&query)
+                            || agent.name.to_ascii_lowercase().contains(&query)
+                            || agent.description.to_ascii_lowercase().contains(&query)
+                    })
+                    .cloned()
+                    .collect();
+                if matches.is_empty() {
+                    list = list.child(sub_line(if catalog.agents.is_empty() {
+                        "No ACP Registry agents available. Enter a custom id above."
+                    } else {
+                        "No registry agents match — press Next to configure a custom agent id."
+                    }));
+                } else {
+                    for (index, preset) in matches.into_iter().enumerate() {
+                        let subtitle = if let Some(note) = &preset.note {
+                            note.clone()
+                        } else if !preset.description.is_empty() {
+                            preset.description.clone()
+                        } else {
+                            preset.command_line()
+                        };
+                        let badge = if preset.available {
+                            "ready"
+                        } else {
+                            "needs setup"
+                        };
+                        let picked = preset.clone();
+                        list = list.child(
+                            div()
+                                .id(("settings-acp-registry-item", index))
+                                .px(px(8.))
+                                .py(px(6.))
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(color("rule"))
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_color(color("ink"))
+                                                .child(format!("{} ({})", preset.name, preset.id)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.5))
+                                                .text_color(color(if preset.available {
+                                                    "live"
+                                                } else {
+                                                    "ink-3"
+                                                }))
+                                                .child(badge),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .text_color(color("ink-2"))
+                                        .child(subtitle),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if picked.available
+                                        && let Ok(document) =
+                                            settings::acp_agent_document_from_preset(&picked)
+                                    {
+                                        this.source.set_setting(
+                                            &format!("providers.acp.agents[{}]", picked.id),
+                                            &document,
+                                        );
+                                        this.settings_mcp_new = None;
+                                        this.settings_error = None;
+                                        this.settings_item = Some(picked.id.clone());
+                                        cx.notify();
+                                        return;
+                                    }
+                                    let prefill = picked.command_line();
+                                    this.settings_mcp_new = Some(McpWizard {
+                                        list_key: "providers.acp.agents".into(),
+                                        step: 1,
+                                        name: picked.id.to_ascii_lowercase(),
+                                    });
+                                    this.settings_error = picked.note.clone();
+                                    this.settings_input.update(cx, |input, cx| {
+                                        input.set_text(prefill, cx);
+                                        window.focus(&input.focus, cx);
+                                    });
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                }
+            }
+        },
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(header)
+        .child(list)
 }
 
 fn wizard_shell(w: &Workspace, step: &str, with_input: bool) -> Div {
