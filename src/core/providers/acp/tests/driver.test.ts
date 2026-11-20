@@ -1285,3 +1285,264 @@ describe("ACP crash recovery & rollback", () => {
     }
   });
 });
+
+describe("ACP isolation, runtime modes, delegated permissions & parked lifecycle (MXN-441)", () => {
+  const PERM_OPTIONS = [
+    { optionId: "once", name: "Allow once", kind: "allow_once" },
+    { optionId: "always", name: "Allow always", kind: "allow_always" },
+    { optionId: "deny", name: "Reject", kind: "reject_once" },
+  ];
+
+  it("blocks PascalCase agy Path, TargetFile, CommandLine, and Cwd under worktree isolation and replies allow_once in full-access", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-iso-pascal-"));
+    tempDirs.push(base);
+    const mainDir = path.join(base, "main");
+    const wtDir = path.join(base, "wt");
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(
+      driver.startSession({
+        threadId: "thread-1",
+        workingDirectory: wtDir,
+        runtimeMode: "full-access",
+        isolation: { worktreeRoot: wtDir, protectedRoots: [mainDir] },
+      }),
+    );
+    const server = transport.sessions[0]!.server;
+
+    // PascalCase Path / TargetFile into main checkout must be declined even in full-access.
+    const byPath = await server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: { toolCallId: "tc-1", title: "Write file", kind: "edit", rawInput: { Path: path.join(mainDir, "a.ts"), Content: "x" } },
+      options: PERM_OPTIONS,
+    });
+    expect(byPath).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
+
+    const byTargetFile = await server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: { toolCallId: "tc-2", title: "Edit file", kind: "edit", rawInput: { TargetFile: path.join(mainDir, "b.ts") } },
+      options: PERM_OPTIONS,
+    });
+    expect(byTargetFile).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
+
+    // PascalCase CommandLine redirect and Cwd into main checkout must be declined.
+    const byCommandLine = await server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: { toolCallId: "tc-3", title: "Run git", kind: "execute", rawInput: { CommandLine: `git -C ${mainDir} status` } },
+      options: PERM_OPTIONS,
+    });
+    expect(byCommandLine).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
+
+    const byCwd = await server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: { toolCallId: "tc-4", title: "Run ls", kind: "execute", rawInput: { CommandLine: "ls", Cwd: mainDir } },
+      options: PERM_OPTIONS,
+    });
+    expect(byCwd).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
+
+    // Safe call inside worktree in full-access must return allow_once (never allow_always).
+    const safeEdit = await server.ask("session/request_permission", {
+      sessionId: "acp-sess-1",
+      toolCall: { toolCallId: "tc-5", title: "Edit ok", kind: "edit", rawInput: { Path: path.join(wtDir, "ok.ts") } },
+      options: PERM_OPTIONS,
+    });
+    expect(safeEdit).toEqual({ outcome: { outcome: "selected", optionId: "once" } });
+
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("honors auto-accept-edits, live setRuntimeMode, and configured defaultMode via session/set_mode", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-modes-"));
+    tempDirs.push(dir);
+    const transport = new FakeAcpTransport({
+      modes: {
+        currentModeId: "default",
+        availableModes: [
+          { id: "default", name: "Default" },
+          { id: "accept-edits", name: "Accept edits" },
+        ],
+      },
+    });
+    const driver = new AcpDriver({
+      transport,
+      agents: {
+        custom: { id: "custom", name: "Custom", command: "custom", args: [], defaultMode: "accept-edits" },
+      },
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(
+        driver.startSession({
+          threadId: "thread-1",
+          workingDirectory: dir,
+          runtimeMode: "auto-accept-edits",
+          modelSelection: { instanceId: "acp/custom", model: "default" },
+        }),
+      );
+      const server = transport.sessions[0]!.server;
+      // defaultMode applied via session/set_mode on session/new.
+      expect(server.requestsTo("session/set_mode")).toEqual([
+        { method: "session/set_mode", params: { sessionId: "acp-sess-1", modeId: "accept-edits" } },
+      ]);
+
+      // Workspace edit auto-approved with allow_once in auto-accept-edits.
+      const editResp = await server.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: { toolCallId: "tc-edit", title: "Edit a.ts", kind: "edit", rawInput: { Path: path.join(dir, "a.ts") } },
+        options: PERM_OPTIONS,
+      });
+      expect(editResp).toEqual({ outcome: { outcome: "selected", optionId: "once" } });
+
+      // Shell command still parks for manual approval in auto-accept-edits, and renders CommandLine (not toolSummary).
+      const execPending = server.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: {
+          toolCallId: "tc-exec",
+          title: "Run tests",
+          kind: "execute",
+          rawInput: { toolSummary: "Run tests", CommandLine: "bun run check" },
+        },
+        options: PERM_OPTIONS,
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "permission.request.opened")).toBe(true));
+      const opened = events.find((e) => e.type === "permission.request.opened") as PermissionRuntimeEvent;
+      expect(permissionActivityRow(opened).payload["detail"]).toBe("bun run check");
+      await Effect.runPromise(driver.respondToRequest("thread-1", opened.requestId, { kind: "accept" }));
+      expect(await execPending).toEqual({ outcome: { outcome: "selected", optionId: "once" } });
+
+      // Live setRuntimeMode downgrades to approval-required and calls session/set_mode("default").
+      driver.setRuntimeMode("thread-1", "approval-required");
+      await vi.waitFor(() =>
+        expect(server.requestsTo("session/set_mode")).toContainEqual({
+          method: "session/set_mode",
+          params: { sessionId: "acp-sess-1", modeId: "default" },
+        }),
+      );
+      const editNowParked = server.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: {
+          toolCallId: "tc-edit-2",
+          title: "Edit b.ts",
+          kind: "edit",
+          rawInput: { toolSummary: "Update b", Path: path.join(dir, "b.ts") },
+        },
+        options: PERM_OPTIONS,
+      });
+      await vi.waitFor(() =>
+        expect(events.filter((e) => e.type === "permission.request.opened")).toHaveLength(2),
+      );
+      const opened2 = events.filter((e) => e.type === "permission.request.opened")[1] as PermissionRuntimeEvent;
+      expect(permissionActivityRow(opened2).payload["detail"]).toBe(path.join(dir, "b.ts"));
+      await Effect.runPromise(driver.respondToRequest("thread-1", opened2.requestId, { kind: "decline" }));
+      expect(await editNowParked).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("cancels parked permissions when a turn settles without interruptTurn", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+    await Effect.runPromise(driver.startSession({ ...START, runtimeMode: "approval-required" }));
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+      const server = transport.sessions[0]!.server;
+      const pending = server.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: { toolCallId: "tc-1", title: "Run", kind: "execute", rawInput: { CommandLine: "echo hi" } },
+        options: PERM_OPTIONS,
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "permission.request.opened")).toBe(true));
+
+      // Turn settles on its own without interruptTurn: parked permission must resolve as cancelled.
+      server.finishPrompt("end_turn");
+      expect(await pending).toEqual({ outcome: { outcome: "cancelled" } });
+      expect((await driver.awaitTurn("thread-1", sent.turnId)).status).toBe("completed");
+      await vi.waitFor(() => expect(events.some((e) => e.type === "permission.request.resolved")).toBe(true));
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("allows delegated ACP threads in auto and auto-accept-edits to run mode-permitted actions while declining interactive-only prompts", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-delegated-"));
+    tempDirs.push(dir);
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ transport });
+
+    // 1. Delegated in `auto` mode (the default).
+    await Effect.runPromise(
+      driver.startSession({
+        threadId: "thread-auto",
+        workingDirectory: dir,
+        runtimeMode: "auto",
+        delegated: true,
+      }),
+    );
+    const autoServer = transport.sessions[0]!.server;
+
+    expect(
+      await autoServer.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: { toolCallId: "tc-edit", title: "Edit", kind: "edit", rawInput: { Path: path.join(dir, "src.ts") } },
+        options: PERM_OPTIONS,
+      }),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "once" } });
+
+    expect(
+      await autoServer.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: { toolCallId: "tc-safe", title: "Run test", kind: "execute", rawInput: { CommandLine: "bun test" } },
+        options: PERM_OPTIONS,
+      }),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "once" } });
+
+    // Sensitive command (git push) needs approval -> declined because delegated has no user.
+    expect(
+      await autoServer.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: { toolCallId: "tc-push", title: "Push", kind: "execute", rawInput: { CommandLine: "git push origin main" } },
+        options: PERM_OPTIONS,
+      }),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
+
+    // 2. Delegated in `auto-accept-edits` mode.
+    await Effect.runPromise(
+      driver.startSession({
+        threadId: "thread-edits",
+        workingDirectory: dir,
+        runtimeMode: "auto-accept-edits",
+        delegated: true,
+      }),
+    );
+    const editsServer = transport.sessions[1]!.server;
+
+    expect(
+      await editsServer.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: { toolCallId: "tc-edit-2", title: "Edit", kind: "edit", rawInput: { Path: path.join(dir, "a.ts") } },
+        options: PERM_OPTIONS,
+      }),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "once" } });
+
+    // Shell command in auto-accept-edits requires approval -> declined for delegated.
+    expect(
+      await editsServer.ask("session/request_permission", {
+        sessionId: "acp-sess-1",
+        toolCall: { toolCallId: "tc-cmd-2", title: "Run", kind: "execute", rawInput: { CommandLine: "bun test" } },
+        options: PERM_OPTIONS,
+      }),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
+
+    await Effect.runPromise(driver.stopAll());
+  });
+});

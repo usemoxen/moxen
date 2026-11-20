@@ -16,9 +16,10 @@ import * as Stream from "effect/Stream";
 
 import type { ModelSummary } from "../../catalog/summary.js";
 import { CliError } from "../../errors.js";
-import { escapes, isolationViolation, type WorktreeIsolation } from "../../threads/isolation.js";
+import { escapes, isolationViolation, rawInputViolation, type WorktreeIsolation } from "../../threads/isolation.js";
 import type { ModelSelection, RuntimeMode } from "../../types.js";
 import { APP_VERSION } from "../../version.js";
+import { assessCommandLine, classifyPath } from "../harness/commandsafety.js";
 import { JsonRpcPeer } from "../stdio.js";
 import type {
   ApprovalRequestId,
@@ -86,6 +87,7 @@ import {
   type AcpInitializeResult,
   type AcpPermissionOption,
   type AcpSessionModesState,
+  type NormalizedAcpToolCall,
 } from "./protocol.js";
 import {
   AGY_ACP_LAUNCH_SPEC,
@@ -276,33 +278,107 @@ function permissionClassification(kind: string | null): "command" | "file-change
   return "tool";
 }
 
+const PERMISSION_PATH_KEYS: readonly string[] = [
+  "file_path",
+  "path",
+  "filePath",
+  "target",
+  "targetFile",
+  "target_file",
+  "notebook_path",
+  "directoryPath",
+  "directory_path",
+  "searchPath",
+  "search_path",
+  "searchDirectory",
+  "search_directory",
+  "Path",
+  "TargetFile",
+  "FilePath",
+  "DirectoryPath",
+  "SearchPath",
+  "SearchDirectory",
+];
+
+function collectPermissionPaths(
+  toolCall: Record<string, unknown>,
+  normalized: NormalizedAcpToolCall,
+): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: unknown): void => {
+    const str = asNonEmptyString(value);
+    if (str && !seen.has(str)) {
+      seen.add(str);
+      paths.push(str);
+    }
+  };
+  const locations = Array.isArray(toolCall["locations"]) ? toolCall["locations"] : [];
+  for (const loc of locations) {
+    add(asRecord(loc)?.["path"]);
+  }
+  const rawInput = asRecord(toolCall["rawInput"]) ?? {};
+  for (const source of [normalized.input, rawInput]) {
+    for (const key of PERMISSION_PATH_KEYS) {
+      add(source[key]);
+    }
+  }
+  return paths;
+}
+
+function extractPermissionCommand(
+  toolCall: Record<string, unknown>,
+  normalized: NormalizedAcpToolCall,
+  defaultCwd: string,
+): { readonly command: string; readonly cwd: string; readonly hasExplicitCommand: boolean } {
+  const rawInput = asRecord(toolCall["rawInput"]) ?? {};
+  const explicitCommand =
+    asNonEmptyString(
+      rawInput["command"] ??
+        rawInput["CommandLine"] ??
+        rawInput["commandLine"] ??
+        rawInput["cmd"] ??
+        normalized.input["command"],
+    );
+  const command = explicitCommand ?? asNonEmptyString(toolCall["title"]) ?? "";
+  const cwd =
+    asNonEmptyString(
+      rawInput["cwd"] ??
+        rawInput["Cwd"] ??
+        rawInput["WorkingDirectory"] ??
+        rawInput["workingDirectory"] ??
+        normalized.input["cwd"],
+    ) ?? defaultCwd;
+  return { command, cwd, hasExplicitCommand: explicitCommand !== null };
+}
+
 function checkPermissionIsolation(
   isolation: WorktreeIsolation,
   toolCall: Record<string, unknown>,
+  normalized: NormalizedAcpToolCall,
   cwd: string,
 ): string | null {
-  const kind = asNonEmptyString(toolCall["kind"]);
+  const kind = normalized.kind ?? asNonEmptyString(toolCall["kind"]);
   const rawInput = asRecord(toolCall["rawInput"]) ?? {};
-  const locations = Array.isArray(toolCall["locations"]) ? toolCall["locations"] : [];
+  const isEdit =
+    kind === "edit" ||
+    kind === "delete" ||
+    kind === "move" ||
+    normalized.canonicalTool === "Edit" ||
+    normalized.canonicalTool === "Write";
+  const isExec = kind === "execute" || normalized.canonicalTool === "Bash";
+  const isRead = kind === "read" || kind === "search" || kind === "think";
 
-  if (kind === "edit" || kind === "delete" || kind === "move") {
-    for (const loc of locations) {
-      const target = asNonEmptyString(asRecord(loc)?.["path"]);
-      if (target && escapes(isolation, target, cwd)) {
-        return `This session is isolated in its own worktree at ${isolation.worktreeRoot}; the main checkout is off limits. ${target} is outside it.`;
-      }
-    }
-    for (const key of ["path", "file_path", "filePath", "target"]) {
-      const target = asNonEmptyString(rawInput[key]);
-      if (target && escapes(isolation, target, cwd)) {
+  if (isEdit) {
+    for (const target of collectPermissionPaths(toolCall, normalized)) {
+      if (escapes(isolation, target, cwd)) {
         return `This session is isolated in its own worktree at ${isolation.worktreeRoot}; the main checkout is off limits. ${target} is outside it.`;
       }
     }
   }
 
-  if (kind === "execute") {
-    const command = asNonEmptyString(rawInput["command"]) ?? asNonEmptyString(toolCall["title"]) ?? "";
-    const commandCwd = asNonEmptyString(rawInput["cwd"]) ?? cwd;
+  if (isExec) {
+    const { command, cwd: commandCwd } = extractPermissionCommand(toolCall, normalized, cwd);
     const violation = isolationViolation(isolation, {
       tool: "Bash",
       input: { command },
@@ -311,6 +387,52 @@ function checkPermissionIsolation(
     if (violation) return violation;
   }
 
+  if (!isRead) {
+    const locations = Array.isArray(toolCall["locations"]) ? toolCall["locations"] : [];
+    for (const loc of locations) {
+      const target = asNonEmptyString(asRecord(loc)?.["path"]);
+      if (target && escapes(isolation, target, cwd)) {
+        return `This session is isolated in its own worktree at ${isolation.worktreeRoot}; the main checkout is off limits. ${target} is outside it.`;
+      }
+    }
+    const { command, cwd: commandCwd, hasExplicitCommand } = extractPermissionCommand(toolCall, normalized, cwd);
+    if (hasExplicitCommand || commandCwd !== cwd) {
+      const violation = isolationViolation(isolation, {
+        tool: "Bash",
+        input: { command },
+        cwd: commandCwd,
+      });
+      if (violation) return violation;
+    }
+    const rawViolation = rawInputViolation(isolation, { ...rawInput, ...normalized.input }, cwd);
+    if (rawViolation) return rawViolation;
+  }
+
+  return null;
+}
+
+function resolveAcpModeIdForRuntime(
+  modes: AcpSessionModesState | null,
+  runtimeMode: RuntimeMode,
+  isolated: boolean,
+): string | null {
+  const available = modes?.availableModes ?? [];
+  if (available.length === 0) return null;
+  const candidates: readonly string[] =
+    runtimeMode === "approval-required"
+      ? ["default", "ask", "supervised", "approval-required"]
+      : runtimeMode === "auto-accept-edits"
+        ? ["accept-edits", "auto-accept-edits", "acceptedits", "accept_edits"]
+        : runtimeMode === "auto"
+          ? ["auto", "default"]
+          : isolated
+            ? // Keep isolated sessions routing tool calls through Moxen's permission gate.
+              ["default"]
+            : ["full-access", "bypass", "bypasspermissions", "yolo", "auto", "accept-edits"];
+  for (const candidate of candidates) {
+    const hit = available.find((mode) => mode.id.toLowerCase() === candidate);
+    if (hit) return hit.id;
+  }
   return null;
 }
 
@@ -727,6 +849,13 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           await this.applySelectionConfigOptions(session, input.modelSelection);
         }
 
+        // Apply configured defaultMode or the session's runtimeMode via `session/set_mode`.
+        if (session.agent.defaultMode) {
+          await this.applySessionMode(session, session.agent.defaultMode);
+        } else {
+          await this.syncSessionMode(session);
+        }
+
         if (this.provider === "antigravity") {
           void this.refreshAntigravityUsage(session);
         }
@@ -762,7 +891,12 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         if (this.openTurn(session)) {
           throw new CliError("ACP_TURN_BUSY", `Thread ${input.threadId} already has a running ACP turn.`);
         }
-        if (input.runtimeMode) session.runtimeMode = input.runtimeMode;
+        if (input.runtimeMode && input.runtimeMode !== session.runtimeMode) {
+          session.runtimeMode = input.runtimeMode;
+          await this.syncSessionMode(session);
+        } else if (input.runtimeMode) {
+          session.runtimeMode = input.runtimeMode;
+        }
         if (input.modelSelection) {
           await this.applySelectionConfigOptions(session, input.modelSelection);
         }
@@ -943,6 +1077,13 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       }
     });
 
+  readonly setRuntimeMode = (threadId: ThreadId, mode: RuntimeMode): void => {
+    const session = this.sessions.get(threadId);
+    if (!session || session.closed) return;
+    session.runtimeMode = mode;
+    void this.syncSessionMode(session);
+  };
+
   respondToRequest = (
     threadId: ThreadId,
     requestId: ApprovalRequestId,
@@ -958,7 +1099,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       if (decision.kind === "acceptForSession") {
         session.sessionAllowKeys.add(parked.sessionKey);
       }
-      const response = selectAcpPermissionOutcome(decision, parked.options);
+      // Keep isolated sessions using `allow_once` on the wire so the agent never
+      // caches `allow_always` past Moxen's worktree isolation checks.
+      const wireDecision: ProviderApprovalDecision =
+        decision.kind === "acceptForSession" && session.isolation ? { kind: "accept" } : decision;
+      const response = selectAcpPermissionOutcome(wireDecision, parked.options);
       parked.resolve(response);
       this.publish({
         type: "permission.request.resolved",
@@ -1118,6 +1263,40 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       }
     } catch {
       // Agent declined option switch; keep session running with its current options.
+    }
+  }
+
+  private async syncSessionMode(session: AcpSession): Promise<void> {
+    const targetModeId = resolveAcpModeIdForRuntime(
+      session.modes,
+      session.runtimeMode,
+      session.isolation !== null,
+    );
+    if (!targetModeId) return;
+    await this.applySessionMode(session, targetModeId);
+  }
+
+  private async applySessionMode(session: AcpSession, modeId: string): Promise<void> {
+    const trimmed = modeId.trim();
+    if (!trimmed || session.closed) return;
+    if (session.modes?.currentModeId === trimmed) return;
+    try {
+      await session.peer.request(
+        ACP_METHODS.sessionSetMode,
+        {
+          sessionId: session.acpSessionId,
+          modeId: trimmed,
+        },
+        this.initializeTimeoutMs,
+      );
+      if (!session.closed) {
+        session.modes = {
+          currentModeId: trimmed,
+          availableModes: session.modes?.availableModes ?? [],
+        };
+      }
+    } catch {
+      // Agent declined mode switch or does not support `session/set_mode`; keep session running.
     }
   }
 
@@ -1699,6 +1878,19 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     });
   }
 
+  private publishPermissionDenied(session: AcpSession, title: string, detail: string): void {
+    const turn = this.openTurn(session);
+    this.publish({
+      type: "session.notice",
+      provider: this.provider,
+      threadId: session.threadId,
+      turnId: turn?.id ?? null,
+      notice: "permission-denied",
+      title,
+      detail,
+    });
+  }
+
   private async handlePermissionRequest(session: AcpSession, params: unknown): Promise<unknown> {
     const record = asRecord(params) ?? {};
     const toolCall = asRecord(record["toolCall"]) ?? {};
@@ -1713,29 +1905,111 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
     // Worktree isolation always wins, even in full-access mode.
     if (session.isolation) {
-      const violation = checkPermissionIsolation(session.isolation, toolCall, session.workingDirectory);
+      const violation = checkPermissionIsolation(session.isolation, toolCall, normalized, session.workingDirectory);
       if (violation) {
-        const turn = this.openTurn(session);
-        this.publish({
-          type: "session.notice",
-          provider: this.provider,
-          threadId: session.threadId,
-          turnId: turn?.id ?? null,
-          notice: "permission-denied",
-          title: `Refused ${toolName} outside worktree`,
-          detail: violation,
-        });
+        this.publishPermissionDenied(session, `Refused ${toolName} outside worktree`, violation);
         return selectAcpPermissionOutcome({ kind: "decline" }, options);
       }
     }
 
-    if (session.runtimeMode === "full-access" || session.sessionAllowKeys.has(sessionKey)) {
-      return selectAcpPermissionOutcome({ kind: "acceptForSession" }, options);
+    // Automatic approvals always reply `allow_once` (`{ kind: "accept" }`), never
+    // `allow_always`, so the agent keeps routing subsequent calls through Moxen's
+    // worktree isolation and live runtime-mode gates.
+    if (session.runtimeMode === "full-access") {
+      return selectAcpPermissionOutcome({ kind: "accept" }, options);
     }
 
+    if (session.sessionAllowKeys.has(sessionKey)) {
+      return selectAcpPermissionOutcome(
+        session.isolation ? { kind: "accept" } : { kind: "acceptForSession" },
+        options,
+      );
+    }
+
+    const effectiveKind = normalized.kind ?? kind;
+    const isRead = effectiveKind === "read" || effectiveKind === "search" || effectiveKind === "think";
+    const isEdit =
+      effectiveKind === "edit" ||
+      effectiveKind === "delete" ||
+      effectiveKind === "move" ||
+      toolName === "Edit" ||
+      toolName === "Write";
+    const isExec = effectiveKind === "execute" || toolName === "Bash";
+
+    let decision: "allow" | "ask" | "deny" = "ask";
+    let denyReason: string | null = null;
+
+    if (isRead) {
+      if (session.runtimeMode === "auto" || session.runtimeMode === "auto-accept-edits") {
+        decision = "allow";
+      } else if (session.delegated) {
+        const readPaths = collectPermissionPaths(toolCall, normalized);
+        const places = readPaths.map((p) => classifyPath(p, { cwd: session.workingDirectory }));
+        const outside = places.some((place) => place !== "cwd" && place !== "tmp");
+        decision = outside ? "ask" : "allow";
+      }
+    } else if (isEdit) {
+      const editPaths = collectPermissionPaths(toolCall, normalized);
+      const places = editPaths.map((p) => classifyPath(p, { cwd: session.workingDirectory }));
+      const protectedPlace = places.find(
+        (place) => place === "secret" || place === "startup" || place === "system" || place === "root" || place === "git",
+      );
+      const outside = places.some((place) => place !== "cwd" && place !== "tmp");
+      if (session.runtimeMode === "auto-accept-edits") {
+        decision = outside ? "ask" : "allow";
+      } else if (session.runtimeMode === "auto") {
+        if (protectedPlace !== undefined) {
+          decision = "deny";
+          denyReason = `Auto mode refused ${toolName} on protected path (${protectedPlace}).`;
+        } else {
+          decision = outside ? "ask" : "allow";
+        }
+      }
+    } else if (isExec) {
+      const { command, cwd: commandCwd } = extractPermissionCommand(toolCall, normalized, session.workingDirectory);
+      const risk = assessCommandLine(command, { cwd: commandCwd, shell: "posix" });
+      if (risk.level === "catastrophic") {
+        decision = "deny";
+        denyReason = risk.reason ?? "This command is too risky to run unattended.";
+      } else if (session.runtimeMode === "auto") {
+        if (risk.level === "safe") {
+          decision = "allow";
+        } else if (risk.level === "dangerous") {
+          decision = "deny";
+          denyReason = risk.reason ?? "Auto mode refused a dangerous command.";
+        } else {
+          decision = "ask";
+        }
+      }
+    } else if (session.runtimeMode === "auto") {
+      // MCP, web fetch, and other non-shell/non-edit tools are auto-approved in Auto mode.
+      decision = "allow";
+    }
+
+    if (decision === "allow") {
+      return selectAcpPermissionOutcome({ kind: "accept" }, options);
+    }
+
+    if (decision === "deny") {
+      if (denyReason) {
+        this.publishPermissionDenied(session, `Refused ${toolName}`, denyReason);
+      }
+      return selectAcpPermissionOutcome({ kind: "decline" }, options);
+    }
+
+    // Only actions that genuinely require interactive approval are declined on delegated threads.
     if (session.delegated) {
       return selectAcpPermissionOutcome({ kind: "decline" }, options);
     }
+
+    const firstLocationPath = collectPermissionPaths(toolCall, normalized)[0] ?? null;
+    const permissionInput: Record<string, unknown> =
+      firstLocationPath &&
+      normalized.input["file_path"] === undefined &&
+      normalized.input["path"] === undefined &&
+      normalized.input["command"] === undefined
+        ? { ...normalized.input, file_path: firstLocationPath }
+        : normalized.input;
 
     const requestId: ApprovalRequestId = `acp-perm-${randomUUID()}`;
     return new Promise<unknown>((resolve) => {
@@ -1754,8 +2028,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         requestId,
         raw: {
           toolName,
-          classification: permissionClassification(kind),
-          input: rawInput,
+          classification: permissionClassification(effectiveKind),
+          input: permissionInput,
           description: title,
           options,
         },
@@ -1854,6 +2128,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   ): void {
     if (turn.status !== "running") return;
     this.clearBackgroundTurnIdleTimer(session);
+    this.cancelAllParked(session);
     if (status === "completed") {
       this.promoteInProgressTools(session, turn);
     } else {

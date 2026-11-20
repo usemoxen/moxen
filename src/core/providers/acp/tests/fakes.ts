@@ -101,6 +101,13 @@ export class FakeAcpServer {
           ...(this.script.configOptions ? { configOptions: this.script.configOptions } : {}),
         };
       }
+      case "session/set_mode": {
+        const p = params as { modeId?: string } | null;
+        if (this.script.modes && typeof this.script.modes === "object" && p?.modeId) {
+          (this.script.modes as Record<string, unknown>)["currentModeId"] = p.modeId;
+        }
+        return {};
+      }
       case "session/set_config_option": {
         const p = params as { configId?: string; value?: string } | null;
         const updated = (this.script.configOptions ?? []).map((opt) => {

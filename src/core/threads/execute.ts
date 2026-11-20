@@ -646,6 +646,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       ...(rules ? { afterAnswer: async () => rules.commit() } : {}),
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
+      runtimeMode: thread.runtimeMode,
       interactionMode: next.interactionMode,
       workingDirectory: thread.env.path,
       ...(args.onEvent ? { onEvent: args.onEvent } : {}),
@@ -1522,6 +1523,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
             prompt: args.prompt,
             ...(args.images?.length ? { images: args.images } : {}),
             ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+            ...(args.runtimeMode ? { runtimeMode: args.runtimeMode } : {}),
             ...(args.interactionMode ? { interactionMode: args.interactionMode } : {}),
           }),
         );

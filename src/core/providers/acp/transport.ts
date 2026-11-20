@@ -15,6 +15,7 @@ export interface AcpAgentLaunchSpec {
   readonly command: string;
   readonly args: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
+  readonly defaultMode?: string;
 }
 
 /** Built-in preset for Google Antigravity CLI (`agy acp`). */

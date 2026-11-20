@@ -2299,6 +2299,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       storeTurnId: sent.turn.id,
       prompt: "",
       modelSelection: turnModel,
+      runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
       ...(onEvent ? { onEvent } : {}),
@@ -2330,6 +2331,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       // Always the turn's own model, so a live session switches when the
       // thread's model changed since it started.
       modelSelection: turnModel,
+      runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
       ...(onEvent ? { onEvent } : {}),

@@ -692,17 +692,35 @@ export function normalizeAcpToolCall(
         };
       }
       const cleanRead = trimmedTitle.replace(/^File\s+/iu, "").trim();
+      const readPath = asNonEmptyString(
+        rawInput["file_path"] ??
+          rawInput["Path"] ??
+          rawInput["TargetFile"] ??
+          rawInput["FilePath"] ??
+          rawInput["filePath"] ??
+          rawInput["path"] ??
+          rawInput["target"],
+      );
       return {
         canonicalTool: "Read",
         kind: "read",
         title: cleanRead || "Read",
-        input: rawInput,
+        input: readPath && rawInput["file_path"] === undefined ? { ...rawInput, file_path: readPath } : rawInput,
       };
     }
     case "edit":
     case "delete":
     case "move": {
       const cleanEdit = trimmedTitle.replace(/^File\s+/iu, "").trim();
+      const editPath = asNonEmptyString(
+        rawInput["file_path"] ??
+          rawInput["Path"] ??
+          rawInput["TargetFile"] ??
+          rawInput["FilePath"] ??
+          rawInput["filePath"] ??
+          rawInput["path"] ??
+          rawInput["target"],
+      );
       const hasContent = asNonEmptyString(rawInput["Content"] ?? rawInput["content"]) !== null;
       const hasTarget =
         rawInput["Target"] !== undefined ||
@@ -713,7 +731,7 @@ export function normalizeAcpToolCall(
         canonicalTool,
         kind,
         title: cleanEdit || canonicalTool,
-        input: rawInput,
+        input: editPath && rawInput["file_path"] === undefined ? { ...rawInput, file_path: editPath } : rawInput,
       };
     }
     case "search": {
@@ -767,13 +785,24 @@ export function normalizeAcpToolCall(
     }
     case "execute": {
       const cmd =
-        asNonEmptyString(rawInput["command"] ?? rawInput["CommandLine"] ?? rawInput["commandLine"]) ??
+        asNonEmptyString(rawInput["command"] ?? rawInput["CommandLine"] ?? rawInput["commandLine"] ?? rawInput["cmd"]) ??
         (trimmedTitle || null);
+      const execCwd = asNonEmptyString(
+        rawInput["cwd"] ?? rawInput["Cwd"] ?? rawInput["WorkingDirectory"] ?? rawInput["workingDirectory"],
+      );
+      const input =
+        (cmd && rawInput["command"] === undefined) || (execCwd && rawInput["cwd"] === undefined)
+          ? {
+              ...rawInput,
+              ...(cmd && rawInput["command"] === undefined ? { command: cmd } : {}),
+              ...(execCwd && rawInput["cwd"] === undefined ? { cwd: execCwd } : {}),
+            }
+          : rawInput;
       return {
         canonicalTool: "Bash",
         kind: "execute",
         title: cmd ?? "Bash",
-        input: cmd && rawInput["command"] === undefined ? { ...rawInput, command: cmd } : rawInput,
+        input,
       };
     }
     case "fetch":
