@@ -246,10 +246,124 @@ pub(crate) fn driver_kind(instance: &str) -> Option<&str> {
 /// One gauge of the composer's compact reading: the session window and the
 /// main weekly one always, any other window only once it is past 70% — the
 /// point where it can bite (`planUsageGauges` in `model/sidepanel.ts`).
+/// Antigravity's secondary `Claude & GPT` pool is omitted here and shown only
+/// in the extended Context panel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Gauge {
     pub short: String,
     pub percent: f64,
+}
+
+fn is_claude_gpt_window(window: &UsageWindow) -> bool {
+    window.id.starts_with("claude-gpt") || window.label.contains("Claude & GPT")
+}
+
+fn window_suffix(label: &str) -> Option<&str> {
+    let (_, suffix) = label
+        .rsplit_once(" – ")
+        .or_else(|| label.rsplit_once(" - "))?;
+    let trimmed = suffix.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanUsageRow {
+    pub id: String,
+    pub label: String,
+    pub used_percent: f64,
+    pub resets_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanUsageGroup {
+    pub title: Option<String>,
+    pub rows: Vec<PlanUsageRow>,
+}
+
+pub fn plan_usage_groups(windows: &[UsageWindow]) -> Vec<PlanUsageGroup> {
+    if windows.is_empty() {
+        return vec![];
+    }
+    let mut families: Vec<String> = vec![];
+    let mut add_family = |name: &str| {
+        if !families.iter().any(|existing| existing == name) {
+            families.push(name.to_string());
+        }
+    };
+    for window in windows {
+        if window.kind == "session"
+            && let Some(suffix) = window_suffix(&window.label)
+        {
+            add_family(suffix);
+        }
+        if window.id.starts_with("gemini-") {
+            add_family("Gemini");
+        }
+        if window.id.starts_with("claude-gpt-") {
+            add_family("Claude & GPT");
+        }
+    }
+    if families.is_empty() {
+        return vec![PlanUsageGroup {
+            title: None,
+            rows: windows
+                .iter()
+                .map(|window| PlanUsageRow {
+                    id: window.id.clone(),
+                    label: window.label.clone(),
+                    used_percent: window.used_percent,
+                    resets_at: window.resets_at.clone(),
+                })
+                .collect(),
+        }];
+    }
+    let mut groups: Vec<(String, Vec<PlanUsageRow>)> = families
+        .iter()
+        .map(|family| (family.clone(), Vec::new()))
+        .collect();
+    for window in windows {
+        let suffix = window_suffix(&window.label);
+        let family = if window.id.starts_with("gemini-")
+            && groups.iter().any(|(name, _)| name == "Gemini")
+        {
+            "Gemini"
+        } else if window.id.starts_with("claude-gpt-")
+            && groups.iter().any(|(name, _)| name == "Claude & GPT")
+        {
+            "Claude & GPT"
+        } else if let Some(s) = suffix
+            && groups.iter().any(|(name, _)| name == s)
+        {
+            s
+        } else {
+            families[0].as_str()
+        };
+        let label = match suffix {
+            Some(s) if s != family => s.to_string(),
+            _ => match window.kind.as_str() {
+                "session" => "5h".to_string(),
+                "weekly" => "Weekly".to_string(),
+                "monthly" => "Monthly".to_string(),
+                _ => window.label.clone(),
+            },
+        };
+        if let Some((_, rows)) = groups.iter_mut().find(|(name, _)| name == family) {
+            rows.push(PlanUsageRow {
+                id: window.id.clone(),
+                label,
+                used_percent: window.used_percent,
+                resets_at: window.resets_at.clone(),
+            });
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(_, rows)| !rows.is_empty())
+        .map(|(title, rows)| PlanUsageGroup {
+            title: Some(title),
+            rows,
+        })
+        .collect()
 }
 
 pub fn plan_gauges(limits: Option<&ProviderLimits>) -> Vec<Gauge> {
@@ -265,6 +379,9 @@ pub fn plan_gauges(limits: Option<&ProviderLimits>) -> Vec<Gauge> {
     let mut gauges = vec![];
     let mut seen = std::collections::HashSet::new();
     for window in &limits.windows {
+        if is_claude_gpt_window(window) {
+            continue;
+        }
         if !seen.contains(window.kind.as_str())
             && let Some(name) = short(&window.kind)
         {
@@ -1404,38 +1521,38 @@ fn plan_usage(
     if limits.windows.is_empty() {
         return section.children(credits_row);
     }
-    let rows: Vec<(String, f64, Option<String>)> = limits
-        .windows
+    let groups = plan_usage_groups(&limits.windows);
+    let percent_width = groups
         .iter()
-        .map(|window| {
-            (
-                window.label.clone(),
-                window.used_percent,
-                reset_label(window.resets_at.as_deref(), now),
-            )
-        })
-        .collect();
-    let percent_width = rows
-        .iter()
-        .map(|(_, percent, _)| format!("{}%", percent.round() as i64).len())
+        .flat_map(|group| group.rows.iter())
+        .map(|row| format!("{}%", row.used_percent.round() as i64).len())
         .max()
         .unwrap_or(0);
-    // The label column fits the longest window, like the TUI's shared
-    // columns, so a second weekly window never wraps under the bar.
-    let longest = rows
+    // The label column fits the longest window across all groups, like the
+    // TUI's shared columns, so every bar starts and ends together.
+    let longest = groups
         .iter()
-        .map(|(label, _, _)| label.chars().count())
+        .flat_map(|group| group.rows.iter())
+        .map(|row| row.label.chars().count())
         .max()
         .unwrap_or(0);
     let label_width = ((longest as f32) * 7.5).clamp(64., 116.);
     section
-        .child(
+        .children(groups.into_iter().map(move |group| {
             div()
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .children(rows.into_iter().map(move |(label, percent, reset)| {
-                    let fraction = (percent / 100.).clamp(0., 1.) as f32;
+                .children(group.title.map(|title| {
+                    div()
+                        .font_family(theme::MONO)
+                        .text_size(px(12.))
+                        .text_color(color("ink-2"))
+                        .child(title)
+                }))
+                .children(group.rows.into_iter().map(move |row| {
+                    let reset = reset_label(row.resets_at.as_deref(), now);
+                    let fraction = (row.used_percent / 100.).clamp(0., 1.) as f32;
                     // The mockup paints every plan window the same blue: urgency
                     // belongs to the gauges and the protection banner, and only
                     // the `vu` meter uses `held` and `broken`.
@@ -1446,7 +1563,7 @@ fn plan_usage(
                         .gap(px(10.))
                         .font_family(theme::MONO)
                         .text_size(px(12.))
-                        .child(div().w(px(label_width)).flex_shrink_0().child(label))
+                        .child(div().w(px(label_width)).flex_shrink_0().child(row.label))
                         .child(
                             div()
                                 .flex_1()
@@ -1463,11 +1580,11 @@ fn plan_usage(
                         )
                         .child(div().text_color(color("ink")).child(format!(
                             "{:>percent_width$}",
-                            format!("{}%", percent.round() as i64)
+                            format!("{}%", row.used_percent.round() as i64)
                         )))
                         .children(reset.map(|reset| div().text_color(color("ink-2")).child(reset)))
-                })),
-        )
+                }))
+        }))
         .children(credits_row)
 }
 
@@ -1475,7 +1592,8 @@ fn plan_usage(
 mod tests {
     use super::{
         Breakdown, Category, CategoryKind, ContextData, Hold, LimitsData, QueueEntry,
-        SnapshotUsage, format_count, format_share, headroom, plan_gauges, reset_label, until_label,
+        SnapshotUsage, format_count, format_share, headroom, plan_gauges, plan_usage_groups,
+        reset_label, until_label,
     };
     use serde_json::json;
 
@@ -1659,6 +1777,45 @@ mod tests {
                 .map(|gauge| (gauge.short.as_str(), gauge.percent as i64))
                 .collect::<Vec<_>>(),
             [("5h", 36), ("wk", 43), ("Opus", 71), ("–", 80)]
+        );
+
+        let agy = LimitsData::from_json(
+            &json!({"providers": {"antigravity": {"checkedAt": "x", "windows": [
+            {"id": "gemini-5h", "kind": "session", "label": "Session – Gemini", "usedPercent": 100.0, "resetsAt": null},
+            {"id": "claude-gpt-5h", "kind": "session", "label": "Session – Claude & GPT", "usedPercent": 100.0, "resetsAt": null},
+            {"id": "gemini-weekly", "kind": "weekly", "label": "Weekly – Gemini", "usedPercent": 50.0, "resetsAt": null},
+            {"id": "claude-gpt-weekly", "kind": "weekly", "label": "Weekly – Claude & GPT", "usedPercent": 88.0, "resetsAt": null},
+            {"id": "gemini-4-argon-weekly", "kind": "weekly", "label": "Weekly – Argon", "usedPercent": 72.0, "resetsAt": null},
+        ], "unavailable": null}}}),
+        );
+        let agy_limits = agy.for_instance("antigravity").expect("antigravity limits");
+        let agy_gauges = plan_gauges(Some(agy_limits));
+        assert_eq!(
+            agy_gauges
+                .iter()
+                .map(|gauge| (gauge.short.as_str(), gauge.percent as i64))
+                .collect::<Vec<_>>(),
+            [("5h", 100), ("wk", 50), ("Argon", 72)]
+        );
+        let groups = plan_usage_groups(&agy_limits.windows);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].title.as_deref(), Some("Gemini"));
+        assert_eq!(
+            groups[0]
+                .rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["5h", "Weekly", "Argon"]
+        );
+        assert_eq!(groups[1].title.as_deref(), Some("Claude & GPT"));
+        assert_eq!(
+            groups[1]
+                .rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["5h", "Weekly"]
         );
     }
 

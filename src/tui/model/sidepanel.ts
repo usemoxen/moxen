@@ -206,10 +206,81 @@ export function effectiveContextBreakdown(
 
 const SHORT_BY_KIND: Record<string, string> = { session: "5h", weekly: "wk", monthly: "mo" };
 
+function isClaudeGptWindow(window: { id: string; label: string }): boolean {
+  return window.id.startsWith("claude-gpt") || /\bClaude\s*&\s*GPT\b/iu.test(window.label);
+}
+
+function windowSuffix(label: string): string | null {
+  const parts = label.split(/\s+[–-]\s+/u);
+  if (parts.length < 2) return null;
+  const suffix = parts.at(-1)?.trim() ?? "";
+  return suffix.length > 0 ? suffix : null;
+}
+
+export interface PlanUsageGroup<W extends { id: string; kind: string; label: string }> {
+  title: string | null;
+  rows: Array<{ window: W; label: string }>;
+}
+
+/**
+ * Group plan-usage windows into subcategories when a provider reports
+ * multiple model-family pools (Antigravity's `Gemini` and `Claude & GPT`),
+ * shortening inner row labels to `5h`, `Weekly` and per-model names (`Argon`).
+ * Single-pool providers keep a single untitled group with their original labels.
+ */
+export function planUsageGroups<W extends { id: string; kind: string; label: string }>(
+  windows: ReadonlyArray<W>,
+): PlanUsageGroup<W>[] {
+  if (windows.length === 0) return [];
+  const families: string[] = [];
+  const addFamily = (name: string): void => {
+    if (!families.includes(name)) families.push(name);
+  };
+  for (const window of windows) {
+    if (window.kind === "session") {
+      const suffix = windowSuffix(window.label);
+      if (suffix !== null) addFamily(suffix);
+    }
+    if (window.id.startsWith("gemini-")) addFamily("Gemini");
+    if (window.id.startsWith("claude-gpt-")) addFamily("Claude & GPT");
+  }
+  if (families.length === 0) {
+    return [{ title: null, rows: windows.map((window) => ({ window, label: window.label })) }];
+  }
+  const byFamily = new Map<string, Array<{ window: W; label: string }>>(families.map((family) => [family, []]));
+  for (const window of windows) {
+    const suffix = windowSuffix(window.label);
+    const family =
+      window.id.startsWith("gemini-") && byFamily.has("Gemini")
+        ? "Gemini"
+        : window.id.startsWith("claude-gpt-") && byFamily.has("Claude & GPT")
+          ? "Claude & GPT"
+          : suffix !== null && byFamily.has(suffix)
+            ? suffix
+            : families[0]!;
+    const label =
+      suffix !== null && suffix !== family
+        ? suffix
+        : window.kind === "session"
+          ? "5h"
+          : window.kind === "weekly"
+            ? "Weekly"
+            : window.kind === "monthly"
+              ? "Monthly"
+              : window.label;
+    byFamily.get(family)!.push({ window, label });
+  }
+  return [...byFamily.entries()]
+    .filter(([, rows]) => rows.length > 0)
+    .map(([title, rows]) => ({ title, rows }));
+}
+
 /**
  * The footer's compact reading of a provider's plan usage: the session
  * window and the main weekly one always, any other window (a per-model
  * weekly limit) only once it is past 70% — the point where it can bite.
+ * Antigravity's secondary `Claude & GPT` pool is omitted here and shown
+ * only in the extended Context panel.
  */
 export function planUsageGauges(
   limits: { windows: ReadonlyArray<{ id: string; kind: string; label: string; usedPercent: number }> } | null | undefined,
@@ -218,6 +289,7 @@ export function planUsageGauges(
   const gauges: PlanUsageGauge[] = [];
   const seenKinds = new Set<string>();
   for (const window of limits.windows) {
+    if (isClaudeGptWindow(window)) continue;
     const main = !seenKinds.has(window.kind) && SHORT_BY_KIND[window.kind] !== undefined;
     if (main) {
       seenKinds.add(window.kind);

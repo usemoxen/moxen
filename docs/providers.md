@@ -81,7 +81,10 @@ negotiates any other protocol version is refused loudly
   Moxen also probes `agy --print /usage --output-format json` and
   `agy --print /credits --output-format json` (zero-turn local slash commands,
   no shell, no credential access) to report subscription quota windows and
-  remaining credits in the Context tab and `usage.limits`.
+  remaining credits in the Context tab and `usage.limits`. Compact composer
+  gauges track the `Gemini` pool (`5h`, `wk`, plus `Argon` once it reaches
+  70%), while the extended Plan usage panel divides windows into `Gemini`
+  (`5h`, `Weekly`, `Argon`) and `Claude & GPT` (`5h`, `Weekly`) subcategories.
 - **Tool canonicalization, background tasks & reactive wakeups**: `AcpDriver`
   unwraps ACP lazy MCP calls (`call_mcp_tool` / `"MCP Tool <name>"`) and
   `"Run mcp_<server>_<tool>"` calls into `mcp__<server>__<tool>` rows,

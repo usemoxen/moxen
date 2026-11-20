@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ActivityEnvelope, MessageEnvelope, ThreadEnvelope } from "../../../core/types.js";
-import { agentThreads, contextShares, effectiveContextBreakdown, estimateContextBreakdown, nativeSubagents, planUsageGauges, subagentPreview } from "../sidepanel.js";
+import { agentThreads, contextShares, effectiveContextBreakdown, estimateContextBreakdown, nativeSubagents, planUsageGauges, planUsageGroups, subagentPreview } from "../sidepanel.js";
 import type { ContextUsage } from "../thread.js";
 
 function thread(id: string, extra: Partial<ThreadEnvelope> = {}): ThreadEnvelope {
@@ -179,6 +179,75 @@ describe("planUsageGauges", () => {
 
   it("shows nothing without a reading", () => {
     expect(planUsageGauges(null)).toEqual([]);
+  });
+
+  it("omits Antigravity Claude & GPT windows from compact gauges while keeping Gemini and biting Argon", () => {
+    const gauges = planUsageGauges({
+      windows: [
+        { id: "gemini-5h", kind: "session", label: "Session – Gemini", usedPercent: 100 },
+        { id: "claude-gpt-5h", kind: "session", label: "Session – Claude & GPT", usedPercent: 100 },
+        { id: "gemini-weekly", kind: "weekly", label: "Weekly – Gemini", usedPercent: 50 },
+        { id: "claude-gpt-weekly", kind: "weekly", label: "Weekly – Claude & GPT", usedPercent: 88 },
+        { id: "gemini-4-argon-weekly", kind: "weekly", label: "Weekly – Argon", usedPercent: 72 },
+      ],
+    });
+    expect(gauges).toEqual([
+      { short: "5h", percent: 100 },
+      { short: "wk", percent: 50 },
+      { short: "Argon", percent: 72 },
+    ]);
+  });
+});
+
+describe("planUsageGroups", () => {
+  it("keeps single-pool providers in one untitled group with original labels", () => {
+    const windows = [
+      { id: "session", kind: "session", label: "Session", usedPercent: 42 },
+      { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 18 },
+      { id: "seven_day_opus", kind: "weekly", label: "Weekly – Opus", usedPercent: 85 },
+    ];
+    expect(planUsageGroups(windows)).toEqual([
+      {
+        title: null,
+        rows: [
+          { window: windows[0]!, label: "Session" },
+          { window: windows[1]!, label: "Weekly" },
+          { window: windows[2]!, label: "Weekly – Opus" },
+        ],
+      },
+    ]);
+  });
+
+  it("divides Antigravity windows into Gemini and Claude & GPT subcategories", () => {
+    const windows = [
+      { id: "gemini-5h", kind: "session", label: "Session – Gemini", usedPercent: 100 },
+      { id: "claude-gpt-5h", kind: "session", label: "Session – Claude & GPT", usedPercent: 100 },
+      { id: "gemini-weekly", kind: "weekly", label: "Weekly – Gemini", usedPercent: 50 },
+      { id: "claude-gpt-weekly", kind: "weekly", label: "Weekly – Claude & GPT", usedPercent: 66 },
+      { id: "gemini-4-argon-weekly", kind: "weekly", label: "Weekly – Argon", usedPercent: 68 },
+    ];
+    expect(
+      planUsageGroups(windows).map((group) => ({
+        title: group.title,
+        rows: group.rows.map((row) => [row.window.id, row.label]),
+      })),
+    ).toEqual([
+      {
+        title: "Gemini",
+        rows: [
+          ["gemini-5h", "5h"],
+          ["gemini-weekly", "Weekly"],
+          ["gemini-4-argon-weekly", "Argon"],
+        ],
+      },
+      {
+        title: "Claude & GPT",
+        rows: [
+          ["claude-gpt-5h", "5h"],
+          ["claude-gpt-weekly", "Weekly"],
+        ],
+      },
+    ]);
   });
 });
 

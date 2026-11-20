@@ -7,7 +7,7 @@ import { TextAttributes } from "@opentui/core";
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
 import { useHover } from "../../hooks/useHover.js";
 import { prettyToolName } from "../../model/activity.js";
-import { contextShares, subagentPreview, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab } from "../../model/sidepanel.js";
+import { contextShares, planUsageGroups, subagentPreview, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab } from "../../model/sidepanel.js";
 import { backgroundTaskKind, backgroundTaskTitle, untilLabel, type BackgroundTaskRow, type ContextUsage } from "../../model/thread.js";
 import { formatDuration, formatTokenCount, formatUsd } from "../../model/turns.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -623,29 +623,38 @@ export function ContextTab({
           {usageLimits.windows.length === 0 ? null : (() => {
             // Inline like the heaviest tools: label, bar, reading in columns
             // shared by every window, so the bars start and end together.
-            const rows = usageLimits.windows.map((window) => {
-              const resets = window.resetsAt === null ? null : new Date(window.resetsAt);
-              const resetLabel =
-                resets === null || Number.isNaN(resets.getTime()) ? null : `↻ ${untilLabel(resets, now).replace(/^in /u, "")}`;
-              return { window, percent: `${Math.round(window.usedPercent)}%`, resetLabel };
-            });
-            const labelWidth = Math.min(Math.max(...rows.map((row) => row.window.label.length)), Math.max(6, Math.floor(inner * 0.3)));
+            const groups = planUsageGroups(usageLimits.windows).map((group) => ({
+              title: group.title,
+              rows: group.rows.map(({ window, label }) => {
+                const resets = window.resetsAt === null ? null : new Date(window.resetsAt);
+                const resetLabel =
+                  resets === null || Number.isNaN(resets.getTime()) ? null : `↻ ${untilLabel(resets, now).replace(/^in /u, "")}`;
+                return { window, label, percent: `${Math.round(window.usedPercent)}%`, resetLabel };
+              }),
+            }));
+            const rows = groups.flatMap((group) => group.rows);
+            const labelWidth = Math.min(Math.max(...rows.map((row) => row.label.length)), Math.max(6, Math.floor(inner * 0.3)));
             const percentWidth = Math.max(...rows.map((row) => row.percent.length));
             const resetWidth = Math.max(0, ...rows.map((row) => row.resetLabel?.length ?? 0));
             const valueWidth = percentWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
             const barWidth = Math.max(4, inner - labelWidth - valueWidth - 2);
-            return rows.map(({ window, percent, resetLabel }) => {
-              const fraction = window.usedPercent / 100;
-              const color = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
-              return (
-                <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                  <OverflowText fg={COLOR.text} width={labelWidth + 1} padToWidth suffix=" ">{window.label}</OverflowText>
-                  <BarRow width={barWidth} fraction={fraction} filledColor={color} />
-                  <text fg={COLOR.dim}>{` ${percent.padStart(percentWidth)}`}</text>
-                  {resetWidth > 0 ? <text fg={COLOR.faint}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
-                </box>
-              );
-            });
+            return groups.map((group, groupIndex) => (
+              <box key={group.title ?? "default"} style={{ flexDirection: "column", flexShrink: 0, ...(groupIndex > 0 ? { marginTop: 1 } : {}) }}>
+                {group.title === null ? null : <text fg={COLOR.dim}>{group.title}</text>}
+                {group.rows.map(({ window, label, percent, resetLabel }) => {
+                  const fraction = window.usedPercent / 100;
+                  const color = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
+                  return (
+                    <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
+                      <OverflowText fg={COLOR.text} width={labelWidth + 1} padToWidth suffix=" ">{label}</OverflowText>
+                      <BarRow width={barWidth} fraction={fraction} filledColor={color} />
+                      <text fg={COLOR.dim}>{` ${percent.padStart(percentWidth)}`}</text>
+                      {resetWidth > 0 ? <text fg={COLOR.faint}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
+                    </box>
+                  );
+                })}
+              </box>
+            ));
           })()}
           {typeof usageLimits.credits === "number" ? (
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between", ...(usageLimits.windows.length > 0 ? { marginTop: 1 } : {}) }}>
