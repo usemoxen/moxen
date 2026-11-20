@@ -1,17 +1,83 @@
 /**
  * Antigravity catalog discovery: probes the official `agy` binary via ACP v1
- * `initialize` without creating an empty session or reading credentials.
+ * `initialize`, and when `agy` supports `session/close` reads the user's live
+ * models and per-model effort levels via a short-lived probe session (cached
+ * per binary + version so repeated catalog reads stay fast).
  */
 import fs from "node:fs";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { ProviderSummary } from "../../catalog/summary.js";
+import type { ModelSummary, ProviderSummary } from "../../catalog/summary.js";
 import { CliError } from "../../errors.js";
 import { binaryOnPath } from "../../infra/process.js";
 import type { AntigravityProviderConfig } from "../../types.js";
 import { AcpDriver } from "../acp/driver.js";
 import type { AcpTransport } from "../acp/transport.js";
 import { ANTIGRAVITY_DEFAULT_MODEL_SLUG, antigravityLaunchSpec } from "./config.js";
+
+const MODELS_CACHE_TTL_MS = 15 * 60_000;
+
+interface CachedAntigravityModels {
+  readonly key: string;
+  readonly fetchedAt: number;
+  readonly models: ModelSummary[];
+}
+
+const memoryCache = new Map<string, CachedAntigravityModels>();
+
+export function forgetAntigravityCatalogCache(): void {
+  memoryCache.clear();
+}
+
+function cacheKeyOf(command: string, args: readonly string[], version: string | null): string {
+  return `${command}\0${args.join("\0")}\0${version ?? ""}`;
+}
+
+function diskCachePath(storeRoot: string): string {
+  return path.join(storeRoot, "cache", "antigravity-models.json");
+}
+
+async function readDiskCache(storeRoot: string | undefined): Promise<CachedAntigravityModels | null> {
+  if (!storeRoot) return null;
+  try {
+    const raw = JSON.parse(await readFile(diskCachePath(storeRoot), "utf8")) as unknown;
+    if (!raw || typeof raw !== "object") return null;
+    const rec = raw as Record<string, unknown>;
+    if (typeof rec["key"] !== "string" || typeof rec["fetchedAt"] !== "number" || !Array.isArray(rec["models"])) {
+      return null;
+    }
+    return { key: rec["key"], fetchedAt: rec["fetchedAt"], models: rec["models"] as ModelSummary[] };
+  } catch {
+    return null;
+  }
+}
+
+async function writeDiskCache(storeRoot: string | undefined, entry: CachedAntigravityModels): Promise<void> {
+  if (!storeRoot) return;
+  try {
+    const file = diskCachePath(storeRoot);
+    await mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tmp, JSON.stringify(entry, null, 2));
+    await rename(tmp, file);
+  } catch {
+    // Non-fatal: in-memory cache still holds the entry.
+  }
+}
+
+function fallbackModels(): ModelSummary[] {
+  return [
+    {
+      slug: ANTIGRAVITY_DEFAULT_MODEL_SLUG,
+      name: "Antigravity (default)",
+      isCustom: false,
+      isHidden: false,
+      isDefault: true,
+      efforts: [],
+    },
+  ];
+}
 
 function isInstalled(command: string, env: NodeJS.ProcessEnv): boolean {
   if (path.isAbsolute(command)) {
@@ -29,6 +95,7 @@ export async function antigravityProvider(
   env: NodeJS.ProcessEnv,
   cwd: string,
   transport?: AcpTransport,
+  options: { readonly storeRoot?: string; readonly now?: () => number } = {},
 ): Promise<ProviderSummary> {
   const spec = antigravityLaunchSpec(config);
   const installed = transport ? true : isInstalled(spec.command, env);
@@ -47,6 +114,11 @@ export async function antigravityProvider(
   };
   if (!installed) return base;
 
+  const now = (options.now ?? Date.now)();
+  const useCache = transport === undefined || options.storeRoot !== undefined;
+  const diskCache = useCache ? await readDiskCache(options.storeRoot) : null;
+  let cachedHit: CachedAntigravityModels | null = null;
+
   const driver = new AcpDriver({
     provider: "antigravity",
     agents: { antigravity: spec },
@@ -55,23 +127,56 @@ export async function antigravityProvider(
     initializeTimeoutMs: 5_000,
   });
   try {
-    const init = await driver.probeAgent("antigravity", cwd);
+    const { init, models: discovered, authError } = await driver.probeAgentCatalog("antigravity", cwd, {
+      shouldDiscover: (initializeResult) => {
+        if (!useCache) return true;
+        const key = cacheKeyOf(spec.command, spec.args, initializeResult.agentInfo.version);
+        const mem = memoryCache.get(key);
+        const hit = mem && now - mem.fetchedAt < MODELS_CACHE_TTL_MS
+          ? mem
+          : diskCache && diskCache.key === key && now - diskCache.fetchedAt < MODELS_CACHE_TTL_MS
+            ? diskCache
+            : null;
+        if (hit && hit.models.length > 0) {
+          cachedHit = hit;
+          memoryCache.set(key, hit);
+          return false;
+        }
+        return true;
+      },
+    });
+    if (authError) {
+      return {
+        ...base,
+        authStatus: "unauthenticated",
+        status: "Run `agy` to sign in to Antigravity.",
+      };
+    }
     const authStatus = init.authMethods.length > 0 ? init.authMethods[0]!.id : "ready";
+    let models: ModelSummary[];
+    if (cachedHit) {
+      models = (cachedHit as CachedAntigravityModels).models;
+    } else if (discovered.length > 0) {
+      models = discovered;
+      if (useCache) {
+        const key = cacheKeyOf(spec.command, spec.args, init.agentInfo.version);
+        const entry: CachedAntigravityModels = { key, fetchedAt: now, models };
+        memoryCache.set(key, entry);
+        await writeDiskCache(options.storeRoot, entry);
+      }
+    } else {
+      const stale = useCache
+        ? (memoryCache.get(cacheKeyOf(spec.command, spec.args, init.agentInfo.version)) ??
+            (diskCache && diskCache.key === cacheKeyOf(spec.command, spec.args, init.agentInfo.version) ? diskCache : null))
+        : null;
+      models = stale && stale.models.length > 0 ? stale.models : fallbackModels();
+    }
     return {
       ...base,
       enabled: true,
       status: null,
       authStatus,
-      models: [
-        {
-          slug: ANTIGRAVITY_DEFAULT_MODEL_SLUG,
-          name: "Antigravity (default)",
-          isCustom: false,
-          isHidden: false,
-          isDefault: true,
-          efforts: [],
-        },
-      ],
+      models,
     };
   } catch (cause) {
     if (cause instanceof CliError && cause.code === "ACP_PROTOCOL_VERSION_UNSUPPORTED") {

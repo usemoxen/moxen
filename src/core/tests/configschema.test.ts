@@ -170,12 +170,29 @@ describe("where settings live", () => {
   });
 
   it("gives every provider tab the same leading groups, and no catch-all", () => {
-    for (const kind of ["claude", "opencode", "harness"]) {
+    for (const kind of ["claude", "opencode", "codex", "antigravity", "acp", "harness"]) {
       const groups = [...new Set(visible.filter((descriptor) => descriptor.section === `provider:${kind}`).map((descriptor) => descriptor.group))];
-      expect(groups.slice(0, 4)).toEqual(["Defaults", "Tools", "Long threads", "Sessions"]);
+      expect(groups.slice(0, 4), kind).toEqual(["Defaults", "Tools", "Long threads", "Sessions"]);
       expect(groups).not.toContain("Behaviour");
       expect(groups).not.toContain("Concurrency");
     }
+  });
+
+  it("keeps Antigravity and ACP defaults, copy and fallbacks free of OpenCode text", () => {
+    const views = describeSettings(DEFAULT_CONFIG);
+    const view = (key: string) => views.find((entry) => entry.descriptor.key === key)!;
+    expect(view("providers.antigravity.compactAt").effective?.label).toBe("Antigravity's own");
+    expect(view("providers.acp.compactAt").effective?.label).toBe("The ACP agent's own");
+    expect(view("providers.antigravity.compaction").descriptor.appliesAt).toBeUndefined();
+    expect(view("providers.acp.compaction").descriptor.appliesAt).toBeUndefined();
+    expect(view("providers.antigravity.binaryPath").descriptor.group).toBe("Setup");
+    expect(view("providers.antigravity.modelInputPrices").descriptor.description).not.toContain("opencode-go");
+    expect(view("providers.claude.modelInputPrices").descriptor.description).not.toContain("opencode-go");
+    const withGlobalModel = describeSettings(setConfigValue(setConfigValue(DEFAULT_CONFIG, "provider", "antigravity"), "model", "gemini-4-neon"));
+    expect(withGlobalModel.find((entry) => entry.descriptor.key === "providers.antigravity.model")?.effective).toMatchObject({
+      value: "gemini-4-neon",
+      origin: "from 'Model' on the Defaults tab",
+    });
   });
 
   it("names no tab in a description: a cross-reference is generated where it is shown", () => {

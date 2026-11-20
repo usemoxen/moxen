@@ -10,8 +10,10 @@
 import { createTwoFilesPatch } from "diff";
 
 import { imageMention } from "../../attachments.js";
+import type { ModelSummary } from "../../catalog/summary.js";
 import { CliError } from "../../errors.js";
 import { outOfProcess, type McpServerSpec } from "../../mcp.js";
+import type { ModelSelection } from "../../types.js";
 import type { ProviderApprovalDecision, ProviderImage } from "../spi.js";
 import type { TerminalTurnStatus } from "../turnsettle.js";
 
@@ -24,6 +26,7 @@ export const ACP_METHODS = {
   authenticate: "authenticate",
   sessionNew: "session/new",
   sessionLoad: "session/load",
+  sessionClose: "session/close",
   sessionPrompt: "session/prompt",
   sessionSetMode: "session/set_mode",
   sessionSetConfigOption: "session/set_config_option",
@@ -98,6 +101,7 @@ export interface AcpMcpCapabilities {
 
 export interface AcpAgentCapabilities {
   readonly loadSession: boolean;
+  readonly canCloseSession: boolean;
   readonly promptCapabilities: AcpPromptCapabilities;
   readonly mcpCapabilities: AcpMcpCapabilities;
 }
@@ -127,6 +131,7 @@ export function parseAcpInitializeResult(raw: unknown, agentLabel?: string): Acp
   const caps = asRecord(record?.["agentCapabilities"]) ?? {};
   const promptCaps = asRecord(caps["promptCapabilities"]) ?? {};
   const mcpCaps = asRecord(caps["mcpCapabilities"]) ?? {};
+  const sessionCaps = asRecord(caps["sessionCapabilities"]) ?? asRecord(caps["session_capabilities"]) ?? {};
   const info = asRecord(record?.["agentInfo"]) ?? {};
   const rawAuth = Array.isArray(record?.["authMethods"]) ? record!["authMethods"] : [];
   const authMethods: AcpAuthMethod[] = [];
@@ -143,7 +148,8 @@ export function parseAcpInitializeResult(raw: unknown, agentLabel?: string): Acp
   return {
     protocolVersion,
     agentCapabilities: {
-      loadSession: caps["loadSession"] === true,
+      loadSession: caps["loadSession"] === true || caps["load_session"] === true,
+      canCloseSession: asRecord(sessionCaps["close"]) !== null || sessionCaps["close"] === true,
       promptCapabilities: {
         image: promptCaps["image"] === true,
         audio: promptCaps["audio"] === true,
@@ -276,6 +282,202 @@ export function parseAcpAvailableCommands(raw: unknown): AcpAvailableCommand[] {
     });
   }
   return commands;
+}
+
+export interface AcpAvailableModel {
+  readonly modelId: string;
+  readonly name: string;
+}
+
+export interface AcpModelsState {
+  readonly currentModelId: string | null;
+  readonly availableModels: ReadonlyArray<AcpAvailableModel>;
+}
+
+export function parseAcpModelsState(raw: unknown): AcpModelsState | null {
+  const record = asRecord(raw);
+  if (!record) return null;
+  const rawModels = Array.isArray(record["availableModels"]) ? record["availableModels"] : [];
+  const availableModels: AcpAvailableModel[] = [];
+  for (const entry of rawModels) {
+    const item = asRecord(entry);
+    const modelId = asNonEmptyString(item?.["modelId"]);
+    if (!modelId) continue;
+    availableModels.push({
+      modelId,
+      name: asNonEmptyString(item?.["name"]) ?? modelId,
+    });
+  }
+  const currentModelId = asNonEmptyString(record["currentModelId"]);
+  if (currentModelId === null && availableModels.length === 0) return null;
+  return { currentModelId, availableModels };
+}
+
+const CANONICAL_EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const CANONICAL_EFFORT_LABELS: Readonly<Record<string, string>> = {
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra",
+  max: "Max",
+};
+
+export function findAcpEffortOption(configOptions: readonly AcpConfigOption[]): AcpConfigOption | undefined {
+  return configOptions.find(
+    (opt) =>
+      opt.category === "thought_level" ||
+      opt.id === "thought_level" ||
+      opt.id === "effort" ||
+      opt.id === "reasoning_effort",
+  );
+}
+
+export function extractSelectionEffort(selection: ModelSelection | undefined): string | null {
+  const opts = selection?.options;
+  if (!opts) return null;
+  const keys = ["effort", "reasoningEffort", "reasoning", "thought_level"];
+  if (Array.isArray(opts)) {
+    for (const key of keys) {
+      const hit = opts.find((entry) => entry.id === key && typeof entry.value === "string" && entry.value.trim().length > 0);
+      if (hit && typeof hit.value === "string") return hit.value.trim();
+    }
+    return null;
+  }
+  if (typeof opts === "object") {
+    const rec = opts as Record<string, unknown>;
+    for (const key of keys) {
+      const value = rec[key];
+      if (typeof value === "string" && value.trim().length > 0) return value.trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Derive Moxen `ModelSummary[]` (base models + per-model effort choices) from
+ * an ACP `session/new` response's `configOptions` and `models`.
+ *
+ * When both `configOptions` (`category: "model"` + `thought_level`) and
+ * `models.availableModels` are present (as `agy acp` sends), each base model
+ * gets only the effort levels its `<slug>-<level>` variants actually support,
+ * so models without effort (e.g. Orchestrator, GPT-OSS) show no effort slider.
+ */
+export function parseAcpCatalogModels(
+  configOptions: readonly AcpConfigOption[],
+  modelsState: AcpModelsState | null,
+): ModelSummary[] {
+  const modelOpt = configOptions.find((opt) => opt.category === "model" || opt.id === "model");
+  const effortOpt = findAcpEffortOption(configOptions);
+  const available = modelsState?.availableModels ?? [];
+
+  if (modelOpt && modelOpt.options.length > 0) {
+    const knownEfforts = new Map<string, { id: string; label: string; order: number }>();
+    (effortOpt?.options ?? []).forEach((choice, idx) => {
+      knownEfforts.set(choice.value.toLowerCase(), { id: choice.value, label: choice.name, order: idx });
+    });
+    CANONICAL_EFFORT_ORDER.forEach((level, idx) => {
+      if (!knownEfforts.has(level)) {
+        knownEfforts.set(level, {
+          id: level,
+          label: CANONICAL_EFFORT_LABELS[level] ?? level,
+          order: 100 + idx,
+        });
+      }
+    });
+
+    const defaultSlug = modelOpt.currentValue ?? null;
+    const currentEffort = effortOpt?.currentValue ?? null;
+    const seen = new Set<string>();
+    const out: ModelSummary[] = [];
+
+    for (const entry of modelOpt.options) {
+      if (seen.has(entry.value)) continue;
+      seen.add(entry.value);
+
+      let matchedLevels: Array<{ id: string; label: string; order: number }> = [];
+      if (available.length > 0) {
+        const prefix = `${entry.value}-`;
+        const seenLevels = new Set<string>();
+        for (const variant of available) {
+          if (!variant.modelId.startsWith(prefix)) continue;
+          const suffix = variant.modelId.slice(prefix.length).toLowerCase();
+          const info = knownEfforts.get(suffix);
+          if (!info || seenLevels.has(info.id)) continue;
+          seenLevels.add(info.id);
+          matchedLevels.push(info);
+        }
+        matchedLevels.sort((a, b) => a.order - b.order);
+      } else if (effortOpt && effortOpt.options.length > 0) {
+        matchedLevels = effortOpt.options.map((choice, idx) => ({
+          id: choice.value,
+          label: choice.name,
+          order: idx,
+        }));
+      }
+
+      const isDefaultModel = defaultSlug !== null ? entry.value === defaultSlug : out.length === 0;
+      const defaultEffort = (() => {
+        if (matchedLevels.length === 0) return null;
+        if (isDefaultModel && currentEffort && matchedLevels.some((c) => c.id === currentEffort)) {
+          return currentEffort;
+        }
+        if (modelsState?.currentModelId?.startsWith(`${entry.value}-`)) {
+          const curSuffix = modelsState.currentModelId.slice(entry.value.length + 1).toLowerCase();
+          const curHit = matchedLevels.find((c) => c.id.toLowerCase() === curSuffix);
+          if (curHit) return curHit.id;
+        }
+        if (matchedLevels.some((c) => c.id === "medium")) return "medium";
+        if (currentEffort && matchedLevels.some((c) => c.id === currentEffort)) return currentEffort;
+        return matchedLevels[0]!.id;
+      })();
+
+      out.push({
+        slug: entry.value,
+        name: entry.name,
+        isCustom: false,
+        isHidden: false,
+        isDefault: isDefaultModel,
+        efforts:
+          matchedLevels.length === 0
+            ? []
+            : [
+                {
+                  id: "effort",
+                  label: effortOpt?.name || "Effort",
+                  choices: matchedLevels.map((level) => ({
+                    id: level.id,
+                    label: level.label,
+                    isDefault: level.id === defaultEffort ? true : null,
+                  })),
+                  currentValue: null,
+                },
+              ],
+      });
+    }
+    return out;
+  }
+
+  if (available.length > 0) {
+    const seen = new Set<string>();
+    const out: ModelSummary[] = [];
+    for (const entry of available) {
+      if (seen.has(entry.modelId)) continue;
+      seen.add(entry.modelId);
+      out.push({
+        slug: entry.modelId,
+        name: entry.name,
+        isCustom: false,
+        isHidden: false,
+        isDefault: modelsState?.currentModelId ? entry.modelId === modelsState.currentModelId : out.length === 0,
+        efforts: [],
+      });
+    }
+    return out;
+  }
+
+  return [];
 }
 
 /**

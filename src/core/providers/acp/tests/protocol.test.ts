@@ -9,6 +9,7 @@ import {
   assertSupportedAcpProtocolVersion,
   buildAcpPromptBlocks,
   extractAcpToolContent,
+  parseAcpCatalogModels,
   selectAcpPermissionOutcome,
 } from "../protocol.js";
 
@@ -93,5 +94,73 @@ describe("ACP wire helpers", () => {
     expect(extracted.patch).toContain("-const x = 1;");
     expect(extracted.patch).toContain("+const x = 2;");
     expect(extracted.files.map((f) => f.path)).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+
+  it("derives base models and per-model efforts from ACP configOptions and availableModels", () => {
+    const models = parseAcpCatalogModels(
+      [
+        {
+          id: "model",
+          category: "model",
+          name: "Model",
+          description: null,
+          currentValue: "gemini-4-neon",
+          options: [
+            { value: "gemini-4-neon", name: "Gemini 4 Neon", description: null },
+            { value: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", description: null },
+          ],
+        },
+        {
+          id: "thought_level",
+          category: "thought_level",
+          name: "Thought Level",
+          description: null,
+          currentValue: "high",
+          options: [
+            { value: "low", name: "Low", description: null },
+            { value: "high", name: "High", description: null },
+            { value: "xhigh", name: "Extra", description: null },
+          ],
+        },
+      ],
+      {
+        currentModelId: "gemini-4-neon-high",
+        availableModels: [
+          { modelId: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)" },
+          { modelId: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
+          { modelId: "gemini-4-neon-xhigh", name: "Gemini 4 Neon (Extra)" },
+          { modelId: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
+        ],
+      },
+    );
+    expect(models).toEqual([
+      {
+        slug: "gemini-4-neon",
+        name: "Gemini 4 Neon",
+        isCustom: false,
+        isDefault: true,
+        isHidden: false,
+        efforts: [
+          {
+            id: "effort",
+            label: "Thought Level",
+            currentValue: null,
+            choices: [
+              { id: "low", label: "Low", isDefault: null },
+              { id: "high", label: "High", isDefault: true },
+              { id: "xhigh", label: "Extra", isDefault: null },
+            ],
+          },
+        ],
+      },
+      {
+        slug: "gpt-oss-120b-medium",
+        name: "GPT-OSS 120B (Medium)",
+        isCustom: false,
+        isDefault: false,
+        isHidden: false,
+        efforts: [],
+      },
+    ]);
   });
 });

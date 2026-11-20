@@ -82,16 +82,39 @@ export async function acpProviderFor(
     initializeTimeoutMs: 5_000,
   });
   try {
-    const init = await driver.probeAgent(instanceId, cwd);
+    const { init, models: discovered } = await driver.probeAgentCatalog(instanceId, cwd);
     const title = init.agentInfo.title ?? init.agentInfo.name ?? displayName;
     const authStatus = init.authMethods.length > 0 ? init.authMethods[0]!.id : "ready";
+    let models: ProviderSummary["models"];
+    if (discovered.length > 0) {
+      if (agent.defaultModel && agent.defaultModel !== ACP_DEFAULT_MODEL_SLUG) {
+        const hasPinned = discovered.some((m) => m.slug === agent.defaultModel);
+        models = hasPinned
+          ? discovered.map((m) => ({ ...m, isDefault: m.slug === agent.defaultModel }))
+          : [
+              ...discovered.map((m) => ({ ...m, isDefault: false })),
+              {
+                slug: agent.defaultModel,
+                name: agent.defaultModel,
+                isCustom: true,
+                isHidden: false,
+                isDefault: true,
+                efforts: [],
+              },
+            ];
+      } else {
+        models = discovered;
+      }
+    } else {
+      models = defaultModelsFor(agent);
+    }
     return {
       ...base,
       displayName: title,
       enabled: true,
       status: null,
       authStatus,
-      models: defaultModelsFor(agent),
+      models,
     };
   } catch (cause) {
     if (cause instanceof CliError && cause.code === "ACP_PROTOCOL_VERSION_UNSUPPORTED") {

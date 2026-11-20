@@ -263,11 +263,11 @@ function valueOf(settings: readonly SettingView[], key: string): string | undefi
  * the provider's catalog default does.
  */
 export function configuredDefaultModel(settings: readonly SettingView[], instanceId: string): string | undefined {
-  const model = (kind: "claude" | "codex" | "opencode" | "harness") => ({ model: valueOf(settings, `providers.${kind}.model`) });
+  const model = (kind: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity") => ({ model: valueOf(settings, `providers.${kind}.model`) });
   const provider = valueOf(settings, "provider");
   const global = valueOf(settings, "model");
   return configuredModel(
-    { ...(provider === undefined ? {} : { provider }), ...(global === undefined ? {} : { model: global }), providers: { codex: model("codex"), claude: model("claude"), opencode: model("opencode"), harness: model("harness") } } as Pick<CliConfig, "provider" | "model" | "providers">,
+    { ...(provider === undefined ? {} : { provider }), ...(global === undefined ? {} : { model: global }), providers: { codex: model("codex"), claude: model("claude"), opencode: model("opencode"), harness: model("harness"), acp: model("acp"), antigravity: model("antigravity") } } as Pick<CliConfig, "provider" | "model" | "providers">,
     instanceId,
   );
 }
@@ -285,9 +285,9 @@ function offered(providers: readonly ProviderSummary[]): readonly ProviderSummar
 }
 
 /** The provider an MCP access setting (`providers.<kind>.mcpExclude`) belongs to. */
-function mcpAccessKind(key: string): "claude" | "codex" | "opencode" | "harness" | null {
-  const kind = /^providers\.(claude|codex|opencode|harness)\.mcpExclude$/.exec(key)?.[1];
-  return kind === "codex" || kind === "claude" || kind === "opencode" || kind === "harness" ? kind : null;
+function mcpAccessKind(key: string): "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity" | null {
+  const kind = /^providers\.(claude|codex|opencode|harness|acp|antigravity)\.mcpExclude$/.exec(key)?.[1];
+  return kind === "codex" || kind === "claude" || kind === "opencode" || kind === "harness" || kind === "acp" || kind === "antigravity" ? kind : null;
 }
 
 /** Every configured server with what keeps it from this provider besides the checklist, and the names switched off here. */
@@ -389,7 +389,7 @@ function isUnsupportedMode(
   providers: readonly ProviderSummary[] | null,
 ): boolean {
   if (!descriptor.key.endsWith("runtimeMode") || providers === null) return false;
-  const kindOfPage = descriptor.key.startsWith("providers.") ? (descriptor.key.split(".")[1] as "claude" | "codex" | "opencode" | "harness") : undefined;
+  const kindOfPage = descriptor.key.startsWith("providers.") ? (descriptor.key.split(".")[1] as "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity") : undefined;
   const providerId = valueOf(settings, "provider");
   const governed = offered(providers).filter((provider) =>
     kindOfPage !== undefined ? driverKindOfInstance(provider.instanceId) === kindOfPage : providerId === undefined || provider.instanceId === providerId,

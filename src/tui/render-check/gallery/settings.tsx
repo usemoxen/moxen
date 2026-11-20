@@ -92,6 +92,59 @@ export const SETTINGS_PROVIDERS: ProviderSummary[] = [
   { instanceId: "codex", driver: "codex", displayName: "Codex", enabled: true, installed: true, status: null, authStatus: "chatgpt", models: models(["Codex model"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   { instanceId: "claudeAgent", driver: "claudeAgent", displayName: "Claude", enabled: true, installed: true, status: null, authStatus: null, models: models(["Claude Opus 5", "Claude Sonnet 5.5"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   { instanceId: "opencode", driver: "opencode", displayName: "OpenCode", enabled: true, installed: true, status: null, authStatus: null, models: models(["GPT-5.5", "Kimi K3"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
+  {
+    instanceId: "antigravity",
+    driver: "antigravity",
+    displayName: "Antigravity",
+    enabled: true,
+    installed: true,
+    status: null,
+    authStatus: "oauth",
+    models: [
+      {
+        slug: "gemini-4-neon",
+        name: "Gemini 4 Neon",
+        isCustom: false,
+        isDefault: true,
+        isHidden: false,
+        efforts: [
+          {
+            id: "effort",
+            label: "Effort",
+            currentValue: "high",
+            choices: [
+              { id: "low", label: "Low", isDefault: false },
+              { id: "medium", label: "Medium", isDefault: false },
+              { id: "high", label: "High", isDefault: true },
+              { id: "xhigh", label: "Extra", isDefault: false },
+            ],
+          },
+        ],
+      },
+      {
+        slug: "gemini-4-argon",
+        name: "Gemini 4 Argon",
+        isCustom: false,
+        isDefault: false,
+        isHidden: false,
+        efforts: [
+          {
+            id: "effort",
+            label: "Effort",
+            currentValue: "medium",
+            choices: [
+              { id: "low", label: "Low", isDefault: false },
+              { id: "medium", label: "Medium", isDefault: true },
+              { id: "high", label: "High", isDefault: false },
+            ],
+          },
+        ],
+      },
+    ],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  },
 ];
 
 const noop = (): void => {};
@@ -172,8 +225,9 @@ export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG)
           codex: { ok: true, installed: true, version: "codex-cli 0.164.0", login: "inherit", minVersion: "0.164.0" },
           claude: { ok: true, installed: true, version: "2.1.293 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
           opencode: { ok: true, installed: true, version: "opencode v2.0.22", login: "inherit", minVersion: "2.0.0" },
+          antigravity: { ok: true, installed: true, version: "1.5.13", login: "inherit" },
         }}
-        latest={{ enabled: true, claude: { latest: "2.1.293", channel: "latest" }, opencode: { latest: "2.0.24", channel: null } }}
+        latest={{ enabled: true, claude: { latest: "2.1.293", channel: "latest" }, opencode: { latest: "2.0.24", channel: null }, antigravity: { latest: "1.5.14", channel: null } }}
         updating={new Set()}
         onUpdate={noop}
         providers={SETTINGS_PROVIDERS}

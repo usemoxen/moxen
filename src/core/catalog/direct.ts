@@ -308,7 +308,7 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
   const harness = harnessProviders(options.harness, env, (instanceId, slug) => isModelHidden(prefs, instanceId, slug));
 
   const codex = await (options.fetchCodexProvider ?? (() => codexProvider(options.codex, env, options.workingDirectory ?? process.cwd())))();
-  const antigravity = await (options.fetchAntigravityProvider ?? (() => antigravityProvider(options.antigravity, env, options.workingDirectory ?? process.cwd())))();
+  const antigravity = await (options.fetchAntigravityProvider ?? (() => antigravityProvider(options.antigravity, env, options.workingDirectory ?? process.cwd(), undefined, { storeRoot })))();
   const acp = await (options.fetchAcpProviders ?? (async () => {
     const registry = options.acpRegistry
       ? await options.acpRegistry().catch((): LoadedAcpRegistry => ({ agents: [], source: "empty" }))

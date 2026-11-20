@@ -4035,7 +4035,8 @@ fn provider_index(id: &str) -> usize {
         "claude" => 0,
         "codex" => 1,
         "opencode" => 2,
-        _ => 3,
+        "antigravity" => 3,
+        _ => 4,
     }
 }
 

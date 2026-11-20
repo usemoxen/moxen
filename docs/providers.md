@@ -1,7 +1,8 @@
 # Providers
 
-Moxen drives three provider runtimes through their own CLIs, and runs a fourth
-itself. Each driver is a thin adapter over one runtime implementing the shared
+Moxen drives provider runtimes through their own CLIs (Claude Code, OpenCode,
+Codex, Antigravity, and configured ACP agents), and runs Moxen Harness itself.
+Each driver is a thin adapter over one runtime implementing the shared
 `ProviderAdapter` contract (`core/providers/spi.ts` — the contract itself
 imports only our own root types plus type-level `effect` modules, without the
 upstream reference's Layers or host services). A driver otherwise imports
@@ -63,8 +64,13 @@ negotiates any other protocol version is refused loudly
   Permission requests (`session/request_permission`) surface in Moxen's
   approval panel, honor `acceptForSession`, and unblock cleanly on
   `interruptTurn`.
-- **Diagnostics**: `moxen doctor` probes `agy`, and catalog discovery runs
-  `initialize` without creating an empty session or reading credentials.
+- **Diagnostics & discovery**: `moxen doctor` probes `agy`, and the Settings
+  page checks Antigravity's latest GitHub Release alongside Claude Code,
+  OpenCode and Codex. Catalog discovery runs `initialize`, and when the agent
+  advertises `sessionCapabilities.close`, probes `session/new` followed
+  immediately by `session/close` (cached on disk under
+  `<storeRoot>/cache/antigravity-models.json` per version) to surface the
+  agent's live models and per-model effort levels without reading credentials.
 
 ## Defaults
 

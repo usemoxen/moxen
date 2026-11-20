@@ -403,4 +403,75 @@ describe("ACP crash recovery & rollback", () => {
     expect(JSON.stringify(prompts[1]!.params)).not.toContain("Stay in worktree.");
     await Effect.runPromise(driver.stopAll());
   });
+
+  it("applies model and thought_level effort via session/set_config_option and skips synthetic default slugs", async () => {
+    const transport = new FakeAcpTransport({
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          name: "Model",
+          currentValue: "gemini-4-neon",
+          options: [
+            { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+            { value: "gemini-4-argon", name: "Gemini 4 Argon" },
+          ],
+        },
+        {
+          id: "thought_level",
+          category: "thought_level",
+          name: "Thought Level",
+          currentValue: "high",
+          options: [
+            { value: "low", name: "Low" },
+            { value: "high", name: "High" },
+            { value: "xhigh", name: "Extra" },
+          ],
+        },
+      ],
+      onPrompt: () => ({ stopReason: "end_turn" }),
+    });
+    const driver = new AcpDriver({
+      transport,
+      agents: {
+        antigravity: { id: "antigravity", name: "Antigravity", command: "agy", args: ["acp"] },
+      },
+    });
+
+    // Synthetic default slug should not issue a set_config_option for model, but effort still applies.
+    await Effect.runPromise(
+      driver.startSession({
+        ...START,
+        modelSelection: {
+          instanceId: "antigravity",
+          model: "antigravity-default",
+          options: [{ id: "effort", value: "xhigh" }],
+        },
+      }),
+    );
+    const server = transport.sessions[0]!.server;
+    expect(server.requestsTo("session/set_config_option").map((r) => r.params)).toEqual([
+      { sessionId: "acp-sess-1", configId: "thought_level", value: "xhigh" },
+    ]);
+
+    // Switching model and effort on a subsequent turn forwards both options.
+    const t1 = await Effect.runPromise(
+      driver.sendTurn({
+        threadId: "thread-1",
+        prompt: "switch",
+        modelSelection: {
+          instanceId: "antigravity",
+          model: "gemini-4-argon",
+          options: [{ id: "effort", value: "low" }],
+        },
+      }),
+    );
+    await driver.awaitTurn("thread-1", t1.turnId);
+    expect(server.requestsTo("session/set_config_option").map((r) => r.params)).toEqual([
+      { sessionId: "acp-sess-1", configId: "thought_level", value: "xhigh" },
+      { sessionId: "acp-sess-1", configId: "model", value: "gemini-4-argon" },
+      { sessionId: "acp-sess-1", configId: "thought_level", value: "low" },
+    ]);
+    await Effect.runPromise(driver.stopAll());
+  });
 });

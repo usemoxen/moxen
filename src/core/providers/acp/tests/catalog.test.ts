@@ -49,4 +49,44 @@ describe("ACP catalog discovery", () => {
     expect(cline!.enabled).toBe(false);
     expect(cline!.status).toMatch(/protocol v2.*only supports ACP protocol v1/i);
   });
+
+  it("discovers models and efforts for ACP agents that advertise session/close", async () => {
+    const transport = new FakeAcpTransport({
+      canCloseSession: true,
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          name: "Model",
+          currentValue: "claude-sonnet",
+          options: [
+            { value: "claude-sonnet", name: "Claude Sonnet" },
+            { value: "claude-opus", name: "Claude Opus" },
+          ],
+        },
+        {
+          id: "thought_level",
+          category: "thought_level",
+          name: "Effort",
+          currentValue: "medium",
+          options: [
+            { value: "low", name: "Low" },
+            { value: "medium", name: "Medium" },
+            { value: "high", name: "High" },
+          ],
+        },
+      ],
+    });
+    const [cline] = await acpProviders(
+      { agents: [{ id: "cline", name: "Cline", command: "cline", args: ["--acp"] }] },
+      process.env,
+      process.cwd(),
+      transport,
+    );
+    expect(cline?.models.map((m) => m.slug)).toEqual(["claude-sonnet", "claude-opus"]);
+    expect(cline?.models[0]?.isDefault).toBe(true);
+    expect(cline?.models[0]?.efforts[0]?.choices.map((e) => e.id)).toEqual(["low", "medium", "high"]);
+    expect(transport.sessions[0]?.server.requestsTo("session/new")).toHaveLength(1);
+    expect(transport.sessions[0]?.server.requestsTo("session/close")).toHaveLength(1);
+  });
 });

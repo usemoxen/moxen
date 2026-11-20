@@ -553,7 +553,7 @@ function longThreadSettings(kind: LongThreadKind): SettingDescriptor[] {
       },
       defaultValue: undefined,
       fallback: { resolver: "compactionMode" },
-      ...(kind === "harness" ? {} : { appliesAt: "server-restart" as const }),
+      ...(kind === "harness" || kind === "acp" || kind === "antigravity" ? {} : { appliesAt: "server-restart" as const }),
     },
     {
       key: `providers.${kind}.compactAt`,
@@ -625,15 +625,25 @@ function perModelSettings(kind: LongThreadKind): SettingDescriptor[] {
   ];
 }
 
-/** One Model prices group per provider, from one template so the four tabs cannot drift: what a million tokens of each kind cost for this provider's models. */
+const PRICE_EXAMPLE: Readonly<Record<"claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity", string>> = {
+  claude: "claude-opus-5=5",
+  codex: "gpt-6.1-sol=2",
+  opencode: "opencode-go/muse-spark-1.3-contributor=2",
+  harness: "qwen3.8-flash-next=0.5",
+  antigravity: "gemini-4-neon=2",
+  acp: "claude-sonnet=3",
+};
+
+/** One Model prices group per provider, from one template so the provider tabs cannot drift: what a million tokens of each kind cost for this provider's models. */
 function priceSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
+  const example = PRICE_EXAMPLE[kind];
   const section = `provider:${kind}` as const;
   const group = "Model prices";
   const row = (leaf: "modelInputPrices" | "modelOutputPrices" | "modelCacheReadPrices" | "modelCacheWritePrices", label: string, tokens: string): SettingDescriptor => ({
     key: `providers.${kind}.${leaf}`,
     label,
-    description: `What one million ${tokens} tokens cost on ${name} models, as model=USD pairs (opencode-go/muse-spark-1.3-contributor=2). Beats the shipped price for those models. A model with no price anywhere stays unpriced.`,
+    description: `What one million ${tokens} tokens cost on ${name} models, as model=USD pairs (${example}). Beats the shipped price for those models. A model with no price anywhere stays unpriced.`,
     section,
     group,
     kind: { type: "string", placeholder: "model=2", multiline: true },
@@ -1202,7 +1212,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     key: "updates.checkLatest",
     label: "Check for newer versions",
     description:
-      "When the settings page opens, ask the npm registry which Claude Code and OpenCode releases are newest, so it can say whether an update is available. Nothing else is sent. Off, the page shows installed versions only.",
+      "When the settings page opens, check which Claude Code, OpenCode, Codex and Antigravity releases are newest, so it can say whether an update is available. Nothing else is sent. Off, the page shows installed versions only.",
     section: "general",
     kind: { type: "boolean" },
     defaultValue: true,
@@ -1564,9 +1574,9 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   ...priceSettings("antigravity"),
   ...(["binaryPath", "launchArgs"] as const).map((field): SettingDescriptor => ({
     key: `providers.antigravity.${field}`,
-    label: { binaryPath: "Executable", launchArgs: "Launch arguments" }[field],
-    description: { binaryPath: "The Antigravity (agy) executable to run.", launchArgs: "Extra arguments passed to `agy acp`." }[field],
-    section: "provider:antigravity", group: "Runtime", kind: { type: "string" },
+    label: { binaryPath: "Antigravity executable", launchArgs: "Launch arguments" }[field],
+    description: { binaryPath: "The `agy` binary to spawn.", launchArgs: "Extra arguments passed to `agy acp`." }[field],
+    section: "provider:antigravity", group: "Setup", kind: { type: "string", ...(field === "binaryPath" ? { placeholder: "agy" } : {}) },
     defaultValue: field === "binaryPath" ? "agy" : undefined,
     appliesAt: "server-restart",
   })),
@@ -1870,7 +1880,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
  * thread starts with, the tools, how long threads are handled, then whatever is
  * particular to that provider, and where it lives last.
  */
-const PROVIDER_GROUP_ORDER = ["Defaults", "Tools", "Long threads", "Sessions", "Model prices", "Setup", "Output", "Ultracode", "Prompt", "Web search", "Model servers"];
+const PROVIDER_GROUP_ORDER = ["Defaults", "Tools", "Long threads", "Sessions", "Model prices", "Setup", "Runtime", "Output", "Ultracode", "Prompt", "Web search", "Model servers", "ACP agents"];
 
 /** The Defaults tab in the order a new thread's choices are made: provider, model, effort, then permissions and checkout. */
 const DEFAULTS_ORDER = ["provider", "model", "speedMode", "thinkingEffort", "runtimeMode", "interactionMode", "threadEnvMode"];
@@ -1891,7 +1901,7 @@ function orderDefaults(settings: readonly SettingDescriptor[]): readonly Setting
 
 function orderProviderGroups(settings: readonly SettingDescriptor[]): readonly SettingDescriptor[] {
   const out = [...settings];
-  for (const section of ["provider:codex", "provider:claude", "provider:opencode", "provider:harness"] as const) {
+  for (const section of ["provider:codex", "provider:claude", "provider:opencode", "provider:antigravity", "provider:acp", "provider:harness"] as const) {
     const slots = out.flatMap((entry, at) => (entry.section === section ? [at] : []));
     const rank = (entry: SettingDescriptor): number => {
       const at = entry.group === undefined ? -1 : PROVIDER_GROUP_ORDER.indexOf(entry.group);
@@ -2201,7 +2211,7 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
   },
   /** A provider tab's Model, unset: the global Model when the global Provider is this one (`configuredModel`); else the provider's catalog default, which the picker names itself. */
   providerModel(config, descriptor) {
-    const kind = /^providers\.(claude|codex|opencode|harness)\.model$/.exec(descriptor.key)?.[1];
+    const kind = /^providers\.(claude|codex|opencode|harness|acp|antigravity)\.model$/.exec(descriptor.key)?.[1];
     const global = BY_KEY.get("model")!;
     const aimed = kind !== undefined && config.provider !== undefined && driverKindOfInstance(config.provider) === kind;
     if (aimed && config.model !== undefined && config.model.trim() !== "") return { value: config.model, label: config.model, origin: settingPlace(descriptor, global) };
@@ -2234,10 +2244,19 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
     if (mode === "off") return undefined;
     if (kind === "harness") return { value: undefined, label: "70% of the window (60% under 128K)" };
     const buffer = kind === "opencode" ? config.providers?.opencode?.compactBuffer : undefined;
-    return {
-      value: undefined,
-      label: kind === "codex" ? "Codex's own" : kind === "claude" ? "Claude Code's own, tuned per model" : buffer !== undefined ? `OpenCode's own, ${numberLabel(buffer, true)} before the limit` : "OpenCode's own, 10% before the limit",
-    };
+    const label =
+      kind === "codex"
+        ? "Codex's own"
+        : kind === "claude"
+          ? "Claude Code's own, tuned per model"
+          : kind === "antigravity"
+            ? "Antigravity's own"
+            : kind === "acp"
+              ? "The ACP agent's own"
+              : buffer !== undefined
+                ? `OpenCode's own, ${numberLabel(buffer, true)} before the limit`
+                : "OpenCode's own, 10% before the limit";
+    return { value: undefined, label };
   },
 };
 

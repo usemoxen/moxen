@@ -13,12 +13,15 @@ export interface FakeAcpScript {
   /** Override the negotiated protocolVersion returned from `initialize`. */
   readonly protocolVersion?: unknown;
   readonly loadSession?: boolean;
+  readonly canCloseSession?: boolean;
+  readonly version?: string;
   readonly imageCapability?: boolean;
   readonly mcpHttp?: boolean;
   readonly mcpSse?: boolean;
   readonly sessionId?: string;
   readonly lostSessions?: readonly string[];
   readonly modes?: unknown;
+  readonly models?: unknown;
   readonly configOptions?: unknown[];
   readonly authMethods?: unknown[];
   readonly failRequests?: Record<string, string>;
@@ -62,6 +65,7 @@ export class FakeAcpServer {
             "protocolVersion" in this.script ? this.script.protocolVersion : ACP_PROTOCOL_VERSION,
           agentCapabilities: {
             loadSession: this.script.loadSession ?? true,
+            ...(this.script.canCloseSession ? { sessionCapabilities: { close: {} } } : {}),
             promptCapabilities: {
               image: this.script.imageCapability ?? true,
               audio: false,
@@ -72,15 +76,18 @@ export class FakeAcpServer {
               sse: this.script.mcpSse ?? false,
             },
           },
-          agentInfo: { name: this.spawnOptions.agent.id, title: this.spawnOptions.agent.name ?? this.spawnOptions.agent.id, version: "1.0.0" },
+          agentInfo: { name: this.spawnOptions.agent.id, title: this.spawnOptions.agent.name ?? this.spawnOptions.agent.id, version: this.script.version ?? "1.0.0" },
           authMethods: this.script.authMethods ?? [],
         };
       case "session/new":
         return {
           sessionId: this.script.sessionId ?? "acp-sess-1",
           ...(this.script.modes ? { modes: this.script.modes } : {}),
+          ...(this.script.models ? { models: this.script.models } : {}),
           ...(this.script.configOptions ? { configOptions: this.script.configOptions } : {}),
         };
+      case "session/close":
+        return {};
       case "session/load": {
         const sessionId = (params as { sessionId?: string } | null)?.sessionId;
         if (!sessionId || this.script.lostSessions?.includes(sessionId)) {

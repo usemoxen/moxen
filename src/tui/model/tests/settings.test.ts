@@ -494,3 +494,73 @@ describe("uiFromSnapshot", () => {
     expect(ui).toMatchObject({ backdrop: "off", modelScenes: false, hideBinaryDiffs: false, defaultSidePanel: "git" });
   });
 });
+
+describe("Antigravity and ACP settings controls", () => {
+  it("lists efforts for the active Antigravity model and supports MCP access on Antigravity and ACP", () => {
+    const providers = [
+      {
+        instanceId: "antigravity",
+        driver: "antigravity" as const,
+        displayName: "Antigravity",
+        enabled: true,
+        installed: true,
+        status: null,
+        authStatus: "oauth",
+        models: [
+          {
+            slug: "gemini-4-neon",
+            name: "Gemini 4 Neon",
+            isCustom: false,
+            isDefault: true,
+            isHidden: false,
+            efforts: [
+              {
+                id: "effort",
+                label: "Effort",
+                currentValue: "high",
+                choices: [
+                  { id: "low", label: "Low", isDefault: false },
+                  { id: "medium", label: "Medium", isDefault: false },
+                  { id: "high", label: "High", isDefault: true },
+                  { id: "xhigh", label: "Extra", isDefault: false },
+                ],
+              },
+            ],
+          },
+          {
+            slug: "gemini-pro-orchestrator-neon",
+            name: "Orchestrator (Neon)",
+            isCustom: false,
+            isDefault: false,
+            isHidden: false,
+            efforts: [],
+          },
+        ],
+        supportedRuntimeModes: null,
+        usageLimits: null,
+        skills: [],
+      },
+    ];
+    const baseSettings = describeSettings(DEFAULT_CONFIG);
+    const effortDesc = settingDescriptor("providers.antigravity.thinkingEffort")!;
+    const neonControl = settingControl(effortDesc, undefined, baseSettings, providers);
+    expect(neonControl.kind).toBe("pick");
+    if (neonControl.kind === "pick") {
+      expect(neonControl.options.map((o) => o.value)).toEqual(["", "low", "medium", "high", "xhigh"]);
+      expect(neonControl.options.find((o) => o.value === "xhigh")?.label).toBe("Extra");
+    }
+
+    const orchestratorSettings = describeSettings(normalizeConfig({ providers: { antigravity: { model: "gemini-pro-orchestrator-neon" } } }));
+    const orchestratorControl = settingControl(effortDesc, undefined, orchestratorSettings, providers);
+    expect(orchestratorControl.kind).toBe("pick");
+    if (orchestratorControl.kind === "pick") {
+      expect(orchestratorControl.options.map((o) => o.value)).toEqual([""]);
+    }
+
+    const withMcp = describeSettings(normalizeConfig({ mcpServers: { fs: { command: "npx" } } }));
+    const agyMcp = settingControl(settingDescriptor("providers.antigravity.mcpExclude")!, undefined, withMcp, providers);
+    const acpMcp = settingControl(settingDescriptor("providers.acp.mcpExclude")!, undefined, withMcp, providers);
+    expect(agyMcp.kind === "servers" && agyMcp.servers.map((s) => s.name)).toEqual(["fs"]);
+    expect(acpMcp.kind === "servers" && acpMcp.servers.map((s) => s.name)).toEqual(["fs"]);
+  });
+});

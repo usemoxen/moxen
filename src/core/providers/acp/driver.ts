@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
+import type { ModelSummary } from "../../catalog/summary.js";
 import { CliError } from "../../errors.js";
 import { escapes, isolationViolation, type WorktreeIsolation } from "../../threads/isolation.js";
 import type { ModelSelection, RuntimeMode } from "../../types.js";
@@ -54,11 +55,15 @@ import {
   asString,
   buildAcpPromptBlocks,
   extractAcpToolContent,
+  extractSelectionEffort,
+  findAcpEffortOption,
   isAcpAuthErrorText,
   isAcpSessionNotFoundText,
   parseAcpAvailableCommands,
+  parseAcpCatalogModels,
   parseAcpConfigOptions,
   parseAcpInitializeResult,
+  parseAcpModelsState,
   parseAcpModesState,
   parseAcpPermissionOptions,
   selectAcpPermissionOutcome,
@@ -292,6 +297,25 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
   /** Probe an ACP agent's initialize handshake (protocol version, capabilities, auth methods) without creating a session. */
   async probeAgent(instanceId: string, cwd: string): Promise<AcpInitializeResult> {
+    const result = await this.probeAgentCatalog(instanceId, cwd, { shouldDiscover: () => false });
+    return result.init;
+  }
+
+  /**
+   * Probe an ACP agent's `initialize` handshake and, when the agent supports
+   * `session/close` and `shouldDiscover(init)` allows it, open and immediately
+   * close a probe session to read live models and per-model effort levels from
+   * `configOptions` / `models`.
+   */
+  async probeAgentCatalog(
+    instanceId: string,
+    cwd: string,
+    options: { readonly shouldDiscover?: (init: AcpInitializeResult) => boolean } = {},
+  ): Promise<{
+    readonly init: AcpInitializeResult;
+    readonly models: ModelSummary[];
+    readonly authError: boolean;
+  }> {
     const agent = this.resolveAgent(instanceId);
     const peer = this.transport.startPeer({ agent, cwd, env: this.baseEnv });
     try {
@@ -307,7 +331,33 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         },
         this.initializeTimeoutMs,
       );
-      return parseAcpInitializeResult(raw, agent.name ?? agent.id);
+      const init = parseAcpInitializeResult(raw, agent.name ?? agent.id);
+      const wantModels = (options.shouldDiscover?.(init) ?? true) && init.agentCapabilities.canCloseSession;
+      if (!wantModels) {
+        return { init, models: [], authError: false };
+      }
+
+      let probeSessionId: string | null = null;
+      try {
+        const newRaw = await peer.request(
+          ACP_METHODS.sessionNew,
+          { cwd, mcpServers: [] },
+          Math.max(this.initializeTimeoutMs, 10_000),
+        );
+        const newRec = asRecord(newRaw);
+        probeSessionId = asNonEmptyString(newRec?.["sessionId"]);
+        const configOptions = parseAcpConfigOptions(newRec?.["configOptions"]);
+        const modelsState = parseAcpModelsState(newRec?.["models"]);
+        const models = parseAcpCatalogModels(configOptions, modelsState);
+        return { init, models, authError: false };
+      } catch (cause) {
+        const text = cause instanceof Error ? cause.message : String(cause);
+        return { init, models: [], authError: isAcpAuthErrorText(text) };
+      } finally {
+        if (probeSessionId) {
+          await peer.request(ACP_METHODS.sessionClose, { sessionId: probeSessionId }, 2_000).catch(() => undefined);
+        }
+      }
     } finally {
       peer.close();
     }
@@ -455,9 +505,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         this.sessions.set(input.threadId, session);
         this.resumable.set(input.threadId, acpSessionId);
 
-        // Apply initial model selection if the agent exposes a model config option.
-        if (input.modelSelection?.model) {
-          await this.applyModelConfigOption(session, input.modelSelection.model);
+        // Apply initial model and effort selections if the agent exposes config options.
+        if (input.modelSelection) {
+          await this.applySelectionConfigOptions(session, input.modelSelection);
         }
 
         return {
@@ -480,8 +530,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         throw new CliError("ACP_TURN_BUSY", `Thread ${input.threadId} already has a running ACP turn.`);
       }
       if (input.runtimeMode) session.runtimeMode = input.runtimeMode;
-      if (input.modelSelection?.model) {
-        await this.applyModelConfigOption(session, input.modelSelection.model);
+      if (input.modelSelection) {
+        await this.applySelectionConfigOptions(session, input.modelSelection);
       }
 
       const turnId: TurnId = `acp-turn-${randomUUID()}`;
@@ -694,18 +744,48 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     });
   }
 
-  private async applyModelConfigOption(session: AcpSession, model: string): Promise<void> {
-    const modelOpt = session.configOptions.find((opt) => opt.category === "model" || opt.id === "model");
-    if (!modelOpt || modelOpt.currentValue === model) return;
-    if (modelOpt.options.length > 0 && !modelOpt.options.some((opt) => opt.value === model)) return;
+  private async applySelectionConfigOptions(session: AcpSession, selection: ModelSelection): Promise<void> {
+    let model = selection.model?.trim() || "";
+    let effort = extractSelectionEffort(selection);
+    const isSyntheticDefault = model === "" || model === "acp-default" || model === "antigravity-default";
+
+    if (!isSyntheticDefault) {
+      const modelOpt = session.configOptions.find((opt) => opt.category === "model" || opt.id === "model");
+      if (modelOpt) {
+        // Support legacy/CLI combined slugs such as `gemini-4-neon-high` by splitting
+        // into base model + effort when the base model exists in `configOptions`.
+        if (modelOpt.options.length > 0 && !modelOpt.options.some((opt) => opt.value === model)) {
+          const split = modelOpt.options.find((opt) => model.startsWith(`${opt.value}-`));
+          if (split) {
+            const suffix = model.slice(split.value.length + 1).trim();
+            model = split.value;
+            if (!effort && suffix.length > 0) effort = suffix;
+          }
+        }
+        await this.setConfigOption(session, modelOpt, model);
+      }
+    }
+
+    if (effort) {
+      // Re-read configOptions after any model switch so effort options match the chosen model.
+      const effortOpt = findAcpEffortOption(session.configOptions);
+      if (effortOpt) {
+        await this.setConfigOption(session, effortOpt, effort);
+      }
+    }
+  }
+
+  private async setConfigOption(session: AcpSession, option: AcpConfigOption, value: string): Promise<void> {
+    if (option.currentValue === value) return;
+    if (option.options.length > 0 && !option.options.some((opt) => opt.value === value)) return;
     try {
       const updated = asRecord(
         await session.peer.request(
           ACP_METHODS.sessionSetConfigOption,
           {
             sessionId: session.acpSessionId,
-            configId: modelOpt.id,
-            value: model,
+            configId: option.id,
+            value,
           },
           this.initializeTimeoutMs,
         ),
@@ -714,11 +794,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         session.configOptions = parseAcpConfigOptions(updated["configOptions"]);
       } else {
         session.configOptions = session.configOptions.map((opt) =>
-          opt.id === modelOpt.id ? { ...opt, currentValue: model } : opt,
+          opt.id === option.id ? { ...opt, currentValue: value } : opt,
         );
       }
     } catch {
-      // Agent declined model switch; keep session running on its current model.
+      // Agent declined option switch; keep session running with its current options.
     }
   }
 
