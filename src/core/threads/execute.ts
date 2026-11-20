@@ -36,6 +36,7 @@ import { OpenCodeDriver } from "../providers/opencode/driver.js";
 import type {
   ContextBreakdown,
   ContextWindowUsage,
+  ProviderAdapterCapabilities,
   ProviderApprovalDecision,
   ProviderImage,
   ProviderRuntimeEvent,
@@ -70,6 +71,7 @@ import type { StoredAttachment, StoredThread, StoredTurn, TurnUsage } from "./ty
 
 /** Structural driver surface the runner needs. All four drivers satisfy it. */
 export interface TurnDriver extends ProviderSessionTitles {
+  readonly capabilities?: ProviderAdapterCapabilities;
   hasSession(threadId: string): Effect.Effect<boolean, CliError>;
   startSession(input: ProviderSessionStartInput): Effect.Effect<unknown, CliError>;
   sendTurn(input: ProviderSendTurnInput): Effect.Effect<{ threadId: string; turnId: string }, CliError>;

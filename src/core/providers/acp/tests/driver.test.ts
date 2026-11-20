@@ -362,11 +362,12 @@ describe("ACP crash recovery & rollback", () => {
     expect(outcome.error).toBeTruthy();
   });
 
-  it("supports readThread and rollbackThread on the session transcript", async () => {
+  it("supports readThread and refuses rollbackThread with REVERT_UNSUPPORTED (supportsConversationRollback: false)", async () => {
     const transport = new FakeAcpTransport({
       onPrompt: () => ({ stopReason: "end_turn" }),
     });
     const driver = new AcpDriver({ transport });
+    expect(driver.capabilities.supportsConversationRollback).toBe(false);
     await Effect.runPromise(driver.startSession(START));
     const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
     await driver.awaitTurn("thread-1", t1.turnId);
@@ -374,16 +375,23 @@ describe("ACP crash recovery & rollback", () => {
     await driver.awaitTurn("thread-1", t2.turnId);
 
     expect((await Effect.runPromise(driver.readThread("thread-1"))).turns).toHaveLength(2);
-    expect((await Effect.runPromise(driver.rollbackThread("thread-1", 1))).turns).toHaveLength(1);
+    expect(await codeOf(() => Effect.runPromise(driver.rollbackThread("thread-1", 1)))).toBe("REVERT_UNSUPPORTED");
+    // Transcript stays intact (never silently desynchronized from the live ACP session).
+    expect((await Effect.runPromise(driver.readThread("thread-1"))).turns).toHaveLength(2);
     await Effect.runPromise(driver.stopAll());
   });
 
-  it("prepends runtime instructions only on the first turn of a fresh session", async () => {
+  it("prepends runtime instructions only on the first normal turn, skips slash commands, and restores them on failure", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-inst-"));
     tempDirs.push(dir);
     await writeFile(path.join(dir, "readme.txt"), "hi", "utf8");
+    let promptCalls = 0;
     const transport = new FakeAcpTransport({
-      onPrompt: () => ({ stopReason: "end_turn" }),
+      onPrompt: () => {
+        promptCalls += 1;
+        if (promptCalls === 2) throw new Error("transient network error");
+        return { stopReason: "end_turn" };
+      },
     });
     const driver = new AcpDriver({ transport });
     await Effect.runPromise(
@@ -393,14 +401,25 @@ describe("ACP crash recovery & rollback", () => {
         instructions: "# Runtime\nStay in worktree.",
       }),
     );
-    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "first" }));
+    // 1. Leading slash command keeps its leading `/compact` untouched; instructions stay pending.
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
     await driver.awaitTurn("thread-1", t1.turnId);
-    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "second" }));
-    await driver.awaitTurn("thread-1", t2.turnId);
+    // 2. First normal turn fails transiently; instructions are restored for the retry.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "first" }));
+    expect((await driver.awaitTurn("thread-1", t2.turnId)).status).toBe("failed");
+    // 3. Retry succeeds with instructions; 4. Following turn omits them.
+    const t3 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "first retry" }));
+    expect((await driver.awaitTurn("thread-1", t3.turnId)).status).toBe("completed");
+    const t4 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "second" }));
+    await driver.awaitTurn("thread-1", t4.turnId);
 
     const prompts = transport.sessions[0]!.server.requestsTo("session/prompt");
-    expect(JSON.stringify(prompts[0]!.params)).toContain("Stay in worktree.");
-    expect(JSON.stringify(prompts[1]!.params)).not.toContain("Stay in worktree.");
+    const textAt = (index: number) =>
+      String((prompts[index]!.params as { prompt: Array<{ text: string }> }).prompt[0]!.text);
+    expect(textAt(0)).toBe("/compact");
+    expect(textAt(1)).toContain("Stay in worktree.");
+    expect(textAt(2)).toContain("Stay in worktree.");
+    expect(textAt(3)).not.toContain("Stay in worktree.");
     await Effect.runPromise(driver.stopAll());
   });
 

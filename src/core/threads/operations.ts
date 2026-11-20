@@ -2504,7 +2504,7 @@ export async function revertThread(
     const live = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
     // No live session and nothing to resume: no provider remembers these turns.
     if (!live && !thread.providerSessions?.[key]) continue;
-    if (!driver.rollbackThread) {
+    if (!driver.rollbackThread || driver.capabilities?.supportsConversationRollback === false) {
       throw new CliError("REVERT_UNSUPPORTED", `The ${key} driver cannot roll back a conversation.`, {
         exitCode: 4,
         details: { threadId, provider: key },

@@ -88,4 +88,36 @@ describe("revertThread numbering", () => {
     expect((await w.store.readTurns(w.thread.id)).find((turn) => turn.id === cancelled.id)?.status).toBe("interrupted");
     expect((await w.store.readMessages(w.thread.id)).some((message) => message.turnId === cancelled.id)).toBe(true);
   });
+
+  it("refuses to revert when the driver declares supportsConversationRollback: false without starting a session", async () => {
+    const harness = await testHarness();
+    let started = 0;
+    const driver: TurnDriver = {
+      capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: false },
+      hasSession: () => Effect.succeed(false),
+      startSession: () => Effect.sync(() => { started += 1; return {}; }),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "native-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => ({ status: "completed", text: "", usage: null, error: null }),
+      streamEvents: Stream.never,
+      rollbackThread: () => Effect.void,
+      resumeCursor: () => null,
+    };
+    const ctx: OperationContext = { store: harness.store, storeRoot: harness.root, config: harness.config, driverFor: () => driver };
+    const thread = await createThread(harness.store, {
+      projectId: "p",
+      title: "ACP Revert",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: harness.work, branch: null },
+    });
+    await harness.store.writeThreadRecord({ ...thread, providerSessions: { antigravity: "acp-sess-1" } });
+    const first = (await sendTurn(harness.store, thread.id, { prompt: "first" })).turn;
+    await completeTurn(harness.store, thread.id, first.id, { text: "one" });
+    const second = (await sendTurn(harness.store, thread.id, { prompt: "second" })).turn;
+    await completeTurn(harness.store, thread.id, second.id, { text: "two" });
+
+    await expect(revertThread(ctx, thread.id, 1)).rejects.toMatchObject({ code: "REVERT_UNSUPPORTED" });
+    expect(started).toBe(0);
+    expect((await harness.store.readTurns(thread.id)).map((t) => t.id)).toEqual([first.id, second.id]);
+  });
 });

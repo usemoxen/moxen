@@ -317,10 +317,15 @@ function buildAnswerText(segments: readonly AcpMessageSegment[]): string {
   return last?.text ?? "";
 }
 
+function isLeadingSlashCommand(prompt: string): boolean {
+  return /^\/[A-Za-z0-9_:-]+(?:\s|$)/.test(prompt.trimStart());
+}
+
 export class AcpDriver implements ProviderAdapter<CliError> {
   readonly provider: "acp" | "antigravity";
   readonly capabilities: ProviderAdapterCapabilities = {
     sessionModelSwitch: "in-session",
+    supportsConversationRollback: false,
   };
 
   private readonly agents: Map<string, AcpAgentLaunchSpec>;
@@ -695,10 +700,16 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         };
         session.transcript.push(turn);
 
-        const effectivePrompt = session.pendingInstructions
-          ? `${session.pendingInstructions}\n\n${input.prompt}`
+        const carriedInstructions =
+          session.pendingInstructions && !isLeadingSlashCommand(input.prompt)
+            ? session.pendingInstructions
+            : null;
+        const effectivePrompt = carriedInstructions
+          ? `${carriedInstructions}\n\n${input.prompt}`
           : input.prompt;
-        session.pendingInstructions = null;
+        if (carriedInstructions !== null) {
+          session.pendingInstructions = null;
+        }
 
         const promptBlocks = buildAcpPromptBlocks(
           effectivePrompt,
@@ -754,6 +765,15 @@ export class AcpDriver implements ProviderAdapter<CliError> {
               const stopReason = record?.["stopReason"];
               const status = acpStopReasonToStatus(stopReason);
               const error = status === "failed" ? `ACP agent refused the turn (${String(stopReason)}).` : null;
+              if (
+                status === "failed" &&
+                carriedInstructions !== null &&
+                session.pendingInstructions === null &&
+                turn.segments.length === 0 &&
+                turn.tools.size === 0
+              ) {
+                session.pendingInstructions = carriedInstructions;
+              }
               this.settleTurn(session, turn, status, error, record ?? undefined);
               if (this.provider === "antigravity") {
                 void this.refreshAntigravityUsage(session, true);
@@ -762,6 +782,14 @@ export class AcpDriver implements ProviderAdapter<CliError> {
             (cause) => {
               this.finishInFlightPrompt(session, inFlight);
               if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
+              if (
+                carriedInstructions !== null &&
+                session.pendingInstructions === null &&
+                turn.segments.length === 0 &&
+                turn.tools.size === 0
+              ) {
+                session.pendingInstructions = carriedInstructions;
+              }
               if (cause instanceof CliError && cause.code === "PEER_REQUEST_TIMEOUT") {
                 this.cancelAllParked(session);
                 session.peer.notify(ACP_METHODS.sessionCancel, { sessionId: session.acpSessionId });
@@ -883,15 +911,14 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       return this.snapshotOf(session);
     });
 
-  rollbackThread = (threadId: ThreadId, numTurns: number): Effect.Effect<ProviderThreadSnapshot, CliError> =>
-    this.attempt("ACP_ROLLBACK_FAILED", `Could not roll back ACP thread ${threadId}`, async () => {
-      const session = this.requireSession(threadId);
-      const drop = Math.max(0, Math.min(numTurns, session.transcript.length));
-      if (drop > 0) {
-        session.transcript.splice(session.transcript.length - drop, drop);
-      }
-      return this.snapshotOf(session);
-    });
+  rollbackThread = (threadId: ThreadId, _numTurns: number): Effect.Effect<ProviderThreadSnapshot, CliError> =>
+    Effect.fail(
+      new CliError(
+        "REVERT_UNSUPPORTED",
+        `The ${this.provider} driver cannot roll back a conversation: ACP v1 has no conversation rewind RPC.`,
+        { exitCode: 4, details: { threadId, provider: this.provider } },
+      ),
+    );
 
   stopAll = (): Effect.Effect<void, CliError> =>
     Effect.sync(() => {
