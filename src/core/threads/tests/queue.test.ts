@@ -14,7 +14,8 @@ import { openThreadStore } from "../store.js";
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
-import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, queueAgentMessage, removeAgentQueuedMessage, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, queueAgentMessage, editAgentQueuedMessage, listAgentQueuedMessages, removeAgentQueuedMessage, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
+import { toThreadEnvelope } from "../project.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -367,6 +368,54 @@ describe("a message an agent queues on a running thread", () => {
     const turn = (await w.store.readTurns(thread.id)).find((candidate) => candidate.id === queued.turn.id)!;
     expect(turn.status).toBe("failed");
     expect(turn.queue?.removed).not.toBe(true);
+  });
+
+  it.each(["session", "weekly", "all"] as const)("accepts the exact usage window %s", (window) => {
+    expect(parseQueuePolicy({ conditions: [{ type: "usage", provider: "codex", window, minimum: 5 }] }).conditions[0]).toMatchObject({ type: "usage", window });
+  });
+
+  it.each([["session"], { kind: "session" }, "daily", null, 1])("rejects a coerced or unknown usage window %j before it is stored", (window) => {
+    expect(() => parseQueuePolicy({ conditions: [{ type: "usage", provider: "codex", window, minimum: 5 }] })).toThrow(CliError);
+  });
+
+  it("exposes the user's hold on the queued-turn envelope", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const queued = await sendTurn(w.store, thread.id, { prompt: "hold me", queue: parseQueuePolicy({ conditions: [] }) });
+    await editWorkQueue(w.ctx, thread.id, queued.turn.id, "hold");
+    const envelope = toThreadEnvelope((await w.store.readThreadRecord(thread.id))!, await w.store.readTurns(thread.id));
+    expect(envelope.queuedTurns?.[0]).toMatchObject({ turnId: queued.turn.id, held: true });
+  });
+
+  it.each([
+    { title: "a message that never ran", started: false, restored: false, listed: true, mutable: true, beforeStart: 1 },
+    { title: "a promoted and failed message", started: true, restored: false, listed: false, mutable: false, beforeStart: 0 },
+    { title: "a promoted, failed, then restored message", started: true, restored: true, listed: false, mutable: false, beforeStart: 0 },
+  ])("treats $title by whether it started", async ({ started, restored, listed, mutable, beforeStart }) => {
+    const w = await world();
+    const thread = await w.make();
+    const queue = parseQueuePolicy({ conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }] });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "agent work", agentThreadId: thread.id, queue });
+    if (started) await w.store.updateTurn(thread.id, queued.turn.id, { status: "failed", error: "boom", startedAt: w.store.nowIso(), completedAt: w.store.nowIso() });
+    if (restored) await editWorkQueue(w.ctx, thread.id, queued.turn.id, "restore");
+    if (restored) expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)?.startedAt).toBeDefined();
+
+    expect((await listAgentQueuedMessages(w.ctx, thread.id)).some((entry) => entry.turnId === queued.turn.id)).toBe(listed);
+    const edit = editAgentQueuedMessage(w.ctx, thread.id, queued.turn.id, parseQueuePolicy({ conditions: [] }).conditions);
+    if (mutable) await expect(edit).resolves.toMatchObject({ turnId: queued.turn.id });
+    else await expect(edit).rejects.toMatchObject({ code: "QUEUE_MESSAGE_STARTED" });
+    const remove = removeAgentQueuedMessage(w.ctx, thread.id, queued.turn.id);
+    if (mutable) await expect(remove).resolves.toMatchObject({ turnId: queued.turn.id });
+    else await expect(remove).rejects.toMatchObject({ code: "QUEUE_MESSAGE_STARTED" });
+
+    // The operator's own remove stays available, but only writes a
+    // before-start cancellation when the turn never ran.
+    const second = await sendTurn(w.store, thread.id, { prompt: "operator work", queue });
+    if (started) await w.store.updateTurn(thread.id, second.turn.id, { status: "failed", error: "boom", startedAt: w.store.nowIso(), completedAt: w.store.nowIso() });
+    if (restored) await editWorkQueue(w.ctx, thread.id, second.turn.id, "restore");
+    await editWorkQueue(w.ctx, thread.id, second.turn.id, "remove");
+    const cancelled = (await w.store.readActivities(thread.id)).filter((activity) => activity.turnId === second.turn.id && activity.kind === "turn.interrupted" && (activity.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true);
+    expect(cancelled).toHaveLength(beforeStart);
   });
 });
 

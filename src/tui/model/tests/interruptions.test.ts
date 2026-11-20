@@ -355,6 +355,30 @@ describe("continuing after a usage limit", () => {
     expect(restored.map((entry) => entry.id)).toEqual(["m2"]);
   });
 
+  it("uses ledger order for a same-millisecond cancellation and promotion", () => {
+    const at = "2026-09-25T10:00:02.000Z";
+    const queued = { ...activity("q1", "turn.queued", {}, "turn-2"), createdAt: at };
+    const cancelled = { ...activity("i1", "turn.interrupted", { beforeStart: true }, "turn-2"), createdAt: at };
+    const promoted = { ...activity("p1", "turn.promoted", {}, "turn-2"), createdAt: at };
+    const shown = (activities: ActivityEnvelope[]) => timeline(state({ activities, messages: [prompt("m2", "turn-2", "restored")] })).map((entry) => entry.id);
+    expect(shown([queued, cancelled])).toEqual([]);
+    expect(shown([queued, cancelled, promoted])).toEqual(["m2"]);
+    // A cancellation after the promotion is a new take-back: the prompt is gone again.
+    expect(shown([queued, promoted, cancelled])).toEqual([]);
+  });
+
+  it("keeps a restored held message in the queue until its turn starts", () => {
+    const queued = activity("q1", "turn.queued", {}, "turn-2");
+    const cancelled = activity("i1", "turn.interrupted", { beforeStart: true }, "turn-2");
+    const held = state({
+      activities: [queued, cancelled],
+      messages: [prompt("m2", "turn-2", "restored and held")],
+      thread: { id: "t", queuedTurns: [{ turnId: "turn-2", messageId: "m2", scheduledFor: null, scheduleReason: null, held: true }] } as unknown as ThreadState["thread"],
+    });
+    expect(timeline(held)).toEqual([]);
+    expect(queuedMessages(held)[0]?.held).toBe(true);
+  });
+
   it("labels a queued native background notification instead of dumping its raw payload", () => {
     const held = (messageId: string) => ({ id: "t", queuedTurns: [{ turnId: "t", messageId, scheduledFor: null, scheduleReason: "usage-hold" }] }) as unknown as ThreadState["thread"];
     const raw = '{"task_id":"b1","status":"completed","output_file":"/tmp/out"}';

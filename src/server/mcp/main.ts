@@ -12,9 +12,11 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { McpServerSpec } from "../../core/mcp.js";
+import type { AgentQueuedMessage, QueuedAgentMessage } from "../../core/threads/operations.js";
 import { isStandaloneExecutable, STANDALONE_MCP_ARG } from "../../core/infra/standalone.js";
 import { openClient } from "../client.js";
-import { memoryAccessOf, MOXEN_CHECKLIST_ARG, MOXEN_DELEGATED_ARG, MOXEN_MEMORY_ARG, MOXEN_NO_WEB_FETCH_ARG, serveMcp } from "./stdio.js";
+import { memoryAccessOf, MOXEN_CHECKLIST_ARG, MOXEN_DELEGATED_ARG, MOXEN_MCP_TOKEN_ENV, MOXEN_MCP_URL_ENV, MOXEN_MEMORY_ARG, MOXEN_NO_WEB_FETCH_ARG, serveMcp } from "./stdio.js";
+import type { AgentQueueAccess } from "./tools.js";
 
 /** The name agents see its tools under (`mcp__moxen__delegate`). */
 export const MOXEN_MCP_SERVER_NAME = "moxen";
@@ -46,6 +48,39 @@ function threadArg(argv: readonly string[]): string | null {
   return value && value.trim() ? value.trim() : null;
 }
 
+/**
+ * Agent queue management over the daemon-issued loopback MCP credential.
+ * The credential names the thread; the `--thread` argument is not proof of
+ * identity. No credential means no binding, and the tools fail closed.
+ */
+export function relayAgentQueue(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  send: typeof fetch = fetch,
+): AgentQueueAccess | undefined {
+  const url = env[MOXEN_MCP_URL_ENV];
+  const token = env[MOXEN_MCP_TOKEN_ENV];
+  if (!url || !token) return undefined;
+  const call = async <T>(name: string, args: Record<string, unknown>): Promise<T> => {
+    const response = await send(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    if (!response.ok) throw new Error(`Agent queue relay refused (${response.status}).`);
+    const body = await response.json() as { result?: { content?: Array<{ text?: string }>; isError?: boolean }; error?: { message?: string } };
+    if (body.error) throw new Error(body.error.message ?? "Agent queue relay failed.");
+    const text = body.result?.content?.[0]?.text ?? "";
+    if (body.result?.isError) throw new Error(text);
+    return JSON.parse(text) as T;
+  };
+  return {
+    queue: async (_callerThreadId, input) => await call<QueuedAgentMessage>("message_queue", { ...input }),
+    list: async () => (await call<{ messages: AgentQueuedMessage[] }>("message_queue_list", {})).messages,
+    edit: async (_callerThreadId, turnId, conditions) => await call("message_queue_edit", { turnId, conditions }),
+    remove: async (_callerThreadId, turnId) => await call("message_queue_remove", { turnId }),
+  };
+}
+
 /** Serves the moxen tools over stdio for the thread named on the command line, then exits. */
 export async function runMcpMain(argv: readonly string[] = process.argv.slice(2)): Promise<never> {
   const parentThreadId = threadArg(argv);
@@ -56,7 +91,8 @@ export async function runMcpMain(argv: readonly string[] = process.argv.slice(2)
   const api = await openClient();
   try {
     const checklist = argv.includes(MOXEN_CHECKLIST_ARG);
-    await serveMcp({ api, parentThreadId, checklist, delegated: argv.includes(MOXEN_DELEGATED_ARG), webFetch: !argv.includes(MOXEN_NO_WEB_FETCH_ARG), memory: memoryAccessOf(argv.find((arg) => arg.startsWith(MOXEN_MEMORY_ARG))?.slice(MOXEN_MEMORY_ARG.length)), input: process.stdin, output: process.stdout });
+    const agentQueue = relayAgentQueue();
+    await serveMcp({ api, parentThreadId, checklist, delegated: argv.includes(MOXEN_DELEGATED_ARG), webFetch: !argv.includes(MOXEN_NO_WEB_FETCH_ARG), memory: memoryAccessOf(argv.find((arg) => arg.startsWith(MOXEN_MEMORY_ARG))?.slice(MOXEN_MEMORY_ARG.length)), ...(agentQueue ? { agentQueue } : {}), input: process.stdin, output: process.stdout });
   } finally {
     await api.close().catch(() => undefined);
   }

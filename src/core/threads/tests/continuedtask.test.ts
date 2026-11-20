@@ -7,7 +7,7 @@ import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, continueOwnThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, continueOwnThread, adoptTasks, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, removeAgentQueuedMessage, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { StoredThread } from "../types.js";
@@ -1030,6 +1030,110 @@ describe("a manual continue with an active turn (MXN-372)", () => {
       for (const turn of await w.store.readTurns(id)) {
         if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
       }
+    }
+  });
+});
+
+describe("task adoption and agent queue mutations", () => {
+  async function setup() {
+    const w = await world();
+    const parent = await w.make("parent");
+    const destination = await w.make("destination");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d1", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", createdAt: now, updatedAt: now });
+    return { w, parent, destination, child };
+  }
+
+  async function agentEntry(w: Awaited<ReturnType<typeof world>>, parentId: string, childId: string) {
+    return (await sendTurn(w.store, childId, {
+      prompt: "agent work",
+      agentThreadId: parentId,
+      queue: parseQueuePolicy({ conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }] }),
+    })).turn;
+  }
+
+  /** Hold `!delegations` so the test chooses which transaction queues first. */
+  async function holdDelegations(w: Awaited<ReturnType<typeof world>>) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let acquired!: () => void;
+    const ready = new Promise<void>((resolve) => { acquired = resolve; });
+    const holding = w.store.withThreadLock("!delegations", async () => { acquired(); await gate; });
+    await ready;
+    return { release, holding };
+  }
+
+  /** Resolve once a call is queued on `!delegations`, before adoption starts. */
+  async function waitForDelegationWait(w: Awaited<ReturnType<typeof world>>) {
+    const real = w.store.withThreadLock.bind(w.store);
+    let armed = true;
+    let notify!: () => void;
+    const waiting = new Promise<void>((resolve) => { notify = resolve; });
+    w.store.withThreadLock = (async (id: string, run: () => Promise<unknown>) => {
+      const result = real(id, run);
+      if (id === "!delegations" && armed) { armed = false; notify(); }
+      return result;
+    }) as typeof w.store.withThreadLock;
+    return { waiting, restore: () => { w.store.withThreadLock = real; } };
+  }
+
+  it("adoption first takes the task away from the old parent's removal", async () => {
+    const { w, parent, destination, child } = await setup();
+    const entry = await agentEntry(w, parent.id, child.id);
+    const { release, holding } = await holdDelegations(w);
+    const adoption = adoptTasks(w.store, parent.id, destination.id);
+    await Promise.resolve();
+    const mutation = removeAgentQueuedMessage(w.ctx, parent.id, entry.id);
+    await Promise.resolve();
+    release();
+    await holding;
+    await expect(mutation).rejects.toMatchObject({ code: "QUEUE_MESSAGE_NOT_YOURS" });
+    await adoption;
+    expect((await w.store.readDelegations()).find((row) => row.id === "d1")?.parentThreadId).toBe(destination.id);
+    expect((await w.store.readTurns(child.id)).find((turn) => turn.id === entry.id)?.queue?.removed).not.toBe(true);
+  });
+
+  it("a mutation first commits before the transfer", async () => {
+    const { w, parent, destination, child } = await setup();
+    const entry = await agentEntry(w, parent.id, child.id);
+    const { release, holding } = await holdDelegations(w);
+    const waiting = await waitForDelegationWait(w);
+    try {
+      const mutation = removeAgentQueuedMessage(w.ctx, parent.id, entry.id);
+      await waiting.waiting;
+      const adoption = adoptTasks(w.store, parent.id, destination.id);
+      release();
+      await holding;
+      await expect(mutation).resolves.toMatchObject({ turnId: entry.id });
+      await adoption;
+    } finally {
+      waiting.restore();
+    }
+    expect((await w.store.readDelegations()).find((row) => row.id === "d1")?.parentThreadId).toBe(destination.id);
+    expect((await w.store.readTurns(child.id)).find((turn) => turn.id === entry.id)?.queue?.removed).toBe(true);
+  });
+
+  it("a manual continuation adopts tasks without re-entering a lock", async () => {
+    const { w, parent, child } = await setup();
+    const continued = await continueThread(w.ctx, { threadId: parent.id });
+    expect((await w.store.readDelegations()).find((row) => row.id === "d1")?.parentThreadId).toBe(continued.threadId);
+    await flushTurnRunners();
+    for (const id of [parent.id, child.id, continued.threadId]) {
+      for (const turn of await w.store.readTurns(id)) if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
+    }
+  });
+
+  it("a queued handoff adopts tasks with admission already held", async () => {
+    const { w, parent, child } = await setup();
+    const queued = (await sendTurn(w.store, parent.id, { prompt: "Handoff", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+    await runWorkQueue(w.ctx);
+    const after = (await w.store.readTurns(parent.id)).find((turn) => turn.id === queued.id)!;
+    expect(after.handoff?.destinationThreadId).toBeDefined();
+    expect((await w.store.readDelegations()).find((row) => row.id === "d1")?.parentThreadId).toBe(after.handoff!.destinationThreadId);
+    await flushTurnRunners();
+    for (const id of [parent.id, child.id, after.handoff!.destinationThreadId]) {
+      for (const turn of await w.store.readTurns(id)) if (turn.status === "running") await interruptTurn(w.store, id, turn.id);
     }
   });
 });

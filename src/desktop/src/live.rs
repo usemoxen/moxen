@@ -953,7 +953,8 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
                 key: turn_id.to_string(),
                 text: body,
                 images,
-                held: listed.is_some_and(|at| entries[at]["policy"]["held"] == true),
+                held: listed.is_some_and(|at| entries[at]["policy"]["held"] == true)
+                    || turn["held"] == true,
                 agent,
                 scheduled: text(turn, &["scheduledFor"]).map(str::to_string),
                 condition_count,
@@ -5541,6 +5542,32 @@ mod tests {
         assert_eq!(queue_label(&queue[0]), "agent · scheduled · 3 conditions");
         // Attribution is not replaced by the state: both stay in the label.
         assert!(queue_label(&queue[0]).starts_with("agent · scheduled"));
+    }
+
+    #[test]
+    fn the_queue_label_keeps_a_manual_or_usage_hold_and_its_condition_count() {
+        let entry = |scheduled: Option<&str>| Queued {
+            key: "t1".into(),
+            text: "waiting".into(),
+            images: vec![],
+            held: true,
+            agent: false,
+            scheduled: scheduled.map(str::to_string),
+            condition_count: 2,
+            blocked: vec![
+                "claude: waiting for session reset".into(),
+                "Thread is running".into(),
+            ],
+            earlier: 0,
+            later: 0,
+        };
+        assert_eq!(queue_label(&entry(None)), "held · 2 conditions");
+        // A usage hold that is also scheduled still shows the count; the state
+        // is not replaced by the time.
+        assert_eq!(
+            queue_label(&entry(Some("2026-11-16T20:00:00.000Z"))),
+            "held · 2 conditions"
+        );
     }
 
     #[test]

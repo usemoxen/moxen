@@ -836,15 +836,23 @@ export class ThreadStore {
    */
   async updateDelegations(patches: ReadonlyArray<{ readonly id: string; readonly patch: Partial<StoredDelegation> }>): Promise<void> {
     if (patches.length === 0) return;
+    await this.withThreadLock("!delegations", () => this.rewriteDelegationsLocked(patches));
+  }
+
+  /**
+   * Rewrite several delegation rows at once, under a lock the caller already
+   * holds (`!delegations`). Adoption holds it across its read and its write;
+   * calling the locking form here would re-enter the same mutex.
+   */
+  async rewriteDelegationsLocked(patches: ReadonlyArray<{ readonly id: string; readonly patch: Partial<StoredDelegation> }>): Promise<void> {
+    if (patches.length === 0) return;
     const wanted = new Map(patches.map((entry) => [entry.id, entry.patch]));
-    await this.withThreadLock("!delegations", async () => {
-      const all = await this.readDelegations();
-      const next = all.map((delegation) => {
-        const patch = wanted.get(delegation.id);
-        return patch === undefined ? delegation : { ...delegation, ...patch, id: delegation.id, updatedAt: this.nowIso() };
-      });
-      await this.writeDelegationRows(next);
+    const all = await this.readDelegations();
+    const next = all.map((delegation) => {
+      const patch = wanted.get(delegation.id);
+      return patch === undefined ? delegation : { ...delegation, ...patch, id: delegation.id, updatedAt: this.nowIso() };
     });
+    await this.writeDelegationRows(next);
   }
 
   /** Replace the delegations ledger, splicing skipped lines back byte-for-byte. Caller holds the lock. */

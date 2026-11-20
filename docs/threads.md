@@ -589,30 +589,39 @@ acceptance is uncertain. **Schedule work** uses the same steps on one page that
 ends in "Queue this work".
 
 A waiting message's row shows a bounded summary of what it holds — its
-scheduled time and, when it has several, a condition count — so the message
-and its agent marker keep their room. The focused entry in the Work queue
-shows every condition in full.
+scheduled time, a manual or usage hold, and, when it has several, a condition
+count — so the message and its agent marker keep their room. The focused entry
+in the Work queue shows every condition in full.
 
 An agent that queued a message with `message_queue` can see and take it back:
 `message_queue_list` lists the entries it created on its own thread and on
 tasks it delegated, `message_queue_edit` replaces what one waits for, and
-`message_queue_remove` drops it before it runs. They use the same Work queue
-edit and admission lock as the user's own actions. Management follows the
-thread chain that owns the destination: when a task transfers to a
-continuation, the continuation inherits the earlier entries and the old parent
-no longer manages them. An agent never touches the user's entries or another
-agent's, and an entry that has started running cannot be taken back. The
-creating thread is recorded on the entry. Taking a waiting message back records
-a before-start cancellation, so the transcript does not show it as sent;
-adding it back and letting it run restores it. A `thread` condition may not name
-the thread the message is queued on: it already waits for that thread's turn,
-so "after this turn" is implied.
+`message_queue_remove` drops it before it runs. This is MCP-only: the tools run
+in the authenticated `moxen` session for the thread, never through a client
+command or query that names the caller. Queueing a message with
+`message_queue` is the same: it takes no caller id from a client. The stdio
+fallback relays them through the daemon-issued loopback credential and fails
+closed without one. They use the
+same Work queue edit and admission lock as the user's own actions. Management
+needs both authorship by the thread's chain and current ownership of the
+destination: when a task transfers to a continuation, the continuation inherits
+the earlier entries and the old parent no longer manages them. An agent never
+touches the user's entries or another agent's, and an entry that has started
+running cannot be taken back. The creating thread is recorded on the entry.
+
+Taking a waiting message back records a before-start cancellation, so the
+transcript does not show it as sent; adding it back and letting it run restores
+it. A turn that already ran keeps `startedAt` through a restore, so it is never
+listed, edited or removed as an unsent message, and removing it does not hide
+its prompt. A `thread` condition may not name the thread the message is queued
+on: it already waits for that thread's turn, so "after this turn" is implied.
 
 Conditions name a provider either by its usage account (`claude`, `codex`) or
 by its provider instance (`claudeAgent`, `opencode/<provider>`); both read the
-same account windows. A key that is a JavaScript prototype member
-(`constructor`, `__proto__`) is refused, and a bad condition already stored
-cannot break the queue read or its removal.
+same account windows. A window is exactly `session`, `weekly` or `all`; arrays,
+objects and other strings are refused. A key that is a JavaScript prototype
+member (`constructor`, `__proto__`) is refused, and a bad condition already
+stored cannot break the queue read or its removal.
 
 The same controls are available without a TUI:
 

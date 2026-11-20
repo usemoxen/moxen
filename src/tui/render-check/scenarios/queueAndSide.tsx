@@ -28,11 +28,16 @@ const NOW = Date.parse("2026-09-26T10:00:00.000Z");
 const ITEMS: readonly QueuedMessage[] = [
   { turnId: "t1", messageId: "m1", text: "Also update the changelog", attachments: 0, scheduledFor: null, reason: null },
   { turnId: "t2", messageId: "m2", text: "Run the full suite after", attachments: 1, scheduledFor: "2026-09-26T12:00:00.000Z", reason: "user" },
-  { turnId: "t3", messageId: "m3", text: "Then open the PR", attachments: 0, scheduledFor: "2026-09-26T15:01:00.000Z", reason: "usage-hold" },
+  { turnId: "t3", messageId: "m3", text: "Then open the PR", attachments: 0, scheduledFor: "2026-09-26T15:01:00.000Z", reason: "usage-hold", conditions: [
+    { type: "reset", provider: "claude", window: "weekly", resetsAt: null },
+    { type: "usage", provider: "claude", window: "session", minimum: 10 },
+  ] },
   // An agent's own queued message: the row marks it as the agent's and shows what it wrote, not the header line.
   { turnId: "t4", messageId: "m4", text: `${SELF_QUEUED_HEADER}\n\nRecheck the nightly build`, attachments: 0, scheduledFor: null, reason: null, agent: true },
   // A condition is not "after this turn": the row says what the entry actually waits for.
   { turnId: "t5", messageId: "m5", text: "Verify the release after the reset", attachments: 0, scheduledFor: null, reason: null, conditions: [{ type: "reset", provider: "claude", window: "session", resetsAt: null }] },
+  // A manual hold with no condition of its own, and a usage hold with two conditions.
+  { turnId: "t6", messageId: "m6", text: "Held until I say so", attachments: 0, scheduledFor: null, reason: null, held: true },
 ];
 
 async function runQueued(): Promise<void> {
@@ -56,14 +61,16 @@ async function runQueued(): Promise<void> {
   console.log(frame);
   for (const expected of [
     "Queued",
-    "5 not sent yet, 1 of them held for the reset",
+    "6 not sent yet, 1 of them held for the reset",
     "1. Also update the changelog",
     "after this turn",
     "+1 image",
-    "after the reset",
     "1/2",
     "agent · Recheck the nightly build",
     "After Claude's next session reset",
+    "Held until I say so",
+    "held",
+    "2 conditions",
   ]) {
     if (!frame.includes(expected)) fail(`queued panel is missing "${expected}"`);
   }
@@ -112,6 +119,14 @@ async function runQueuedNarrow(): Promise<void> {
         { type: "usage", provider: "claude", window: "session", minimum: 10 },
       ],
     },
+    { turnId: "n3", messageId: "n3", text: "Held for me", attachments: 0, scheduledFor: null, reason: null, held: true },
+    {
+      turnId: "n4", messageId: "n4", text: "Usage-held release", attachments: 0, scheduledFor: "2026-09-26T17:01:00.000Z", reason: "usage-hold",
+      conditions: [
+        { type: "reset", provider: "claude", window: "weekly", resetsAt: null },
+        { type: "usage", provider: "claude", window: "session", minimum: 10 },
+      ],
+    },
   ];
   const setup = await testRender(
     <box style={{ width: 64, height: 8, flexDirection: "column" }}>
@@ -123,7 +138,7 @@ async function runQueuedNarrow(): Promise<void> {
   const frame = setup.captureCharFrame();
   console.log("--- queued panel narrow ---");
   console.log(frame);
-  for (const expected of ["agent · Recheck the build", "3 conditions", "2 conditions", "◷"]) {
+  for (const expected of ["agent · Recheck the build", "3 conditions", "2 conditions", "held", "◷"]) {
     if (!frame.includes(expected)) fail(`narrow queued panel is missing "${expected}"`);
   }
   if (frame.includes("After Claude's next session reset")) fail("narrow queued panel did not bound its condition list");

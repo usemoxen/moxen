@@ -25,18 +25,29 @@ const MAX_QUEUED_ROWS = 6;
 export function whenLabel(item: QueuedMessage, now: number, threads: readonly { id: string; title: string }[] = [], maxWidth = Number.POSITIVE_INFINITY): string {
   const at = item.scheduledFor === null ? null : clockTime(item.scheduledFor, now);
   // ◷, not the ⏲ emoji: terminals draw the emoji two cells wide over the space after it.
-  const scheduled = at === null ? [] : [item.reason === "usage-hold" ? t("queued.afterReset", { at }) : `◷ ${at}`];
+  const compactTime = at === null ? null : `◷ ${at}`;
+  const fullTime = at === null ? null : item.reason === "usage-hold" ? t("queued.afterReset", { at }) : compactTime;
+  const held = item.held === true ? [t("queued.held")] : [];
   const conditions = item.conditions ?? [];
   if (conditions.length > 1) {
-    const summary = [...scheduled, t("queued.conditions", { count: conditions.length })].join(" · ");
-    return textWidth(summary) <= maxWidth ? summary : clippedText(summary, maxWidth);
+    // The count is the part that must survive: drop the time before clipping it.
+    const count = t(item.held === true ? "queued.conditionsShort" : "queued.conditions", { count: conditions.length });
+    const base = [...held, count];
+    const withTime = compactTime === null ? base : [compactTime, ...base];
+    const chosen = textWidth(withTime.join(" · ")) <= maxWidth ? withTime : base;
+    return textWidth(chosen.join(" · ")) <= maxWidth ? chosen.join(" · ") : clippedText(chosen.join(" · "), maxWidth);
   }
   if (conditions.length === 1) {
-    const one = [...scheduled, queueConditionText(conditions[0]!, threads, [], now)].join(" · ");
-    return textWidth(one) <= maxWidth ? one : clippedText(one, maxWidth);
+    const condition = queueConditionText(conditions[0]!, threads, [], now);
+    const base = [...held, condition];
+    const withFullTime = fullTime === null ? base : [fullTime, ...base];
+    const withCompactTime = compactTime === null ? base : [compactTime, ...base];
+    const chosen = textWidth(withFullTime.join(" · ")) <= maxWidth ? withFullTime : withCompactTime;
+    return textWidth(chosen.join(" · ")) <= maxWidth ? chosen.join(" · ") : clippedText(chosen.join(" · "), maxWidth);
   }
-  if (at === null) return t("queued.after_this_turn_c5ef");
-  return scheduled[0]!;
+  if (at === null) return item.held === true ? t("queued.held") : t("queued.after_this_turn_c5ef");
+  const parts = held.length > 0 ? [compactTime!, ...held] : [fullTime!];
+  return textWidth(parts.join(" · ")) <= maxWidth ? parts.join(" · ") : clippedText(parts.join(" · "), maxWidth);
 }
 
 function CancelButton({ onClick }: { onClick: () => void }) {

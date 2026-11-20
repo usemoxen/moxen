@@ -1192,6 +1192,8 @@ export interface QueuedMessage {
   readonly reason: "user" | "usage-reset" | "usage-hold" | null;
   /** Every condition the entry waits for; empty or absent when it waits only for the turn (MXN-349). */
   readonly conditions?: readonly QueueCondition[];
+  /** The user holds it back, even with no condition of its own. */
+  readonly held?: boolean;
   /** Set when an agent queued it with `message_queue`, rather than the user typing it (MXN-401). */
   readonly agent?: true;
   /** Set when the message is moxen's own "your delegated tasks settled" note. */
@@ -1237,6 +1239,7 @@ export function queuedMessages(state: ThreadState): QueuedMessage[] {
         scheduledFor: queued.scheduledFor,
         reason: queued.scheduleReason,
         conditions: queued.conditions ?? [],
+        ...(queued.held === true ? { held: true as const } : {}),
         ...(message.origin === "agent-message" ? { agent: true as const } : {}),
         ...(tasks === null ? {} : { tasks }),
         ...(isBackgroundNotification(message) ? { background: true as const } : {}),

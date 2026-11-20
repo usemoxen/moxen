@@ -86,6 +86,23 @@ describe("transport", () => {
     } finally { unsubscribe(); }
   });
 
+  it("rejects the agent queue management RPCs on an ordinary socket", async () => {
+    const harness = await testHarness();
+    const handle = await served(harness);
+    const client = await connected(handle.endpoint);
+    for (const command of [
+      { type: "thread.message.queue", callerThreadId: "thread-x", message: "x" },
+      { type: "thread.message.queue.edit", callerThreadId: "thread-x", turnId: "turn-x", conditions: [] },
+      { type: "thread.message.queue.remove", callerThreadId: "thread-x", turnId: "turn-x" },
+    ]) {
+      await expect(client.dispatch(command as never)).rejects.toMatchObject({ code: "UNKNOWN_COMMAND" });
+    }
+    await expect(client.query({ type: "thread.message.queue.list", callerThreadId: "thread-x" } as never)).rejects.toMatchObject({ code: "UNKNOWN_QUERY" });
+    // The operator's own queue commands still decode and run.
+    await expect(client.query({ type: "queue.read" })).resolves.toMatchObject({ entries: expect.any(Array) });
+    await expect(client.dispatch({ type: "queue.edit", threadId: "thread-x", turnId: "turn-x", action: "hold" })).rejects.toMatchObject({ code: "QUEUE_ENTRY_NOT_WAITING" });
+  });
+
   it("carries commands, queries and errors — code, details and exit code intact", async () => {
     const harness = await testHarness();
     const handle = await served(harness);

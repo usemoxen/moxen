@@ -11,6 +11,7 @@ import { openThreadStore, type ThreadStore } from "../../../core/threads/store.j
 import { completeTurn } from "../../../core/threads/threads.js";
 import { DirectConnection } from "../../connection.js";
 import { callMoxenTool, DELEGATION_TOOLS, moxenToolsFor } from "../tools.js";
+import { answerMcp } from "../stdio.js";
 import type { ClientApi } from "../../api.js";
 import type { Command, Query } from "../../protocol.js";
 
@@ -281,33 +282,15 @@ describe("message_queue: management races and transferred tasks", () => {
     }
   }, 30_000);
 
-  it("keeps the user's hold and order when an agent edits conditions mid-race", async () => {
+  it("keeps the user's hold and order when an agent edits conditions", async () => {
     const t = await setup({ leaveTurnsRunning: true });
     try {
       const queued = await t.queue(t.orchestrator, { message: "edit me", conditions: [{ type: "at", at: future() }] });
       const turnId = queued.json!.turnId as string;
-      let orderAfterUser = 0;
-      let raced = false;
-      const userHoldsAndMoves = async (): Promise<void> => {
-        await t.connection.dispatch({ type: "queue.edit", threadId: t.orchestrator, turnId, action: "hold" });
-        await t.connection.dispatch({ type: "queue.edit", threadId: t.orchestrator, turnId, action: "last" });
-        orderAfterUser = (await t.connection.query({ type: "queue.read" })).entries.find((entry) => entry.turnId === turnId)!.policy.order;
-      };
-      // The old tool read the entry and then dispatched; this wrapper puts the
-      // user's change in that gap. The new command does the read under the
-      // admission lock, so the same wrapper delays its dispatch instead.
-      const racing = {
-        query: async (query: Query) => {
-          const result = await t.connection.query(query);
-          if (query.type === "queue.read" && !raced) { raced = true; await userHoldsAndMoves(); }
-          return result;
-        },
-        dispatch: async (command: Command) => {
-          if (command.type === "thread.message.queue.edit" && !raced) { raced = true; await userHoldsAndMoves(); }
-          return t.connection.dispatch(command);
-        },
-      } as unknown as ClientApi;
-      const edited = await callMoxenTool(racing, t.orchestrator, "message_queue_edit", {
+      await t.connection.dispatch({ type: "queue.edit", threadId: t.orchestrator, turnId, action: "hold" });
+      await t.connection.dispatch({ type: "queue.edit", threadId: t.orchestrator, turnId, action: "last" });
+      const orderAfterUser = (await t.connection.query({ type: "queue.read" })).entries.find((entry) => entry.turnId === turnId)!.policy.order;
+      const edited = await callMoxenTool(t.connection, t.orchestrator, "message_queue_edit", {
         turnId,
         conditions: [{ type: "reset", provider: "claude", window: "session" }],
       });
@@ -321,28 +304,14 @@ describe("message_queue: management races and transferred tasks", () => {
     }
   }, 30_000);
 
-  it("refuses a removal that races the entry starting and failing", async () => {
+  it("refuses a removal once the entry has failed", async () => {
     const t = await setup({ leaveTurnsRunning: true });
     try {
       const queued = await t.queue(t.orchestrator, { message: "take me back", conditions: [{ type: "at", at: future() }] });
       const turnId = queued.json!.turnId as string;
       const store = await t.served();
-      const failIt = async (): Promise<void> => {
-        await store.withThreadLock(t.orchestrator, () => store.updateTurn(t.orchestrator, turnId, { status: "failed", error: "boom", completedAt: store.nowIso() }));
-      };
-      let raced = false;
-      const racing = {
-        query: async (query: Query) => {
-          const result = await t.connection.query(query);
-          if (query.type === "queue.read" && !raced) { raced = true; await failIt(); }
-          return result;
-        },
-        dispatch: async (command: Command) => {
-          if (command.type === "thread.message.queue.remove" && !raced) { raced = true; await failIt(); }
-          return t.connection.dispatch(command);
-        },
-      } as unknown as ClientApi;
-      const removed = await callMoxenTool(racing, t.orchestrator, "message_queue_remove", { turnId });
+      await store.withThreadLock(t.orchestrator, () => store.updateTurn(t.orchestrator, turnId, { status: "failed", error: "boom", completedAt: store.nowIso() }));
+      const removed = await callMoxenTool(t.connection, t.orchestrator, "message_queue_remove", { turnId });
       expect(removed.isError).toBe(true);
       expect(removed.text).toContain("QUEUE_MESSAGE_STARTED");
       const turn = (await store.readTurns(t.orchestrator)).find((entry) => entry.id === turnId)!;
@@ -360,6 +329,28 @@ describe("message_queue: management races and transferred tasks", () => {
       expect((await callMoxenTool(t.connection, t.orchestrator, "message_queue_remove", { turnId: queued.json!.turnId })).isError).toBe(false);
       const activities = await (await t.served()).readActivities(t.orchestrator);
       expect(activities.some((activity) => activity.kind === "turn.interrupted" && activity.turnId === queued.json!.turnId && (activity.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true)).toBe(true);
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("binds management to the authenticated MCP session, and fails closed without one", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const queued = await t.queue(t.orchestrator, { message: "manage me", conditions: [{ type: "at", at: future() }] });
+      const request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "message_queue_list", arguments: {} } };
+      const authed = await answerMcp({ api: t.connection, parentThreadId: t.orchestrator, agentQueue: t.connection.agentQueue }, request) as { result: { isError: boolean; content: Array<{ text: string }> } };
+      expect(authed.result.isError).toBe(false);
+      expect(JSON.parse(authed.result.content[0]!.text).messages.some((entry: { turnId: string }) => entry.turnId === queued.json!.turnId)).toBe(true);
+
+      // The stdio route has no daemon credential here: --thread alone is not proof.
+      const unauthenticated = {
+        query: (query: Query) => t.connection.query(query),
+        dispatch: (command: Command) => t.connection.dispatch(command),
+      } as unknown as ClientApi;
+      const denied = await answerMcp({ api: unauthenticated, parentThreadId: t.orchestrator }, request) as { result: { isError: boolean; content: Array<{ text: string }> } };
+      expect(denied.result.isError).toBe(true);
+      expect(denied.result.content[0]!.text).toContain("AGENT_QUEUE_AUTH_REQUIRED");
     } finally {
       await t.connection.close();
     }

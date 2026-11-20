@@ -71,10 +71,10 @@ import {
 } from "../core/forge/forge.js";
 import { toWsConfigPayload } from "./config-payload.js";
 import { MOXEN_MCP_SERVER_NAME, moxenMcpServerSpec } from "./mcp/main.js";
-import { MOXEN_CHECKLIST_ARG, MOXEN_CHECKLIST_QUERY, MOXEN_DELEGATED_ARG, MOXEN_DELEGATED_QUERY, MOXEN_MEMORY_ARG, MOXEN_MEMORY_QUERY, MOXEN_NO_WEB_FETCH_ARG, MOXEN_NO_WEB_FETCH_QUERY, moxenInstructions } from "./mcp/stdio.js";
+import { MOXEN_CHECKLIST_ARG, MOXEN_CHECKLIST_QUERY, MOXEN_DELEGATED_ARG, MOXEN_DELEGATED_QUERY, MOXEN_MCP_TOKEN_ENV, MOXEN_MCP_URL_ENV, MOXEN_MEMORY_ARG, MOXEN_MEMORY_QUERY, MOXEN_NO_WEB_FETCH_ARG, MOXEN_NO_WEB_FETCH_QUERY, moxenInstructions } from "./mcp/stdio.js";
 import { startMcpHttpServer, type McpHttpServer } from "./mcp/http.js";
 import { MOXEN_MCP_INSTRUCTIONS } from "./mcp/stdio.js";
-import { callMoxenTool, moxenToolsFor, type MemoryAccess } from "./mcp/tools.js";
+import { callMoxenTool, moxenToolsFor, type AgentQueueAccess, type MemoryAccess } from "./mcp/tools.js";
 import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
 import { driverProviders } from "../core/threads/longthreads.js";
@@ -368,6 +368,20 @@ export interface DirectConnectionOptions {
 }
 
 export class DirectConnection implements ClientApi {
+  /**
+   * The agent queue operations an authenticated MCP session binds to its own
+   * thread. Deliberately not a command or query: a thread id in a payload is
+   * a resource, never proof of who is calling.
+   */
+  readonly agentQueue: AgentQueueAccess = {
+    list: async (callerThreadId) => listAgentQueuedMessages(await this.context(), callerThreadId),
+    edit: async (callerThreadId, turnId, conditions) => editAgentQueuedMessage(await this.context(), callerThreadId, turnId, conditions),
+    remove: async (callerThreadId, turnId) => removeAgentQueuedMessage(await this.context(), callerThreadId, turnId),
+    queue: async (callerThreadId, input) => {
+      const ctx = await this.context();
+      return await queueAgentMessage(ctx, callerThreadId, input, await this.usageProtection.snapshotRows(ctx));
+    },
+  };
   private readonly usageProtection = new UsageProtection(() => this.context());
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private usageTickRunning = false;
@@ -624,7 +638,7 @@ export class DirectConnection implements ClientApi {
       type: "in-process",
       instructions: moxenInstructions({ delegated, webFetch, memory }),
       tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null, researchLead, researchMember: isResearchRunActive(researchRun) }),
-      call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
+      call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory, agentQueue: this.agentQueue }),
       fallback,
       checklist,
       // Delegation is what these tools are for: never behind a tool search.
@@ -669,7 +683,15 @@ export class DirectConnection implements ClientApi {
 
   private moxenStdioFor(threadId: string): Extract<McpServerSpec, { type: "stdio" }> {
     const spec = moxenMcpServerSpec(threadId);
-    const env: Record<string, string> = { ...spec.env, MOXEN_STORE_ROOT: this.storeRoot };
+    // The daemon-issued credential is what proves the calling thread to the
+    // agent-queue tools; `--thread` alone is not an identity. Without it the
+    // stdio child fails those tools closed.
+    const endpoint = this.mcpHttp?.specFor(threadId);
+    const env: Record<string, string> = {
+      ...spec.env,
+      MOXEN_STORE_ROOT: this.storeRoot,
+      ...(endpoint ? { [MOXEN_MCP_URL_ENV]: endpoint.url, [MOXEN_MCP_TOKEN_ENV]: (endpoint.headers.Authorization ?? "").replace(/^Bearer /, "") } : {}),
+    };
     for (const name of ["MOXEN_CONFIG", "MOXEN_SERVER", "MOXEN_SERVER_ENDPOINT"]) {
       const value = process.env[name];
       // A paired server's name in MOXEN_SERVER is this process's client
@@ -963,7 +985,7 @@ export class DirectConnection implements ClientApi {
     // The same long-lived owner serves the moxen tools over loopback HTTP
     // for providers that cannot host them in-process.
     if (this.builtinMcpServers !== null) {
-      void startMcpHttpServer(this)
+      void startMcpHttpServer(this, undefined, this.agentQueue)
         .then((server) => {
           if (this.closed) void server.close();
           else this.mcpHttp = server;
@@ -1607,14 +1629,6 @@ export class DirectConnection implements ClientApi {
         return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
       case "thread.task.ask":
         return await this.taskAsk(command);
-      case "thread.message.queue": {
-        const ctx = await this.context();
-        return await queueAgentMessage(ctx, command.callerThreadId, { message: command.message, ...(command.threadId !== undefined ? { threadId: command.threadId } : {}), ...(command.at !== undefined ? { at: command.at } : {}), ...(command.conditions ? { conditions: command.conditions } : {}) }, await this.usageProtection.snapshotRows(ctx));
-      }
-      case "thread.message.queue.edit":
-        return await editAgentQueuedMessage(await this.context(), command.callerThreadId, command.turnId, command.conditions);
-      case "thread.message.queue.remove":
-        return await removeAgentQueuedMessage(await this.context(), command.callerThreadId, command.turnId);
       case "thread.plan.set":
         return await recordChecklist(await this.context(), command.threadId, command.plan);
       case "thread.background.stop": {
@@ -2334,8 +2348,6 @@ export class DirectConnection implements ClientApi {
         });
       case "thread.task.status":
         return await describeTask(ctx, query.parentThreadId, query.taskId);
-      case "thread.message.queue.list":
-        return { messages: await listAgentQueuedMessages(ctx, query.callerThreadId) };
       case "thread.delegation":
         return await delegationInfo(ctx, query.threadId);
       case "research.run":

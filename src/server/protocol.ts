@@ -40,8 +40,6 @@ import type {
   ContinuedOwnThread,
   SentTaskMessage,
   SettledTask,
-  QueuedAgentMessage,
-  AgentQueuedMessage,
   ChecklistStep,
   DelegateRequest,
   Delegation,
@@ -302,11 +300,6 @@ export type CommandBody =
    * transport must never retry it.
    */
   | { readonly type: "thread.task.ask"; readonly parentThreadId: string; readonly taskId: string; readonly question: string }
-  /** An agent's message into its own thread's queue, or a task it delegated's (moxen's `message_queue`). */
-  | { readonly type: "thread.message.queue"; readonly callerThreadId: string; readonly message: string; readonly threadId?: string; readonly at?: string; readonly conditions?: QueuePolicy["conditions"] }
-  /** Change or take back an agent's own waiting message (moxen's `message_queue_edit` / `message_queue_remove`). */
-  | { readonly type: "thread.message.queue.edit"; readonly callerThreadId: string; readonly turnId: string; readonly conditions: QueuePolicy["conditions"] }
-  | { readonly type: "thread.message.queue.remove"; readonly callerThreadId: string; readonly turnId: string }
   /** Stop one background task (a `run_in_background` command, a Monitor watch, a background subagent). */
   | { readonly type: "thread.background.stop"; readonly threadId: string; readonly taskId: string }
   /** The agent's checklist, for a provider with none of its own (moxen's `todos` tool). The whole list. */
@@ -496,9 +489,6 @@ export interface CommandResults {
   "thread.task.settle": SettledTask;
   "thread.task.send": SentTaskMessage;
   "thread.task.ask": AskedTask;
-  "thread.message.queue": QueuedAgentMessage;
-  "thread.message.queue.edit": { readonly threadId: string; readonly turnId: string };
-  "thread.message.queue.remove": { readonly threadId: string; readonly turnId: string };
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
   "thread.plan.set": RecordedChecklist;
   "project.ensure": EnsuredProject;
@@ -574,8 +564,6 @@ export type Query =
       readonly lastTurn?: boolean;
     }
   | { readonly type: "thread.task.status"; readonly parentThreadId: string; readonly taskId: string }
-  /** The waiting messages an agent may still manage, on its own thread and the tasks it owns (moxen's `message_queue_list`). */
-  | { readonly type: "thread.message.queue.list"; readonly callerThreadId: string }
   /**
    * The live delegation that made this thread a task, if any: which thread
    * it reports to and whether it notifies. Lets a client cancelling an
@@ -781,7 +769,6 @@ export interface QueryResults {
   "thread.inspect": { readonly project: StoredProject | null; readonly thread: ThreadInspection };
   "thread.read": { readonly project: StoredProject | null; readonly thread: ThreadReading };
   "thread.task.status": DescribedTask;
-  "thread.message.queue.list": { readonly messages: readonly AgentQueuedMessage[] };
   "thread.delegation": { readonly parentThreadId: string; readonly notify: boolean } | null;
   "research.run": ResearchRunView | null;
   "opencode.session-thread": {
@@ -1391,31 +1378,6 @@ export function decodeCommand(value: unknown): Command {
         taskId: requireField(record.taskId, type, "taskId"),
         question: requireField(record.question, type, "question"),
       };
-    case "thread.message.queue":
-      return {
-        ...meta,
-        type,
-        callerThreadId: requireThreadId(record.callerThreadId),
-        message: requireField(record.message, type, "message"),
-        ...(record.threadId !== undefined ? { threadId: requireThreadId(record.threadId) } : {}),
-        ...optionalString(record, "at"),
-        ...(record.conditions !== undefined ? { conditions: parseQueuePolicy({ conditions: record.conditions }).conditions } : {}),
-      };
-    case "thread.message.queue.edit":
-      return {
-        ...meta,
-        type,
-        callerThreadId: requireThreadId(record.callerThreadId),
-        turnId: requireField(record.turnId, type, "turnId"),
-        conditions: parseQueuePolicy({ conditions: record.conditions }).conditions,
-      };
-    case "thread.message.queue.remove":
-      return {
-        ...meta,
-        type,
-        callerThreadId: requireThreadId(record.callerThreadId),
-        turnId: requireField(record.turnId, type, "turnId"),
-      };
     case "thread.background.stop":
       return {
         ...meta,
@@ -1787,8 +1749,6 @@ export function decodeQuery(value: unknown): Query {
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
       };
-    case "thread.message.queue.list":
-      return { type, callerThreadId: requireThreadId(record.callerThreadId) };
     case "thread.delegation":
       return { type, threadId: requireThreadId(record.threadId) };
     case "thread.turn.await":

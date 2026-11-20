@@ -127,13 +127,20 @@ pub struct Row {
 }
 
 /// Turns that never started: still waiting in the queue, or cancelled while
-/// they waited (`cancelledBeforeStart` in `src/tui/model/thread.ts`).
+/// they waited (`cancelledBeforeStart` in `src/tui/model/thread.ts`). Ledger
+/// order decides same-millisecond events: a later promotion supersedes an
+/// explicit before-start cancellation, and a later cancellation supersedes
+/// that promotion.
 fn unstarted_turns(thread: &Value) -> HashSet<&str> {
     let mut waited = HashSet::new();
-    let mut promoted = HashSet::new();
-    let mut interrupted = HashSet::new();
-    let mut unstarted: HashSet<&str> = HashSet::new();
-    for activity in thread["activities"].as_array().into_iter().flatten() {
+    let mut last_promoted: HashMap<&str, usize> = HashMap::new();
+    let mut interruptions: HashMap<&str, (usize, bool)> = HashMap::new();
+    for (index, activity) in thread["activities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         let Some(turn) = text(activity, &["turnId"]) else {
             continue;
         };
@@ -142,22 +149,28 @@ fn unstarted_turns(thread: &Value) -> HashSet<&str> {
                 waited.insert(turn);
             }
             Some("turn.promoted") => {
-                promoted.insert(turn);
+                last_promoted.insert(turn, index);
             }
             Some("turn.interrupted") => {
-                interrupted.insert(turn);
-                if activity["payload"]["beforeStart"] == true {
-                    unstarted.insert(turn);
-                }
+                interruptions.insert(turn, (index, activity["payload"]["beforeStart"] == true));
             }
             _ => {}
         }
     }
-    unstarted.extend(
-        interrupted
-            .into_iter()
-            .filter(|turn| waited.contains(turn) && !promoted.contains(turn)),
-    );
+    let mut unstarted: HashSet<&str> = HashSet::new();
+    for (turn, (at, before_start)) in interruptions {
+        if before_start {
+            if last_promoted
+                .get(turn)
+                .is_none_or(|promoted| *promoted < at)
+            {
+                unstarted.insert(turn);
+            }
+        } else if waited.contains(turn) && !last_promoted.contains_key(turn) {
+            // Legacy rows: a queued turn interrupted without the marker.
+            unstarted.insert(turn);
+        }
+    }
     for queued in thread["queuedTurns"].as_array().into_iter().flatten() {
         if let Some(turn) = text(queued, &["turnId"]) {
             unstarted.insert(turn);
@@ -171,6 +184,20 @@ pub fn project(thread: &Value) -> Vec<Row> {
     // (when, tie-break, row): messages sort before the steps they began.
     let mut rows: Vec<(i64, usize, Row)> = vec![];
     let unstarted = unstarted_turns(thread);
+    // A queued prompt landed where its turn actually started, not where it
+    // was typed; a restored retry uses the later promotion too.
+    let promoted_at: HashMap<&str, i64> = thread["activities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|activity| text(activity, &["kind"]) == Some("turn.promoted"))
+        .filter_map(|activity| {
+            Some((
+                text(activity, &["turnId"])?,
+                ms(activity, &["createdAt"]).unwrap_or(0),
+            ))
+        })
+        .collect();
     // Turns a usage limit stopped: the provider's own "limit reached" reply
     // says what the turn's usage-limit notice already shows, better.
     let limited: HashSet<&str> = thread["activities"]
@@ -201,7 +228,13 @@ pub fn project(thread: &Value) -> Vec<Row> {
             continue;
         }
         let body = text(message, &["text"]).unwrap_or_default().to_string();
-        let when = ms(message, &["createdAt"]).unwrap_or(0);
+        let mut when = ms(message, &["createdAt"]).unwrap_or(0);
+        if role == "user"
+            && let Some(promoted) =
+                text(message, &["turnId"]).and_then(|turn| promoted_at.get(turn))
+        {
+            when = when.max(*promoted);
+        }
         let streaming = message.get("streaming").and_then(Value::as_bool) == Some(true);
         let message = match role {
             // Moxen's own blocks render as cards and quiet lines, never as
@@ -697,6 +730,90 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].key, "m1");
     }
+    #[test]
+    fn a_removed_message_returns_only_once_its_promotion_supersedes_the_cancel() {
+        let thread = json!({
+            "messages": [
+                {"id": "m1", "role": "user", "text": "previous", "turnId": "t1", "createdAt": "2026-11-16T10:00:00.000Z"},
+                {"id": "m2", "role": "user", "text": "restored", "turnId": "t2", "createdAt": "2026-11-16T10:01:00.000Z"},
+            ],
+            "activities": [
+                {"id": "q", "turnId": "t2", "kind": "turn.queued", "createdAt": "2026-11-16T10:01:00.000Z"},
+                {"id": "i", "turnId": "t2", "kind": "turn.interrupted", "createdAt": "2026-11-16T10:02:00.000Z", "payload": {"beforeStart": true}},
+            ],
+        });
+        assert_eq!(project(&thread).len(), 1);
+        let restored = json!({
+            "messages": thread["messages"].clone(),
+            "activities": [
+                {"id": "q", "turnId": "t2", "kind": "turn.queued", "createdAt": "2026-11-16T10:01:00.000Z"},
+                {"id": "i", "turnId": "t2", "kind": "turn.interrupted", "createdAt": "2026-11-16T10:02:00.000Z", "payload": {"beforeStart": true}},
+                {"id": "p", "turnId": "t2", "kind": "turn.promoted", "createdAt": "2026-11-16T10:03:00.000Z"},
+            ],
+        });
+        let texts: Vec<String> = project(&restored)
+            .into_iter()
+            .filter_map(|row| match row.message {
+                Message::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["previous", "restored"]);
+    }
+
+    #[test]
+    fn a_same_millisecond_cancel_and_promotion_follow_ledger_order() {
+        let messages = json!([
+            {"id": "m1", "role": "user", "text": "previous", "turnId": "t1", "createdAt": "2026-11-16T10:00:00.000Z"},
+            {"id": "m2", "role": "user", "text": "restored", "turnId": "t2", "createdAt": "2026-11-16T10:01:00.000Z"},
+        ]);
+        let at = "2026-11-16T10:01:00.000Z";
+        let queue = json!({"id": "q", "turnId": "t2", "kind": "turn.queued", "createdAt": at});
+        let cancel = json!({"id": "i", "turnId": "t2", "kind": "turn.interrupted", "createdAt": at, "payload": {"beforeStart": true}});
+        let promote = json!({"id": "p", "turnId": "t2", "kind": "turn.promoted", "createdAt": at});
+        let texts = |activities: Vec<serde_json::Value>| -> Vec<String> {
+            project(&json!({"messages": messages.clone(), "activities": activities}))
+                .into_iter()
+                .filter_map(|row| match row.message {
+                    Message::User { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(texts(vec![queue.clone(), cancel.clone()]), ["previous"]);
+        assert_eq!(
+            texts(vec![queue.clone(), cancel.clone(), promote.clone()]),
+            ["previous", "restored"]
+        );
+        assert_eq!(texts(vec![queue, promote, cancel]), ["previous"]);
+    }
+
+    #[test]
+    fn a_restored_prompt_is_placed_where_its_turn_started() {
+        let thread = json!({
+            "messages": [
+                {"id": "m1", "role": "user", "text": "previous", "turnId": "t1", "createdAt": "2026-11-16T10:00:00.000Z"},
+                {"id": "m2", "role": "user", "text": "restored", "turnId": "t2", "createdAt": "2026-11-16T10:01:00.000Z"},
+                {"id": "m3", "role": "assistant", "text": "reply", "turnId": "t3", "createdAt": "2026-11-16T10:03:00.000Z"},
+            ],
+            "activities": [
+                {"id": "q", "turnId": "t2", "kind": "turn.queued", "createdAt": "2026-11-16T10:01:00.000Z"},
+                {"id": "i", "turnId": "t2", "kind": "turn.interrupted", "createdAt": "2026-11-16T10:02:00.000Z", "payload": {"beforeStart": true}},
+                {"id": "p", "turnId": "t2", "kind": "turn.promoted", "createdAt": "2026-11-16T10:05:00.000Z"},
+            ],
+        });
+        let rows = project(&thread);
+        let texts: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| match row.message {
+                Message::User { text, .. } => Some(text),
+                Message::Assistant { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["previous", "reply", "restored"]);
+    }
+
     use super::*;
     use serde_json::json;
 

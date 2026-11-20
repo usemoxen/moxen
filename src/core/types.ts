@@ -671,6 +671,8 @@ export interface QueuedTurnEnvelope {
   scheduleReason: "user" | "usage-reset" | "usage-hold" | null;
   /** Every condition the entry waits for, so a client shows them all (MXN-349). Absent when it has none. */
   conditions?: QueueCondition[];
+  /** The user holds it back; a plain queued message with no condition still says so. */
+  held?: boolean;
 }
 
 export interface LatestTurnEnvelope {

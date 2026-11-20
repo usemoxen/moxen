@@ -14,6 +14,7 @@ import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
+import { startedTurn } from "./views.js";
 import type {
   InteractionMode,
   ModelSelection,
@@ -731,7 +732,7 @@ async function interruptTurnLocked(
     summary: reason ?? turn.id,
     // A queued or scheduled message taken back before it ran: clients drop
     // it from the transcript rather than show a turn that never happened.
-    ...(turn.status === "queued" ? { payload: { beforeStart: true } } : {}),
+    ...(!startedTurn(turn) ? { payload: { beforeStart: true } } : {}),
     createdAt: now,
   });
   if (!updated) {
@@ -1369,7 +1370,7 @@ async function cancelStaleContinueLocked(store: ThreadStore, threadId: string, t
     summary: turn.id,
     // Taken back before it ran: clients drop it from the transcript rather
     // than show a turn that never happened.
-    payload: { beforeStart: true },
+    ...(!startedTurn(turn) ? { payload: { beforeStart: true } } : {}),
     createdAt: now,
   });
   store.emit(threadId, "turn-interrupted");

@@ -67,6 +67,8 @@ export interface WorkQueueEntry {
   readonly blocked: readonly string[]; readonly scheduledFor: string | null;
   /** The agent thread that queued this entry with `message_queue`; only it may list or change it (MXN-401). */
   readonly agentThreadId?: string;
+  /** Whether the turn reached the provider. A restored retry keeps this true even while queued. */
+  readonly started?: boolean;
 }
 
 export function parseQueuePolicy(value: unknown): QueuePolicy {
@@ -79,7 +81,7 @@ export function parseQueuePolicy(value: unknown): QueuePolicy {
     const c = raw as Record<string, unknown>;
     const id = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200;
     if (c.type === "at" && typeof c.at === "string" && Number.isFinite(Date.parse(c.at))) return { type: "at", at: new Date(c.at).toISOString() };
-    if (c.type === "usage" && id(c.provider) && ["session", "weekly", "all"].includes(String(c.window)) && typeof c.minimum === "number" && Number.isFinite(c.minimum) && c.minimum >= 0 && c.minimum <= 100) {
+    if (c.type === "usage" && id(c.provider) && typeof c.window === "string" && ["session", "weekly", "all"].includes(c.window) && typeof c.minimum === "number" && Number.isFinite(c.minimum) && c.minimum >= 0 && c.minimum <= 100) {
       const provider = accountKey(c.provider);
       if (provider === null) return bad();
       return { type: "usage", provider, window: c.window as "session" | "weekly" | "all", minimum: c.minimum };

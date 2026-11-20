@@ -22,7 +22,8 @@ import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
-import { parseQueuePolicy } from "../../core/threads/queue.js";
+import type { AgentQueuedMessage, QueueAgentMessageInput, QueuedAgentMessage } from "../../core/threads/operations.js";
+import { parseQueuePolicy, type QueueCondition } from "../../core/threads/queue.js";
 import { usageKeyForInstance } from "../../core/usage/limits.js";
 import type { ClientApi } from "../api.js";
 import { decodeResearchPlan, type CommandResult } from "../protocol.js";
@@ -360,6 +361,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "at holds it until a time; conditions hold it until the queue's own conditions are met; with both, it waits for both. " +
       "Returns the entry's turnId, the threadId, and when it is expected to run. On a thread usage protection holds, the message waits behind the hold and does not end it. " +
       "You can queue only on your own thread and tasks you delegated, and not on a research run's roles or lead. " +
+      "Offered only through this thread's authenticated moxen session, never a client command that names the caller. " +
       "The message has none of your conversation when it runs: say it in full.",
     inputSchema: {
       type: "object",
@@ -386,7 +388,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Each entry has its turnId, its thread, what you wrote and what it waits for. " +
       "Use message_queue_edit or message_queue_remove with that turnId before it runs. " +
       "It never lists the user's own queue entries, and a message that has started has left the queue. " +
-      "Management follows the destination's current owner: a continuation that takes over a task inherits its earlier entries.",
+      "Management follows the destination's current owner: a continuation that takes over a task inherits its earlier entries. " +
+      "This is MCP-only through the authenticated session for your thread, never a client command that names a caller.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
   },
@@ -397,6 +400,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Pass its turnId and the new conditions: they replace the old ones whole. " +
       "Only an entry you queued can be changed (never the user's), and not one that has started running. " +
       "It stays on the thread and task it was queued for; a continuation that took the task over inherits it. " +
+      "MCP-only through the authenticated session for your thread. " +
       "A condition cannot wait for the thread the message is queued on: 'after this turn' is already implied.",
     inputSchema: {
       type: "object",
@@ -415,6 +419,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Pass its turnId from message_queue or message_queue_list. " +
       "Only an entry you queued can be removed (never the user's), and not one that has started running. " +
       "A continuation that took a task over inherits its earlier entries. " +
+      "MCP-only through the authenticated session for your thread. " +
       "The message stays stored: the user can add it back from Work queue.",
     inputSchema: { type: "object", properties: { turnId: { type: "string" } }, required: ["turnId"], additionalProperties: false },
   },
@@ -647,6 +652,21 @@ export interface MoxenToolOptions {
   readonly webFetch?: boolean;
   /** Absent: write. */
   readonly memory?: MemoryAccess;
+  /**
+   * The authenticated agent-queue binding for this session's thread. Only the
+   * in-process server and the token-authenticated loopback MCP route provide
+   * it; a stdio process relays it through the daemon-issued credential, and
+   * without one the management tools fail closed.
+   */
+  readonly agentQueue?: AgentQueueAccess;
+}
+
+/** The server-bound agent queue operations; never part of the public command protocol. */
+export interface AgentQueueAccess {
+  queue(callerThreadId: string, input: QueueAgentMessageInput): Promise<QueuedAgentMessage>;
+  list(callerThreadId: string): Promise<AgentQueuedMessage[]>;
+  edit(callerThreadId: string, turnId: string, conditions: readonly QueueCondition[]): Promise<{ readonly threadId: string; readonly turnId: string }>;
+  remove(callerThreadId: string, turnId: string): Promise<{ readonly threadId: string; readonly turnId: string }>;
 }
 
 /** Whether a session with these options may call `name`: hidden tools are refused too, since a client can call a tool it was never shown. */
@@ -760,7 +780,7 @@ export async function routeMcpSession(
   const run = await api.query({ type: "research.run", threadId: routing.threadId }).catch(() => null);
   return {
     threadId: routing.threadId,
-    options: { delegated: routing.delegated, webFetch: routing.webFetch, memory: routing.memory, checklist: routing.checklist, ...forceDelegated(run, routing.threadId, isResearchRunActive(run)) },
+    options: { delegated: routing.delegated, webFetch: routing.webFetch, memory: routing.memory, checklist: routing.checklist, ...(fallback.options.agentQueue ? { agentQueue: fallback.options.agentQueue } : {}), ...forceDelegated(run, routing.threadId, isResearchRunActive(run)) },
   };
 }
 
@@ -874,9 +894,12 @@ export async function callMoxenTool(
   parentThreadId: string,
   name: string,
   args: Record<string, unknown>,
-  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number; readonly usageRefreshMs?: number } = {},
+  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number; readonly usageRefreshMs?: number; readonly agentQueue?: AgentQueueAccess } = {},
 ): Promise<ToolResult> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  // In-process callers carry the server's bound gateway; a remote or stdio
+  // client has none and the management tools fail closed. Never a payload id.
+  const agentQueue = options.agentQueue ?? (api as { readonly agentQueue?: AgentQueueAccess }).agentQueue;
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
   if (options.delegated === true && DELEGATION_TOOLS.has(name)) return { text: `${name} is not available in a delegated task: do the task yourself.`, isError: true };
   if (options.webFetch === false && name === "web_fetch") return { text: "web_fetch is switched off for this provider.", isError: true };
@@ -1045,9 +1068,7 @@ export async function callMoxenTool(
       case "message_queue": {
         if (args.delivery !== undefined && args.delivery !== "queue") throw new CliError("INVALID_TOOL_INPUT", "delivery must be \"queue\": a queued message cannot steer, restart or start a turn on its own.");
         if (args.conditions !== undefined && !Array.isArray(args.conditions)) throw new CliError("INVALID_TOOL_INPUT", "conditions must be an array of queue conditions.");
-        const queued = await api.dispatch({
-          type: "thread.message.queue",
-          callerThreadId: parentThreadId,
+        const queued = await requireAgentQueue(agentQueue).queue(parentThreadId, {
           message: argString(args, "message", true)!,
           ...(argString(args, "threadId") !== undefined ? { threadId: argString(args, "threadId")! } : {}),
           ...(argString(args, "at") !== undefined ? { at: argString(args, "at")! } : {}),
@@ -1056,17 +1077,17 @@ export async function callMoxenTool(
         return ok(queued);
       }
       case "message_queue_list":
-        return ok(await api.query({ type: "thread.message.queue.list", callerThreadId: parentThreadId }));
+        return ok({ messages: await requireAgentQueue(agentQueue).list(parentThreadId) });
       case "message_queue_edit": {
         const turnId = argString(args, "turnId", true)!;
         if (!Array.isArray(args.conditions)) throw new CliError("INVALID_TOOL_INPUT", "conditions must be an array of queue conditions.");
         const conditions = parseQueuePolicy({ conditions: args.conditions }).conditions;
-        const edited = await api.dispatch({ type: "thread.message.queue.edit", callerThreadId: parentThreadId, turnId, conditions });
+        const edited = await requireAgentQueue(agentQueue).edit(parentThreadId, turnId, conditions);
         return ok({ ...edited, conditions, note: "It now waits for these conditions instead of the old ones." });
       }
       case "message_queue_remove": {
         const turnId = argString(args, "turnId", true)!;
-        const removed = await api.dispatch({ type: "thread.message.queue.remove", callerThreadId: parentThreadId, turnId });
+        const removed = await requireAgentQueue(agentQueue).remove(parentThreadId, turnId);
         return ok({ ...removed, removed: true, note: "It will not run. The message stays stored; the user can add it back from Work queue." });
       }
       case "thread_continue": {
@@ -1210,6 +1231,22 @@ async function currentWebPolicy(api: ClientApi): Promise<WebPolicy> {
 
 function ok(value: unknown): ToolResult {
   return { text: JSON.stringify(value, null, 2), isError: false };
+}
+
+/**
+ * Agent queue management is bound to the authenticated MCP session, never to
+ * a caller id in tool arguments or a public command. A stdio process without
+ * the daemon-issued loopback credential gets this refusal instead.
+ */
+function requireAgentQueue(agentQueue: AgentQueueAccess | undefined): AgentQueueAccess {
+  if (agentQueue === undefined) {
+    throw new CliError(
+      "AGENT_QUEUE_AUTH_REQUIRED",
+      "Agent queue management is available only through this thread's authenticated moxen MCP endpoint. Start the shared server so the tools can prove the calling thread; a --thread argument alone is not an identity.",
+      { exitCode: 4 },
+    );
+  }
+  return agentQueue;
 }
 
 /**
