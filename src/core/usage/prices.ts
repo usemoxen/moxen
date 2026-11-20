@@ -49,7 +49,7 @@ export const DEFAULT_MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
   "gpt-5.3-codex": { input: 1.75, cacheRead: 0.175, cacheWrite: 1.75, output: 14 },
 };
 
-export type ModelPriceKind = "claude" | "codex" | "opencode" | "harness";
+export type ModelPriceKind = "claude" | "codex" | "opencode" | "harness" | "acp";
 
 /**
  * What a model costs on a provider kind: the user's rows for that kind,

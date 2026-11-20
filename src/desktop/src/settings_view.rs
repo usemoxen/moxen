@@ -733,7 +733,9 @@ fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
     for section in snapshot.sections() {
         let category = match section {
             "provider:harness" => "Moxen Harness",
-            "provider:claude" | "provider:codex" | "provider:opencode" => "Providers",
+            "provider:claude" | "provider:codex" | "provider:opencode" | "provider:acp" => {
+                "Providers"
+            }
             "mcp" | "skills" => "Integrations",
             _ => "Moxen",
         };
@@ -3728,6 +3730,7 @@ fn providers_line(providers: &[String]) -> String {
             "claude" => "Claude Code",
             "codex" => "Codex",
             "opencode" => "OpenCode",
+            "acp" => "ACP",
             "harness" => "Moxen Harness",
             other => other,
         })
@@ -3963,6 +3966,7 @@ fn provider_row(
         "claude" => "Claude Code",
         "codex" => "Codex",
         "opencode" => "OpenCode",
+        "acp" => "ACP",
         _ => provider.id.as_str(),
     };
     let newest = provider.latest.clone().unwrap_or_else(|| "unknown".into());

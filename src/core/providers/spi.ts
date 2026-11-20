@@ -14,14 +14,15 @@ import type { McpServerSpec } from "../mcp.js";
 import type { WorktreeIsolation } from "../threads/isolation.js";
 import type { InteractionMode, ModelSelection, RuntimeMode } from "../types.js";
 
-/** Provider surfaces we own. Cursor and Antigravity are out of scope. */
-export type ProviderDriverKind = "claude" | "codex" | "opencode" | "harness";
+/** Provider surfaces we own. */
+export type ProviderDriverKind = "claude" | "codex" | "opencode" | "harness" | "acp";
 
 export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = [
   "claude",
   "codex",
   "opencode",
   "harness",
+  "acp",
 ];
 
 export function isProviderDriverKind(value: unknown): value is ProviderDriverKind {

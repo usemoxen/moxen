@@ -32,6 +32,7 @@ import { searchThreadsView } from "../core/threads/search.js";
 import { turnThroughput } from "../core/threads/throughput.js";
 import * as Effect from "effect/Effect";
 
+import { loadAcpRegistryCatalog } from "../core/providers/acp/registry.js";
 import { buildDirectProviders } from "../core/catalog/direct.js";
 import { fetchLiveModels } from "../core/providers/claude/livemodels.js";
 import { SdkTransport } from "../core/providers/claude/transport.js";
@@ -439,6 +440,8 @@ export class DirectConnection implements ClientApi {
       return await buildDirectProviders({
         harness: providers?.harness,
         ...(providers?.codex ? { codex: providers.codex } : {}),
+        ...(providers?.acp ? { acp: providers.acp } : {}),
+        acpRegistry: () => loadAcpRegistryCatalog({ storeRoot: this.storeRoot }),
         fetchClaudeModels: () => fetchLiveModels({ transport: new SdkTransport(), binaryPath: claudeBinary }),
       });
     });
@@ -2357,7 +2360,7 @@ export class DirectConnection implements ClientApi {
         return { providers: withLiveUsage(await this.providers()) };
       case "doctor": {
         const providers = (await this.loadConfig()).providers;
-        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath);
+        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath, providers?.acp?.binaryPath);
       }
       case "thread.background.list": {
         const driver = await this.sessionDriver(query.threadId);

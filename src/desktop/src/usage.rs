@@ -224,6 +224,9 @@ pub(crate) fn driver_kind(instance: &str) -> Option<&str> {
     if key == "harness" || key.starts_with("harness/") {
         return Some("harness");
     }
+    if key == "acp" || key.starts_with("acp/") {
+        return Some("acp");
+    }
     if key == "claudeagent" || key == "claude" {
         return Some("claude");
     }

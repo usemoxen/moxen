@@ -18,6 +18,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { acpProviders } from "../providers/acp/catalog.js";
+import { loadAcpRegistryCatalog, type LoadedAcpRegistry } from "../providers/acp/registry.js";
 import { codexProvider } from "../providers/codex/catalog.js";
 import { claudeCatalogModels, setLiveClaudeModels } from "../providers/claude/catalog.js";
 import { resolveLiveModels } from "../providers/claude/livemodels.js";
@@ -38,13 +40,16 @@ import {
   type ModelsDevModel,
   type ModelsDevProvider,
 } from "../providers/opencode/catalog.js";
-import type { CodexProviderConfig, HarnessProviderConfig } from "../types.js";
+import type { AcpProviderConfig, CodexProviderConfig, HarnessProviderConfig } from "../types.js";
 import type { EffortDescriptor, ModelSummary, ProviderSummary } from "./summary.js";
 
 export interface DirectCatalogOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly codex?: CodexProviderConfig;
   readonly fetchCodexProvider?: () => Promise<ProviderSummary>;
+  readonly acp?: AcpProviderConfig;
+  readonly fetchAcpProviders?: () => Promise<ProviderSummary[]>;
+  readonly acpRegistry?: () => Promise<LoadedAcpRegistry>;
   readonly workingDirectory?: string;
   readonly storeRoot?: string;
   readonly modelsDev?: () => Promise<LoadedModelsDevCatalog>;
@@ -300,5 +305,15 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
   const harness = harnessProviders(options.harness, env, (instanceId, slug) => isModelHidden(prefs, instanceId, slug));
 
   const codex = await (options.fetchCodexProvider ?? (() => codexProvider(options.codex, env, options.workingDirectory ?? process.cwd())))();
-  return [claude, { ...codex, models: codex.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, "codex", model.slug) })) }, ...harness, ...opencode, compat];
+  const acp = await (options.fetchAcpProviders ?? (async () => {
+    const registry = options.acpRegistry
+      ? await options.acpRegistry().catch((): LoadedAcpRegistry => ({ agents: [], source: "empty" }))
+      : await loadAcpRegistryCatalog({ storeRoot, offlineOnly: true }).catch((): LoadedAcpRegistry => ({ agents: [], source: "empty" }));
+    return acpProviders(options.acp, env, options.workingDirectory ?? process.cwd(), undefined, registry.agents);
+  }))();
+  const mappedAcp = acp.map((provider) => ({
+    ...provider,
+    models: provider.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, provider.instanceId, model.slug) })),
+  }));
+  return [claude, { ...codex, models: codex.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, "codex", model.slug) })) }, ...mappedAcp, ...harness, ...opencode, compat];
 }

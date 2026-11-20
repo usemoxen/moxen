@@ -1306,6 +1306,7 @@ fn doctor(w: &Workspace) -> Div {
         ("claude", "Claude Code"),
         ("opencode", "OpenCode"),
         ("codex", "Codex"),
+        ("acp", "ACP"),
     ] {
         let provider = &diagnosis["providers"][id];
         if !provider.is_null() {
