@@ -255,7 +255,9 @@ pub struct Gauge {
 }
 
 fn is_claude_gpt_window(window: &UsageWindow) -> bool {
-    window.id.starts_with("claude-gpt") || window.label.contains("Claude & GPT")
+    window.id.starts_with("claude-gpt")
+        || window.id.starts_with("3p-")
+        || window.label.contains("Claude & GPT")
 }
 
 fn window_suffix(label: &str) -> Option<&str> {
@@ -299,7 +301,7 @@ pub fn plan_usage_groups(windows: &[UsageWindow]) -> Vec<PlanUsageGroup> {
         if window.id.starts_with("gemini-") {
             add_family("Gemini");
         }
-        if window.id.starts_with("claude-gpt-") {
+        if window.id.starts_with("claude-gpt-") || window.id.starts_with("3p-") {
             add_family("Claude & GPT");
         }
     }
@@ -327,7 +329,7 @@ pub fn plan_usage_groups(windows: &[UsageWindow]) -> Vec<PlanUsageGroup> {
             && groups.iter().any(|(name, _)| name == "Gemini")
         {
             "Gemini"
-        } else if window.id.starts_with("claude-gpt-")
+        } else if (window.id.starts_with("claude-gpt-") || window.id.starts_with("3p-"))
             && groups.iter().any(|(name, _)| name == "Claude & GPT")
         {
             "Claude & GPT"
@@ -2043,5 +2045,65 @@ mod tests {
             .expect("antigravity limits");
         assert_eq!(agy.credits, Some(12.0));
         assert_eq!(agy.windows.len(), 1);
+    }
+
+    #[test]
+    fn plan_usage_groups_files_3p_weekly_under_claude_and_gpt_without_3p_5h() {
+        let windows = vec![
+            super::UsageWindow {
+                id: "gemini-5h".to_string(),
+                kind: "session".to_string(),
+                label: "Session – Gemini".to_string(),
+                used_percent: 45.0,
+                resets_at: None,
+            },
+            super::UsageWindow {
+                id: "gemini-weekly".to_string(),
+                kind: "weekly".to_string(),
+                label: "Weekly – Gemini".to_string(),
+                used_percent: 20.0,
+                resets_at: None,
+            },
+            super::UsageWindow {
+                id: "3p-weekly".to_string(),
+                kind: "weekly".to_string(),
+                label: "Weekly – Claude & GPT".to_string(),
+                used_percent: 90.0,
+                resets_at: None,
+            },
+        ];
+        let groups = super::plan_usage_groups(&windows);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].title.as_deref(), Some("Gemini"));
+        assert_eq!(
+            groups[0]
+                .rows
+                .iter()
+                .map(|r| (r.id.as_str(), r.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("gemini-5h", "5h"), ("gemini-weekly", "Weekly")]
+        );
+        assert_eq!(groups[1].title.as_deref(), Some("Claude & GPT"));
+        assert_eq!(
+            groups[1]
+                .rows
+                .iter()
+                .map(|r| (r.id.as_str(), r.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("3p-weekly", "Weekly")]
+        );
+        let limits = super::ProviderLimits {
+            windows,
+            credits: None,
+            unavailable: None,
+        };
+        let gauges = super::plan_gauges(Some(&limits));
+        assert_eq!(
+            gauges
+                .iter()
+                .map(|g| (g.short.as_str(), g.percent))
+                .collect::<Vec<_>>(),
+            vec![("5h", 45.0), ("wk", 20.0)]
+        );
     }
 }

@@ -32,6 +32,24 @@ describe("usage limits registry", () => {
     ], NOW);
     expect(standingLimit("codex", NOW)).toEqual({ label: "Weekly", resetsAt: weekly });
   });
+
+  it("scopes Antigravity standingLimit to the model's quota pool so 3p exhaustion does not block Gemini", () => {
+    const weekly = new Date(NOW + 24 * 3_600_000).toISOString();
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 40, exhausted: false, resetsAt: IN_2H },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 100, exhausted: true, resetsAt: IN_2H },
+      { id: "gemini-argon-wtu-weekly", label: "Weekly – Argon", usedPercent: 100, exhausted: true, resetsAt: weekly },
+    ], NOW);
+    expect(standingLimit("antigravity", NOW, "gemini-4-neon")).toBeNull();
+    expect(standingLimit("antigravity", NOW, "gemini-4-argon")).toEqual({ label: "Weekly – Argon", resetsAt: weekly });
+    expect(standingLimit("antigravity", NOW, "claude-sonnet-5-5")).toEqual({ label: "Session – Claude & GPT", resetsAt: IN_2H });
+    expect(standingLimit("antigravity", NOW, "gpt-oss-120b-medium")).toEqual({ label: "Session – Claude & GPT", resetsAt: IN_2H });
+    // Without a model, secondary 3p pool does not block primary account.
+    recordUsageWindows("antigravity", [
+      { id: "gemini-argon-wtu-weekly", label: "Weekly – Argon", usedPercent: 0, exhausted: false, resetsAt: weekly },
+    ], NOW);
+    expect(standingLimit("antigravity", NOW)).toBeNull();
+  });
   it("keeps the probe's windows and refreshes one from a live event", () => {
     recordUsageWindows(
       "claude",

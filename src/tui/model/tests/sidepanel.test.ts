@@ -249,6 +249,36 @@ describe("planUsageGroups", () => {
       },
     ]);
   });
+
+  it("groups agy 3p-weekly into Claude & GPT even when 3p-5h is absent and omits 3p-* from compact gauges", () => {
+    const windows = [
+      { id: "gemini-5h", kind: "session", label: "Session – Gemini", usedPercent: 45 },
+      { id: "gemini-weekly", kind: "weekly", label: "Weekly – Gemini", usedPercent: 20 },
+      { id: "3p-weekly", kind: "weekly", label: "Weekly – Claude & GPT", usedPercent: 90 },
+    ];
+    expect(
+      planUsageGroups(windows).map((group) => ({
+        title: group.title,
+        rows: group.rows.map((row) => [row.window.id, row.label]),
+      })),
+    ).toEqual([
+      {
+        title: "Gemini",
+        rows: [
+          ["gemini-5h", "5h"],
+          ["gemini-weekly", "Weekly"],
+        ],
+      },
+      {
+        title: "Claude & GPT",
+        rows: [["3p-weekly", "Weekly"]],
+      },
+    ]);
+    expect(planUsageGauges({ windows })).toEqual([
+      { short: "5h", percent: 45 },
+      { short: "wk", percent: 20 },
+    ]);
+  });
 });
 
 function message(id: string, role: "user" | "assistant", text: string): MessageEnvelope {

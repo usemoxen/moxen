@@ -1194,7 +1194,10 @@ function parseAcpCostUsd(raw: unknown): number | undefined {
   const direct = finiteNonNeg(raw);
   if (direct !== null) return direct;
   const rec = asRecord(raw);
-  const amount = finiteNonNeg(rec?.["amount"]);
+  if (!rec) return undefined;
+  const currency = asNonEmptyString(rec["currency"]);
+  if (currency !== null && currency.toUpperCase() !== "USD") return undefined;
+  const amount = finiteNonNeg(rec["amount"]);
   return amount === null ? undefined : amount;
 }
 

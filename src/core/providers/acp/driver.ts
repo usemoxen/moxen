@@ -1813,6 +1813,20 @@ export class AcpDriver implements ProviderAdapter<CliError> {
               ? { costUsd: prev.costUsd }
               : {}),
         };
+        this.publish({
+          type: "token-usage.updated",
+          provider: this.provider,
+          threadId: session.threadId,
+          usage: {
+            input: parsed.used,
+            cacheRead: 0,
+            cacheCreate: 0,
+            output: 0,
+            thinking: 0,
+            ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
+          },
+          raw: update,
+        });
       }
       return;
     }

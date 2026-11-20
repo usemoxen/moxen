@@ -196,6 +196,28 @@ export function usageLimitsSnapshot(now: number = Date.now()): Record<string, Pr
   return result;
 }
 
+function antigravityWindowMatchesModel(window: RecordedWindow, model: string | null | undefined): boolean {
+  const id = window.id.toLowerCase();
+  const label = window.label.toLowerCase();
+  const is3pWindow = id.startsWith("3p-") || id.startsWith("claude-gpt") || /\bclaude\s*&\s*gpt\b/i.test(label);
+  const isGeminiWindow = id.startsWith("gemini-") || /\bgemini\b|\bargon\b|\bneon\b/i.test(label);
+  const isArgonWindow = id.includes("argon") || /\bargon\b/i.test(label);
+  const rawModel = model?.trim().toLowerCase() ?? "";
+  if (!rawModel) {
+    // Without a specific model, keep the secondary 3p pool from blocking the primary Gemini pool.
+    return !is3pWindow;
+  }
+  const isGeminiModel = rawModel.startsWith("gemini") || rawModel === "default";
+  if (isGeminiModel) {
+    if (is3pWindow) return false;
+    if (isArgonWindow && !rawModel.includes("argon")) return false;
+    return true;
+  }
+  // Third-party model (Claude / GPT / etc.) on Antigravity: only 3p or shared windows apply.
+  if (isGeminiWindow && !is3pWindow) return false;
+  return true;
+}
+
 /**
  * The window that is spent right now for an account, if any: at 100% with
  * a reset still ahead. A turn that fails while one stands was stopped by
@@ -205,11 +227,16 @@ export function usageLimitsSnapshot(now: number = Date.now()): Record<string, Pr
 export function standingLimit(
   provider: string,
   now: number = Date.now(),
+  model?: string | null,
 ): { label: string; resetsAt: string } | null {
   const entry = recorded.get(provider);
   if (!entry) return null;
   const spent = entry.windows
-    .filter((window) => window.usedPercent >= 100 && window.resetsAt !== null && Date.parse(window.resetsAt) > now)
+    .filter((window) => {
+      if (window.usedPercent < 100 || window.resetsAt === null || Date.parse(window.resetsAt) <= now) return false;
+      if (provider === "antigravity" && !antigravityWindowMatchesModel(window, model)) return false;
+      return true;
+    })
     // Every spent window blocks the account; a session reset cannot clear a weekly limit.
     .sort((left, right) => Date.parse(right.resetsAt!) - Date.parse(left.resetsAt!));
   const first = spent[0];

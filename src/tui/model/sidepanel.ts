@@ -207,7 +207,7 @@ export function effectiveContextBreakdown(
 const SHORT_BY_KIND: Record<string, string> = { session: "5h", weekly: "wk", monthly: "mo" };
 
 function isClaudeGptWindow(window: { id: string; label: string }): boolean {
-  return window.id.startsWith("claude-gpt") || /\bClaude\s*&\s*GPT\b/iu.test(window.label);
+  return window.id.startsWith("claude-gpt") || window.id.startsWith("3p-") || /\bClaude\s*&\s*GPT\b/iu.test(window.label);
 }
 
 function windowSuffix(label: string): string | null {
@@ -242,7 +242,7 @@ export function planUsageGroups<W extends { id: string; kind: string; label: str
       if (suffix !== null) addFamily(suffix);
     }
     if (window.id.startsWith("gemini-")) addFamily("Gemini");
-    if (window.id.startsWith("claude-gpt-")) addFamily("Claude & GPT");
+    if (window.id.startsWith("claude-gpt-") || window.id.startsWith("3p-")) addFamily("Claude & GPT");
   }
   if (families.length === 0) {
     return [{ title: null, rows: windows.map((window) => ({ window, label: window.label })) }];
@@ -253,7 +253,7 @@ export function planUsageGroups<W extends { id: string; kind: string; label: str
     const family =
       window.id.startsWith("gemini-") && byFamily.has("Gemini")
         ? "Gemini"
-        : window.id.startsWith("claude-gpt-") && byFamily.has("Claude & GPT")
+        : (window.id.startsWith("claude-gpt-") || window.id.startsWith("3p-")) && byFamily.has("Claude & GPT")
           ? "Claude & GPT"
           : suffix !== null && byFamily.has(suffix)
             ? suffix

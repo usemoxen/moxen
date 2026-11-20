@@ -20,7 +20,8 @@ export type AntigravityCommandRunner = (
   timeoutMs: number,
 ) => Promise<string | null>;
 
-const PROBE_TIMEOUT_MS = 8_000;
+/** Bounded inside the server's 6_000ms `USAGE_DRIVER_PROBE_TIMEOUT_MS` race. */
+export const ANTIGRAVITY_USAGE_PROBE_TIMEOUT_MS = 5_500;
 const CACHE_TTL_MS = 60_000;
 
 interface CacheEntry {
@@ -30,10 +31,12 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<AntigravityUsageSnapshot | null>>();
+const queuedForce = new Map<string, Promise<AntigravityUsageSnapshot | null>>();
 
 export function forgetAntigravityUsageCache(): void {
   cache.clear();
   inFlight.clear();
+  queuedForce.clear();
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -210,40 +213,62 @@ export async function probeAntigravityUsage(
   env: NodeJS.ProcessEnv = process.env,
   options: {
     readonly force?: boolean;
+    readonly useCache?: boolean;
     readonly now?: () => number;
     readonly timeoutMs?: number;
     readonly run?: AntigravityCommandRunner;
   } = {},
 ): Promise<AntigravityUsageSnapshot | null> {
-  const now = (options.now ?? Date.now)();
-  const useCache = options.run === undefined;
+  const nowFn = options.now ?? Date.now;
+  const now = nowFn();
+  const useCache = options.useCache ?? options.run === undefined;
   if (useCache && !options.force) {
     const hit = cache.get(command);
     if (hit && now - hit.fetchedAt < CACHE_TTL_MS) return hit.snapshot;
   }
-  const existing = useCache ? inFlight.get(command) : undefined;
-  if (existing) return existing;
 
   const runner = options.run ?? defaultRunCommand;
-  const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
-  const work = (async (): Promise<AntigravityUsageSnapshot | null> => {
-    const [usageOut, creditsOut] = await Promise.all([
-      runner(command, ["--print", "/usage", "--output-format", "json"], env, timeoutMs).catch(() => null),
-      runner(command, ["--print", "/credits", "--output-format", "json"], env, timeoutMs).catch(() => null),
-    ]);
-    const windows = usageOut ? parseAntigravityUsageJson(usageOut) : [];
-    const credits = creditsOut ? parseAntigravityCreditsJson(creditsOut) : null;
-    if (windows.length === 0 && credits === null) return null;
-    const snapshot: AntigravityUsageSnapshot = { windows, credits };
-    if (useCache) cache.set(command, { fetchedAt: now, snapshot });
-    return snapshot;
-  })();
+  const timeoutMs = options.timeoutMs ?? ANTIGRAVITY_USAGE_PROBE_TIMEOUT_MS;
+  const startProbe = (): Promise<AntigravityUsageSnapshot | null> => {
+    const work = (async (): Promise<AntigravityUsageSnapshot | null> => {
+      const [usageOut, creditsOut] = await Promise.all([
+        runner(command, ["--print", "/usage", "--output-format", "json"], env, timeoutMs).catch(() => null),
+        runner(command, ["--print", "/credits", "--output-format", "json"], env, timeoutMs).catch(() => null),
+      ]);
+      const windows = usageOut ? parseAntigravityUsageJson(usageOut) : [];
+      const credits = creditsOut ? parseAntigravityCreditsJson(creditsOut) : null;
+      if (windows.length === 0 && credits === null) return null;
+      const snapshot: AntigravityUsageSnapshot = { windows, credits };
+      if (useCache) cache.set(command, { fetchedAt: nowFn(), snapshot });
+      return snapshot;
+    })();
+    if (useCache) {
+      inFlight.set(command, work);
+      void work.finally(() => {
+        if (inFlight.get(command) === work) inFlight.delete(command);
+      });
+    }
+    return work;
+  };
 
   if (useCache) {
-    inFlight.set(command, work);
-    void work.finally(() => {
-      if (inFlight.get(command) === work) inFlight.delete(command);
-    });
+    const existing = inFlight.get(command);
+    if (existing) {
+      if (!options.force) return existing;
+      // A forced probe arrived while an earlier probe was already running:
+      // chain one fresh probe after it completes rather than returning stale data.
+      const queued = queuedForce.get(command);
+      if (queued) return queued;
+      const next = existing
+        .catch(() => null)
+        .then(() => {
+          if (queuedForce.get(command) === next) queuedForce.delete(command);
+          return startProbe();
+        });
+      queuedForce.set(command, next);
+      return next;
+    }
   }
-  return work;
+
+  return startProbe();
 }

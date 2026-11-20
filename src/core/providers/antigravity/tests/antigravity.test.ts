@@ -9,6 +9,7 @@ import { FakeAcpTransport } from "../../acp/tests/fakes.js";
 import { antigravityProvider, disambiguateAntigravityModelName, forgetAntigravityCatalogCache } from "../catalog.js";
 import { ANTIGRAVITY_DEFAULT_MODEL_SLUG, antigravityLaunchSpec } from "../config.js";
 import {
+  ANTIGRAVITY_USAGE_PROBE_TIMEOUT_MS,
   forgetAntigravityUsageCache,
   parseAntigravityCreditsJson,
   parseAntigravityTier,
@@ -266,5 +267,38 @@ describe("Antigravity first-class provider", () => {
     });
     expect(probed).toMatchObject({ credits: 42 });
     expect(probed?.windows).toHaveLength(4);
+  });
+
+  it("chains a fresh probe when force: true arrives during an in-flight probe and bounds probe timeout <= 6s", async () => {
+    expect(ANTIGRAVITY_USAGE_PROBE_TIMEOUT_MS).toBeLessThanOrEqual(6_000);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let callNum = 0;
+    const creditsPayload = (n: number) => JSON.stringify({ command: { name: "credits", data: { remaining_credits: n } } });
+    const usagePayload = JSON.stringify({ command: { name: "usage", data: { groups: [] } } });
+    const run = async (_cmd: string, args: readonly string[]): Promise<string | null> => {
+      if (args.includes("/usage")) return usagePayload;
+      callNum += 1;
+      if (callNum === 1) {
+        await firstGate;
+        return creditsPayload(100);
+      }
+      return creditsPayload(85);
+    };
+
+    const p1 = probeAntigravityUsage("agy-force-test", process.env, { run, useCache: true });
+    // Coalesce a second non-forced call onto p1.
+    const p1Dup = probeAntigravityUsage("agy-force-test", process.env, { run, useCache: true });
+    // A forced call while p1 is still in flight must NOT return p1's stale result.
+    const pForced = probeAntigravityUsage("agy-force-test", process.env, { run, useCache: true, force: true });
+    releaseFirst();
+
+    const [r1, r1Dup, rForced] = await Promise.all([p1, p1Dup, pForced]);
+    expect(r1?.credits).toBe(100);
+    expect(r1Dup?.credits).toBe(100);
+    expect(rForced?.credits).toBe(85);
+    expect(callNum).toBe(2);
   });
 });

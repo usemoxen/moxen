@@ -2067,4 +2067,36 @@ describe("ACP native subagent status events (MXN-445)", () => {
       await Effect.runPromise(driver.stopAll());
     }
   });
+
+  it("publishes token-usage.updated when usage_update notifications arrive mid-turn", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession({ threadId: "thread-1", workingDirectory: process.cwd() }));
+      const server = transport.sessions[0]!.server;
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "hello" }));
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "usage_update",
+        used: 4_200,
+        size: 100_000,
+        cost: { amount: 0.12, currency: "USD" },
+      });
+      await vi.waitFor(() => expect(events.some((e) => e.type === "token-usage.updated")).toBe(true));
+      expect(events.find((e) => e.type === "token-usage.updated")).toMatchObject({
+        type: "token-usage.updated",
+        provider: "antigravity",
+        threadId: "thread-1",
+        usage: { input: 4_200, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0, costUsd: 0.12 },
+      });
+      server.finishPrompt("end_turn");
+      await driver.awaitTurn("thread-1", sent.turnId);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
 });

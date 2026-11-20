@@ -617,7 +617,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // the next queued message now would only fail it against the same wall
     // (and then the next, until the whole queue is failed turns), so hold
     // it for just after the reset instead — it runs then like a scheduled one.
-    const standing = standingLimit(usageKeyForInstance(selection.instanceId));
+    const standing = standingLimit(usageKeyForInstance(selection.instanceId), Date.now(), selection.model);
     if (standing !== null) {
       const until = new Date(Date.parse(standing.resetsAt) + USAGE_CONTINUE_GRACE_MS).toISOString();
       store.untrackRunning(next.id);
@@ -1412,7 +1412,7 @@ function recordTurnActivity(
   const noteFailure = (): void => {
     if (limitRecorded || modelSelection === null) return;
     const provider = usageKeyForInstance(modelSelection.instanceId);
-    const standing = standingLimit(provider);
+    const standing = standingLimit(provider, Date.now(), modelSelection.model);
     if (standing === null) return;
     limitRecorded = true;
     append("usage.limit", "Usage limit reached", {

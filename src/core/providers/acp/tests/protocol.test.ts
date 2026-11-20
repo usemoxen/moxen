@@ -10,6 +10,8 @@ import {
   buildAcpPromptBlocks,
   extractAcpToolContent,
   parseAcpCatalogModels,
+  parseAcpTurnUsage,
+  parseAcpUsageUpdate,
   selectAcpPermissionOutcome,
 } from "../protocol.js";
 
@@ -162,5 +164,34 @@ describe("ACP wire helpers", () => {
         efforts: [],
       },
     ]);
+  });
+
+  it("only parses costUsd when currency is USD or omitted", () => {
+    expect(parseAcpUsageUpdate({ used: 500, size: 10_000, cost: { amount: 0.25, currency: "USD" } })).toEqual({
+      used: 500,
+      size: 10_000,
+      costUsd: 0.25,
+    });
+    expect(parseAcpUsageUpdate({ used: 500, size: 10_000, cost: { amount: 0.25, currency: "usd" } })).toEqual({
+      used: 500,
+      size: 10_000,
+      costUsd: 0.25,
+    });
+    expect(parseAcpUsageUpdate({ used: 500, size: 10_000, cost: { amount: 0.25 } })).toEqual({
+      used: 500,
+      size: 10_000,
+      costUsd: 0.25,
+    });
+    expect(parseAcpUsageUpdate({ used: 500, size: 10_000, cost: { amount: 1000, currency: "JPY" } })).toEqual({
+      used: 500,
+      size: 10_000,
+    });
+    expect(parseAcpTurnUsage({ inputTokens: 100, outputTokens: 20, cost: { amount: 12, currency: "EUR" } })).toEqual({
+      input: 100,
+      cacheRead: 0,
+      cacheCreate: 0,
+      output: 20,
+      thinking: 0,
+    });
   });
 });
