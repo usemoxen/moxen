@@ -219,6 +219,7 @@ interface AcpSession {
   modes: AcpSessionModesState | null;
   configOptions: AcpConfigOption[];
   availableCommands: AcpAvailableCommand[];
+  title: string | null;
   context: ContextWindowUsage | null;
   tier: string | null;
   readonly sessionAllowKeys: Set<string>;
@@ -490,6 +491,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly sessions = new Map<ThreadId, AcpSession>();
   /** ACP session id per Moxen thread, kept past session teardown for resume. */
   private readonly resumable = new Map<ThreadId, string>();
+  /** Latest provider-generated session title keyed by ACP session id. */
+  private readonly sessionTitles = new Map<string, string>();
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
 
   constructor(options: AcpDriverOptions = {}) {
@@ -523,6 +526,24 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   get streamEvents(): Stream.Stream<ProviderRuntimeEvent> {
     return Stream.fromQueue(this.queue);
   }
+
+  /** Replace the configured ACP agent map live when `providers.acp.agents` changes. */
+  setAgents(agents: Readonly<Record<string, AcpAgentLaunchSpec>>): void {
+    this.agents.clear();
+    this.agents.set(AGY_ACP_LAUNCH_SPEC.id, AGY_ACP_LAUNCH_SPEC);
+    for (const [id, spec] of Object.entries(agents)) {
+      this.agents.set(id.trim().toLowerCase(), spec);
+    }
+  }
+
+  readonly sessionTitle = async (cursor: string, _workingDirectory: string): Promise<string | null> => {
+    const cached = this.sessionTitles.get(cursor);
+    if (cached) return cached;
+    for (const session of this.sessions.values()) {
+      if (session.acpSessionId === cursor && session.title) return session.title;
+    }
+    return null;
+  };
 
   /** Probe an ACP agent's initialize handshake (protocol version, capabilities, auth methods) without creating a session. */
   async probeAgent(instanceId: string, cwd: string): Promise<AcpInitializeResult> {
@@ -731,6 +752,52 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       });
       const clientHandlers = new AcpClientHandlers();
       let session: AcpSession | null = null;
+      const earlyUpdates: unknown[] = [];
+
+      // Register peer handlers before `session/new` / `session/load` so metadata
+      // notifications emitted during session creation/loading are never dropped.
+      peer.onNotification((method, params) => {
+        if (method !== ACP_METHODS.sessionUpdate) return;
+        if (session === null) {
+          const updateKind = asNonEmptyString(asRecord(asRecord(params)?.["update"])?.["sessionUpdate"]);
+          if (
+            updateKind === "available_commands_update" ||
+            updateKind === "current_mode_update" ||
+            updateKind === "config_option_update" ||
+            updateKind === "usage_update" ||
+            updateKind === "session_info_update"
+          ) {
+            earlyUpdates.push(params);
+          }
+          return;
+        }
+        if (session.closed) return;
+        this.handleSessionUpdate(session, params);
+      });
+
+      peer.onRequest(async (method, params) => {
+        if (session !== null) {
+          if (session.closed) {
+            throw new CliError("SESSION_CLOSED", "ACP session is closed.");
+          }
+          return this.handlePeerRequest(session, method, params);
+        }
+        const clientCtx = {
+          workingDirectory: input.workingDirectory,
+          isolation: input.isolation ?? null,
+          env: this.baseEnv,
+        };
+        return this.handleClientMethod(clientHandlers, clientCtx, method, params);
+      });
+
+      peer.onExit((code) => {
+        if (!session || session.closed) return;
+        this.closeSession(
+          session,
+          "failed",
+          `ACP agent "${session.agent.name ?? session.agent.id}" exited unexpectedly (code ${String(code)}).`,
+        );
+      });
 
       try {
         const initRaw = await peer.request(
@@ -752,6 +819,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         let modes: AcpSessionModesState | null = null;
         let configOptions: AcpConfigOption[] = [];
         let tier: string | null = null;
+        let initialTitle: string | null = null;
         let resumed = false;
 
         if (input.resumeCursor && init.agentCapabilities.loadSession) {
@@ -770,6 +838,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
             modes = parseAcpModesState(loadRec?.["modes"]);
             configOptions = parseAcpConfigOptions(loadRec?.["configOptions"]);
             tier = parseAntigravityTier(loadRec);
+            initialTitle = asNonEmptyString(loadRec?.["title"])?.trim() ?? null;
             resumed = true;
           } catch (cause) {
             const text = cause instanceof Error ? cause.message : String(cause);
@@ -800,6 +869,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           modes = parseAcpModesState(newRec?.["modes"]);
           configOptions = parseAcpConfigOptions(newRec?.["configOptions"]);
           tier = parseAntigravityTier(newRec);
+          initialTitle = asNonEmptyString(newRec?.["title"])?.trim() ?? null;
+        }
+
+        if (initialTitle) {
+          this.sessionTitles.set(acpSessionId, initialTitle);
         }
 
         const startedAt = new Date().toISOString();
@@ -821,6 +895,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           modes,
           configOptions,
           availableCommands: [],
+          title: initialTitle,
           context: null,
           tier,
           sessionAllowKeys: new Set(),
@@ -840,9 +915,15 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           closed: false,
         };
 
-        this.wirePeer(session);
         this.sessions.set(input.threadId, session);
         this.resumable.set(input.threadId, acpSessionId);
+
+        // Flush startup notifications buffered during `session/new` or `session/load`.
+        for (const buffered of earlyUpdates) {
+          const updateSessionId = asNonEmptyString(asRecord(buffered)?.["sessionId"]);
+          if (updateSessionId && updateSessionId !== acpSessionId) continue;
+          this.handleSessionUpdate(session, buffered);
+        }
 
         // Apply initial model and effort selections if the agent exposes config options.
         if (input.modelSelection) {
@@ -1300,53 +1381,42 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     }
   }
 
-  private wirePeer(session: AcpSession): void {
-    session.peer.onNotification((method, params) => {
-      if (session.closed) return;
-      if (method === ACP_METHODS.sessionUpdate) {
-        this.handleSessionUpdate(session, params);
-      }
-    });
+  private async handlePeerRequest(session: AcpSession, method: string, params: unknown): Promise<unknown> {
+    if (method === ACP_METHODS.requestPermission) {
+      return this.handlePermissionRequest(session, params);
+    }
+    const clientCtx = {
+      workingDirectory: session.workingDirectory,
+      isolation: session.isolation,
+      env: this.baseEnv,
+    };
+    return this.handleClientMethod(session.clientHandlers, clientCtx, method, params);
+  }
 
-    session.peer.onRequest(async (method, params) => {
-      if (session.closed) {
-        throw new CliError("SESSION_CLOSED", "ACP session is closed.");
-      }
-      const clientCtx = {
-        workingDirectory: session.workingDirectory,
-        isolation: session.isolation,
-        env: this.baseEnv,
-      };
-      switch (method) {
-        case ACP_METHODS.requestPermission:
-          return this.handlePermissionRequest(session, params);
-        case ACP_METHODS.fsReadTextFile:
-          return session.clientHandlers.readTextFile(params, clientCtx);
-        case ACP_METHODS.fsWriteTextFile:
-          return session.clientHandlers.writeTextFile(params, clientCtx);
-        case ACP_METHODS.terminalCreate:
-          return session.clientHandlers.createTerminal(params, clientCtx);
-        case ACP_METHODS.terminalOutput:
-          return session.clientHandlers.terminalOutput(params);
-        case ACP_METHODS.terminalWaitForExit:
-          return session.clientHandlers.waitForTerminalExit(params);
-        case ACP_METHODS.terminalKill:
-          return session.clientHandlers.killTerminal(params);
-        case ACP_METHODS.terminalRelease:
-          return session.clientHandlers.releaseTerminal(params);
-        default:
-          throw new CliError("ACP_METHOD_NOT_FOUND", `Unsupported ACP client method: ${method}`);
-      }
-    });
-
-    session.peer.onExit((code) => {
-      if (session.closed) return;
-      this.closeSession(
-        session,
-        "failed",
-        `ACP agent "${session.agent.name ?? session.agent.id}" exited unexpectedly (code ${String(code)}).`,
-      );
-    });
+  private async handleClientMethod(
+    clientHandlers: AcpClientHandlers,
+    clientCtx: { readonly workingDirectory: string; readonly isolation: WorktreeIsolation | null; readonly env: NodeJS.ProcessEnv },
+    method: string,
+    params: unknown,
+  ): Promise<unknown> {
+    switch (method) {
+      case ACP_METHODS.fsReadTextFile:
+        return clientHandlers.readTextFile(params, clientCtx);
+      case ACP_METHODS.fsWriteTextFile:
+        return clientHandlers.writeTextFile(params, clientCtx);
+      case ACP_METHODS.terminalCreate:
+        return clientHandlers.createTerminal(params, clientCtx);
+      case ACP_METHODS.terminalOutput:
+        return clientHandlers.terminalOutput(params);
+      case ACP_METHODS.terminalWaitForExit:
+        return clientHandlers.waitForTerminalExit(params);
+      case ACP_METHODS.terminalKill:
+        return clientHandlers.killTerminal(params);
+      case ACP_METHODS.terminalRelease:
+        return clientHandlers.releaseTerminal(params);
+      default:
+        throw new CliError("ACP_METHOD_NOT_FOUND", `Unsupported ACP client method: ${method}`);
+    }
   }
 
   private handleSessionUpdate(session: AcpSession, params: unknown): void {
@@ -1358,6 +1428,20 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
     if (kind === "available_commands_update") {
       session.availableCommands = parseAcpAvailableCommands(update["availableCommands"]);
+      return;
+    }
+    if (kind === "session_info_update") {
+      const title = asNonEmptyString(update["title"])?.trim() ?? null;
+      if (title && title !== session.title) {
+        session.title = title;
+        this.sessionTitles.set(session.acpSessionId, title);
+        this.publish({
+          type: "session.title.updated",
+          provider: this.provider,
+          threadId: session.threadId,
+          title,
+        });
+      }
       return;
     }
     if (kind === "current_mode_update") {

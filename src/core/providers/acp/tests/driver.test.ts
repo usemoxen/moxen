@@ -8,6 +8,7 @@ import * as Stream from "effect/Stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../../errors.js";
+import { driverForInstance } from "../../../threads/execute.js";
 import { permissionActivityRow, type PermissionRuntimeEvent } from "../../../threads/requestactivity.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "../../../threads/toolactivity.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
@@ -1544,5 +1545,118 @@ describe("ACP isolation, runtime modes, delegated permissions & parked lifecycle
     ).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
 
     await Effect.runPromise(driver.stopAll());
+  });
+});
+
+describe("ACP session titles, startup notifications, and live agent config sync (MXN-442)", () => {
+  it("handles session_info_update titles and buffers startup updates emitted during session/new and session/load", async () => {
+    const transport = new FakeAcpTransport({
+      onSessionNew: (server, sessionId) => {
+        server.notifyUpdate(sessionId, {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [{ name: "compact", description: "Compact conversation" }],
+        });
+        server.notifyUpdate(sessionId, {
+          sessionUpdate: "usage_update",
+          used: 4_000,
+          size: 200_000,
+        });
+        server.notifyUpdate(sessionId, {
+          sessionUpdate: "session_info_update",
+          title: "Initial ACP Title",
+        });
+      },
+      onSessionLoad: (server, sessionId) => {
+        // Replayed history during session/load must NOT spawn a phantom background turn.
+        server.notifyUpdate(sessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "old replayed text" },
+        });
+        server.notifyUpdate(sessionId, {
+          sessionUpdate: "session_info_update",
+          title: "Resumed ACP Title",
+        });
+      },
+    });
+    const driver = new AcpDriver({ transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const meta = driver.sessionMetadata("thread-1");
+      expect(meta?.availableCommands).toEqual([
+        { name: "compact", description: "Compact conversation", inputHint: null },
+      ]);
+      expect(await driver.contextUsage("thread-1")).toMatchObject({ usedTokens: 4_000, maxTokens: 200_000 });
+      expect(await driver.sessionTitle("acp-sess-1", START.workingDirectory)).toBe("Initial ACP Title");
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === "session.title.updated" && e.title === "Initial ACP Title")).toBe(true),
+      );
+
+      // Mid-session title update also publishes and updates sessionTitle().
+      const server = transport.sessions[0]!.server;
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "session_info_update",
+        title: "Refined ACP Title",
+      });
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === "session.title.updated" && e.title === "Refined ACP Title")).toBe(true),
+      );
+      expect(await driver.sessionTitle("acp-sess-1", START.workingDirectory)).toBe("Refined ACP Title");
+
+      // Resume via session/load: picks up title update without opening a phantom background turn from replay.
+      await Effect.runPromise(driver.stopSession("thread-1"));
+      await Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-sess-1" }));
+      expect(await driver.sessionTitle("acp-sess-1", START.workingDirectory)).toBe("Resumed ACP Title");
+      expect(events.some((e) => e.type === "turn.started" && e.origin === "background")).toBe(false);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("refreshes cached AcpDriver agents live when providers.acp.agents changes", async () => {
+    const owner = {};
+    const transport = new FakeAcpTransport();
+    const factories = {
+      acp: () =>
+        new AcpDriver({
+          transport,
+          agents: {
+            cline: { id: "cline", name: "Cline", command: "cline", args: ["--acp"] },
+          },
+        }),
+    };
+    const initial = driverForInstance(owner, "acp/cline", factories, {
+      acp: { agents: [{ id: "cline", name: "Cline", command: "cline", args: ["--acp"] }] },
+    });
+    expect(initial).toBeInstanceOf(AcpDriver);
+
+    // Add a new agent profile `goose` without recreating the cached driver.
+    const updated = driverForInstance(owner, "acp/goose", factories, {
+      acp: {
+        agents: [
+          { id: "cline", name: "Cline", command: "cline", args: ["--acp"] },
+          { id: "goose", name: "Goose", command: "goose", args: ["acp"] },
+        ],
+      },
+    });
+    expect(updated).toBe(initial);
+
+    await Effect.runPromise(
+      updated.startSession({
+        threadId: "thread-goose",
+        workingDirectory: START.workingDirectory,
+        modelSelection: { instanceId: "acp/goose", model: "default" },
+      }),
+    );
+    expect(transport.sessions[0]!.server.spawnOptions.agent).toMatchObject({
+      id: "goose",
+      command: "goose",
+      args: ["acp"],
+    });
+    await Effect.runPromise((updated as AcpDriver).stopAll());
   });
 });

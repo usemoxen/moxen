@@ -26,6 +26,10 @@ export interface FakeAcpScript {
   readonly authMethods?: unknown[];
   readonly sessionMeta?: unknown;
   readonly failRequests?: Record<string, string>;
+  /** Optional hook invoked right before `session/new` responds (e.g. to emit startup notifications). */
+  readonly onSessionNew?: (server: FakeAcpServer, sessionId: string) => void;
+  /** Optional hook invoked right before `session/load` responds (e.g. to emit replay/startup notifications). */
+  readonly onSessionLoad?: (server: FakeAcpServer, sessionId: string) => void;
   /** Custom handler for `session/prompt`; return `{ stopReason }` or hold until resolved. */
   readonly onPrompt?: (
     server: FakeAcpServer,
@@ -80,14 +84,17 @@ export class FakeAcpServer {
           agentInfo: { name: this.spawnOptions.agent.id, title: this.spawnOptions.agent.name ?? this.spawnOptions.agent.id, version: this.script.version ?? "1.0.0" },
           authMethods: this.script.authMethods ?? [],
         };
-      case "session/new":
+      case "session/new": {
+        const sessionId = this.script.sessionId ?? "acp-sess-1";
+        this.script.onSessionNew?.(this, sessionId);
         return {
-          sessionId: this.script.sessionId ?? "acp-sess-1",
+          sessionId,
           ...(this.script.modes ? { modes: this.script.modes } : {}),
           ...(this.script.models ? { models: this.script.models } : {}),
           ...(this.script.configOptions ? { configOptions: this.script.configOptions } : {}),
           ...(this.script.sessionMeta ? { _meta: this.script.sessionMeta } : {}),
         };
+      }
       case "session/close":
         return {};
       case "session/load": {
@@ -95,6 +102,7 @@ export class FakeAcpServer {
         if (!sessionId || this.script.lostSessions?.includes(sessionId)) {
           throw new Error(`session not found: ${String(sessionId)}`);
         }
+        this.script.onSessionLoad?.(this, sessionId);
         return {
           sessionId,
           ...(this.script.modes ? { modes: this.script.modes } : {}),

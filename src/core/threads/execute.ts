@@ -270,6 +270,13 @@ export function driverForInstance(
   const secretEnv = (providers?.harness?.profiles ?? []).map((profile) => profile.apiKeyEnv).filter((name): name is string => typeof name === "string" && name !== "");
   if (existing) {
     if (existing instanceof CodexDriver) existing.setSecretEnv(secretEnv);
+    if (existing instanceof AcpDriver && providers !== undefined) {
+      existing.setAgents(
+        existing.provider === "antigravity"
+          ? { antigravity: antigravityLaunchSpec(providers.antigravity) }
+          : resolveAcpAgentsMap(providers.acp),
+      );
+    }
     return existing;
   }
   let driver: TurnDriver | undefined;
