@@ -12,6 +12,7 @@ import { binaryOnPath } from "../../infra/process.js";
 import type { AcpProviderConfig } from "../../types.js";
 import { ACP_DEFAULT_MODEL_SLUG, resolveAcpAgents, type ResolvedAcpAgent } from "./config.js";
 import { AcpDriver } from "./driver.js";
+import { resolveRegistryLaunchSpec, type AcpRegistryAgent } from "./registry.js";
 import type { AcpTransport } from "./transport.js";
 
 function isCommandInstalled(command: string, env: NodeJS.ProcessEnv): boolean {
@@ -103,12 +104,70 @@ export async function acpProviderFor(
   }
 }
 
+function registryProviderSummary(
+  agent: AcpRegistryAgent,
+  env: NodeJS.ProcessEnv,
+): ProviderSummary {
+  const launch = resolveRegistryLaunchSpec(agent, { env });
+  const instanceId = `acp/${agent.id}`;
+  if (launch.ok) {
+    return {
+      instanceId,
+      driver: "acp",
+      displayName: agent.name,
+      installed: true,
+      enabled: true,
+      status: null,
+      authStatus: null,
+      models: [
+        {
+          slug: ACP_DEFAULT_MODEL_SLUG,
+          name: `${agent.name} (default)`,
+          isCustom: false,
+          isHidden: false,
+          isDefault: true,
+          efforts: [],
+        },
+      ],
+      supportedRuntimeModes: null,
+      usageLimits: null,
+      skills: [],
+    };
+  }
+  return {
+    instanceId,
+    driver: "acp",
+    displayName: agent.name,
+    installed: false,
+    enabled: false,
+    status: launch.message,
+    authStatus: null,
+    models: [],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  };
+}
+
 export async function acpProviders(
   config: AcpProviderConfig | undefined,
   env: NodeJS.ProcessEnv,
   cwd: string,
   transport?: AcpTransport,
+  registry: readonly AcpRegistryAgent[] = [],
 ): Promise<ProviderSummary[]> {
-  const agents = resolveAcpAgents(config);
-  return Promise.all(agents.map((agent) => acpProviderFor(agent, env, cwd, transport)));
+  const configured = resolveAcpAgents(config);
+  const configuredIds = new Set(configured.map((agent) => agent.id));
+  const disabledIds = new Set(
+    (config?.agents ?? [])
+      .filter((entry) => entry.enabled === false)
+      .map((entry) => entry.id.trim().toLowerCase()),
+  );
+  const probed = await Promise.all(
+    configured.map((agent) => acpProviderFor(agent, env, cwd, transport)),
+  );
+  const fromRegistry = registry
+    .filter((entry) => !configuredIds.has(entry.id) && !disabledIds.has(entry.id))
+    .map((entry) => registryProviderSummary(entry, env));
+  return [...probed, ...fromRegistry];
 }

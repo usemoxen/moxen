@@ -50,6 +50,12 @@ an agent that negotiates any other protocol version is refused loudly
   `id: "agy"` overrides (or, with `enabled: false`, disables) the built-in
   preset. Launch arguments are tokenized into argv arrays and never joined into
   a shell string.
+- **ACP Registry**: Moxen caches the pinned v1 ACP Registry
+  (`https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`)
+  under `<storeRoot>/cache/acp-registry.json` (with offline fallback) and
+  surfaces compatible registry agents (`binary`, `npx`, `uvx`) as `acp/<id>`,
+  keeping user-configured entries authoritative and reporting missing runtimes
+  or incompatible platforms cleanly.
 - **Worktree isolation & permissions**: when an ACP agent delegates `fs/*` or
   `terminal/*` to the client, Moxen enforces worktree isolation on writes and
   commands and spawns processes with `shell: false`. Permission requests
