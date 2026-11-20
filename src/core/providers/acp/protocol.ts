@@ -585,7 +585,7 @@ function canonicalMcpName(server: string | null, tool: string): string {
   if (server && server.trim().length > 0) {
     return `mcp__${server.trim()}__${cleanTool}`;
   }
-  const single = /^mcp_([a-z0-9]+)_([a-z0-9_]+)$/iu.exec(cleanTool);
+  const single = /^mcp_([a-z0-9][a-z0-9-]*)_([a-z0-9_-]+)$/iu.exec(cleanTool);
   if (single) {
     return `mcp__${single[1]}__${single[2]}`;
   }
@@ -641,7 +641,7 @@ export function normalizeAcpToolCall(
     if (/^mcp__(.+?)__(.+)$/iu.test(bare)) {
       return { canonicalTool: bare, kind: "other", title: bare, input: rawInput };
     }
-    const singleMcp = /^mcp_([a-z0-9]+)_([a-z0-9_]+)$/iu.exec(bare);
+    const singleMcp = /^mcp_([a-z0-9][a-z0-9-]*)_([a-z0-9_-]+)$/iu.exec(bare);
     if (singleMcp !== null) {
       const canonicalTool = `mcp__${singleMcp[1]}__${singleMcp[2]}`;
       return { canonicalTool, kind: "other", title: canonicalTool, input: rawInput };

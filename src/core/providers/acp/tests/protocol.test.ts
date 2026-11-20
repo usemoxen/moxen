@@ -9,6 +9,7 @@ import {
   assertSupportedAcpProtocolVersion,
   buildAcpPromptBlocks,
   extractAcpToolContent,
+  normalizeAcpToolCall,
   parseAcpCatalogModels,
   parseAcpTurnUsage,
   parseAcpUsageUpdate,
@@ -192,6 +193,21 @@ describe("ACP wire helpers", () => {
       cacheCreate: 0,
       output: 20,
       thinking: 0,
+    });
+  });
+
+  it("normalizes hyphenated eager MCP server names in normalizeAcpToolCall", () => {
+    expect(normalizeAcpToolCall("other", "Run mcp_brave-search_brave_image_search", { query: "cats" })).toEqual({
+      canonicalTool: "mcp__brave-search__brave_image_search",
+      kind: "other",
+      title: "mcp__brave-search__brave_image_search",
+      input: { query: "cats" },
+    });
+    expect(normalizeAcpToolCall("other", "Run mcp_chrome-devtools_click", {})).toEqual({
+      canonicalTool: "mcp__chrome-devtools__click",
+      kind: "other",
+      title: "mcp__chrome-devtools__click",
+      input: {},
     });
   });
 });

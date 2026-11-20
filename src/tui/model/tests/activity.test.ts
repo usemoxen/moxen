@@ -1101,6 +1101,8 @@ describe("Antigravity ACP Read rows", () => {
       detail: "",
       running: false,
     });
+    expect(prettyToolName("Run mcp_brave-search_brave_image_search")).toBe("Brave Search · Brave image search");
+    expect(prettyToolName("mcp_chrome-devtools_click")).toBe("Chrome Devtools · Click");
 
     const manageTask = describeActivity({
       ...activity("tool-call.completed", {

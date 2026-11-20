@@ -997,7 +997,7 @@ export function parseMcpToolName(name: string): { server: string; tool: string }
   const clean = name.trim().replace(/^Run\s+/iu, "");
   const match = /^mcp__(.+?)__(.+)$/u.exec(clean);
   if (match !== null) return { server: match[1]!, tool: match[2]! };
-  const single = /^mcp_([a-z0-9]+)_([a-z0-9_]+)$/iu.exec(clean);
+  const single = /^mcp_([a-z0-9][a-z0-9-]*)_([a-z0-9_-]+)$/iu.exec(clean);
   return single === null ? null : { server: single[1]!, tool: single[2]! };
 }
 
