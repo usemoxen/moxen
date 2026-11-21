@@ -21,6 +21,8 @@ import path from "node:path";
 import { acpProviders } from "../providers/acp/catalog.js";
 import { loadAcpRegistryCatalog, type LoadedAcpRegistry } from "../providers/acp/registry.js";
 import { accountDisplayName } from "../providers/accounts.js";
+import { discoverChatGptModels, toChatGptModelSummary, type ChatGptModelInfo } from "../providers/chatgpt/catalog.js";
+import { ensureFreshChatGptToken } from "../providers/chatgpt/oauth.js";
 import { antigravityProviders } from "../providers/antigravity/catalog.js";
 import { codexProvider } from "../providers/codex/catalog.js";
 import { claudeCatalogModels, setLiveClaudeModels } from "../providers/claude/catalog.js";
@@ -57,6 +59,7 @@ export interface DirectCatalogOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly claude?: ClaudeProviderConfig | undefined;
   readonly chatgpt?: ChatGptProviderConfig | undefined;
+  readonly fetchChatGptModels?: ((accountId: string) => Promise<readonly ChatGptModelInfo[]>) | undefined;
   readonly codex?: CodexProviderConfig | undefined;
   readonly fetchCodexProvider?: () => Promise<ProviderSummary>;
   readonly antigravity?: AntigravityProviderConfig;
@@ -337,24 +340,54 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
           },
         ];
 
-  const chatgptList: ProviderSummary[] = (options.chatgpt?.accounts ?? []).map((account) => {
-    const instanceId = accountInstanceId("chatgpt", account.id);
-    const disabled = account.enabled === false;
-    const signedIn = Boolean(account.authRef);
-    return {
-      instanceId,
-      driver: "chatgpt",
-      displayName: accountDisplayName("chatgpt", account),
-      enabled: !disabled && signedIn,
-      installed: true,
-      status: disabled ? "disabled" : !signedIn ? "Sign in with ChatGPT to use this account." : null,
-      authStatus: signedIn ? (account.planType ?? "chatgpt") : "unauthenticated",
-      models: [],
-      supportedRuntimeModes: null,
-      usageLimits: null,
-      skills: [],
-    };
-  });
+  const chatgptList: ProviderSummary[] = await Promise.all(
+    (options.chatgpt?.accounts ?? []).map(async (account): Promise<ProviderSummary> => {
+      const instanceId = accountInstanceId("chatgpt", account.id);
+      const disabled = account.enabled === false;
+      const signedIn = Boolean(account.authRef);
+      let discovered: readonly ChatGptModelInfo[] = [];
+      let status: string | null = disabled
+        ? "disabled"
+        : !signedIn
+          ? "Sign in with ChatGPT to use this account."
+          : null;
+      if (!disabled && signedIn) {
+        try {
+          discovered = await (
+            options.fetchChatGptModels
+              ? options.fetchChatGptModels(account.id)
+              : (async () => {
+                  const { accessToken } = await ensureFreshChatGptToken(account.id);
+                  return await discoverChatGptModels(accessToken);
+                })()
+          );
+        } catch (cause) {
+          status = cause instanceof Error ? cause.message : String(cause);
+        }
+      }
+      const preferred = account.model?.trim() || options.chatgpt?.model?.trim();
+      const models: ModelSummary[] = discovered.map((info, idx) => {
+        const isDefault = preferred ? info.id === preferred : idx === 0;
+        return {
+          ...toChatGptModelSummary(info, isDefault),
+          isHidden: isModelHidden(prefs, instanceId, info.id),
+        };
+      });
+      return {
+        instanceId,
+        driver: "chatgpt",
+        displayName: accountDisplayName("chatgpt", account),
+        enabled: !disabled && signedIn,
+        installed: true,
+        status,
+        authStatus: signedIn ? (account.planType ?? "chatgpt") : "unauthenticated",
+        models,
+        supportedRuntimeModes: null,
+        usageLimits: null,
+        skills: [],
+      };
+    }),
+  );
 
   const opencode = await opencodeProviders(
     modelsDev,
@@ -388,10 +421,20 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
     ...provider,
     models: provider.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, provider.instanceId, model.slug) })),
   }));
+  // Standalone `codex` is companion-only (usage windows & locked-down image_generation);
+  // user-facing chat uses Sign in with ChatGPT (`chatgpt/<id>`).
+  const codexSummary: ProviderSummary = {
+    ...codex,
+    enabled: false,
+    status: !codex.installed
+      ? (codex.status ?? "not installed")
+      : "Companion only — use Sign in with ChatGPT (chatgpt/<id>) for chat.",
+    models: codex.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, codex.instanceId, model.slug) })),
+  };
   return [
     ...claudeList,
     ...chatgptList,
-    { ...codex, models: codex.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, codex.instanceId, model.slug) })) },
+    codexSummary,
     ...mappedAntigravity,
     ...mappedAcp,
     ...harness,

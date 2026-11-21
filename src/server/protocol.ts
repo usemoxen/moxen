@@ -387,6 +387,23 @@ export type CommandBody =
   | { readonly type: "provider.account.remove"; readonly kind: AccountProviderKind; readonly id: string }
   /** Enable or disable a configured provider account without deleting it. */
   | { readonly type: "provider.account.toggle"; readonly kind: AccountProviderKind; readonly id: string; readonly enabled: boolean }
+  /** Start an OpenAI Sign in with ChatGPT OAuth 2.0 PKCE + OIDC login session behind the server boundary. */
+  | { readonly type: "chatgpt.login.start"; readonly accountId: string; readonly label?: string }
+  /** Wait for (or manually complete from a pasted redirect URL) a pending Sign in with ChatGPT login session. */
+  | { readonly type: "chatgpt.login.complete"; readonly sessionId: string; readonly callbackUrl?: string; readonly timeoutMs?: number }
+  /** Cancel a pending Sign in with ChatGPT login session and close its loopback listener. */
+  | { readonly type: "chatgpt.login.cancel"; readonly sessionId: string }
+  /** Revoke tokens and clear OS keychain credentials for a Sign in with ChatGPT account. */
+  | { readonly type: "chatgpt.logout"; readonly accountId: string }
+  /** Pair and cryptographically verify a Codex companion (`CODEX_HOME`) against a signed-in ChatGPT account's OIDC identity. */
+  | {
+      readonly type: "chatgpt.codex.pair";
+      readonly accountId: string;
+      readonly codexHomePath?: string;
+      readonly codexBinaryPath?: string;
+      readonly codexLaunchArgs?: string;
+      readonly confirmWorkspace?: boolean;
+    }
   /**
    * Continue a thread in a new one: same project and checkout, opened with a
    * handoff written from the old thread's ledger. Without a model request the
@@ -539,6 +556,20 @@ export interface CommandResults {
   "provider.account.save": { readonly account: ProviderAccountSummary; readonly created: boolean; readonly settings: SettingsSnapshot } & Accepted;
   "provider.account.remove": { readonly removed: boolean; readonly settings: SettingsSnapshot } & Accepted;
   "provider.account.toggle": { readonly account: ProviderAccountSummary; readonly settings: SettingsSnapshot } & Accepted;
+  "chatgpt.login.start": { readonly sessionId: string; readonly accountId: string; readonly authorizationUrl: string; readonly redirectUri: string };
+  "chatgpt.login.complete": { readonly account: ProviderAccountSummary; readonly settings: SettingsSnapshot } & Accepted;
+  "chatgpt.login.cancel": Accepted;
+  "chatgpt.logout": { readonly account: ProviderAccountSummary | null; readonly settings: SettingsSnapshot } & Accepted;
+  "chatgpt.codex.pair": {
+    readonly verified: boolean;
+    readonly needsConfirmation: boolean;
+    readonly reason: string | null;
+    readonly account: ProviderAccountSummary;
+    readonly codexEmail: string | null;
+    readonly codexPlanType: string | null;
+    readonly codexWorkspaceName: string | null;
+    readonly settings: SettingsSnapshot;
+  };
   "thread.continue": { readonly threadId: string; readonly title: string; readonly scheduledFor: string | null } & Accepted;
   "thread.continue-agent": ContinuedOwnThread & Accepted;
   "thread.side-question": { readonly text: string; readonly withContext: boolean; readonly provider: string };
@@ -1655,6 +1686,43 @@ export function decodeCommand(value: unknown): Command {
         kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
         id: requireField(record.id, type, "id"),
         enabled: record.enabled,
+      };
+    case "chatgpt.login.start":
+      return {
+        ...meta,
+        type,
+        accountId: requireField(record.accountId, type, "accountId"),
+        ...optionalString(record, "label"),
+      };
+    case "chatgpt.login.complete":
+      return {
+        ...meta,
+        type,
+        sessionId: requireField(record.sessionId, type, "sessionId"),
+        ...optionalString(record, "callbackUrl"),
+        ...optionalNumber(record, "timeoutMs", type),
+      };
+    case "chatgpt.login.cancel":
+      return {
+        ...meta,
+        type,
+        sessionId: requireField(record.sessionId, type, "sessionId"),
+      };
+    case "chatgpt.logout":
+      return {
+        ...meta,
+        type,
+        accountId: requireField(record.accountId, type, "accountId"),
+      };
+    case "chatgpt.codex.pair":
+      return {
+        ...meta,
+        type,
+        accountId: requireField(record.accountId, type, "accountId"),
+        ...optionalString(record, "codexHomePath"),
+        ...optionalString(record, "codexBinaryPath"),
+        ...optionalString(record, "codexLaunchArgs"),
+        ...optionalBoolean(record, "confirmWorkspace", type),
       };
     default:
       throw unknownCommand(type);

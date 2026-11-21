@@ -38,7 +38,10 @@ import { fetchLiveModels } from "../core/providers/claude/livemodels.js";
 import { SdkTransport } from "../core/providers/claude/transport.js";
 import { diagnose } from "../core/diagnostics/doctor.js";
 import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
-import { removeProviderAccount, setProviderAccountEnabled, summarizeProviderAccounts, upsertProviderAccount } from "../core/providers/accounts.js";
+import { removeProviderAccount, resolveChatGptAccount, setProviderAccountEnabled, summarizeAccount, summarizeProviderAccounts, upsertProviderAccount } from "../core/providers/accounts.js";
+import { probeCodexCompanion, verifyCodexCompanion, type CodexCompanionProbeResult } from "../core/providers/chatgpt/companion.js";
+import { startChatGptLoginSession, type ChatGptLoginSession } from "../core/providers/chatgpt/login.js";
+import { clearChatGptAuth, loadChatGptAuthBundle, type OAuthDeps } from "../core/providers/chatgpt/oauth.js";
 import { hasSecret, isSecretRef, refName, writeSecret } from "../core/secrets.js";
 import { latestVersions } from "../core/providers/latest.js";
 import { checkForUpdate } from "../core/selfupdate/check.js";
@@ -365,6 +368,10 @@ export interface DirectConnectionOptions {
   readonly rollbackApp?: (options: UpdateOptions) => Promise<RollbackResult>;
   /** The `fetch` the harness test and probe use; tests hand in a fake server. */
   readonly harnessFetch?: typeof fetch;
+  /** Optional OAuth dependencies override (tests) for Sign in with ChatGPT login/logout. */
+  readonly chatgptOAuth?: OAuthDeps & { readonly bindLoopback?: boolean };
+  /** Optional Codex companion probe override (tests) for `chatgpt.codex.pair`. */
+  readonly probeCodexCompanion?: (driver: CodexDriver, cwd: string) => Promise<CodexCompanionProbeResult>;
 }
 
 export class DirectConnection implements ClientApi {
@@ -399,6 +406,9 @@ export class DirectConnection implements ClientApi {
   private readonly readLatestVersions: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
   private readonly runProviderUpdate: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   private readonly harnessFetch: typeof fetch | undefined;
+  private readonly chatgptOAuth: (OAuthDeps & { readonly bindLoopback?: boolean }) | undefined;
+  private readonly probeCodexCompanionFn: ((driver: CodexDriver, cwd: string) => Promise<CodexCompanionProbeResult>) | undefined;
+  private readonly chatgptLogins = new Map<string, { readonly session: ChatGptLoginSession; readonly label?: string }>();
   private readonly checkAppUpdate: () => Promise<UpdateCheck>;
   private readonly updateApp: (options: UpdateOptions) => Promise<UpdateResult>;
   private readonly rollbackApp: (options: UpdateOptions) => Promise<RollbackResult>;
@@ -432,6 +442,8 @@ export class DirectConnection implements ClientApi {
     persistUsageLimits(this.storeRoot);
     this.factories = options.drivers ?? {};
     this.harnessFetch = options.harnessFetch;
+    this.chatgptOAuth = options.chatgptOAuth;
+    this.probeCodexCompanionFn = options.probeCodexCompanion;
     this.shellPollMs = options.shellPollMs ?? 1500;
     this.threadPollMs = options.threadPollMs ?? 750;
     this.closeDriverTimeoutMs = options.closeDriverTimeoutMs ?? CLOSE_DRIVER_TIMEOUT_MS;
@@ -470,7 +482,6 @@ export class DirectConnection implements ClientApi {
       return config;
     };
     void this.applyEmbeddingPolicy().catch(() => undefined);
-    this.harnessFetch = options.harnessFetch;
     this.readLatestVersions = options.latestVersions ?? ((claudeBinaryPath) => latestVersions(claudeBinaryPath === undefined ? {} : { claudeBinaryPath }));
     this.checkAppUpdate = options.checkAppUpdate ?? (() => checkForUpdate({ install: readInstall() }));
     this.updateApp = options.updateApp ?? updateRelease;
@@ -638,7 +649,7 @@ export class DirectConnection implements ClientApi {
 
   private async imageAvailability(threadId: string): Promise<
     { readonly available: false; readonly reason: string } |
-    { readonly available: true; readonly reason: null; readonly selection: ImageGenerationModel }
+    { readonly available: true; readonly reason: null; readonly selection: ImageGenerationModel; readonly codexInstanceId: string }
   > {
     const ctx = await this.context();
     const thread = await ctx.store.readThreadRecord(threadId);
@@ -648,15 +659,25 @@ export class DirectConnection implements ClientApi {
     if (!moxenToolsOf(kind === null ? undefined : ctx.config.providers?.[kind]).orchestration ||
         (await ctx.store.readDelegations()).some((row) => row.childThreadId === threadId)) return unavailable("Image generation is unavailable in delegated tasks or with orchestration switched off.");
     if (isNativeToolDisabled(ctx.config.providers?.codex?.disabledNativeTools, "image_generation", "codex")) return unavailable("Codex image generation is switched off.");
+
+    // ChatGPT threads require a verified paired Codex companion for their account.
+    let codexInstanceId = "codex";
+    if (kind === "chatgpt") {
+      const resolved = resolveChatGptAccount(ctx.config.providers?.chatgpt, ctx.config.providers?.codex, thread.modelSelection.instanceId);
+      if (!resolved.account?.codexVerified) {
+        return unavailable("Link a verified Codex companion in Settings → Providers to enable image generation for this ChatGPT account.");
+      }
+      codexInstanceId = resolved.accountId ? `codex/${resolved.accountId}` : "codex";
+    }
     try {
-      const driver = this.driverFor("codex");
+      const driver = this.driverFor(codexInstanceId);
       if (!(driver instanceof CodexDriver)) return unavailable("The Codex driver cannot check image-generation eligibility.");
       const provider = (await this.providers()).find((entry) => entry.instanceId === "codex");
-      if (!provider?.enabled || !provider.installed) return unavailable("Codex must be installed and enabled for image generation.");
+      if (!provider?.installed) return unavailable("Codex must be installed as a companion for image generation.");
       const selection = imageGenerationModel(provider.models);
       if (!selection) return unavailable("Image generation requires a released Luna model in Codex's catalog with a supported reasoning effort other than none.");
       const availability = await driver.withPeer(thread.env.path, imageGenerationAvailability);
-      return availability.available ? { available: true, reason: null, selection } : unavailable(availability.reason!);
+      return availability.available ? { available: true, reason: null, selection, codexInstanceId } : unavailable(availability.reason!);
     }
     catch { return unavailable("Could not verify Codex subscription and usage; check Codex login and try again."); }
   }
@@ -1043,6 +1064,19 @@ export class DirectConnection implements ClientApi {
         });
         await Promise.race([landed, deadline]);
       }),
+    );
+    // Also mirror live usage from verified Codex companions onto their `chatgpt/<id>` usage buckets.
+    const chatgptAccounts = this.lastProviders?.chatgpt?.accounts ?? [];
+    await Promise.allSettled(
+      chatgptAccounts
+        .filter((account) => account.enabled !== false && account.codexVerified === true)
+        .map(async (account) => {
+          const companion = this.driverFor(`codex/${account.id}`);
+          const refreshed = await companion.refreshUsage?.().catch(() => null);
+          if (refreshed && (refreshed.windows.length > 0 || typeof refreshed.credits === "number")) {
+            recordUsageWindows(`chatgpt/${account.id}`, refreshed.windows, undefined, { credits: refreshed.credits });
+          }
+        }),
     );
     return usageLimitsSnapshot();
   }
@@ -1600,7 +1634,7 @@ export class DirectConnection implements ClientApi {
           ...(references.length ? ["Reference image paths (read these before editing):", ...references.map((file) => JSON.stringify(file))] : []),
           "Image request:", command.prompt,
         ].join("\n\n");
-        return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: "codex", ...availability.selection, isolation: "shared", wait: false }, { hidden: true });
+        return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: availability.codexInstanceId, ...availability.selection, isolation: "shared", wait: false }, { hidden: true });
       }
       case "thread.task.cancel":
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId, { notifyParent: command.notifyParent });
@@ -1897,6 +1931,179 @@ export class DirectConnection implements ClientApi {
             account = { ...account, signedIn };
           }
           return { account, settings: await this.settingsSnapshot(), accepted: true };
+        });
+      }
+      case "chatgpt.login.start": {
+        const session = await startChatGptLoginSession(command.accountId, this.chatgptOAuth);
+        this.chatgptLogins.set(session.sessionId, {
+          session,
+          ...(command.label ? { label: command.label } : {}),
+        });
+        return {
+          sessionId: session.sessionId,
+          accountId: session.accountId,
+          authorizationUrl: session.authorizationUrl,
+          redirectUri: session.redirectUri,
+        };
+      }
+      case "chatgpt.login.complete": {
+        const entry = this.chatgptLogins.get(command.sessionId);
+        if (!entry) {
+          throw new CliError("CHATGPT_LOGIN_NOT_FOUND", `No pending ChatGPT login session "${command.sessionId}".`);
+        }
+        try {
+          const completion = command.callbackUrl
+            ? await entry.session.completeFromUrl(command.callbackUrl)
+            : await entry.session.waitForCallback(command.timeoutMs);
+          return await this.withConfigWrite(async () => {
+            const { fileConfig, path, skipped } = await this.readConfigFile();
+            const existingList = fileConfig.providers?.chatgpt?.accounts ?? [];
+            const existing = existingList.find((item) => item.id.trim().toLowerCase() === completion.accountId);
+            const id = completion.accountId;
+            const nextAccount = {
+              ...(existing ?? {}),
+              id,
+              ...(entry.label ? { label: entry.label } : existing?.label ? { label: existing.label } : {}),
+              authRef: completion.authRef,
+              userId: completion.bundle.identity.userId,
+              ...(completion.bundle.identity.email ? { email: completion.bundle.identity.email } : {}),
+              ...(completion.bundle.identity.accountId ? { accountId: completion.bundle.identity.accountId } : {}),
+              ...(completion.bundle.identity.workspaceName ? { workspaceName: completion.bundle.identity.workspaceName } : {}),
+              ...(completion.bundle.identity.planType ? { planType: completion.bundle.identity.planType } : {}),
+            };
+            const accounts = existing
+              ? existingList.map((item) => (item.id.trim().toLowerCase() === id ? nextAccount : item))
+              : [...existingList, nextAccount];
+            const nextConfig = normalizeFileConfig({
+              ...fileConfig,
+              providers: {
+                ...fileConfig.providers,
+                chatgpt: { ...fileConfig.providers?.chatgpt, accounts },
+              },
+            });
+            await saveConfig(path, nextConfig, skipped);
+            const savedAccount = nextConfig.providers?.chatgpt?.accounts?.find((item) => item.id === id) ?? nextAccount;
+            return {
+              account: summarizeAccount("chatgpt", savedAccount, true),
+              settings: await this.settingsSnapshot(),
+              accepted: true as const,
+            };
+          });
+        } finally {
+          this.chatgptLogins.delete(command.sessionId);
+        }
+      }
+      case "chatgpt.login.cancel": {
+        const entry = this.chatgptLogins.get(command.sessionId);
+        if (entry) {
+          this.chatgptLogins.delete(command.sessionId);
+          await entry.session.cancel();
+        }
+        return { accepted: true };
+      }
+      case "chatgpt.logout": {
+        const normalizedId = command.accountId.trim().toLowerCase();
+        await clearChatGptAuth(normalizedId, this.chatgptOAuth);
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const existingList = fileConfig.providers?.chatgpt?.accounts ?? [];
+          const existing = existingList.find((item) => item.id.trim().toLowerCase() === normalizedId);
+          if (!existing) {
+            return { account: null, settings: await this.settingsSnapshot(), accepted: true as const };
+          }
+          const { authRef: _ref, codexVerified: _ver, ...rest } = existing;
+          const accounts = existingList.map((item) => (item.id.trim().toLowerCase() === normalizedId ? rest : item));
+          const nextConfig = normalizeFileConfig({
+            ...fileConfig,
+            providers: {
+              ...fileConfig.providers,
+              chatgpt: { ...fileConfig.providers?.chatgpt, accounts },
+            },
+          });
+          await saveConfig(path, nextConfig, skipped);
+          const updated = nextConfig.providers?.chatgpt?.accounts?.find((item) => item.id === normalizedId) ?? rest;
+          return {
+            account: summarizeAccount("chatgpt", updated, false),
+            settings: await this.settingsSnapshot(),
+            accepted: true as const,
+          };
+        });
+      }
+      case "chatgpt.codex.pair": {
+        const normalizedId = command.accountId.trim().toLowerCase();
+        const bundle = await loadChatGptAuthBundle(normalizedId, this.chatgptOAuth?.secrets);
+        if (!bundle) {
+          throw new CliError(
+            "CHATGPT_NOT_SIGNED_IN",
+            `ChatGPT account "${normalizedId}" is not signed in. Sign in with ChatGPT before pairing Codex.`,
+          );
+        }
+        const config = await this.loadConfig();
+        const existing = config.providers?.chatgpt?.accounts?.find((item) => item.id.trim().toLowerCase() === normalizedId);
+        if (!existing) {
+          throw new CliError("ACCOUNT_NOT_FOUND", `No chatgpt account "${normalizedId}" is configured.`, { exitCode: 4 });
+        }
+        const codexHomePath = command.codexHomePath ?? existing.codexHomePath;
+        const codexBinaryPath = command.codexBinaryPath ?? existing.codexBinaryPath;
+        const codexLaunchArgs = command.codexLaunchArgs ?? existing.codexLaunchArgs;
+        const companionDriver = new CodexDriver({
+          instanceId: `codex/${normalizedId}`,
+          settings: {
+            ...(config.providers?.codex ?? {}),
+            ...(codexHomePath !== undefined ? { homePath: codexHomePath } : {}),
+            ...(codexBinaryPath !== undefined ? { binaryPath: codexBinaryPath } : {}),
+            ...(codexLaunchArgs !== undefined ? { launchArgs: codexLaunchArgs } : {}),
+          },
+        });
+        let probed: CodexCompanionProbeResult;
+        try {
+          probed = this.probeCodexCompanionFn
+            ? await this.probeCodexCompanionFn(companionDriver, process.cwd())
+            : await companionDriver.withPeer(process.cwd(), probeCodexCompanion);
+        } finally {
+          await Effect.runPromise(companionDriver.stopAll()).catch(() => undefined);
+        }
+        const verification = verifyCodexCompanion(bundle.identity, probed.account, probed.rateLimits, {
+          confirmWorkspace: command.confirmWorkspace,
+        });
+        if (verification.verified && probed.rateLimits.windows.length > 0) {
+          recordUsageWindows(`chatgpt/${normalizedId}`, [...probed.rateLimits.windows]);
+        }
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const list = fileConfig.providers?.chatgpt?.accounts ?? [];
+          const current = list.find((item) => item.id.trim().toLowerCase() === normalizedId) ?? existing;
+          const nextEntry = {
+            ...current,
+            ...(codexHomePath !== undefined ? { codexHomePath } : {}),
+            ...(codexBinaryPath !== undefined ? { codexBinaryPath } : {}),
+            ...(codexLaunchArgs !== undefined ? { codexLaunchArgs } : {}),
+            ...(verification.verified ? { codexVerified: true } : {}),
+            ...(verification.verified && verification.codexPlanType ? { planType: verification.codexPlanType } : {}),
+            ...(verification.verified && verification.codexWorkspaceName ? { workspaceName: verification.codexWorkspaceName } : {}),
+            ...(verification.verified && verification.codexAccountId ? { accountId: verification.codexAccountId } : {}),
+          };
+          if (!verification.verified) delete nextEntry.codexVerified;
+          const accounts = list.map((item) => (item.id.trim().toLowerCase() === normalizedId ? nextEntry : item));
+          const nextConfig = normalizeFileConfig({
+            ...fileConfig,
+            providers: {
+              ...fileConfig.providers,
+              chatgpt: { ...fileConfig.providers?.chatgpt, accounts },
+            },
+          });
+          await saveConfig(path, nextConfig, skipped);
+          const stored = nextConfig.providers?.chatgpt?.accounts?.find((item) => item.id === normalizedId) ?? nextEntry;
+          return {
+            verified: verification.verified,
+            needsConfirmation: verification.needsConfirmation,
+            reason: verification.reason,
+            account: summarizeAccount("chatgpt", stored, true),
+            codexEmail: verification.codexEmail,
+            codexPlanType: verification.codexPlanType,
+            codexWorkspaceName: verification.codexWorkspaceName,
+            settings: await this.settingsSnapshot(),
+          };
         });
       }
       case "thread.conversation.revert":
@@ -2700,6 +2907,10 @@ export class DirectConnection implements ClientApi {
         }
       }),
     );
+    for (const pending of this.chatgptLogins.values()) {
+      await pending.session.cancel().catch(() => undefined);
+    }
+    this.chatgptLogins.clear();
     this.ownedDrivers.clear();
     // The store is free for the next server: without this a fast restart
     // would meet this process's own lock and have to take it over.

@@ -27,7 +27,8 @@ import type { McpServerSpec } from "../mcp.js";
 
 import { resolveAcpAgentsMap } from "../providers/acp/config.js";
 import { AcpDriver } from "../providers/acp/driver.js";
-import { resolveAntigravityAccount, resolveClaudeAccount } from "../providers/accounts.js";
+import { resolveAntigravityAccount, resolveChatGptAccount, resolveClaudeAccount } from "../providers/accounts.js";
+import { createChatGptHarnessDriver } from "../providers/chatgpt/catalog.js";
 import { CodexDriver } from "../providers/codex/driver.js";
 import { ClaudeDriver } from "../providers/claude/driver.js";
 import { locateSkillsMod } from "../providers/claude/skillsmod.js";
@@ -297,12 +298,17 @@ export function driverForInstance(
       skillsMod: locateSkillsMod(),
     });
   } else if (kind === "codex") {
+    const companionId = key.startsWith("codex/") ? key.slice("codex/".length) : null;
+    const companion = companionId !== null
+      ? resolveChatGptAccount(providers?.chatgpt, providers?.codex, `chatgpt/${companionId}`).codexSettings
+      : null;
+    const settings = companion ?? providers?.codex;
     driver = factories.codex?.() ?? new CodexDriver({
-      ...(providers?.codex ? { settings: providers.codex } : {}),
+      ...(settings ? { settings } : {}),
       ...(key !== "codex" ? { instanceId: key } : {}),
     });
   } else if (kind === "chatgpt") {
-    driver = factories.chatgpt?.() ?? factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
+    driver = factories.chatgpt?.() ?? factories.harness?.() ?? createChatGptHarnessDriver({ config: providers?.harness });
   } else if (kind === "opencode") {
     driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
   } else if (kind === "harness") {

@@ -37,6 +37,7 @@ import { APP_NAME } from "../config.js";
 import { CliError } from "../errors.js";
 import { storedInteractionMode } from "../interactionmode.js";
 import { disabledNativeToolNames, effectiveDisabledNativeTools } from "../nativetools.js";
+import { codexImageGenDisabledTools } from "../providers/chatgpt/companion.js";
 import { moxenToolsOf, outOfProcess, parseNameList, resolveMcpServers, routeMcpServers, type McpServerEntry, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
 import { runProcess } from "../infra/process.js";
 import { renameReplacing, writeAtomic } from "../infra/atomic.js";
@@ -395,10 +396,18 @@ async function sessionSetup(
   };
   const recorded = thread.instructionState?.[key];
   if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered) await record(next);
+  const baseDisabledTools =
+    nativeKind === null
+      ? []
+      : disabledNativeToolNames(effectiveDisabledNativeTools(nativeKind, nativeConfig?.disabledNativeTools));
+  const disabledNativeTools =
+    thread.hidden === true && nativeKind === "codex"
+      ? [...new Set([...baseDisabledTools, ...codexImageGenDisabledTools(true)])]
+      : baseDisabledTools;
   return {
     mcpServers,
     disabledMcpTools,
-    disabledNativeTools: nativeKind === null ? [] : disabledNativeToolNames(effectiveDisabledNativeTools(nativeKind, nativeConfig?.disabledNativeTools)),
+    disabledNativeTools,
     // OpenCode's own base prompt is replaced by Moxen's unless the user switched that off.
     moxenPrompt: nativeKind === "opencode" && ctx.config.providers?.opencode?.moxenPrompt !== false,
     checklist: providerConfig?.todos !== false,
