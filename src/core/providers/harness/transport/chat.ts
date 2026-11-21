@@ -42,6 +42,8 @@ export interface ChatRequest {
   readonly onDelta?: ((delta: Record<string, unknown>) => void) | undefined;
 }
 
+export const SUBSCRIPTION_SHARING_LIMIT_CODE = "subscription_sharing_usage_limit_exceeded";
+
 /** A failed request, classified so the loop can decide between retrying, compacting and giving up. */
 export class ChatHttpError extends Error {
   constructor(
@@ -52,6 +54,8 @@ export class ChatHttpError extends Error {
     readonly retryable: boolean,
     /** How long the server asked us to wait (`Retry-After`), when it did. */
     readonly retryAfterMs: number | null = null,
+    /** Provider-specific machine error code when supplied (e.g. `subscription_sharing_usage_limit_exceeded`). */
+    readonly errorCode: string | null = null,
   ) {
     super(message);
     this.name = "ChatHttpError";
@@ -245,17 +249,36 @@ export async function failureFrom(response: Response): Promise<ChatHttpError> {
     // The status is enough when the body cannot be read.
   }
   let detail = text;
+  let errorCode: string | null = null;
   try {
     const parsed = asRecord(JSON.parse(text));
     const error = asRecord(parsed?.error);
     detail = typeof error?.message === "string" ? error.message : typeof parsed?.message === "string" ? parsed.message : text;
+    if (typeof error?.code === "string" && error.code.trim() !== "") errorCode = error.code.trim();
+    else if (typeof error?.type === "string" && error.type.trim() !== "") errorCode = error.type.trim();
+    else if (typeof parsed?.code === "string" && parsed.code.trim() !== "") errorCode = parsed.code.trim();
   } catch {
     // Not JSON; keep the raw text.
+  }
+  if (
+    response.status === 429 &&
+    (errorCode === SUBSCRIPTION_SHARING_LIMIT_CODE ||
+      text.includes(SUBSCRIPTION_SHARING_LIMIT_CODE) ||
+      detail.includes(SUBSCRIPTION_SHARING_LIMIT_CODE))
+  ) {
+    return new ChatHttpError(
+      "ChatGPT per-app weekly usage limit reached for Moxen (subscription_sharing_usage_limit_exceeded). Adjust Moxen's weekly allowance or extra credits in ChatGPT Settings → Usage → App limits. Your overall ChatGPT plan may still have remaining usage.",
+      response.status,
+      false,
+      false,
+      null,
+      SUBSCRIPTION_SHARING_LIMIT_CODE,
+    );
   }
   const overflow = (response.status === 400 || response.status === 413 || response.status === 422) && OVERFLOW.test(detail);
   const retryable = !overflow && (response.status === 408 || response.status === 429 || response.status >= 500);
   const message = `The model endpoint answered ${response.status}${detail ? `: ${detail.trim().slice(0, 500)}` : "."}`;
-  return new ChatHttpError(message, response.status, overflow, retryable, retryable ? retryAfterOf(response.headers) : null);
+  return new ChatHttpError(message, response.status, overflow, retryable, retryable ? retryAfterOf(response.headers) : null, errorCode);
 }
 
 /**
@@ -355,6 +378,13 @@ export async function* streamChat(request: ChatRequest): AsyncGenerator<ModelEve
 /** Wrap a transport failure that reached the user as a plain error. */
 export function chatErrorToCliError(error: unknown): CliError {
   if (error instanceof CliError) return error;
-  if (error instanceof ChatHttpError) return new CliError("HARNESS_REQUEST_FAILED", error.message, { details: { status: error.status } });
+  if (error instanceof ChatHttpError) {
+    if (error.errorCode === SUBSCRIPTION_SHARING_LIMIT_CODE) {
+      return new CliError("CHATGPT_APP_LIMIT_EXCEEDED", error.message, {
+        details: { status: error.status, code: error.errorCode },
+      });
+    }
+    return new CliError("HARNESS_REQUEST_FAILED", error.message, { details: { status: error.status } });
+  }
   return new CliError("HARNESS_REQUEST_FAILED", (error as Error).message ?? String(error));
 }

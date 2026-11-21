@@ -21,15 +21,17 @@ export function responsesRequestBody(request: ChatRequest, replayReasoning = tru
     if (!quirks.omitToolChoice) body.tool_choice = request.toolChoice ?? "auto";
     if (!quirks.parallelToolCalls) body.parallel_tool_calls = false;
   }
-  if (request.maxTokens !== undefined) body.max_output_tokens = request.maxTokens;
+  if (!quirks.chatgptOAuth && request.maxTokens !== undefined) body.max_output_tokens = request.maxTokens;
   if (quirks.sendReasoning) {
     body.reasoning = { summary: "auto", ...(request.effort ? { effort: request.effort } : {}) };
     // Without the server keeping the conversation, the only way to give its reasoning back is the encrypted form.
     if (replayReasoning && quirks.reasoningReplay !== "none") body.include = ["reasoning.encrypted_content"];
   }
   const { sampling } = request;
-  if (sampling?.temperature !== undefined) body.temperature = sampling.temperature;
-  if (sampling?.topP !== undefined) body.top_p = sampling.topP;
+  if (!quirks.chatgptOAuth) {
+    if (sampling?.temperature !== undefined) body.temperature = sampling.temperature;
+    if (sampling?.topP !== undefined) body.top_p = sampling.topP;
+  }
   return body;
 }
 

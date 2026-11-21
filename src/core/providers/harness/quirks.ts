@@ -57,6 +57,8 @@ export interface ModelQuirks {
   readonly cacheControl: boolean;
   /** Responses only. Send the `reasoning` field (effort, summaries, encrypted reasoning for replay); off for a model that is not a reasoning model and rejects it. */
   readonly sendReasoning: boolean;
+  /** Sign in with ChatGPT OAuth direct Responses profile: omit unsupported params (`max_output_tokens`, `temperature`, `top_p`). */
+  readonly chatgptOAuth: boolean;
 }
 
 export const DEFAULT_QUIRKS: ModelQuirks = {
@@ -79,6 +81,7 @@ export const DEFAULT_QUIRKS: ModelQuirks = {
   anthropicThinking: "adaptive",
   cacheControl: true,
   sendReasoning: true,
+  chatgptOAuth: false,
 };
 
 /** The families a preset exists for; anything else is `generic`. */
@@ -138,6 +141,7 @@ const BOOLEANS = [
   "parallelToolCalls",
   "cacheControl",
   "sendReasoning",
+  "chatgptOAuth",
 ] as const;
 
 /**

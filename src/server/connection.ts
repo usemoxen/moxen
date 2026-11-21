@@ -1707,7 +1707,7 @@ export class DirectConnection implements ClientApi {
       case "prompt.improve":
         return await improvePrompt(await this.loadConfig(), command, async (input, selection) => {
           const driver = this.driverFor(selection.instanceId);
-          if (!driver.completeText) throw new CliError("PROMPT_IMPROVER_UNAVAILABLE", `${selection.provider}/${selection.model} cannot run a completion without tools, so it cannot improve a draft. Your original draft is unchanged. Choose a Claude Code or OpenCode model in the prompt improver settings (promptImprover.provider, promptImprover.model).`);
+          if (!driver.completeText) throw new CliError("PROMPT_IMPROVER_UNAVAILABLE", `${selection.provider}/${selection.model} cannot run a completion without tools, so it cannot improve a draft. Your original draft is unchanged. Choose a Claude Code, ChatGPT, OpenCode, or Moxen Harness model in the prompt improver settings (promptImprover.provider, promptImprover.model).`);
           return await driver.completeText(input);
         });
       case "remote.pairing.start":
