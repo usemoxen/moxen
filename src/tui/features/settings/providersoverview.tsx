@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { useState } from "react";
 import { TextAttributes } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
@@ -148,6 +149,22 @@ export interface ProvidersOverviewPanelProps {
   readonly onUpdateAll: () => void;
   readonly onOpenSection: (section: SettingSection) => void;
   readonly onClose: () => void;
+  readonly onChatGptLogin?: (accountId: string, label?: string) => Promise<{ readonly authorizationUrl: string; readonly done: Promise<void> } | null>;
+  readonly onChatGptLogout?: (accountId: string) => Promise<void>;
+  readonly onChatGptPairCodex?: (accountId: string, confirmWorkspace?: boolean) => Promise<{ readonly verified: boolean; readonly needsConfirmation: boolean; readonly reason: string | null } | null>;
+}
+
+function openBrowserUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+    const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+    const args = process.platform === "win32" ? ["/c", "start", "", parsed.toString()] : [parsed.toString()];
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.unref();
+  } catch {
+    // URL is displayed on screen as fallback.
+  }
 }
 
 export function ProvidersOverviewPanel({
@@ -170,11 +187,16 @@ export function ProvidersOverviewPanel({
   onUpdateAll,
   onOpenSection,
   onClose,
+  onChatGptLogin,
+  onChatGptLogout,
+  onChatGptPairCodex,
 }: ProvidersOverviewPanelProps) {
   const [cursor, setCursor] = useState(0);
   const [detailCursor, setDetailCursor] = useState(0);
   const [editingField, setEditingField] = useState<DetailFieldId | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [authUrlPending, setAuthUrlPending] = useState<string | null>(null);
+  const [pairFeedback, setPairFeedback] = useState<{ readonly text: string; readonly needsConfirmation: boolean } | null>(null);
   const [wizard, setWizard] = useState<
     | null
     | { step: "kind"; kindIndex: number }
@@ -404,6 +426,71 @@ export function ProvidersOverviewPanel({
         {status ? (
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
             <OverflowText fg={COLOR.dim} bg={SURFACE.raised} width={width}>{status}</OverflowText>
+          </box>
+        ) : null}
+        {selected.kind === "chatgpt" ? (
+          <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }}>
+            <box style={{ flexDirection: "row", gap: 2 }}>
+              {selected.signedIn ? (
+                <box
+                  onMouseDown={() => {
+                    setPairFeedback(null);
+                    void onChatGptLogout?.(selected.id);
+                  }}
+                >
+                  <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("settings.providers.signOut")}</text>
+                </box>
+              ) : (
+                <box
+                  onMouseDown={() => {
+                    if (authUrlPending !== null || !onChatGptLogin) return;
+                    setPairFeedback(null);
+                    void onChatGptLogin(selected.id, selected.label).then((started) => {
+                      if (!started) return;
+                      setAuthUrlPending(started.authorizationUrl);
+                      openBrowserUrl(started.authorizationUrl);
+                      void started.done.finally(() => setAuthUrlPending(null));
+                    });
+                  }}
+                >
+                  <text fg={authUrlPending ? COLOR.dim : COLOR.accent} bg={SURFACE.raised} selectable={false}>
+                    {authUrlPending ? t("settings.providers.signingIn") : t("settings.providers.signInChatGpt")}
+                  </text>
+                </box>
+              )}
+              {selected.signedIn ? (
+                <box
+                  onMouseDown={() => {
+                    if (!onChatGptPairCodex) return;
+                    const confirm = pairFeedback?.needsConfirmation === true;
+                    void onChatGptPairCodex(selected.id, confirm).then((res) => {
+                      if (!res) return;
+                      setPairFeedback(
+                        res.verified
+                          ? null
+                          : { text: res.reason ?? "", needsConfirmation: res.needsConfirmation },
+                      );
+                    });
+                  }}
+                >
+                  <text fg={COLOR.accent} bg={SURFACE.raised} selectable={false}>
+                    {pairFeedback?.needsConfirmation ? t("settings.providers.confirmPairCodex") : t("settings.providers.pairCodex")}
+                  </text>
+                </box>
+              ) : null}
+            </box>
+            {authUrlPending ? (
+              <OverflowText fg={COLOR.dim} bg={SURFACE.raised} width={width}>
+                {t("settings.providers.openAuthUrl", { url: authUrlPending })}
+              </OverflowText>
+            ) : !selected.codexVerified ? (
+              <OverflowText fg={COLOR.dim} bg={SURFACE.raised} width={width}>
+                {t("settings.providers.unpairedHint")}
+              </OverflowText>
+            ) : null}
+            {pairFeedback?.text ? (
+              <OverflowText fg={COLOR.danger} bg={SURFACE.raised} width={width}>{pairFeedback.text}</OverflowText>
+            ) : null}
           </box>
         ) : null}
         <scrollbox style={{ flexGrow: 1, marginTop: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>

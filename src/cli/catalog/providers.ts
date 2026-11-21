@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import path from "node:path";
 
 import { selectModel, selectProvider, type ProviderSummary } from "../../core/catalog/summary.js";
@@ -148,4 +149,77 @@ export async function toggleProviderAccount(
 export async function removeProviderAccountCli(config: CliConfig, kind: AccountProviderKind, id: string) {
   const result = await (await cliClient(config)).dispatch({ type: "provider.account.remove", kind, id });
   return { removed: result.removed };
+}
+
+/** Open an HTTPS URL in the user's default browser without shell-joining strings. */
+export function openExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+    const args = process.platform === "win32" ? ["/c", "start", "", parsed.toString()] : [parsed.toString()];
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function chatgptLoginCli(
+  config: CliConfig,
+  options: { accountId: string; label?: string; noOpen?: boolean; callbackUrl?: string },
+) {
+  const client = await cliClient(config);
+  const started = await client.dispatch({
+    type: "chatgpt.login.start",
+    accountId: options.accountId,
+    ...(options.label ? { label: options.label } : {}),
+  });
+  if (!options.callbackUrl && options.noOpen !== true) {
+    openExternalUrl(started.authorizationUrl);
+  }
+  if (!options.callbackUrl) {
+    process.stderr.write(`Open this URL to sign in with ChatGPT:\n${started.authorizationUrl}\nWaiting for callback on ${started.redirectUri}…\n`);
+  }
+  const completed = await client.dispatch({
+    type: "chatgpt.login.complete",
+    sessionId: started.sessionId,
+    ...(options.callbackUrl ? { callbackUrl: options.callbackUrl } : {}),
+  });
+  return { account: completed.account };
+}
+
+export async function chatgptLogoutCli(config: CliConfig, accountId: string) {
+  const result = await (await cliClient(config)).dispatch({ type: "chatgpt.logout", accountId });
+  return { account: result.account };
+}
+
+export async function chatgptPairCodexCli(
+  config: CliConfig,
+  options: {
+    accountId: string;
+    codexHomePath?: string;
+    codexBinaryPath?: string;
+    codexLaunchArgs?: string;
+    confirmWorkspace?: boolean;
+  },
+) {
+  const result = await (await cliClient(config)).dispatch({
+    type: "chatgpt.codex.pair",
+    accountId: options.accountId,
+    ...(options.codexHomePath !== undefined ? { codexHomePath: options.codexHomePath } : {}),
+    ...(options.codexBinaryPath !== undefined ? { codexBinaryPath: options.codexBinaryPath } : {}),
+    ...(options.codexLaunchArgs !== undefined ? { codexLaunchArgs: options.codexLaunchArgs } : {}),
+    ...(options.confirmWorkspace === true ? { confirmWorkspace: true } : {}),
+  });
+  return {
+    verified: result.verified,
+    needsConfirmation: result.needsConfirmation,
+    reason: result.reason,
+    account: result.account,
+    codexEmail: result.codexEmail,
+    codexPlanType: result.codexPlanType,
+    codexWorkspaceName: result.codexWorkspaceName,
+  };
 }

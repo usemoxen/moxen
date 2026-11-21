@@ -882,6 +882,9 @@ pub trait ThreadSource {
     fn save_provider_account(&mut self, _payload: serde_json::Value) {}
     fn toggle_provider_account(&mut self, _kind: &str, _id: &str, _enabled: bool) {}
     fn remove_provider_account(&mut self, _kind: &str, _id: &str) {}
+    fn start_chatgpt_login(&mut self, _account_id: &str, _label: Option<&str>) {}
+    fn logout_chatgpt(&mut self, _account_id: &str) {}
+    fn pair_chatgpt_codex(&mut self, _account_id: &str, _confirm_workspace: bool) {}
     /// Downloads, tests and switches to the newest Moxen release.
     fn apply_update(&mut self) {}
     /// Goes back to the version the update replaced.

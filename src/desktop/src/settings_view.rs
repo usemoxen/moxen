@@ -4943,8 +4943,69 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                         account.instance_id,
                         account_status_subtitle(account)
                     )),
-            )
-            .child(ui::caps("Runtime"));
+            );
+
+        if is_chatgpt {
+            let signed_in = account.signed_in == Some(true);
+            let login_id = account.id.clone();
+            let login_label = account.label.clone();
+            let logout_id = account.id.clone();
+            let pair_id = account.id.clone();
+            let confirm_pair_id = account.id.clone();
+            let mut chatgpt_bar = div().flex().flex_wrap().gap(px(6.));
+            if signed_in {
+                chatgpt_bar = chatgpt_bar
+                    .child(small_button(
+                        ("providers-chatgpt-logout", 0),
+                        "Sign out",
+                        "Revoke ChatGPT OAuth tokens and clear keychain",
+                        cx.listener(move |this, _, _, cx| {
+                            this.source.logout_chatgpt(&logout_id);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(small_button(
+                        ("providers-chatgpt-pair", 0),
+                        "Verify Codex companion",
+                        "Verify paired CODEX_HOME against your signed-in ChatGPT identity",
+                        cx.listener(move |this, _, _, cx| {
+                            this.source.pair_chatgpt_codex(&pair_id, false);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(small_button(
+                        ("providers-chatgpt-pair-confirm", 0),
+                        "Confirm workspace",
+                        "Confirm workspace pairing when email matches without a shared workspace ID",
+                        cx.listener(move |this, _, _, cx| {
+                            this.source.pair_chatgpt_codex(&confirm_pair_id, true);
+                            cx.notify();
+                        }),
+                    ));
+            } else {
+                chatgpt_bar = chatgpt_bar.child(small_button(
+                    ("providers-chatgpt-login", 0),
+                    "Sign in with ChatGPT",
+                    "Authenticate via OpenAI OAuth 2.0 + OIDC in your browser",
+                    cx.listener(move |this, _, _, cx| {
+                        this.source
+                            .start_chatgpt_login(&login_id, Some(&login_label));
+                        cx.notify();
+                    }),
+                ));
+            }
+            detail_col = detail_col.child(chatgpt_bar);
+            if !account.codex_verified {
+                detail_col = detail_col.child(
+                    div()
+                        .text_xs()
+                        .text_color(color("ink-2"))
+                        .child("Unpaired: link a verified Codex companion for live usage windows and image generation."),
+                );
+            }
+        }
+
+        detail_col = detail_col.child(ui::caps("Runtime"));
 
         let env_str = account
             .env

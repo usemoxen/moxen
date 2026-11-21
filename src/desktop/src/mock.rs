@@ -1814,6 +1814,52 @@ impl ThreadSource for MockSource {
             error: false,
         });
     }
+    fn start_chatgpt_login(&mut self, account_id: &str, _label: Option<&str>) {
+        let target = format!("chatgpt/{}", account_id.trim().to_lowercase());
+        if let Some(account) = self
+            .provider_accounts
+            .iter_mut()
+            .find(|a| a.instance_id == target)
+        {
+            account.signed_in = Some(true);
+            if account.email.is_none() {
+                account.email = Some("dev@example.test".into());
+            }
+        }
+        self.settings_notice = Some(SettingsNotice {
+            text: format!("Signed in {target}."),
+            error: false,
+        });
+    }
+    fn logout_chatgpt(&mut self, account_id: &str) {
+        let target = format!("chatgpt/{}", account_id.trim().to_lowercase());
+        if let Some(account) = self
+            .provider_accounts
+            .iter_mut()
+            .find(|a| a.instance_id == target)
+        {
+            account.signed_in = Some(false);
+            account.codex_verified = false;
+        }
+        self.settings_notice = Some(SettingsNotice {
+            text: format!("Signed out {target}."),
+            error: false,
+        });
+    }
+    fn pair_chatgpt_codex(&mut self, account_id: &str, _confirm_workspace: bool) {
+        let target = format!("chatgpt/{}", account_id.trim().to_lowercase());
+        if let Some(account) = self
+            .provider_accounts
+            .iter_mut()
+            .find(|a| a.instance_id == target)
+        {
+            account.codex_verified = true;
+        }
+        self.settings_notice = Some(SettingsNotice {
+            text: format!("Verified Codex companion for {target}."),
+            error: false,
+        });
+    }
     fn apply_update(&mut self) {
         self.settings_notice = Some(SettingsNotice {
             text: "Updated to 0.3.0.".into(),

@@ -47,6 +47,9 @@ import {
   resolveProject,
 } from "./projects/projects.js";
 import {
+  chatgptLoginCli,
+  chatgptLogoutCli,
+  chatgptPairCodexCli,
   listEfforts,
   listModels,
   listProviderAccounts,
@@ -1915,6 +1918,92 @@ providerAccounts
       const context = await commandContext();
       const result = await removeProviderAccountCli(context.config, parseAccountKind(kind), id);
       writeSuccess(result, context, result.removed ? `Removed ${kind}/${id}.` : `No account ${kind}/${id} was configured.`);
+    }),
+  );
+
+const chatgptCli = providers
+  .command("chatgpt")
+  .description("Sign in with ChatGPT (OAuth 2.0 + OIDC) and pair a verified Codex companion.");
+
+chatgptCli
+  .command("login")
+  .description("Sign in to a ChatGPT account via OAuth 2.0 PKCE + OIDC.")
+  .argument("<id>", "Account slug (e.g. personal, work)")
+  .option("--label <name>", "Human-readable display name.")
+  .option("--no-open", "Print the authorization URL without opening a browser.")
+  .option("--callback-url <url>", "Complete login from a pasted callback URL instead of waiting on loopback.")
+  .action((id: string, options: { label?: string; open?: boolean; callbackUrl?: string }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await chatgptLoginCli(context.config, {
+        accountId: id,
+        ...(options.label ? { label: options.label } : {}),
+        noOpen: options.open === false || context.json,
+        ...(options.callbackUrl ? { callbackUrl: options.callbackUrl } : {}),
+      });
+      const who = result.account.email ?? result.account.instanceId;
+      writeSuccess(result, context, `Signed in ${result.account.instanceId} (${who}).`);
+    }),
+  );
+
+chatgptCli
+  .command("logout")
+  .description("Revoke tokens and clear OS keychain credentials for a ChatGPT account.")
+  .argument("<id>", "Account slug")
+  .action((id: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await chatgptLogoutCli(context.config, id);
+      writeSuccess(result, context, `Signed out chatgpt/${id}.`);
+    }),
+  );
+
+chatgptCli
+  .command("pair-codex")
+  .description("Pair and verify a Codex companion (CODEX_HOME) for live usage windows and image generation.")
+  .argument("<id>", "Account slug")
+  .option("--codex-home <path>", "Path to the Codex companion CODEX_HOME directory.")
+  .option("--codex-binary <path>", "Optional codex binary override.")
+  .option("--codex-launch-args <args>", "Optional codex launch arguments.")
+  .option("--confirm-workspace", "Confirm workspace pairing when email matches without a shared workspace ID.")
+  .action(
+    (
+      id: string,
+      options: { codexHome?: string; codexBinary?: string; codexLaunchArgs?: string; confirmWorkspace?: boolean },
+    ) =>
+      action(async () => {
+        const context = await commandContext();
+        const result = await chatgptPairCodexCli(context.config, {
+          accountId: id,
+          ...(options.codexHome !== undefined ? { codexHomePath: options.codexHome } : {}),
+          ...(options.codexBinary !== undefined ? { codexBinaryPath: options.codexBinary } : {}),
+          ...(options.codexLaunchArgs !== undefined ? { codexLaunchArgs: options.codexLaunchArgs } : {}),
+          ...(options.confirmWorkspace === true ? { confirmWorkspace: true } : {}),
+        });
+        const text = result.verified
+          ? `Paired verified Codex companion for chatgpt/${id}${result.codexWorkspaceName ? ` (${result.codexWorkspaceName})` : ""}.`
+          : (result.reason ?? "Could not verify Codex companion.");
+        writeSuccess(result, context, text);
+      }),
+  );
+
+chatgptCli
+  .command("status")
+  .description("Show Sign in with ChatGPT account status and Codex companion pairing.")
+  .argument("[id]", "Optional account slug")
+  .action((id: string | undefined) =>
+    action(async () => {
+      const context = await commandContext();
+      const { accounts } = await listProviderAccounts(context.config);
+      const filtered = accounts.filter(
+        (account) => account.kind === "chatgpt" && (id === undefined || account.id === id.trim().toLowerCase()),
+      );
+      const lines = filtered.map((account) => {
+        const auth = account.signedIn ? `signed-in (${account.email ?? "verified"})` : "not-signed-in";
+        const codex = account.codexVerified ? `codex-verified (${account.codexHomePath ?? "default"})` : "codex-unpaired";
+        return `${account.instanceId}\t${account.label}\t${auth}\t${account.planType ?? "-"}\t${codex}`;
+      });
+      writeSuccess({ accounts: filtered }, context, lines.length > 0 ? lines.join("\n") : "No ChatGPT accounts configured.");
     }),
   );
 

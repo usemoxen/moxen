@@ -3498,6 +3498,105 @@ impl ThreadSource for ServerSource {
             Ok(())
         });
     }
+    fn start_chatgpt_login(&mut self, account_id: &str, label: Option<&str>) {
+        let mut start_fields = json!({ "accountId": account_id });
+        if let Some(label) = label {
+            start_fields["label"] = json!(label);
+        }
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            let started = wire
+                .dispatch("chatgpt.login.start", start_fields)
+                .map_err(|error| problem(&error, None))?;
+            let session_id = started
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let auth_url = started
+                .get("authorizationUrl")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if auth_url.starts_with("https://") || auth_url.starts_with("http://") {
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&auth_url).spawn();
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("cmd")
+                    .args(["/c", "start", "", &auth_url])
+                    .spawn();
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let _ = std::process::Command::new("xdg-open").arg(&auth_url).spawn();
+            }
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: "Complete Sign in with ChatGPT in your browser…".into(),
+                    error: false,
+                });
+            });
+            let done = wire
+                .dispatch("chatgpt.login.complete", json!({ "sessionId": session_id }))
+                .map_err(|error| problem(&error, None))?;
+            let who = done
+                .get("account")
+                .and_then(|a| a.get("email").or_else(|| a.get("instanceId")))
+                .and_then(Value::as_str)
+                .unwrap_or("ChatGPT")
+                .to_string();
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: format!("Signed in as {who}."),
+                    error: false,
+                });
+            });
+            read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
+    fn logout_chatgpt(&mut self, account_id: &str) {
+        let fields = json!({ "accountId": account_id });
+        let id = account_id.to_string();
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch("chatgpt.logout", fields)
+                .map_err(|error| problem(&error, None))?;
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: format!("Signed out chatgpt/{id}."),
+                    error: false,
+                });
+            });
+            read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
+    fn pair_chatgpt_codex(&mut self, account_id: &str, confirm_workspace: bool) {
+        let fields = json!({ "accountId": account_id, "confirmWorkspace": confirm_workspace });
+        let id = account_id.to_string();
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            let res = wire
+                .dispatch("chatgpt.codex.pair", fields)
+                .map_err(|error| problem(&error, None))?;
+            let verified = res.get("verified").and_then(Value::as_bool).unwrap_or(false);
+            let reason = res
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("Could not verify Codex companion.");
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: if verified {
+                        format!("Verified Codex companion for chatgpt/{id}.")
+                    } else {
+                        reason.to_string()
+                    },
+                    error: !verified,
+                });
+            });
+            read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
     fn apply_update(&mut self) {
         send_app_update(&self.shared, "app.update.apply");
     }
