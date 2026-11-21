@@ -26,7 +26,7 @@ import {
 } from "./git/git.js";
 import { cliClient } from "./infra/client.js";
 import { doctor } from "./doctor.js";
-import { parseUpdatable, updateCommand } from "./update.js";
+import { parseUpdatable, updateAllCommand, updateCommand } from "./update.js";
 import { describeInstall, describeProgress, describeRollback, describeSelfUpdate, describeUpdate, selfUpdateCheck, selfUpdateInstall, selfUpdateMode, selfUpdateRollback, selfUpdateRun } from "./selfupdate.js";
 import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/client.js";
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
@@ -49,9 +49,15 @@ import {
 import {
   listEfforts,
   listModels,
+  listProviderAccounts,
   listProviders,
   listSkills,
+  parseAccountKind,
+  parseEnvAssignments,
+  removeProviderAccountCli,
+  saveProviderAccount,
   setModelHidden,
+  toggleProviderAccount,
 } from "./catalog/providers.js";
 import type { ProviderUsageLimits } from "../core/catalog/summary.js";
 import {
@@ -598,10 +604,22 @@ program.command("doctor").description("Check provider binaries, auth, store, and
 program
   .command("update")
   .description("Update Claude Code, OpenCode, Codex or Antigravity with its own updater, and report the version before and after.")
-  .argument("<provider>", "claude | opencode | codex | antigravity")
-  .action((provider: string) =>
+  .argument("[provider]", "claude | opencode | codex | antigravity")
+  .option("--all", "Update all provider CLIs in parallel.")
+  .action((provider: string | undefined, options: { all?: boolean }) =>
     action(async () => {
       const context = await commandContext();
+      if (options.all === true) {
+        if (provider !== undefined) {
+          throw new CliError("INVALID_THREAD_OPTION", "Specify either a provider name or --all, not both.", { exitCode: 2 });
+        }
+        const { results, text } = await updateAllCommand(context.config);
+        writeSuccess({ results }, context, text);
+        return;
+      }
+      if (provider === undefined) {
+        throw new CliError("INVALID_THREAD_OPTION", "Specify a provider (claude, opencode, codex, antigravity) or --all.", { exitCode: 2 });
+      }
       const { update, text } = await updateCommand(context.config, parseUpdatable(provider));
       writeSuccess(update, context, text);
     }),
@@ -1777,6 +1795,126 @@ providers
         ...result.commands.map((command) => `command\t/${command.name}\t${command.description ?? ""}`),
       ];
       writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No skills or commands.");
+    }),
+  );
+
+const providerAccounts = providers
+  .command("accounts")
+  .description("Manage configured multi-account logins (claude/<id>, chatgpt/<id>, antigravity/<id>).");
+
+providerAccounts
+  .command("list")
+  .description("List configured provider accounts.")
+  .action(() =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await listProviderAccounts(context.config);
+      const lines = result.accounts.map((account) => {
+        const detail = account.email ?? account.homePath ?? account.codexHomePath ?? "-";
+        const plan = account.planType ? ` (${account.planType})` : "";
+        return `${account.instanceId}\t${account.label}\t${account.enabled ? "enabled" : "disabled"}\t${detail}${plan}\t${account.model ?? "-"}`;
+      });
+      writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No configured accounts.");
+    }),
+  );
+
+providerAccounts
+  .command("save")
+  .alias("add")
+  .description("Create or update a provider account.")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug (e.g. personal, work)")
+  .option("--label <name>", "Human-readable display name.")
+  .option("--home <path>", "Isolated config/home directory (Claude CLAUDE_CONFIG_DIR or Antigravity HOME).")
+  .option("--binary <path>", "Override executable path for this account.")
+  .option("--launch-args <args>", "Additional CLI launch arguments.")
+  .option("--env <KEY=VALUE>", "Non-secret environment variable (repeatable).", (value: string, prev: string[]) => [...prev, value], [] as string[])
+  .option("--model <slug>", "Default model slug for this account.")
+  .option("--effort <level>", "Default thinking effort for this account.")
+  .option("--codex-home <path>", "Paired Codex companion CODEX_HOME (ChatGPT accounts only).")
+  .option("--codex-binary <path>", "Paired Codex binary path override (ChatGPT accounts only).")
+  .option("--codex-launch-args <args>", "Paired Codex launch arguments (ChatGPT accounts only).")
+  .option("--disabled", "Create or save this account disabled.")
+  .action(
+    (
+      kind: string,
+      id: string,
+      options: {
+        label?: string;
+        home?: string;
+        binary?: string;
+        launchArgs?: string;
+        env?: string[];
+        model?: string;
+        effort?: string;
+        codexHome?: string;
+        codexBinary?: string;
+        codexLaunchArgs?: string;
+        disabled?: boolean;
+      },
+    ) =>
+      action(async () => {
+        const context = await commandContext();
+        const env = options.env && options.env.length > 0 ? parseEnvAssignments(options.env) : undefined;
+        const result = await saveProviderAccount(context.config, {
+          kind: parseAccountKind(kind),
+          id,
+          ...(options.label !== undefined ? { label: options.label } : {}),
+          ...(options.disabled === true ? { enabled: false } : {}),
+          ...(options.home !== undefined ? { homePath: options.home } : {}),
+          ...(options.binary !== undefined ? { binaryPath: options.binary } : {}),
+          ...(options.launchArgs !== undefined ? { launchArgs: options.launchArgs } : {}),
+          ...(env !== undefined ? { env } : {}),
+          ...(options.model !== undefined ? { model: options.model } : {}),
+          ...(options.effort !== undefined ? { thinkingEffort: options.effort } : {}),
+          ...(options.codexHome !== undefined ? { codexHomePath: options.codexHome } : {}),
+          ...(options.codexBinary !== undefined ? { codexBinaryPath: options.codexBinary } : {}),
+          ...(options.codexLaunchArgs !== undefined ? { codexLaunchArgs: options.codexLaunchArgs } : {}),
+        });
+        writeSuccess(
+          result,
+          context,
+          `${result.created ? "Added" : "Updated"} ${result.account.instanceId} (${result.account.label}).`,
+        );
+      }),
+  );
+
+providerAccounts
+  .command("enable")
+  .description("Enable a configured provider account.")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug")
+  .action((kind: string, id: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await toggleProviderAccount(context.config, parseAccountKind(kind), id, true);
+      writeSuccess(result, context, `Enabled ${result.account.instanceId}.`);
+    }),
+  );
+
+providerAccounts
+  .command("disable")
+  .description("Disable a configured provider account without removing it.")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug")
+  .action((kind: string, id: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await toggleProviderAccount(context.config, parseAccountKind(kind), id, false);
+      writeSuccess(result, context, `Disabled ${result.account.instanceId}.`);
+    }),
+  );
+
+providerAccounts
+  .command("remove")
+  .description("Remove a configured provider account.")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug")
+  .action((kind: string, id: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await removeProviderAccountCli(context.config, parseAccountKind(kind), id);
+      writeSuccess(result, context, result.removed ? `Removed ${kind}/${id}.` : `No account ${kind}/${id} was configured.`);
     }),
   );
 

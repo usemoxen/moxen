@@ -21,3 +21,14 @@ export async function updateCommand(config: CliConfig, provider: UpdatableProvid
   const update = await (await cliClient(config)).dispatch({ type: "provider.update", provider });
   return { update, text: describeUpdate(update) };
 }
+
+export async function updateAllCommand(config: CliConfig, providers?: readonly UpdatableProvider[]) {
+  const result = await (await cliClient(config)).dispatch({
+    type: "provider.update-all",
+    ...(providers && providers.length > 0 ? { providers } : {}),
+  });
+  const lines = result.results.map((item) =>
+    item.ok ? describeUpdate(item.update) : `${item.provider}: ${item.error}`,
+  );
+  return { results: result.results, text: lines.join("\n") };
+}

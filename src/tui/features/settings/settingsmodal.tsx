@@ -7,6 +7,7 @@ import { useKeyboard } from "@opentui/react";
 import { ListEditor, type Screen as EditorScreen } from "./listeditor.js";
 import { itemRows } from "../../model/listeditor.js";
 import { McpAccessEditor } from "./mcpaccess.js";
+import { ProvidersOverviewPanel } from "./providersoverview.js";
 import { SkillsPanel } from "./skillspanel.js";
 import { WebOrderEditor } from "./weborder.js";
 import { HandoffModelsEditor } from "./handoffmodels.js";
@@ -31,7 +32,7 @@ import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
 import { splitInlineCode } from "../../model/inlinecode.js";
 import { nextToggleValue, moxenVersionLine, providerVersionLine, settingControl, withModelOverride, withModelPrice, MODEL_OVERRIDE_KEY, MODEL_PRICE_KEY, settingValueLabel, updatableProviderOf, type LatestView, type MoxenVersionLine, type ProviderCheckView, type SettingControl, type SettingOption } from "../../model/settings.js";
-import type { LatestVersions, UpdatableProvider } from "../../../core/catalog/update.js";
+import type { LatestVersions, ProviderUpdateAllItem, UpdatableProvider } from "../../../core/catalog/update.js";
 import {
   SECTION_LABEL,
   SETTING_SECTIONS,
@@ -39,7 +40,12 @@ import {
   type SettingSection,
   type SettingValue,
 } from "../../../core/configschema.js";
-import { driverKindOfInstance } from "../../../core/types.js";
+import {
+  driverKindOfInstance,
+  type AccountProviderKind,
+  type ProviderAccountSaveInput,
+  type ProviderAccountSummary,
+} from "../../../core/types.js";
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import type { SettingsSnapshot } from "../../../server/api.js";
 import type { McpRunner } from "../../../core/providers/harness/presets.js";
@@ -78,8 +84,10 @@ interface SettingItem {
 /** The left column: section labels plus the selection bar and a gap. */
 const TAB_WIDTH = 25;
 
+type SettingsTab = SettingSection | "providers:overview";
+
 /** The sidebar's categories, top to bottom: each names the sections filed under it. */
-const SECTION_CATEGORY: Record<SettingSection, string> = {
+const SECTION_CATEGORY: Record<SettingsTab, string> = {
   general: "Moxen",
   defaults: "Moxen",
   sessions: "Moxen",
@@ -88,6 +96,7 @@ const SECTION_CATEGORY: Record<SettingSection, string> = {
   memory: "Moxen",
   interface: "Moxen",
   git: "Moxen",
+  "providers:overview": "Providers",
   "provider:codex": "Providers",
   "provider:claude": "Providers",
   "provider:chatgpt": "Providers",
@@ -100,11 +109,11 @@ const SECTION_CATEGORY: Record<SettingSection, string> = {
 };
 
 /** Sections long enough to be split in the sidebar, one entry per heading on the page. */
-const PAGED_SECTIONS: ReadonlySet<SettingSection> = new Set<SettingSection>(["provider:harness", "provider:acp"]);
+const PAGED_SECTIONS: ReadonlySet<SettingsTab> = new Set<SettingsTab>(["provider:harness", "provider:acp"]);
 
 /** One row of the sidebar: a section, or one heading of a paged section. */
 interface SidebarEntry {
-  readonly section: SettingSection;
+  readonly section: SettingsTab;
   readonly group: string | null;
   readonly label: string;
   /** The tree drawing before the label: `├ `, `│ └ `… */
@@ -113,6 +122,8 @@ interface SidebarEntry {
   readonly profile?: string;
   /** The nested list setting `profile` belongs to. */
   readonly list?: string;
+  /** A configured multi-account login (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`). */
+  readonly accountInstance?: string;
   /** Set on a heading of the model open inside `profile`, so clicking it narrows that model's editor. */
   readonly model?: string;
   readonly heading?: string;
@@ -143,6 +154,8 @@ export function SettingsModal({
   latest,
   updating,
   onUpdate,
+  onUpdateAll,
+  accounts: initialAccounts,
   moxenUpdate,
   providers,
   screenWidth,
@@ -179,6 +192,8 @@ export function SettingsModal({
   /** The providers whose updater is running now. */
   updating: ReadonlySet<UpdatableProvider>;
   onUpdate: (provider: UpdatableProvider) => void;
+  onUpdateAll?: () => void;
+  accounts?: readonly ProviderAccountSummary[];
   /**
    * The Moxen updater behind the General tab's card: the same state the
    * update screen draws, so the card is a second door to that screen.
@@ -212,8 +227,97 @@ export function SettingsModal({
   const snapshot = useMemo(() => localizeSnapshot(rawSnapshot), [rawSnapshot, language]);
   const inner = Math.max(40, width - 4);
   const paneWidth = Math.max(24, inner - TAB_WIDTH - 3);
-  const [tab, setTab] = useState<SettingSection>(initialSection);
+  const [tab, setTab] = useState<SettingsTab>(initialSection);
   const memoryStatus = useMemoryRuntime(client, tab === "memory");
+  const [loadedAccounts, setLoadedAccounts] = useState<readonly ProviderAccountSummary[]>(initialAccounts ?? []);
+  const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
+  const [accountSaving, setAccountSaving] = useState(false);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [updatingAll, setUpdatingAll] = useState(false);
+  const [updateAllResults, setUpdateAllResults] = useState<readonly ProviderUpdateAllItem[] | null>(null);
+
+  useEffect(() => {
+    if (initialAccounts !== undefined) setLoadedAccounts(initialAccounts);
+  }, [initialAccounts]);
+
+  useEffect(() => {
+    if (!client) return;
+    let alive = true;
+    void client
+      .query({ type: "providers.accounts" })
+      .then((res) => {
+        if (alive) setLoadedAccounts(res.accounts);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [client, rawSnapshot]);
+
+  const reloadAccounts = async () => {
+    if (!client) return;
+    const res = await client.query({ type: "providers.accounts" });
+    setLoadedAccounts(res.accounts);
+  };
+
+  const handleSaveAccount = async (input: ProviderAccountSaveInput): Promise<boolean> => {
+    if (!client) return false;
+    setAccountSaving(true);
+    setAccountError(null);
+    try {
+      await client.dispatch({ type: "provider.account.save", ...input });
+      await reloadAccounts();
+      return true;
+    } catch (cause) {
+      setAccountError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      setAccountSaving(false);
+    }
+  };
+
+  const handleToggleAccount = async (kind: AccountProviderKind, id: string, enabled: boolean): Promise<void> => {
+    if (!client) return;
+    setAccountSaving(true);
+    setAccountError(null);
+    try {
+      await client.dispatch({ type: "provider.account.toggle", kind, id, enabled });
+      await reloadAccounts();
+    } catch (cause) {
+      setAccountError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAccountSaving(false);
+    }
+  };
+
+  const handleRemoveAccount = async (kind: AccountProviderKind, id: string): Promise<void> => {
+    if (!client) return;
+    setAccountSaving(true);
+    setAccountError(null);
+    try {
+      await client.dispatch({ type: "provider.account.remove", kind, id });
+      await reloadAccounts();
+    } catch (cause) {
+      setAccountError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAccountSaving(false);
+    }
+  };
+
+  const handleUpdateAll = () => {
+    if (onUpdateAll) {
+      onUpdateAll();
+      return;
+    }
+    if (!client || updatingAll) return;
+    setUpdatingAll(true);
+    setAccountError(null);
+    void client
+      .dispatch({ type: "provider.update-all" })
+      .then((res) => setUpdateAllResults(res.results))
+      .catch((cause: unknown) => setAccountError(cause instanceof Error ? cause.message : String(cause)))
+      .finally(() => setUpdatingAll(false));
+  };
   /** The heading the open page is narrowed to, in a paged section; null shows the whole section. */
   const [pageGroup, setPageGroup] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
@@ -263,7 +367,7 @@ export function SettingsModal({
   }, [snapshot, tab, pageGroup, providers]);
 
   /** The provider the open tab is about, when it can be updated from here. */
-  const updatable = updatableProviderOf(tab);
+  const updatable = tab === "providers:overview" ? null : updatableProviderOf(tab);
 
   const safe = items.length === 0 ? -1 : Math.min(index, items.length - 1);
   const current = safe >= 0 ? items[safe] : undefined;
@@ -317,7 +421,8 @@ export function SettingsModal({
   /** The nested list open in the editor with one of its entries open, which narrows the sidebar to that list. */
   const focusedList = listOpen !== null && NESTED_LISTS.includes(listOpen) && editorScreen.profile !== null ? listOpen : null;
   /** A page that holds nothing but one list is not shown: the list is. */
-  const onlyList = (section: SettingSection, group: string | null): string | null => {
+  const onlyList = (section: SettingsTab, group: string | null): string | null => {
+    if (section === "providers:overview") return null;
     const shown = (snapshot?.settings ?? []).filter((view) => view.descriptor.section === section && view.descriptor.hidden !== true && (group === null || view.descriptor.group === group));
     return shown.length === 1 && shown[0]!.descriptor.kind.type === "list" ? shown[0]!.descriptor.key : null;
   };
@@ -347,12 +452,37 @@ export function SettingsModal({
     }
     const pushEntries = (list: (typeof nested)[number], indent: string) =>
       list.items.forEach((item, at) => out.push({ section: list.section, group: list.group, label: item.title, prefix: `${indent}${at === list.items.length - 1 ? "└ " : "├ "}`, profile: item.id, list: list.key }));
+    let pushedOverview = false;
     for (const section of sections) {
+      if (!pushedOverview && SECTION_CATEGORY[section] === "Providers") {
+        pushedOverview = true;
+        out.push({ section: "providers:overview", group: null, label: t("settings.providers.overview"), prefix: "" });
+      }
       // A paged section is a category of its own: its pages sit directly under the category heading, with no row for the section.
       if (!PAGED_SECTIONS.has(section)) out.push({ section, group: null, label: tx(SECTION_LABEL[section]), prefix: "" });
       if (!snapshot) continue;
       if (!PAGED_SECTIONS.has(section)) {
         for (const list of nested) if (list.section === section && list.group === null) pushEntries(list, "");
+        const accountKind: AccountProviderKind | null =
+          section === "provider:claude"
+            ? "claude"
+            : section === "provider:chatgpt"
+              ? "chatgpt"
+              : section === "provider:antigravity"
+                ? "antigravity"
+                : null;
+        if (accountKind !== null) {
+          const matching = loadedAccounts.filter((account) => account.kind === accountKind);
+          matching.forEach((account, at) => {
+            out.push({
+              section: "providers:overview",
+              group: null,
+              label: account.label,
+              prefix: at === matching.length - 1 ? "└ " : "├ ",
+              accountInstance: account.instanceId,
+            });
+          });
+        }
         continue;
       }
       const seen: string[] = [];
@@ -365,13 +495,13 @@ export function SettingsModal({
         if (bare && group !== serverList.group) continue;
         seen.push(group);
       }
-      seen.forEach((group, index) => {
+      seen.forEach((group) => {
         out.push({ section, group, label: group, prefix: "" });
         for (const list of nested) if (list.section === section && list.group === group) pushEntries(list, "");
       });
     }
     return out;
-  }, [sections, snapshot, focusedList, editorScreen.profile, editorScreen.model]);
+  }, [sections, snapshot, focusedList, editorScreen.profile, editorScreen.model, loadedAccounts, language]);
 
   /** Open an entry of a nested list in its editor, on one of its headings (the first when none is asked for). */
   const openEntry = (listKey: string, entryId: string, heading: string | null) => {
@@ -391,12 +521,24 @@ export function SettingsModal({
     if (entry.back === true) {
       setEditorScreen({ profile: null, model: null });
       setEditorHeading(null);
+    } else if (entry.accountInstance !== undefined) {
+      switchTab("providers:overview", null);
+      setSelectedAccount(entry.accountInstance);
     } else if (entry.model !== undefined && entry.heading !== undefined) setEditorHeading(entry.heading);
     else if (entry.profile !== undefined && entry.list !== undefined) openEntry(entry.list, entry.profile, entry.heading ?? null);
-    else switchTab(entry.section, entry.group);
+    else {
+      if (entry.section === "providers:overview") setSelectedAccount(null);
+      switchTab(entry.section, entry.group);
+    }
   };
   const entryActive = (entry: SidebarEntry): boolean => {
     if (entry.back === true) return false;
+    if (entry.accountInstance !== undefined) {
+      return tab === "providers:overview" && selectedAccount === entry.accountInstance;
+    }
+    if (entry.section === "providers:overview") {
+      return tab === "providers:overview" && selectedAccount === null;
+    }
     if (focusedList !== null) {
       if (entry.profile !== editorScreen.profile) return false;
       // Where you are is the heading shown, or the entry itself when it has too few headings to list.
@@ -408,7 +550,7 @@ export function SettingsModal({
     return entry.profile === undefined && entry.section === tab && entry.group === pageGroup;
   };
 
-  const switchTab = (next: SettingSection, group: string | null = null) => {
+  const switchTab = (next: SettingsTab, group: string | null = null) => {
     setTab(next);
     setPageGroup(group);
     setIndex(0);
@@ -423,10 +565,11 @@ export function SettingsModal({
   };
   const stepTab = (delta: number) => {
     // Entries and their headings are reached by click or from the list; stepping goes page to page.
-    const pages = entries.filter((entry) => entry.profile === undefined && entry.back !== true && !(PAGED_SECTIONS.has(entry.section) && entry.group === null));
+    const pages = entries.filter((entry) => entry.profile === undefined && entry.accountInstance === undefined && entry.back !== true && !(PAGED_SECTIONS.has(entry.section) && entry.group === null));
     if (pages.length === 0) return;
     const at = Math.max(0, pages.findIndex((entry) => entry.section === tab && entry.group === pageGroup));
     const next = pages[(at + delta + pages.length) % pages.length]!;
+    if (next.section === "providers:overview") setSelectedAccount(null);
     switchTab(next.section, next.group);
   };
 
@@ -512,7 +655,7 @@ export function SettingsModal({
 
   useKeyboard((key) => {
     if (managing || showUpdate) return;
-    if (tab === "skills" && key.name !== "tab") return;
+    if ((tab === "skills" || tab === "providers:overview") && key.name !== "tab") return;
     // The list editor owns every key while it is open, and one it has already acted on is not ours.
     if (listOpen !== null || accessOpen !== null || handoffOpen !== null || pricesOpen !== null || key.defaultPrevented) return;
     const escape = key.name === "escape" || key.name === "esc";
@@ -623,7 +766,18 @@ export function SettingsModal({
         : current?.control.kind === "toggle"
           ? t("settings.hint.toggle")
           : t("settings.hint.open");
-  const hint = tab === "skills" ? t("skills.settingsHint") : listOpen !== null || handoffOpen !== null || pricesOpen !== null ? "" : picking === null && (updatable !== null || (tab === "general" && moxenUpdate !== undefined)) ? t("settings.hint.update", { hint: base }) : base;
+  const hint =
+    tab === "skills"
+      ? t("skills.settingsHint")
+      : tab === "providers:overview"
+        ? selectedAccount !== null
+          ? t("settings.providers.detailHint")
+          : t("settings.providers.hint")
+        : listOpen !== null || handoffOpen !== null || pricesOpen !== null
+          ? ""
+          : picking === null && (updatable !== null || (tab === "general" && moxenUpdate !== undefined))
+            ? t("settings.hint.update", { hint: base })
+            : base;
 
   return (
     <>
@@ -653,11 +807,11 @@ export function SettingsModal({
               {entries.map((entry, at) => {
                 // A category heads its first section; inside an open entry the sidebar is only the way back, so none shows.
                 const category = SECTION_CATEGORY[entry.section];
-                const top = entry.prefix === "" && entry.profile === undefined && entry.back !== true;
-                const before = entries.slice(0, at).findLast((candidate) => candidate.prefix === "" && candidate.profile === undefined);
+                const top = entry.prefix === "" && entry.profile === undefined && entry.accountInstance === undefined && entry.back !== true;
+                const before = entries.slice(0, at).findLast((candidate) => candidate.prefix === "" && candidate.profile === undefined && candidate.accountInstance === undefined);
                 const heads = top && focusedList === null && (before === undefined || SECTION_CATEGORY[before.section] !== category);
                 return (
-                  <Fragment key={`${entry.section}#${entry.group ?? ""}#${entry.profile ?? ""}#${entry.heading ?? ""}${entry.back === true ? "#back" : ""}`}>
+                  <Fragment key={`${entry.section}#${entry.group ?? ""}#${entry.profile ?? ""}#${entry.accountInstance ?? ""}#${entry.heading ?? ""}${entry.back === true ? "#back" : ""}`}>
                     {heads ? <CategoryHeading label={tx(category)} first={at === 0} width={TAB_WIDTH} /> : null}
                     <SectionTab
                       id={`settings-side-${at}`}
@@ -679,6 +833,28 @@ export function SettingsModal({
             >
               {tab === "skills" ? (
                 <SkillsPanel client={client} width={paneWidth} showHint={false} onClose={() => { markModalDismissed(); onClose(); }} />
+              ) : tab === "providers:overview" ? (
+                <ProvidersOverviewPanel
+                  accounts={loadedAccounts}
+                  selectedInstance={selectedAccount}
+                  onSelectAccount={setSelectedAccount}
+                  providers={providers}
+                  versions={versions}
+                  latest={latest}
+                  updating={updating}
+                  updatingAll={updatingAll}
+                  updateAllResults={updateAllResults}
+                  saving={accountSaving}
+                  error={accountError}
+                  width={paneWidth}
+                  onSaveAccount={handleSaveAccount}
+                  onToggleAccount={handleToggleAccount}
+                  onRemoveAccount={handleRemoveAccount}
+                  onUpdate={onUpdate}
+                  onUpdateAll={handleUpdateAll}
+                  onOpenSection={(section) => switchTab(section, null)}
+                  onClose={() => { markModalDismissed(); onClose(); }}
+                />
               ) : handoffItem !== undefined && handoffItem.control.kind === "handoff" ? (
                 <HandoffModelsEditor
                   title={handoffItem.descriptor.label}

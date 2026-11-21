@@ -71,6 +71,7 @@ pub struct MockSource {
     acp_registry: Option<crate::settings::AcpRegistryCatalog>,
     remote: Option<RemoteState>,
     updates: Option<UpdateState>,
+    provider_accounts: Vec<crate::settings::ProviderAccountSummary>,
     experience: Value,
     experience_case: Option<String>,
     diagnosis: Option<Value>,
@@ -405,6 +406,50 @@ impl MockSource {
             acp_registry: None,
             remote: None,
             updates: None,
+            provider_accounts: vec![
+                crate::settings::ProviderAccountSummary {
+                    kind: "claude".into(),
+                    id: "personal".into(),
+                    instance_id: "claude/personal".into(),
+                    label: "Personal".into(),
+                    enabled: true,
+                    home_path: Some("~/.claude-personal".into()),
+                    binary_path: None,
+                    launch_args: None,
+                    env: Default::default(),
+                    model: None,
+                    thinking_effort: None,
+                    email: None,
+                    workspace_name: None,
+                    plan_type: Some("Claude Pro".into()),
+                    signed_in: None,
+                    codex_home_path: None,
+                    codex_binary_path: None,
+                    codex_launch_args: None,
+                    codex_verified: false,
+                },
+                crate::settings::ProviderAccountSummary {
+                    kind: "chatgpt".into(),
+                    id: "work".into(),
+                    instance_id: "chatgpt/work".into(),
+                    label: "Work".into(),
+                    enabled: true,
+                    home_path: None,
+                    binary_path: None,
+                    launch_args: None,
+                    env: Default::default(),
+                    model: None,
+                    thinking_effort: None,
+                    email: Some("dev@example.test".into()),
+                    workspace_name: Some("Acme".into()),
+                    plan_type: Some("ChatGPT Plus".into()),
+                    signed_in: Some(true),
+                    codex_home_path: Some("~/.codex-work".into()),
+                    codex_binary_path: None,
+                    codex_launch_args: None,
+                    codex_verified: true,
+                },
+            ],
             experience: json!({"onboardingCompleted":true,"seenReleases":["0.1.2"],"version":"0.1.5","releases":[
                 {"version":"0.1.2","title":{"en":"Make yourself at home","es":"Ponte a gusto"},
                  "highlights":[{"title":{"en":"A place to start","es":"Por dónde empezar"},"body":{"en":"Walk through appearance, models, memory and tools.","es":"Repasa el aspecto, los modelos, la memoria y las herramientas."},"action":"onboarding"}],
@@ -1649,6 +1694,123 @@ impl ThreadSource for MockSource {
     fn update_provider(&mut self, _provider: &str) {
         self.settings_notice = Some(SettingsNotice {
             text: "Already current.".into(),
+            error: false,
+        });
+    }
+    fn update_all_providers(&mut self) {
+        self.settings_notice = Some(SettingsNotice {
+            text: "All providers are up to date.".into(),
+            error: false,
+        });
+    }
+    fn read_provider_accounts(&mut self) {}
+    fn provider_accounts(
+        &self,
+    ) -> Option<Arc<Result<Vec<crate::settings::ProviderAccountSummary>, String>>> {
+        Some(Arc::new(Ok(self.provider_accounts.clone())))
+    }
+    fn save_provider_account(&mut self, payload: serde_json::Value) {
+        let Some(kind) = payload.get("kind").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(id) = payload.get("id").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let id = id.trim().to_lowercase();
+        let instance_id = format!("{kind}/{id}");
+        let str_opt = |k: &str| {
+            payload
+                .get(k)
+                .and_then(serde_json::Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        if let Some(existing) = self
+            .provider_accounts
+            .iter_mut()
+            .find(|a| a.instance_id == instance_id)
+        {
+            if payload.get("label").is_some() {
+                existing.label = str_opt("label").unwrap_or_else(|| existing.id.clone());
+            }
+            if payload.get("homePath").is_some() {
+                existing.home_path = str_opt("homePath");
+            }
+            if payload.get("binaryPath").is_some() {
+                existing.binary_path = str_opt("binaryPath");
+            }
+            if payload.get("launchArgs").is_some() {
+                existing.launch_args = str_opt("launchArgs");
+            }
+            if payload.get("model").is_some() {
+                existing.model = str_opt("model");
+            }
+            if payload.get("thinkingEffort").is_some() {
+                existing.thinking_effort = str_opt("thinkingEffort");
+            }
+            if payload.get("codexHomePath").is_some() {
+                existing.codex_home_path = str_opt("codexHomePath");
+            }
+            if payload.get("codexBinaryPath").is_some() {
+                existing.codex_binary_path = str_opt("codexBinaryPath");
+            }
+            if payload.get("codexLaunchArgs").is_some() {
+                existing.codex_launch_args = str_opt("codexLaunchArgs");
+            }
+            if let Some(env_val) = payload.get("env") {
+                existing.env = env_val
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+        } else {
+            self.provider_accounts
+                .push(crate::settings::ProviderAccountSummary {
+                    kind: kind.to_string(),
+                    id: id.clone(),
+                    instance_id: instance_id.clone(),
+                    label: str_opt("label").unwrap_or_else(|| id.clone()),
+                    enabled: true,
+                    home_path: str_opt("homePath"),
+                    binary_path: str_opt("binaryPath"),
+                    launch_args: str_opt("launchArgs"),
+                    env: Default::default(),
+                    model: str_opt("model"),
+                    thinking_effort: str_opt("thinkingEffort"),
+                    email: None,
+                    workspace_name: None,
+                    plan_type: None,
+                    signed_in: if kind == "chatgpt" { Some(false) } else { None },
+                    codex_home_path: str_opt("codexHomePath"),
+                    codex_binary_path: str_opt("codexBinaryPath"),
+                    codex_launch_args: str_opt("codexLaunchArgs"),
+                    codex_verified: false,
+                });
+        }
+        self.settings_notice = Some(SettingsNotice {
+            text: format!("Saved {instance_id}."),
+            error: false,
+        });
+    }
+    fn toggle_provider_account(&mut self, kind: &str, id: &str, enabled: bool) {
+        let target = format!("{kind}/{id}");
+        if let Some(account) = self
+            .provider_accounts
+            .iter_mut()
+            .find(|a| a.instance_id == target)
+        {
+            account.enabled = enabled;
+        }
+    }
+    fn remove_provider_account(&mut self, kind: &str, id: &str) {
+        let target = format!("{kind}/{id}");
+        self.provider_accounts.retain(|a| a.instance_id != target);
+        self.settings_notice = Some(SettingsNotice {
+            text: format!("Removed {target}."),
             error: false,
         });
     }

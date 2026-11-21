@@ -293,6 +293,12 @@ async function runSettings(): Promise<void> {
   await setup.flush();
   await act(async () => setup.mockInput.pressTab({ shift: true }));
   await setup.flush();
+  const overview = setup.captureCharFrame();
+  if (!overview.includes("Configured providers") || !overview.includes("[ + Add provider ]") || !overview.includes("[ Update all ]")) {
+    fail("the Providers Overview tab is missing its heading, add button, or update-all button");
+  }
+  await act(async () => setup.mockInput.pressTab({ shift: true }));
+  await setup.flush();
   const rows = setup.captureCharFrame().split("\n");
   const forgeRow = rows.findIndex((row) => row.includes("Forge integration"));
   if (forgeRow < 0) fail("settings page has no forge row to click");

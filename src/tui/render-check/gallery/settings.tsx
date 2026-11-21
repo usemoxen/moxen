@@ -6,6 +6,7 @@ import { DEFAULT_CONFIG, setConfigValue } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
 import { SETTINGS, describeSettings, type SettingDescriptor } from "../../../core/configschema.js";
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
+import { ProvidersOverviewPanel } from "../../features/settings/providersoverview.js";
 import { SkillsPanel } from "../../features/settings/skillspanel.js";
 import { skillsClient } from "../skillsfixture.js";
 import { tx } from "../../i18n/index.js";
@@ -43,7 +44,7 @@ const ref = (name: string, label: string, ...steps: Step[]): PageRef => ({ name:
 const page = (label: string): PageRef => ref(label, label, side(label));
 
 /** The sidebar, top to bottom, as the page lists it with no profiles or servers set. */
-export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex", "Antigravity", "ChatGPT", "ACP agents", "Model servers", "MCP servers", "Skills"].map(page);
+export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Overview", "Claude Code", "OpenCode", "Codex", "Antigravity", "ChatGPT", "ACP agents", "Model servers", "MCP servers", "Skills"].map(page);
 
 const PROFILE_PAGES = ["Endpoint", "Models", "Sampling", "Compaction", "Behaviour", "Prompt", "Template quirks"];
 const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
@@ -392,4 +393,83 @@ export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntrie
   width: 90,
   height: 32,
   element: () => <Stage width={90} height={32}><SkillsPanel client={skillsClient().api} width={88} /></Stage>,
+}, {
+  id: "providers-overview",
+  group: "settings",
+  title: "Providers overview: multi-account logins and CLI updaters",
+  width: 90,
+  height: 30,
+  element: () => (
+    <Stage width={90} height={30}>
+      <ProvidersOverviewPanel
+        accounts={[
+          {
+            kind: "claude",
+            id: "personal",
+            instanceId: "claude/personal",
+            label: "Personal",
+            enabled: true,
+            homePath: "~/.claude-personal",
+            binaryPath: null,
+            launchArgs: null,
+            env: {},
+            model: null,
+            thinkingEffort: null,
+            email: null,
+            workspaceName: null,
+            planType: "Claude Pro",
+            signedIn: null,
+            codexHomePath: null,
+            codexBinaryPath: null,
+            codexLaunchArgs: null,
+            codexVerified: false,
+          },
+          {
+            kind: "chatgpt",
+            id: "work",
+            instanceId: "chatgpt/work",
+            label: "Work",
+            enabled: true,
+            homePath: null,
+            binaryPath: null,
+            launchArgs: null,
+            env: {},
+            model: null,
+            thinkingEffort: null,
+            email: "dev@example.test",
+            workspaceName: "Acme",
+            planType: "ChatGPT Plus",
+            signedIn: true,
+            codexHomePath: "~/.codex-work",
+            codexBinaryPath: null,
+            codexLaunchArgs: null,
+            codexVerified: true,
+          },
+        ]}
+        selectedInstance={null}
+        onSelectAccount={noop}
+        providers={SETTINGS_PROVIDERS}
+        versions={{
+          claude: { ok: true, installed: true, version: "2.1.330 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
+          opencode: { ok: true, installed: true, version: "opencode v2.3.2", login: "inherit", minVersion: "2.0.0" },
+          codex: { ok: true, installed: true, version: "codex-cli 0.171.0", login: "inherit", minVersion: "0.164.0" },
+          antigravity: { ok: true, installed: true, version: "agy 1.5.14", login: "inherit", minVersion: "1.0.0" },
+        }}
+        latest={{ enabled: true, claude: { latest: "2.1.330", channel: "latest" }, opencode: { latest: "2.3.2", channel: null }, codex: { latest: "0.171.0", channel: null }, antigravity: { latest: "1.5.14", channel: null } }}
+        updating={new Set()}
+        updatingAll={false}
+        updateAllResults={null}
+        saving={false}
+        error={null}
+        width={86}
+        onSaveAccount={async () => true}
+        onToggleAccount={async () => undefined}
+        onRemoveAccount={async () => undefined}
+        onUpdate={noop}
+        onUpdateAll={noop}
+        onOpenSection={noop}
+        onClose={noop}
+      />
+    </Stage>
+  ),
 }];

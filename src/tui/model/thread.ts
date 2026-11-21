@@ -1,5 +1,5 @@
 import { t, t as tr, tx } from "../i18n/index.js";
-import type { MessageEnvelope, SessionEnvelope, ThreadEnvelope, ActivityEnvelope } from "../../core/types.js";
+import { driverKindOfInstance, type MessageEnvelope, type SessionEnvelope, type ThreadEnvelope, type ActivityEnvelope } from "../../core/types.js";
 import { describeActivity } from "./activity.js";
 import { USAGE_CONTINUE_PROMPT } from "../../core/threads/views.js";
 
@@ -1578,7 +1578,7 @@ export function shouldOfferResumeCompaction(
   providerInstanceId: string | null | undefined,
   now: number,
 ): boolean {
-  if (providerInstanceId !== "claudeAgent") return false;
+  if (driverKindOfInstance(providerInstanceId ?? "") !== "claude") return false;
   // A running turn keeps the cache warm with every request: nothing to
   // resume, whatever the last reading's age. (Readings used to arrive only
   // when a turn ended, so an hour-long turn tripped this mid-flight.)

@@ -1,6 +1,6 @@
 import { createPatch } from "diff";
 
-import type { ActivityEnvelope } from "../../core/types.js";
+import { driverKindOfInstance, type ActivityEnvelope } from "../../core/types.js";
 import { webToolKind } from "../../core/threads/views.js";
 import { prettifyModelSlug } from "./display.js";
 import { detectFiletype } from "./patch.js";
@@ -1037,9 +1037,11 @@ export function webToolSource(tool: string, provider?: string): string | null {
   const mcp = parseMcpToolName(tool);
   if (mcp !== null) return prettyMcpServer(mcp.server);
   if (webToolKind(tool) !== null) {
-    if (provider === "codex") return "Codex";
-    if (provider === "antigravity") return "Antigravity";
-    if (provider === "acp" || provider?.startsWith("acp/")) return "ACP";
+    const kind = provider ? driverKindOfInstance(provider) : null;
+    if (kind === "codex") return "Codex";
+    if (kind === "chatgpt") return "ChatGPT";
+    if (kind === "antigravity") return "Antigravity";
+    if (kind === "acp") return "ACP";
   }
   const bare = tool.trim().split(".").pop() ?? "";
   if (/^Web(?:Search|Fetch)$/u.test(bare)) return "Claude Code";

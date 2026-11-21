@@ -222,8 +222,11 @@ pub fn provider_limits<'a>(
 /// `src/core/types.ts`).
 pub(crate) fn driver_kind(instance: &str) -> Option<&str> {
     let key = instance.trim().to_lowercase();
-    if key == "codex" {
+    if key == "codex" || key.starts_with("codex/") {
         return Some("codex");
+    }
+    if key == "chatgpt" || key.starts_with("chatgpt/") {
+        return Some("chatgpt");
     }
     if key == "opencode" || key.starts_with("opencode/") {
         return Some("opencode");
@@ -231,13 +234,13 @@ pub(crate) fn driver_kind(instance: &str) -> Option<&str> {
     if key == "harness" || key.starts_with("harness/") {
         return Some("harness");
     }
-    if key == "antigravity" || key == "agy" {
+    if key == "antigravity" || key == "agy" || key.starts_with("antigravity/") {
         return Some("antigravity");
     }
     if key == "acp" || key.starts_with("acp/") {
         return Some("acp");
     }
-    if key == "claudeagent" || key == "claude" {
+    if key == "claudeagent" || key == "claude" || key.starts_with("claude/") {
         return Some("claude");
     }
     None
@@ -2113,5 +2116,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("5h", 45.0), ("wk", 20.0)]
         );
+    }
+
+    #[test]
+    fn driver_kind_recognizes_multi_account_instance_prefixes() {
+        assert_eq!(super::driver_kind("claude/work"), Some("claude"));
+        assert_eq!(super::driver_kind("claudeAgent"), Some("claude"));
+        assert_eq!(super::driver_kind("chatgpt/personal"), Some("chatgpt"));
+        assert_eq!(super::driver_kind("antigravity/alt"), Some("antigravity"));
+        assert_eq!(super::driver_kind("codex/companion"), Some("codex"));
+        assert_eq!(super::driver_kind("unknown/x"), None);
     }
 }

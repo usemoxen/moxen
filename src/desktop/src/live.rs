@@ -610,6 +610,8 @@ struct State {
     remote: Option<Arc<Result<RemoteState, String>>>,
     /// The providers' newest versions and Moxen's own update check, once read.
     updates: Option<Arc<Result<UpdateState, String>>>,
+    /// Configured multi-account logins (`providers.accounts`), once read.
+    provider_accounts: Option<Arc<Result<Vec<settings::ProviderAccountSummary>, String>>>,
     /// What the last thread search answered, while the palette shows it.
     search: SearchState,
     /// The latest search asked for: an older answer never replaces a newer one.
@@ -3417,6 +3419,85 @@ impl ThreadSource for ServerSource {
             Ok(())
         });
     }
+    fn update_all_providers(&mut self) {
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            let result = wire
+                .dispatch("provider.update-all", json!({}))
+                .map_err(|error| problem(&error, None))?;
+            let line = settings::provider_update_all_line(&result);
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: line,
+                    error: false,
+                });
+            });
+            read_update_state(&shared);
+            Ok(())
+        });
+    }
+    fn read_provider_accounts(&mut self) {
+        read_provider_accounts_state(&self.shared);
+    }
+    fn provider_accounts(
+        &self,
+    ) -> Option<Arc<Result<Vec<settings::ProviderAccountSummary>, String>>> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .provider_accounts
+            .clone()
+    }
+    fn save_provider_account(&mut self, payload: serde_json::Value) {
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            let result = wire
+                .dispatch("provider.account.save", payload)
+                .map_err(|error| problem(&error, None))?;
+            let label = result
+                .get("account")
+                .and_then(|a| a.get("instanceId"))
+                .and_then(Value::as_str)
+                .unwrap_or("account")
+                .to_string();
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: format!("Saved {label}."),
+                    error: false,
+                });
+            });
+            read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
+    fn toggle_provider_account(&mut self, kind: &str, id: &str, enabled: bool) {
+        let fields = json!({ "kind": kind, "id": id, "enabled": enabled });
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch("provider.account.toggle", fields)
+                .map_err(|error| problem(&error, None))?;
+            read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
+    fn remove_provider_account(&mut self, kind: &str, id: &str) {
+        let fields = json!({ "kind": kind, "id": id });
+        let label = format!("{kind}/{id}");
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            wire.dispatch("provider.account.remove", fields)
+                .map_err(|error| problem(&error, None))?;
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: format!("Removed {label}."),
+                    error: false,
+                });
+            });
+            read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
     fn apply_update(&mut self) {
         send_app_update(&self.shared, "app.update.apply");
     }
@@ -5097,6 +5178,19 @@ fn set_pairing(shared: &Arc<Shared>, pairing: Option<settings::Pairing>) {
 }
 
 /// Reads the providers' newest versions and Moxen's own update check together.
+fn read_provider_accounts_state(shared: &Arc<Shared>) {
+    settings_read(
+        shared,
+        Some(("providers.accounts", None)),
+        move |wire| {
+            wire.query("providers.accounts", json!({}))
+                .map(|value| settings::ProviderAccountSummary::list_from_json(&value))
+                .map_err(|error| error.message)
+        },
+        move |state, accounts| state.provider_accounts = Some(Arc::new(accounts)),
+    );
+}
+
 fn read_update_state(shared: &Arc<Shared>) {
     settings_read(
         shared,

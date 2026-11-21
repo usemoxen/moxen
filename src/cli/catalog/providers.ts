@@ -1,7 +1,13 @@
 import path from "node:path";
 
 import { selectModel, selectProvider, type ProviderSummary } from "../../core/catalog/summary.js";
-import type { CliConfig } from "../../core/types.js";
+import { CliError } from "../../core/errors.js";
+import {
+  ACCOUNT_PROVIDER_KINDS,
+  type AccountProviderKind,
+  type CliConfig,
+  type ProviderAccountSaveInput,
+} from "../../core/types.js";
 import { activeRemoteServer, cliClient, serverCwd } from "../infra/client.js";
 import { directAuth, directRuntime } from "../infra/direct.js";
 
@@ -88,4 +94,58 @@ export async function setModelHidden(
     model: { slug: model.slug, name: model.name },
     hidden,
   };
+}
+
+export function parseAccountKind(value: string): AccountProviderKind {
+  const normalized = value.trim().toLowerCase();
+  const match = ACCOUNT_PROVIDER_KINDS.find((kind) => kind === normalized);
+  if (!match) {
+    throw new CliError(
+      "INVALID_THREAD_OPTION",
+      `Provider kind must be one of ${ACCOUNT_PROVIDER_KINDS.join(", ")} (got "${value}").`,
+      { exitCode: 2 },
+    );
+  }
+  return match;
+}
+
+export function parseEnvAssignments(entries: readonly string[]): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const raw of entries) {
+    const eq = raw.indexOf("=");
+    if (eq <= 0) {
+      throw new CliError("INVALID_THREAD_OPTION", `Environment variable must be KEY=VALUE (got "${raw}").`, { exitCode: 2 });
+    }
+    const key = raw.slice(0, eq).trim();
+    if (!key) {
+      throw new CliError("INVALID_THREAD_OPTION", `Environment variable name cannot be empty (got "${raw}").`, { exitCode: 2 });
+    }
+    env[key] = raw.slice(eq + 1);
+  }
+  return env;
+}
+
+export async function listProviderAccounts(config: CliConfig) {
+  const { accounts } = await (await cliClient(config)).query({ type: "providers.accounts" });
+  return { accounts };
+}
+
+export async function saveProviderAccount(config: CliConfig, input: ProviderAccountSaveInput) {
+  const result = await (await cliClient(config)).dispatch({ type: "provider.account.save", ...input });
+  return { account: result.account, created: result.created };
+}
+
+export async function toggleProviderAccount(
+  config: CliConfig,
+  kind: AccountProviderKind,
+  id: string,
+  enabled: boolean,
+) {
+  const result = await (await cliClient(config)).dispatch({ type: "provider.account.toggle", kind, id, enabled });
+  return { account: result.account };
+}
+
+export async function removeProviderAccountCli(config: CliConfig, kind: AccountProviderKind, id: string) {
+  const result = await (await cliClient(config)).dispatch({ type: "provider.account.remove", kind, id });
+  return { removed: result.removed };
 }

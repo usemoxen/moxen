@@ -165,6 +165,8 @@ pub struct Workspace {
     /// memory open inside it, and a form, confirmation or add-flow below.
     pub settings_open: bool,
     pub settings_tab: (String, Option<String>),
+    pub settings_account: Option<String>,
+    pub settings_account_kind: String,
     pub settings_editor: Option<String>,
     pub settings_price_model: Option<String>,
     pub settings_rail_tip: Option<usize>,
@@ -572,6 +574,8 @@ impl Workspace {
             thread_action_focus: cx.focus_handle(),
             settings_open: false,
             settings_tab: ("general".into(), None),
+            settings_account: None,
+            settings_account_kind: "claude".into(),
             settings_editor: None,
             settings_price_model: None,
             settings_rail_tip: None,

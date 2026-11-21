@@ -97,6 +97,7 @@ export const settingsEs: Readonly<Record<string, string>> = {
   "Model servers": "Servidores de modelos",
 
   // sidebar
+  "Overview": "Resumen",
   "General": "General",
   "Agent context": "Contexto del agente",
   "Interface": "Interfaz",

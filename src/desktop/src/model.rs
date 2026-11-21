@@ -872,6 +872,16 @@ pub trait ThreadSource {
     }
     /// Runs a provider CLI's own updater.
     fn update_provider(&mut self, _provider: &str) {}
+    /// Runs all provider CLI updaters in parallel.
+    fn update_all_providers(&mut self) {}
+    /// Reads configured multi-account provider logins (`providers.accounts`).
+    fn read_provider_accounts(&mut self) {}
+    fn provider_accounts(&self) -> Option<Arc<Result<Vec<crate::settings::ProviderAccountSummary>, String>>> {
+        None
+    }
+    fn save_provider_account(&mut self, _payload: serde_json::Value) {}
+    fn toggle_provider_account(&mut self, _kind: &str, _id: &str, _enabled: bool) {}
+    fn remove_provider_account(&mut self, _kind: &str, _id: &str) {}
     /// Downloads, tests and switches to the newest Moxen release.
     fn apply_update(&mut self) {}
     /// Goes back to the version the update replaced.

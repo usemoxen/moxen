@@ -1838,6 +1838,106 @@ impl UpdateState {
     }
 }
 
+/// Public, credential-free summary of one configured provider account (`providers.accounts`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderAccountSummary {
+    pub kind: String,
+    pub id: String,
+    pub instance_id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub home_path: Option<String>,
+    pub binary_path: Option<String>,
+    pub launch_args: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub model: Option<String>,
+    pub thinking_effort: Option<String>,
+    pub email: Option<String>,
+    pub workspace_name: Option<String>,
+    pub plan_type: Option<String>,
+    pub signed_in: Option<bool>,
+    pub codex_home_path: Option<String>,
+    pub codex_binary_path: Option<String>,
+    pub codex_launch_args: Option<String>,
+    pub codex_verified: bool,
+}
+
+impl ProviderAccountSummary {
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let kind = text(value, "kind")?;
+        let id = text(value, "id")?;
+        let instance_id = text(value, "instanceId").unwrap_or_else(|| format!("{kind}/{id}"));
+        let label = text(value, "label").unwrap_or_else(|| id.clone());
+        let env = value
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            kind,
+            id,
+            instance_id,
+            label,
+            enabled: boolean(value, "enabled").unwrap_or(true),
+            home_path: text(value, "homePath"),
+            binary_path: text(value, "binaryPath"),
+            launch_args: text(value, "launchArgs"),
+            env,
+            model: text(value, "model"),
+            thinking_effort: text(value, "thinkingEffort"),
+            email: text(value, "email"),
+            workspace_name: text(value, "workspaceName"),
+            plan_type: text(value, "planType"),
+            signed_in: boolean(value, "signedIn"),
+            codex_home_path: text(value, "codexHomePath"),
+            codex_binary_path: text(value, "codexBinaryPath"),
+            codex_launch_args: text(value, "codexLaunchArgs"),
+            codex_verified: boolean(value, "codexVerified").unwrap_or(false),
+        })
+    }
+
+    pub fn list_from_json(value: &Value) -> Vec<Self> {
+        value
+            .get("accounts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Self::from_json)
+            .collect()
+    }
+}
+
+/// Summarize the answer from `provider.update-all` into a single notice line.
+pub fn provider_update_all_line(result: &Value) -> String {
+    let Some(items) = result.get("results").and_then(Value::as_array) else {
+        return "Providers updated.".into();
+    };
+    let mut parts = Vec::new();
+    for item in items {
+        let provider = text(item, "provider").unwrap_or_default();
+        let ok = boolean(item, "ok").unwrap_or(false);
+        if ok {
+            let line = item
+                .get("update")
+                .map(provider_update_line)
+                .unwrap_or_else(|| "Updated.".into());
+            parts.push(format!("{provider}: {line}"));
+        } else {
+            let err = text(item, "error").unwrap_or_else(|| "failed".into());
+            parts.push(format!("{provider}: {err}"));
+        }
+    }
+    if parts.is_empty() {
+        "No providers updated.".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
 /// What a provider updater run reports.
 pub fn provider_update_line(result: &Value) -> String {
     let after = text(result, "after");
@@ -1864,11 +1964,54 @@ pub fn provider_update_line(result: &Value) -> String {
 mod tests {
     use super::{
         DiscoveredModel, Discovery, Embeddings, FieldKind, HarnessRun, ListFieldValue, MemoryList,
-        MemorySearch, RemoteState, SettingKind, SettingValue, Snapshot, UpdateState, display_field,
-        display_value, mcp_document, normalize_field_value, normalize_setting_value,
-        profile_document, provider_update_line, section_label, section_order,
+        MemorySearch, ProviderAccountSummary, RemoteState, SettingKind, SettingValue, Snapshot,
+        UpdateState, display_field, display_value, mcp_document, normalize_field_value,
+        normalize_setting_value, profile_document, provider_update_all_line, provider_update_line,
+        section_label, section_order,
     };
     use serde_json::json;
+
+    #[test]
+    fn decodes_provider_account_summaries_and_update_all_lines() {
+        let accounts = ProviderAccountSummary::list_from_json(&json!({
+            "accounts": [
+                {
+                    "kind": "claude",
+                    "id": "work",
+                    "instanceId": "claude/work",
+                    "label": "Work",
+                    "enabled": true,
+                    "homePath": "~/.claude-work",
+                    "env": { "FOO": "1" }
+                },
+                {
+                    "kind": "chatgpt",
+                    "id": "personal",
+                    "instanceId": "chatgpt/personal",
+                    "label": "Personal",
+                    "enabled": false,
+                    "email": "u@example.test",
+                    "planType": "plus",
+                    "signedIn": true,
+                    "codexVerified": true
+                }
+            ]
+        }));
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].instance_id, "claude/work");
+        assert_eq!(accounts[0].env.get("FOO").map(String::as_str), Some("1"));
+        assert_eq!(accounts[1].email.as_deref(), Some("u@example.test"));
+        assert!(accounts[1].codex_verified);
+
+        let line = provider_update_all_line(&json!({
+            "results": [
+                { "provider": "claude", "ok": true, "update": { "updated": true, "after": "2.2.0" } },
+                { "provider": "opencode", "ok": false, "error": "offline" }
+            ]
+        }));
+        assert!(line.contains("claude: Updated to 2.2.0."));
+        assert!(line.contains("opencode: offline"));
+    }
 
     fn snapshot() -> Snapshot {
         Snapshot::from_json(&json!({

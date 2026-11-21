@@ -69,13 +69,25 @@ pub enum SettingsForm {
     },
     /// Text added to the end of a memory.
     MemoryAppend { name: String, scope: String },
+    /// One editable field of a configured provider account.
+    AccountField {
+        kind: String,
+        id: String,
+        field: String,
+        title: String,
+    },
+    /// Slug id for a newly added provider account.
+    AddAccount { kind: String },
 }
 
 impl SettingsForm {
     fn inline(&self) -> bool {
         matches!(
             self,
-            Self::Scalar { .. } | Self::Field { .. } | Self::ModelPrice { .. }
+            Self::Scalar { .. }
+                | Self::Field { .. }
+                | Self::ModelPrice { .. }
+                | Self::AccountField { .. }
         )
     }
 
@@ -83,7 +95,9 @@ impl SettingsForm {
         match self {
             Self::Scalar { title, .. }
             | Self::Field { title, .. }
-            | Self::ModelPrice { title, .. } => title.clone(),
+            | Self::ModelPrice { title, .. }
+            | Self::AccountField { title, .. } => title.clone(),
+            Self::AddAccount { kind } => format!("Add {} account (slug id)", account_kind_name(kind)),
             Self::Duplicate { id, .. } => format!("Copy “{id}” under a new name"),
             Self::AddModel { .. } => "Name the model".into(),
             Self::Import => "Import a profile".into(),
@@ -138,6 +152,11 @@ pub enum SettingsConfirm {
     },
     UpdateProvider {
         provider: String,
+    },
+    UpdateAllProviders,
+    RemoveAccount {
+        kind: String,
+        id: String,
     },
     SetupEmbeddings {
         all: bool,
@@ -236,6 +255,7 @@ impl Workspace {
         self.source.refresh_catalog();
         self.source.read_remote();
         self.source.read_updates();
+        self.source.read_provider_accounts();
         self.source.read_memories(self.settings_thread());
         self.source.read_managed_skills(self.settings_thread());
         self.source.read_embeddings();
@@ -535,6 +555,47 @@ impl Workspace {
                     self.source.read_memory(thread, &name, &scope);
                 }
             }
+            SettingsForm::AccountField {
+                kind, id, field, ..
+            } => {
+                let mut payload = serde_json::json!({ "kind": kind, "id": id });
+                let trimmed = text.trim();
+                if field == "env" {
+                    let mut map = serde_json::Map::new();
+                    for part in trimmed.split([',', '\n']) {
+                        let entry = part.trim();
+                        if let Some((k, v)) = entry.split_once('=') {
+                            let k = k.trim();
+                            if !k.is_empty() {
+                                map.insert(k.to_string(), serde_json::Value::String(v.trim().to_string()));
+                            }
+                        }
+                    }
+                    payload["env"] = if map.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(map)
+                    };
+                } else if trimmed.is_empty() {
+                    payload[&field] = serde_json::Value::Null;
+                } else {
+                    payload[&field] = serde_json::Value::String(trimmed.to_string());
+                }
+                self.source.save_provider_account(payload);
+                self.settings_form = None;
+            }
+            SettingsForm::AddAccount { kind } => {
+                let slug = text.trim().to_lowercase();
+                if slug.is_empty() {
+                    self.settings_error = Some("Type an account id (for example: personal or work).".into());
+                } else {
+                    let instance_id = format!("{kind}/{slug}");
+                    self.source
+                        .save_provider_account(serde_json::json!({ "kind": kind, "id": slug }));
+                    self.settings_account = Some(instance_id);
+                    self.settings_form = None;
+                }
+            }
         }
         cx.notify();
     }
@@ -579,6 +640,14 @@ impl Workspace {
             }
             SettingsConfirm::RevokeDevice { id } => self.source.revoke_device(&id),
             SettingsConfirm::UpdateProvider { provider } => self.source.update_provider(&provider),
+            SettingsConfirm::UpdateAllProviders => self.source.update_all_providers(),
+            SettingsConfirm::RemoveAccount { kind, id } => {
+                let target = format!("{kind}/{id}");
+                self.source.remove_provider_account(&kind, &id);
+                if self.settings_account.as_deref() == Some(target.as_str()) {
+                    self.settings_account = None;
+                }
+            }
             SettingsConfirm::SetupEmbeddings { all } => self.source.setup_embeddings(all),
             SettingsConfirm::RebuildEmbeddings { all } => self.source.rebuild_embeddings(all),
             SettingsConfirm::UnloadEmbeddings => self.source.unload_embeddings(),
@@ -765,9 +834,11 @@ fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
         let category = match section {
             "provider:harness" => "Moxen Harness",
             "provider:acp" => "ACP",
-            "provider:claude" | "provider:codex" | "provider:opencode" | "provider:antigravity" => {
-                "Providers"
-            }
+            "provider:claude"
+            | "provider:codex"
+            | "provider:opencode"
+            | "provider:antigravity"
+            | "provider:chatgpt" => "Providers",
             "mcp" | "skills" => "Integrations",
             _ => "Moxen",
         };
@@ -818,6 +889,17 @@ fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
                 group: None,
                 category: "Moxen",
                 label,
+            },
+        );
+    }
+    if let Some(first_provider) = tabs.iter().position(|tab| tab.category == "Providers") {
+        tabs.insert(
+            first_provider,
+            SettingsTab {
+                section: "providers:overview",
+                group: None,
+                category: "Providers",
+                label: "Overview",
             },
         );
     }
@@ -921,6 +1003,7 @@ fn body(w: &Workspace, tab: Option<&SettingsTab<'_>>, cx: &mut Context<Workspace
     let content: AnyElement = match tab {
         Some(tab) if tab.section == "remote" => remote_tab(w, cx),
         Some(tab) if tab.section == "updates" => updates_tab(w, cx),
+        Some(tab) if tab.section == "providers:overview" => providers_overview_tab(w, cx),
         _ => section_tab(w, tab, cx),
     };
     div()
@@ -4520,7 +4603,23 @@ fn updates_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             out = out.child(
                 div()
                     .pt(px(10.))
-                    .child(ui::caps(&crate::language::tr("Providers"))),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(ui::caps(&crate::language::tr("Providers")))
+                    .child(small_button(
+                        ("settings-provider-update-all", 0),
+                        "Update all",
+                        "Run every installed provider CLI updater in parallel",
+                        cx.listener(|this, _, _, cx| {
+                            this.confirm_settings(
+                                "Update all provider CLIs?".into(),
+                                "Runs each installed provider's own updater in parallel on this machine.".into(),
+                                SettingsConfirm::UpdateAllProviders,
+                                cx,
+                            );
+                        }),
+                    )),
             );
             for provider in &state.providers {
                 out = out.child(provider_row(w, provider, cx));
@@ -4528,6 +4627,441 @@ fn updates_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         }
     }
     out.into_any_element()
+}
+
+fn account_kind_name(kind: &str) -> &'static str {
+    match kind {
+        "claude" => "Claude Code",
+        "chatgpt" => "ChatGPT",
+        "antigravity" => "Antigravity",
+        _ => "Provider",
+    }
+}
+
+fn account_kind_section(kind: &str) -> &'static str {
+    match kind {
+        "claude" => "provider:claude",
+        "chatgpt" => "provider:chatgpt",
+        "antigravity" => "provider:antigravity",
+        _ => "providers:overview",
+    }
+}
+
+fn account_status_subtitle(account: &settings::ProviderAccountSummary) -> String {
+    if !account.enabled {
+        return "Disabled".into();
+    }
+    let mut parts = Vec::new();
+    if let Some(email) = &account.email {
+        parts.push(format!("Authenticated as {email}"));
+    } else if account.kind == "chatgpt" {
+        parts.push(if account.signed_in == Some(true) {
+            "Signed in".into()
+        } else {
+            "Not signed in".into()
+        });
+    } else if let Some(home) = &account.home_path {
+        parts.push(home.clone());
+    } else {
+        parts.push("Default home".into());
+    }
+    if let Some(plan) = &account.plan_type {
+        parts.push(plan.clone());
+    }
+    if account.codex_verified {
+        parts.push("Codex verified".into());
+    }
+    parts.join(" · ")
+}
+
+/// Providers overview: master-detail manager for multi-account logins (`claude/<id>`,
+/// `chatgpt/<id>`, `antigravity/<id>`), inline runtime/env editing, and Update / Update all.
+fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let accounts_state = w.source.provider_accounts();
+    let updates_state = w.source.updates();
+    let accounts: Vec<settings::ProviderAccountSummary> = match accounts_state.as_deref() {
+        Some(Ok(list)) => list.clone(),
+        _ => vec![],
+    };
+    let selected_id = w
+        .settings_account
+        .as_deref()
+        .filter(|id| accounts.iter().any(|a| a.instance_id == *id))
+        .map(str::to_string)
+        .or_else(|| accounts.first().map(|a| a.instance_id.clone()));
+    let selected = selected_id
+        .as_deref()
+        .and_then(|id| accounts.iter().find(|a| a.instance_id == id));
+
+    let version_for = |kind: &str| -> Option<String> {
+        let cli = match kind {
+            "claude" => "claude",
+            "antigravity" => "antigravity",
+            "chatgpt" => "codex",
+            other => other,
+        };
+        updates_state
+            .as_deref()
+            .and_then(|res| res.as_ref().ok())
+            .and_then(|state| state.providers.iter().find(|p| p.id == cli))
+            .and_then(|p| p.latest.clone())
+    };
+
+    let mut list_col = div()
+        .w(px(230.))
+        .flex_shrink_0()
+        .pr(px(12.))
+        .border_r_1()
+        .border_color(color("line"))
+        .flex()
+        .flex_col()
+        .gap(px(6.));
+
+    list_col = list_col.child(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(ui::caps("Accounts"))
+            .child(small_button(
+                ("providers-overview-update-all", 0),
+                "Update all",
+                "Update all installed provider CLIs in parallel",
+                cx.listener(|this, _, _, cx| {
+                    this.confirm_settings(
+                        "Update all provider CLIs?".into(),
+                        "Runs each installed provider's own updater in parallel on this machine.".into(),
+                        SettingsConfirm::UpdateAllProviders,
+                        cx,
+                    );
+                }),
+            )),
+    );
+
+    if let Some(Err(message)) = accounts_state.as_deref() {
+        list_col = list_col.child(error_row(message, w, cx));
+    } else if accounts.is_empty() {
+        list_col = list_col.child(
+            div()
+                .text_xs()
+                .text_color(color("ink-2"))
+                .py(px(6.))
+                .child("No dedicated accounts configured yet."),
+        );
+    } else {
+        for (idx, account) in accounts.iter().enumerate() {
+            let active = selected.is_some_and(|s| s.instance_id == account.instance_id);
+            let pick_id = account.instance_id.clone();
+            let toggle_kind = account.kind.clone();
+            let toggle_id = account.id.clone();
+            let next_enabled = !account.enabled;
+            let ver = version_for(&account.kind);
+            let title = format!("{} · {}", account_kind_name(&account.kind), account.label);
+            let sub = account_status_subtitle(account);
+            list_col = list_col.child(
+                div()
+                    .id(("providers-account-row", idx))
+                    .rounded(px(6.))
+                    .px(px(8.))
+                    .py(px(6.))
+                    .when(active, |d| d.bg(color("sunk")))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_account = Some(pick_id.clone());
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(color("ink"))
+                                    .child(match ver {
+                                        Some(v) => format!("{title} v{v}"),
+                                        None => title,
+                                    }),
+                            )
+                            .child(small_button(
+                                ("providers-account-toggle", idx),
+                                if account.enabled { "On" } else { "Off" },
+                                "Enable or disable this account",
+                                cx.listener(move |this, _, _, cx| {
+                                    this.source
+                                        .toggle_provider_account(&toggle_kind, &toggle_id, next_enabled);
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(color("ink-2"))
+                            .truncate()
+                            .child(sub),
+                    ),
+            );
+        }
+    }
+
+    // + Add provider row with kind selector
+    let chosen_kind = w.settings_account_kind.clone();
+    list_col = list_col.child(
+        div()
+            .pt(px(8.))
+            .border_t_1()
+            .border_color(color("line"))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(ui::caps("+ Add provider"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(4.))
+                    .children(["claude", "chatgpt", "antigravity"].into_iter().enumerate().map(
+                        |(idx, kind)| {
+                            let selected_kind = chosen_kind == kind;
+                            let k = kind.to_string();
+                            let label = if selected_kind {
+                                format!("• {}", account_kind_name(kind))
+                            } else {
+                                account_kind_name(kind).to_string()
+                            };
+                            small_button(
+                                ("providers-add-kind", idx),
+                                &label,
+                                "Choose provider kind",
+                                cx.listener(move |this, _, _, cx| {
+                                    this.settings_account_kind = k.clone();
+                                    cx.notify();
+                                }),
+                            )
+                        },
+                    )),
+            )
+            .child({
+                let add_label = format!("+ Add {} account", account_kind_name(&chosen_kind));
+                small_button(
+                    ("providers-add-open", 0),
+                    &add_label,
+                    "Add a new login for the selected provider",
+                    cx.listener(move |this, _, _, cx| {
+                        let kind = this.settings_account_kind.clone();
+                        this.open_settings_form(SettingsForm::AddAccount { kind }, "", cx);
+                    }),
+                )
+            }),
+    );
+
+    // Right column: detail editor for selected account
+    let mut detail_col = div()
+        .flex_1()
+        .min_w_0()
+        .pl(px(14.))
+        .flex()
+        .flex_col()
+        .gap(px(8.));
+
+    if let Some(account) = selected {
+        let is_chatgpt = account.kind == "chatgpt";
+        let ver = version_for(&account.kind);
+        let section_target = account_kind_section(&account.kind).to_string();
+        let remove_kind = account.kind.clone();
+        let remove_id = account.id.clone();
+        let remove_instance = account.instance_id.clone();
+
+        detail_col = detail_col.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_color(color("ink"))
+                        .child(match ver {
+                            Some(v) => format!(
+                                "{} · {} (v{v})",
+                                account_kind_name(&account.kind),
+                                account.label
+                            ),
+                            None => format!(
+                                "{} · {}",
+                                account_kind_name(&account.kind),
+                                account.label
+                            ),
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(small_button(
+                            ("providers-detail-open-section", 0),
+                            "Provider settings",
+                            "Open shared provider-level settings",
+                            cx.listener(move |this, _, _, cx| {
+                                this.select_settings_section(&section_target, None);
+                                cx.notify();
+                            }),
+                        ))
+                        .child(small_button(
+                            ("providers-detail-remove", 0),
+                            "Remove",
+                            "Remove this account from Moxen",
+                            cx.listener(move |this, _, _, cx| {
+                                this.confirm_settings(
+                                    format!("Remove {remove_instance}?"),
+                                    "Removes this account from config (and clears any ChatGPT OAuth tokens from keychain).".into(),
+                                    SettingsConfirm::RemoveAccount {
+                                        kind: remove_kind.clone(),
+                                        id: remove_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            }),
+                        )),
+                ),
+        );
+
+        detail_col = detail_col
+            .child(ui::caps("Status"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(color("ink-2"))
+                    .child(format!(
+                        "{} · {}",
+                        account.instance_id,
+                        account_status_subtitle(account)
+                    )),
+            )
+            .child(ui::caps("Runtime"));
+
+        let env_str = account
+            .env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows: Vec<(&str, &str, String)> = vec![
+            ("label", "Display name", account.label.clone()),
+            (
+                if is_chatgpt { "codexBinaryPath" } else { "binaryPath" },
+                "Binary path",
+                if is_chatgpt {
+                    account.codex_binary_path.clone().unwrap_or_default()
+                } else {
+                    account.binary_path.clone().unwrap_or_default()
+                },
+            ),
+            (
+                if is_chatgpt { "codexHomePath" } else { "homePath" },
+                match account.kind.as_str() {
+                    "claude" => "CLAUDE_CONFIG_DIR path",
+                    "antigravity" => "Account home (HOME / USERPROFILE)",
+                    _ => "Codex companion home (CODEX_HOME)",
+                },
+                if is_chatgpt {
+                    account.codex_home_path.clone().unwrap_or_default()
+                } else {
+                    account.home_path.clone().unwrap_or_default()
+                },
+            ),
+            (
+                if is_chatgpt { "codexLaunchArgs" } else { "launchArgs" },
+                "Launch arguments",
+                if is_chatgpt {
+                    account.codex_launch_args.clone().unwrap_or_default()
+                } else {
+                    account.launch_args.clone().unwrap_or_default()
+                },
+            ),
+            ("model", "Default model", account.model.clone().unwrap_or_default()),
+            (
+                "thinkingEffort",
+                "Thinking effort",
+                account.thinking_effort.clone().unwrap_or_default(),
+            ),
+            ("env", "Environment variables (KEY=VALUE)", env_str),
+        ];
+
+        for (idx, (field, title, value)) in rows.into_iter().enumerate() {
+            let kind = account.kind.clone();
+            let id = account.id.clone();
+            let field_name = field.to_string();
+            let title_str = title.to_string();
+            let initial = value.clone();
+            detail_col = detail_col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .py(px(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_color(color("ink")).child(title))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color("ink-2"))
+                                    .truncate()
+                                    .child(if value.is_empty() {
+                                        "Default".to_string()
+                                    } else {
+                                        value
+                                    }),
+                            ),
+                    )
+                    .child(small_button(
+                        ("providers-detail-edit", idx),
+                        "Edit",
+                        "Edit this account field",
+                        cx.listener(move |this, _, _, cx| {
+                            this.open_settings_form(
+                                SettingsForm::AccountField {
+                                    kind: kind.clone(),
+                                    id: id.clone(),
+                                    field: field_name.clone(),
+                                    title: title_str.clone(),
+                                },
+                                &initial,
+                                cx,
+                            );
+                        }),
+                    )),
+            );
+        }
+    } else {
+        detail_col = detail_col.child(
+            div()
+                .text_color(color("ink-2"))
+                .py(px(12.))
+                .child("Select an account on the left or click “+ Add provider” to configure Claude Code, ChatGPT, or Antigravity logins."),
+        );
+    }
+
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .w_full()
+        .child(list_col)
+        .child(detail_col)
+        .into_any_element()
 }
 
 fn provider_row(
@@ -4587,6 +5121,17 @@ mod tests {
         ProfileWizard, RAIL_GUTTER, RAIL_WIDTH, SkillListItem, rail_tip_left, setting_label,
         settings, skill_list_order, wizard_models,
     };
+
+    #[test]
+    fn providers_overview_leads_the_providers_category_including_chatgpt() {
+        let snapshot = crate::mock_settings::snapshot_fixture();
+        let provider_tabs: Vec<_> = super::tabs(&snapshot)
+            .into_iter()
+            .filter(|tab| tab.category == "Providers")
+            .map(|tab| tab.section)
+            .collect();
+        assert_eq!(provider_tabs.first().copied(), Some("providers:overview"));
+    }
 
     #[test]
     fn the_interface_offers_the_same_theme_as_the_tui() {
