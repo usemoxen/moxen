@@ -106,12 +106,43 @@ export function chatgptAccountAuthRef(accountId: string): string {
 }
 
 const HOST_ID_SECRET_NAME = "chatgpt.host_id";
+const VALID_HOST_ID_PREFIXES = [
+  "urn:uuid:",
+  "urn:ietf:params:oauth:jwk-thumbprint:",
+  "did:key:",
+] as const;
+const BARE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
-/** Persistent per-host identifier for `dynamic_agent_client` registration. */
+/**
+ * Normalize a persisted or supplied `ext_agent_host_id` to a valid OpenAI URI
+ * (`urn:uuid:...`, `urn:ietf:params:oauth:jwk-thumbprint:...`, or `did:key:...`).
+ * Upgrades legacy bare UUIDs stored before the `urn:uuid:` prefix was added.
+ */
+export function normalizeAgentHostId(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (VALID_HOST_ID_PREFIXES.some((prefix) => trimmed.startsWith(prefix) && trimmed.length > prefix.length)) {
+    return trimmed;
+  }
+  if (BARE_UUID_RE.test(trimmed)) {
+    return `urn:uuid:${trimmed.toLowerCase()}`;
+  }
+  return null;
+}
+
+/** Persistent per-host identifier (`urn:uuid:...`) for Sign in with ChatGPT. */
 export async function getOrCreateAgentHostId(secrets: KeychainAdapter = DEFAULT_KEYCHAIN): Promise<string> {
   const existing = await secrets.read(HOST_ID_SECRET_NAME);
-  if (existing && existing.trim().length > 0) return existing.trim();
-  const created = crypto.randomUUID();
+  if (existing) {
+    const normalized = normalizeAgentHostId(existing);
+    if (normalized) {
+      if (normalized !== existing.trim()) {
+        await secrets.write(HOST_ID_SECRET_NAME, normalized);
+      }
+      return normalized;
+    }
+  }
+  const created = `urn:uuid:${crypto.randomUUID()}`;
   await secrets.write(HOST_ID_SECRET_NAME, created);
   return created;
 }
@@ -205,8 +236,11 @@ export function buildAuthorizationUrl(input: BuildAuthUrlInput): string {
   url.searchParams.set("nonce", input.pkce.nonce);
   url.searchParams.set("code_challenge", input.pkce.codeChallenge);
   url.searchParams.set("code_challenge_method", "S256");
+  const hostId = normalizeAgentHostId(input.hostId) ?? input.hostId.trim();
+  if (hostId) {
+    url.searchParams.set("ext_agent_host_id", hostId);
+  }
   if (clientId === DYNAMIC_AGENT_CLIENT_ID) {
-    url.searchParams.set("ext_agent_host_id", input.hostId);
     url.searchParams.set("agent_name_hint", input.agentNameHint ?? AGENT_NAME_HINT);
   }
   return url.toString();

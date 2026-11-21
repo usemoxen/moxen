@@ -58,11 +58,19 @@ const DISCOVERY: OpenIdConfiguration = {
 afterEach(() => resetChatGptOAuthCachesForTests());
 
 describe("Sign in with ChatGPT OAuth 2.0 PKCE + OIDC (MXN-460)", () => {
-  it("builds a PKCE S256 dynamic_agent_client authorization URL and parses callback + issued client_id", async () => {
+  it("builds a PKCE S256 dynamic_agent_client authorization URL with urn:uuid host ID and parses callback + issued client_id", async () => {
     const secrets = makeMemoryKeychain();
     const hostId1 = await getOrCreateAgentHostId(secrets);
     const hostId2 = await getOrCreateAgentHostId(secrets);
     expect(hostId1).toBe(hostId2);
+    expect(hostId1).toMatch(/^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u);
+
+    // Legacy bare UUID already saved in keychain is upgraded in-place to urn:uuid:...
+    const legacySecrets = makeMemoryKeychain();
+    await legacySecrets.write("chatgpt.host_id", "6591ea8b-fb76-46e5-9485-05f96f0e341d");
+    const upgraded = await getOrCreateAgentHostId(legacySecrets);
+    expect(upgraded).toBe("urn:uuid:6591ea8b-fb76-46e5-9485-05f96f0e341d");
+    expect(legacySecrets.map.get("chatgpt.host_id")).toBe("urn:uuid:6591ea8b-fb76-46e5-9485-05f96f0e341d");
 
     const pkce = createPkceSession();
     const expectedChallenge = crypto.createHash("sha256").update(pkce.codeVerifier).digest("base64url");
@@ -82,6 +90,20 @@ describe("Sign in with ChatGPT OAuth 2.0 PKCE + OIDC (MXN-460)", () => {
     expect(authUrl.searchParams.get("resource")).toBe(OPENAI_API_RESOURCE);
     expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authUrl.searchParams.get("scope")).toBe(CHATGPT_OAUTH_SCOPES.join(" "));
+
+    // Returning sign-in with issued client_id keeps ext_agent_host_id (normalized) and omits agent_name_hint.
+    const reauthUrl = new URL(
+      buildAuthorizationUrl({
+        discovery: DISCOVERY,
+        pkce,
+        redirectUri: "http://127.0.0.1:43210/callback",
+        clientId: "oaiapp_issued_1",
+        hostId: "6591ea8b-fb76-46e5-9485-05f96f0e341d",
+      }),
+    );
+    expect(reauthUrl.searchParams.get("client_id")).toBe("oaiapp_issued_1");
+    expect(reauthUrl.searchParams.get("ext_agent_host_id")).toBe("urn:uuid:6591ea8b-fb76-46e5-9485-05f96f0e341d");
+    expect(reauthUrl.searchParams.get("agent_name_hint")).toBeNull();
 
     const parsed = parseAuthorizationCallback(
       `http://127.0.0.1:43210/callback?code=abc123&state=${encodeURIComponent(pkce.state)}&client_id=oaiapp_issued_1`,
