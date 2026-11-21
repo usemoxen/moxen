@@ -32,6 +32,8 @@ impl Workspace {
                 self.experience_ui.folder = false;
                 self.experience_ui.guide_started = Some(std::time::Instant::now());
                 self.source.read_settings();
+                self.source.read_diagnosis();
+                self.source.read_provider_accounts();
             }
             Panel::Releases => self.experience_ui.release = 0,
             Panel::Problems => self.source.read_records(),
@@ -139,6 +141,10 @@ impl Workspace {
         } else {
             self.experience_ui.step += 1;
             self.experience_ui.folder = false;
+            if self.experience_ui.step == 2 {
+                self.source.read_diagnosis();
+                self.source.read_provider_accounts();
+            }
             if self.experience_ui.step == 3 {
                 self.source.read_embeddings();
             }
@@ -149,11 +155,16 @@ impl Workspace {
         self.open_settings(window, cx);
         self.settings_entry = match section {
             "provider:harness" => Some("providers.harness.profiles".into()),
+            "provider:acp" => Some("providers.acp.agents".into()),
             "mcp" => Some("mcpServers".into()),
             _ => None,
         };
         self.settings_item = None;
-        let group = (section == "provider:harness").then_some("Model servers");
+        let group = match section {
+            "provider:harness" => Some("Model servers"),
+            "provider:acp" => Some("ACP agents"),
+            _ => None,
+        };
         self.select_settings_section(section, group);
     }
 
@@ -923,8 +934,149 @@ fn memory_mode(w: &Workspace) -> Memory {
     Memory::Plain
 }
 
+fn guide_cli_status(diagnosis: Option<&Value>, key: &str) -> String {
+    let Some(entry) = diagnosis.and_then(|d| d.get("providers")).and_then(|p| p.get(key)) else {
+        return t("guide.cliNotInstalledHint").into();
+    };
+    if entry.get("installed").and_then(Value::as_bool) != Some(true) {
+        return t("guide.cliNotInstalledHint").into();
+    }
+    let version = string(entry, "version");
+    if version.is_empty() {
+        t("guide.cliInstalledReady").into()
+    } else {
+        t("guide.cliInstalledVersion").replace("{version}", version)
+    }
+}
+
 fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
     let catalog = w.source.catalog();
+    let diagnosis = w.source.diagnosis();
+    let diag_val = diagnosis.as_deref().and_then(|res| res.as_ref().ok());
+    let accounts: Vec<crate::settings::ProviderAccountSummary> = match w.source.provider_accounts().as_deref() {
+        Some(Ok(list)) => list.clone(),
+        _ => vec![],
+    };
+    let opencode_enabled = w
+        .source
+        .settings()
+        .as_deref()
+        .and_then(|res| res.as_ref().ok())
+        .and_then(|snap| snap.find("providers.opencode.enabled"))
+        .is_some_and(|view| view.value == crate::settings::SettingValue::Flag(true));
+
+    let has_providers = matches!(catalog, CatalogState::Ready(ref cat) if !cat.providers.is_empty());
+    let claude_added = accounts.iter().any(|a| a.kind == "claude")
+        || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "claudeAgent"));
+    let chatgpt_account = accounts.iter().find(|a| a.kind == "chatgpt" && a.signed_in == Some(true));
+    let chatgpt_added = chatgpt_account.is_some()
+        || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "chatgpt" && p.enabled));
+    let opencode_added = opencode_enabled
+        || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "opencode"));
+    let antigravity_added = accounts.iter().any(|a| a.kind == "antigravity")
+        || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "antigravity"));
+
+    let mut setup_row = |id: &'static str, label: String, added: bool, note: String, action: Box<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>| {
+        let action = Arc::new(action);
+        let run = action.clone();
+        row()
+            .child(guide_button(
+                id,
+                label,
+                added,
+                cx,
+                move |w, window, cx| run(w, window, cx),
+            ))
+            .child(detail(note).flex_1().min_w_0().whitespace_normal())
+    };
+
+    let setup_card = column()
+        .p(px(12.))
+        .gap(px(6.))
+        .bg(color("sunk"))
+        .rounded(px(theme::px_token("radius", "radius-md")))
+        .child(ui::caps(t("guide.setupHeading")))
+        .child(setup_row(
+            "guide-setup-claude",
+            t("guide.addClaude").into(),
+            claude_added,
+            if claude_added {
+                t("guide.providerAdded").into()
+            } else {
+                guide_cli_status(diag_val, "claude")
+            },
+            Box::new(move |w, _, cx| {
+                if !claude_added {
+                    w.source.save_provider_account(json!({
+                        "kind": "claude",
+                        "id": "default",
+                        "label": "Default",
+                    }));
+                    w.experience_ui.provider = Some("claude/default".into());
+                    w.source.refresh_catalog();
+                    cx.notify();
+                }
+            }),
+        ))
+        .child(setup_row(
+            "guide-setup-chatgpt",
+            t("guide.signInChatGpt").into(),
+            chatgpt_added,
+            if let Some(email) = chatgpt_account.and_then(|a| a.email.as_deref()) {
+                t("settings.providers.authenticatedAs").replace("{email}", email)
+            } else if chatgpt_added {
+                t("guide.providerAdded").into()
+            } else {
+                t("guide.chatGptDetail").into()
+            },
+            Box::new(move |w, _, cx| {
+                if !chatgpt_added {
+                    w.source.start_chatgpt_login("default", Some("Default"));
+                    w.experience_ui.provider = Some("chatgpt/default".into());
+                    cx.notify();
+                }
+            }),
+        ))
+        .child(setup_row(
+            "guide-setup-opencode",
+            t("guide.enableOpencode").into(),
+            opencode_added,
+            if opencode_added {
+                t("guide.providerEnabled").into()
+            } else {
+                guide_cli_status(diag_val, "opencode")
+            },
+            Box::new(move |w, _, cx| {
+                if !opencode_added {
+                    w.source.set_setting("providers.opencode.enabled", "true");
+                    w.source.refresh_catalog();
+                    cx.notify();
+                }
+            }),
+        ))
+        .child(setup_row(
+            "guide-setup-antigravity",
+            t("guide.addAntigravity").into(),
+            antigravity_added,
+            if antigravity_added {
+                t("guide.providerAdded").into()
+            } else {
+                guide_cli_status(diag_val, "antigravity")
+            },
+            Box::new(move |w, _, cx| {
+                if !antigravity_added {
+                    w.source.save_provider_account(json!({
+                        "kind": "antigravity",
+                        "id": "default",
+                        "label": "Default",
+                    }));
+                    w.experience_ui.provider = Some("antigravity/default".into());
+                    w.source.refresh_catalog();
+                    cx.notify();
+                }
+            }),
+        ));
+
     let input = |composer| {
         div()
             .rounded(px(theme::px_token("radius", "radius-md")))
@@ -1037,11 +1189,17 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             ));
         }
     }
-    column()
-        .child(row().items_start().child(provider_pane).child(model_pane))
-        .child(
-            row()
-                .child(guide_button(
+    let mut out = column().child(setup_card);
+    if has_providers {
+        out = out.child(row().items_start().child(provider_pane).child(model_pane));
+    } else {
+        out = out.child(detail(t("guide.noProvidersYet")));
+    }
+    out.child(
+        row()
+            .flex_wrap()
+            .when(has_providers, |r| {
+                r.child(guide_button(
                     "guide-provider-refresh",
                     t("guide.refreshProviders"),
                     false,
@@ -1051,16 +1209,24 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                         cx.notify();
                     },
                 ))
-                .child(guide_button(
-                    "guide-harness",
-                    t("guide.addModelServer"),
-                    false,
-                    cx,
-                    |w, window, cx| w.guide_settings("provider:harness", window, cx),
-                )),
-        )
-        .when_some(status, |s, status| s.child(detail(status)))
-        .child(detail(t("guide.loginHint")))
+            })
+            .child(guide_button(
+                "guide-harness",
+                t("guide.addModelServer"),
+                false,
+                cx,
+                |w, window, cx| w.guide_settings("provider:harness", window, cx),
+            ))
+            .child(guide_button(
+                "guide-acp",
+                t("guide.addAcpAgent"),
+                false,
+                cx,
+                |w, window, cx| w.guide_settings("provider:acp", window, cx),
+            )),
+    )
+    .when_some(status, |s, status| s.child(detail(status)))
+    .child(detail(t("guide.loginHint")))
 }
 
 fn words(value: &Value) -> String {
@@ -1573,7 +1739,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::guide_enter_advances;
+    use super::{guide_cli_status, guide_enter_advances};
+    use serde_json::json;
 
     #[test]
     fn enter_on_a_focused_guide_control_does_not_advance() {
@@ -1583,5 +1750,18 @@ mod tests {
         assert!(guide_enter_advances(true, false));
         assert!(guide_enter_advances(false, true));
         assert!(guide_enter_advances(true, true));
+    }
+
+    #[test]
+    fn guide_cli_status_reports_detected_version_or_missing_hint() {
+        let diag = json!({
+            "providers": {
+                "claude": { "installed": true, "version": "2.1.330" },
+                "opencode": { "installed": false, "version": null },
+            }
+        });
+        assert!(guide_cli_status(Some(&diag), "claude").contains("2.1.330"));
+        assert!(guide_cli_status(Some(&diag), "opencode").contains("not installed"));
+        assert!(guide_cli_status(None, "antigravity").contains("not installed"));
     }
 }

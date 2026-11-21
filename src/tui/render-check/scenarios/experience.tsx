@@ -166,9 +166,15 @@ export async function runExperience(): Promise<void> {
   await click("Static");
   await next();
   await see("Choose who you work with");
+  await see("Set up a provider");
+  await see("Sign in with ChatGPT");
   await click("Claude Opus 5");
   if (visible("Select model")) fail("onboarding opened a separate model picker");
   await see("Choose who you work with");
+  await scrollTo("+ Enable OpenCode");
+  await click("+ Enable OpenCode");
+  await until(() => config.providers?.opencode?.enabled === true, "clicking + Enable OpenCode in onboarding did not enable OpenCode");
+  await scrollTo("Connect a model server");
   await click("Connect a model server");
   await see("Back to this step");
   await act(async () => setup.mockInput.pressKey("a"));
