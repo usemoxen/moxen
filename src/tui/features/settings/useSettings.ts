@@ -299,4 +299,4 @@ export function longThreadConfigFromSnapshot(snapshot: SettingsSnapshot | null, 
   return out as LongThreadConfig;
 }
 
-const LONG_THREAD_KEY = /^(longThreads\.\w+|ui\.autoHandoff\w*|providers\.(claude|codex|opencode|harness|acp|antigravity)\.(handoff|handoffAt|handoffModels|compaction|compactionModels|compactAt|compactAtModels|autoHandoff\w*|autoCompact\w*))$/;
+const LONG_THREAD_KEY = /^(longThreads\.\w+|ui\.autoHandoff\w*|providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)\.(handoff|handoffAt|handoffModels|compaction|compactionModels|compactAt|compactAtModels|autoHandoff\w*|autoCompact\w*))$/;

@@ -32,8 +32,8 @@ export interface McpRouting {
   readonly disabled?: boolean;
 }
 
-export type McpProviderKind = "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity";
-const PROVIDER_KINDS: readonly McpProviderKind[] = ["claude", "codex", "opencode", "harness", "acp", "antigravity"];
+export type McpProviderKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
+const PROVIDER_KINDS: readonly McpProviderKind[] = ["claude", "codex", "chatgpt", "opencode", "harness", "acp", "antigravity"];
 
 export type McpServerEntry = McpRouting &
   (

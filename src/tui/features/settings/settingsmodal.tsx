@@ -90,6 +90,7 @@ const SECTION_CATEGORY: Record<SettingSection, string> = {
   git: "Moxen",
   "provider:codex": "Providers",
   "provider:claude": "Providers",
+  "provider:chatgpt": "Providers",
   "provider:opencode": "Providers",
   "provider:antigravity": "Providers",
   "provider:acp": "ACP",

@@ -82,7 +82,7 @@ export const DEFAULT_MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
   ...HAND_EDITED_MODEL_PRICES,
 };
 
-export type ModelPriceKind = "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity";
+export type ModelPriceKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
 
 /**
  * What a model costs on a provider kind: the user's rows for that kind,

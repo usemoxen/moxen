@@ -1,5 +1,5 @@
 import { CliError } from "../errors.js";
-import { driverKindOfInstance } from "../types.js";
+import { driverKindOfInstance, parseAccountInstanceId } from "../types.js";
 import { binaryOnPath } from "../infra/process.js";
 import { parseClaudeModels } from "../providers/claude/catalog.js";
 import type {
@@ -111,10 +111,26 @@ export function asModelSelection(value: unknown): ModelSelection | null {
   return candidate as unknown as ModelSelection;
 }
 
-/** The defaults the user set on a provider's own settings page, for the provider an instance belongs to. */
+/** The defaults the user set on a provider's own settings page (with per-account model/effort overrides winning over provider-level defaults). */
 export function providerDefaults(config: Pick<CliConfig, "providers">, instanceId: string): { runtimeMode?: RuntimeMode; model?: string; thinkingEffort?: string } {
   const kind = driverKindOfInstance(instanceId);
-  return kind === null ? {} : (config.providers?.[kind] ?? {});
+  if (kind === null) return {};
+  const base = config.providers?.[kind] ?? {};
+  const parsed = parseAccountInstanceId(instanceId);
+  if (!parsed) return base;
+  const accounts =
+    parsed.kind === "claude"
+      ? config.providers?.claude?.accounts
+      : parsed.kind === "chatgpt"
+        ? config.providers?.chatgpt?.accounts
+        : config.providers?.antigravity?.accounts;
+  const account = accounts?.find((entry) => entry.id.trim().toLowerCase() === parsed.accountId);
+  if (!account) return base;
+  return {
+    ...base,
+    ...(account.model !== undefined ? { model: account.model } : {}),
+    ...(account.thinkingEffort !== undefined ? { thinkingEffort: account.thinkingEffort } : {}),
+  };
 }
 
 /** The permission mode a new thread on `instanceId` starts in: the provider's own default, else the global one. */

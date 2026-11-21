@@ -114,6 +114,8 @@ import {
 export interface AcpDriverOptions {
   /** Provider kind emitted on runtime events (`"acp"` or `"antigravity"`). */
   readonly provider?: "acp" | "antigravity";
+  /** Account-addressed instance id (e.g. `antigravity/<id>`) for per-account usage & routing. */
+  readonly instanceId?: string;
   /** Configured ACP agents keyed by id (e.g. `agy`, `cline`). */
   readonly agents?: Readonly<Record<string, AcpAgentLaunchSpec>>;
   readonly env?: NodeJS.ProcessEnv;
@@ -574,6 +576,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   ) => Effect.Effect<void, CliError>;
 
   private readonly agents: Map<string, AcpAgentLaunchSpec>;
+  private readonly usageInstanceId: string | undefined;
   private readonly baseEnv: NodeJS.ProcessEnv;
   private readonly transport: AcpTransport;
   private readonly initializeTimeoutMs: number;
@@ -593,6 +596,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
   constructor(options: AcpDriverOptions = {}) {
     this.provider = options.provider ?? "acp";
+    const rawInstance = options.instanceId?.trim().toLowerCase();
+    this.usageInstanceId = rawInstance && rawInstance !== "antigravity" && rawInstance !== "acp" ? rawInstance : undefined;
     this.agents = new Map<string, AcpAgentLaunchSpec>([
       [AGY_ACP_LAUNCH_SPEC.id, AGY_ACP_LAUNCH_SPEC],
       ...(this.provider === "antigravity" ? [["antigravity", AGY_ACP_LAUNCH_SPEC] as const] : []),
@@ -986,11 +991,15 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     readonly credits?: number | null;
   } | null> => {
     if (this.provider !== "antigravity") return null;
-    const agent = this.agents.get("antigravity") ?? AGY_ACP_LAUNCH_SPEC;
-    const snapshot = await this.probeUsageFn(agent.command, this.baseEnv, { force: true }).catch(() => null);
+    const agent =
+      (this.usageInstanceId ? this.agents.get(this.usageInstanceId) : undefined)
+      ?? this.agents.get("antigravity")
+      ?? AGY_ACP_LAUNCH_SPEC;
+    const probeEnv = agent.env ? { ...this.baseEnv, ...agent.env } : this.baseEnv;
+    const snapshot = await this.probeUsageFn(agent.command, probeEnv, { force: true }).catch(() => null);
     if (!snapshot || (snapshot.windows.length === 0 && snapshot.credits === null)) return null;
     return {
-      key: "antigravity",
+      key: this.usageInstanceId ?? "antigravity",
       windows: snapshot.windows,
       ...(snapshot.credits === null ? {} : { credits: snapshot.credits }),
     };
@@ -2767,6 +2776,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.publish({
       type: "rate-limits.updated",
       provider: this.provider,
+      ...(this.usageInstanceId ? { instanceId: this.usageInstanceId } : {}),
       threadId: session.threadId,
       windows: [window],
       raw: {
@@ -2808,12 +2818,14 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     }
     if (force) session.lastForcedUsageRefreshAt = now;
     const run = (async () => {
-      const snapshot = await this.probeUsageFn(session.agent.command, this.baseEnv, { force }).catch(() => null);
+      const probeEnv = session.agent.env ? { ...this.baseEnv, ...session.agent.env } : this.baseEnv;
+      const snapshot = await this.probeUsageFn(session.agent.command, probeEnv, { force }).catch(() => null);
       if (!snapshot || session.closed) return;
       if (snapshot.windows.length === 0 && snapshot.credits === null) return;
       this.publish({
         type: "rate-limits.updated",
         provider: this.provider,
+        ...(this.usageInstanceId ? { instanceId: this.usageInstanceId } : {}),
         threadId: session.threadId,
         windows: snapshot.windows,
         ...(snapshot.credits === null ? {} : { credits: snapshot.credits }),

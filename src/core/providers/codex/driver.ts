@@ -93,6 +93,10 @@ import {
 
 export interface CodexDriverOptions {
   readonly settings?: Partial<CodexSettings> & CodexProviderConfig;
+  /** Account-addressed instance id (e.g. `codex/<id>` or paired `chatgpt/<id>`). */
+  readonly instanceId?: string;
+  /** Explicit usage bucket key (defaults to `instanceId` or `"codex"`). */
+  readonly usageKey?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly transport?: CodexTransport;
   readonly rateLimitsTimeoutMs?: number;
@@ -302,6 +306,8 @@ export class CodexDriver implements ProviderAdapter<CliError> {
    * Kept small so shutdown stays prompt.
    */
   private readonly stopTimeoutMs: number;
+  private readonly usageKey: string;
+  private readonly rateLimitInstanceId: string | undefined;
   private secretEnv: readonly string[] = [];
   private readonly sessions = new Map<ThreadId, CodexSession>();
   /** Codex thread id per thread, kept past session teardown (see `resumeCursor`). */
@@ -318,6 +324,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SpawnCodexTransport();
     this.rateLimitsTimeoutMs = options.rateLimitsTimeoutMs ?? 3000;
     this.stopTimeoutMs = options.stopTimeoutMs ?? 2_000;
+    const explicitKey = options.usageKey?.trim().toLowerCase() || options.instanceId?.trim().toLowerCase();
+    this.rateLimitInstanceId = explicitKey && explicitKey !== "codex" ? explicitKey : undefined;
+    this.usageKey = this.rateLimitInstanceId ?? "codex";
   }
 
   /** Custom Harness profile keys must not reach application-owned shell commands. */
@@ -505,7 +514,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
     if (!session) return null;
     const windows = await this.probeRateLimits(session);
-    return windows.length > 0 ? { key: "codex", windows } : null;
+    return windows.length > 0 ? { key: this.usageKey, windows } : null;
   };
 
   readonly contextBreakdown = async (threadId: string): Promise<ContextBreakdown | null> => {
@@ -603,6 +612,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     this.publish({
       type: "rate-limits.updated",
       provider: "codex",
+      ...(this.rateLimitInstanceId ? { instanceId: this.rateLimitInstanceId } : {}),
       threadId: session.threadId,
       windows,
       raw: { planType: inner["planType"] ?? null },

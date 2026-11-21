@@ -73,6 +73,7 @@ export const SETTING_SECTIONS = [
   "provider:opencode",
   "provider:codex",
   "provider:antigravity",
+  "provider:chatgpt",
   "provider:acp",
   "provider:harness",
   "mcp",
@@ -92,6 +93,7 @@ export const SECTION_LABEL: Record<SettingSection, string> = {
   git: "Git and forges",
   "provider:codex": "Codex",
   "provider:claude": "Claude Code",
+  "provider:chatgpt": "ChatGPT",
   "provider:opencode": "OpenCode",
   "provider:antigravity": "Antigravity",
   "provider:acp": "ACP",
@@ -135,11 +137,11 @@ export type SettingKind =
       /** With `source` native-tools: the provider's own tools this setting can switch off (`core/nativetools.ts`). */
       readonly tools?: readonly NativeTool[];
       /** With `source` model or effort: offer only this provider's models (the setting belongs to its page). */
-      readonly providerKind?: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity";
+      readonly providerKind?: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
       /** With `source` model: whose value names the provider instance this setting's models belong to, instead of the global Provider. */
       readonly providerKey?: string;
       /** With `source` provider or model: offer only providers with these drivers. */
-      readonly providerKinds?: readonly ("claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity")[];
+      readonly providerKinds?: readonly ("claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity")[];
     }
   /**
    * `unit` is appended when the value is shown ("20" -> "20s"). `presets`
@@ -347,6 +349,11 @@ const COMPACTION_TEXT: Readonly<Record<LongThreadKind, { readonly own: string; r
     description:
       "Who compacts a thread as it fills. Claude Code: it decides, and a size under 'Compact at' becomes its auto-compact window (100K to 1M). Moxen: Claude Code's own is switched off and Moxen compacts past 'Compact at', open or not; asking offers a card, but a delegated task, or a thread halfway from the line to full, is compacted unasked. Off: nobody compacts.",
   },
+  chatgpt: {
+    own: "Automatic",
+    description:
+      "Who compacts a thread as it fills. Automatic: past 'Compact at', between turns and in the middle of a long one, and when the server refuses a prompt as too long. Asking offers a card at the line instead, but a delegated task, or a thread halfway from the line to full, is compacted unasked. Off leaves /compact and the rescue for a refused prompt.",
+  },
   opencode: {
     own: "OpenCode",
     description:
@@ -374,14 +381,14 @@ const COMPACTION_CHOICE_LABEL: Readonly<Record<Exclude<CompactionMode, "provider
 /** The sentence every Long threads group ends on, so the two lines are never read apart. */
 const LINES_INTERACT = "Handing off is offered first when its line is lower than compaction's; past both, the lower one acts first.";
 
-const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity", string>> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode", harness: "Moxen Harness", acp: "ACP", antigravity: "Antigravity" };
+const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity", string>> = { codex: "Codex", claude: "Claude Code", chatgpt: "ChatGPT", opencode: "OpenCode", harness: "Moxen Harness", acp: "ACP", antigravity: "Antigravity" };
 
 /**
  * One Tools group per provider, from one template so the three tabs cannot drift: Moxen's own tools
  * and skills, MCP reach, the to-do list, and (Claude Code, OpenCode) the web orders and the
  * provider's own tools to switch off.
  */
-function toolSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
+function toolSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   const base = { section, group: "Tools", appliesAt: "next-session" } as const;
@@ -440,7 +447,7 @@ function toolSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp" 
       defaultValue: true,
     },
   ];
-  if (kind === "harness" || kind === "acp" || kind === "antigravity") return settings;
+  if (kind === "harness" || kind === "chatgpt" || kind === "acp" || kind === "antigravity") return settings;
   const advice = "It is advice in the prompt: no tool is switched off, and the model may still pick another.";
   return [
     ...settings,
@@ -473,7 +480,7 @@ function toolSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp" 
 }
 
 /** A provider's switch for the skills Moxen used to ship (MXN-138): kept so older configs still load, and does nothing. */
-function moxenSkillsSetting(kind: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor {
+function moxenSkillsSetting(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor {
   return {
     key: `providers.${kind}.moxenSkills`,
     label: "Moxen's skills",
@@ -491,7 +498,7 @@ function moxenSkillsSetting(kind: "claude" | "codex" | "opencode" | "harness" | 
  * One Sessions group per provider, the global Sessions settings narrowed to it: instructions that only this
  * provider's threads get, and whether a usage limit is waited out. Unset, each follows the global one.
  */
-function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
+function sessionSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   return [
@@ -508,7 +515,7 @@ function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness" | "ac
     {
       key: `providers.${kind}.sessionTtl`,
       label: "Idle session lifetime",
-      description: `How long ${kind === "opencode" || kind === "acp" || kind === "antigravity" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back.", acp: "Each is an ACP agent process.", antigravity: "Each is an `agy acp` process." }[kind]}`,
+      description: `How long ${kind === "opencode" || kind === "acp" || kind === "antigravity" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", chatgpt: "Sessions run through Moxen Harness against OpenAI Responses.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back.", acp: "Each is an ACP agent process.", antigravity: "Each is an `agy acp` process." }[kind]}`,
       section,
       group: "Sessions",
       kind: { type: "duration", presets: DURATION_PRESETS, ends: { low: "Shorter", high: "Longer" } },
@@ -549,12 +556,12 @@ function longThreadSettings(kind: LongThreadKind): SettingDescriptor[] {
       kind: {
         type: "enum",
         choices: modes.map((mode) =>
-          kind === "harness" ? choice(mode, mode === "auto" ? "Automatic" : mode === "ask" ? "Moxen asks" : "Off") : choice(mode, mode === "provider" ? COMPACTION_TEXT[kind].own : COMPACTION_CHOICE_LABEL[mode]),
+          kind === "harness" || kind === "chatgpt" ? choice(mode, mode === "auto" ? "Automatic" : mode === "ask" ? "Moxen asks" : "Off") : choice(mode, mode === "provider" ? COMPACTION_TEXT[kind].own : COMPACTION_CHOICE_LABEL[mode]),
         ),
       },
       defaultValue: undefined,
       fallback: { resolver: "compactionMode" },
-      ...(kind === "harness" || kind === "acp" || kind === "antigravity" ? {} : { appliesAt: "server-restart" as const }),
+      ...(kind === "harness" || kind === "chatgpt" || kind === "acp" || kind === "antigravity" ? {} : { appliesAt: "server-restart" as const }),
     },
     {
       key: `providers.${kind}.compactAt`,
@@ -626,9 +633,10 @@ function perModelSettings(kind: LongThreadKind): SettingDescriptor[] {
   ];
 }
 
-const PRICE_EXAMPLE: Readonly<Record<"claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity", string>> = {
+const PRICE_EXAMPLE: Readonly<Record<"claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity", string>> = {
   claude: "claude-opus-5=5",
   codex: "gpt-6.1-sol=2",
+  chatgpt: "gpt-6.1-sol=2",
   opencode: "opencode-go/muse-spark-1.3-contributor=2",
   harness: "qwen3.8-flash-next=0.5",
   antigravity: "gemini-4-neon=2",
@@ -636,7 +644,7 @@ const PRICE_EXAMPLE: Readonly<Record<"claude" | "codex" | "opencode" | "harness"
 };
 
 /** One Model prices group per provider, from one template so the provider tabs cannot drift: one per-model editor backed by the four underlying price maps. */
-function priceSettings(kind: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
+function priceSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const example = PRICE_EXAMPLE[kind];
   const section = `provider:${kind}` as const;
@@ -1539,6 +1547,50 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     defaultValue: field === "binaryPath" ? "codex" : undefined,
     appliesAt: "server-restart",
   })),
+  // -- ChatGPT (Sign in with ChatGPT via Moxen Harness) ----------------------
+  {
+    key: "providers.chatgpt.runtimeMode",
+    label: "Permissions",
+    description: "How much a new ChatGPT thread may do without asking.",
+    section: "provider:chatgpt",
+    group: "Defaults",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("approval-required", "Supervised", "Ask before every edit and command."),
+        choice("auto-accept-edits", "Auto-accept edits", "Reads and edits go through; commands still ask."),
+        choice("auto", "Auto", "Moxen's command classifier lets safe calls through and refuses dangerous ones."),
+        choice("full-access", "Full access", "No prompts at all."),
+      ],
+    },
+    defaultValue: undefined,
+    fallback: { key: "runtimeMode" },
+  },
+  {
+    key: "providers.chatgpt.model",
+    label: "Model",
+    description: "The model a new ChatGPT thread starts with, when neither the request nor the project names one.",
+    section: "provider:chatgpt",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "model", providerKind: "chatgpt" },
+    defaultValue: undefined,
+    fallback: { resolver: "providerModel" },
+  },
+  {
+    key: "providers.chatgpt.thinkingEffort",
+    label: "Effort",
+    description: "The reasoning effort a new ChatGPT thread starts at, for models that take one.",
+    section: "provider:chatgpt",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "effort", providerKind: "chatgpt" },
+    defaultValue: undefined,
+    fallback: { key: "thinkingEffort" },
+  },
+  ...toolSettings("chatgpt"),
+  ...sessionSettings("chatgpt"),
+  ...longThreadSettings("chatgpt"),
+  ...priceSettings("chatgpt"),
+
   // -- Antigravity -----------------------------------------------------------
   {
     key: "providers.antigravity.runtimeMode",
@@ -1911,7 +1963,7 @@ function orderDefaults(settings: readonly SettingDescriptor[]): readonly Setting
 
 function orderProviderGroups(settings: readonly SettingDescriptor[]): readonly SettingDescriptor[] {
   const out = [...settings];
-  for (const section of ["provider:codex", "provider:claude", "provider:opencode", "provider:antigravity", "provider:acp", "provider:harness"] as const) {
+  for (const section of ["provider:codex", "provider:claude", "provider:chatgpt", "provider:opencode", "provider:antigravity", "provider:acp", "provider:harness"] as const) {
     const slots = out.flatMap((entry, at) => (entry.section === section ? [at] : []));
     const rank = (entry: SettingDescriptor): number => {
       const at = entry.group === undefined ? -1 : PROVIDER_GROUP_ORDER.indexOf(entry.group);
@@ -2182,7 +2234,7 @@ function settingPlace(from: SettingDescriptor, to: SettingDescriptor): string {
 
 /** The provider a Long threads row is on; undefined for the global one. */
 const longThreadKindOf = (descriptor: SettingDescriptor): LongThreadKind | undefined =>
-  /^providers\.(claude|codex|opencode|harness|acp|antigravity)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
+  /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
 
 /** What a long-thread rule found, said on `descriptor`'s page: the value as that page writes it, and where it is set (nothing for the built-in default). */
 function sourcedEffective(descriptor: SettingDescriptor, value: string, key: string | null): SettingEffective {
@@ -2194,7 +2246,7 @@ function sourcedEffective(descriptor: SettingDescriptor, value: string, key: str
 const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, descriptor: SettingDescriptor) => SettingEffective | undefined>> = {
   /** A provider's delegation tools or web_fetch, unset: the older all-at-once `moxenTools` (`moxenToolsOf`), else on. */
   moxenTools(config, descriptor) {
-    const kind = /^providers\.(claude|codex|opencode|harness|acp|antigravity)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity" | undefined;
+    const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | undefined;
     const legacy = kind === undefined ? undefined : config.providers?.[kind]?.moxenTools;
     return legacy === false ? { value: false, label: "Off", origin: `from providers.${kind}.moxenTools in the config file` } : { value: true, label: "On" };
   },
@@ -2223,7 +2275,7 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
   },
   /** A provider tab's Model, unset: the global Model when the global Provider is this one (`configuredModel`); else the provider's catalog default, which the picker names itself. */
   providerModel(config, descriptor) {
-    const kind = /^providers\.(claude|codex|opencode|harness|acp|antigravity)\.model$/.exec(descriptor.key)?.[1];
+    const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)\.model$/.exec(descriptor.key)?.[1];
     const global = BY_KEY.get("model")!;
     const aimed = kind !== undefined && config.provider !== undefined && driverKindOfInstance(config.provider) === kind;
     if (aimed && config.model !== undefined && config.model.trim() !== "") return { value: config.model, label: config.model, origin: settingPlace(descriptor, global) };
@@ -2254,7 +2306,7 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
     const found = compactLineFor(config, kind);
     if (found !== null) return sourcedEffective(descriptor, lineText(found.value), found.key);
     if (mode === "off") return undefined;
-    if (kind === "harness") return { value: undefined, label: "70% of the window (60% under 128K)" };
+    if (kind === "harness" || kind === "chatgpt") return { value: undefined, label: "70% of the window (60% under 128K)" };
     const buffer = kind === "opencode" ? config.providers?.opencode?.compactBuffer : undefined;
     const label =
       kind === "codex"

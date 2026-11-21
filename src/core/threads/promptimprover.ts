@@ -31,7 +31,7 @@ export interface ImprovePromptInput {
 /** The provider and model the improver runs on, resolved from its own settings. */
 export interface PromptImproverSelection {
   readonly instanceId: string;
-  readonly provider: "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity";
+  readonly provider: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
   readonly model: string;
 }
 
@@ -79,7 +79,7 @@ export async function improvePrompt(
   const request = JSON.stringify({ draft: input.prompt, customInstructions, projectRules, protectedText: input.protectedText ?? [] });
   let reply: string;
   try {
-    reply = await complete({ workingDirectory: directory, model, prompt: request, instructions: PROMPT_IMPROVER_INSTRUCTIONS, signal: AbortSignal.timeout(90_000) }, selection);
+    reply = await complete({ workingDirectory: directory, model, instanceId: selection.instanceId, prompt: request, instructions: PROMPT_IMPROVER_INSTRUCTIONS, signal: AbortSignal.timeout(90_000) }, selection);
   } catch (cause) {
     if (cause instanceof CliError && cause.code === "PROMPT_IMPROVER_UNAVAILABLE") throw cause;
     const detail = cause instanceof Error ? cause.message : String(cause);

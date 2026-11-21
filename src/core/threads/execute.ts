@@ -27,7 +27,7 @@ import type { McpServerSpec } from "../mcp.js";
 
 import { resolveAcpAgentsMap } from "../providers/acp/config.js";
 import { AcpDriver } from "../providers/acp/driver.js";
-import { antigravityLaunchSpec } from "../providers/antigravity/config.js";
+import { resolveAntigravityAccount, resolveClaudeAccount } from "../providers/accounts.js";
 import { CodexDriver } from "../providers/codex/driver.js";
 import { ClaudeDriver } from "../providers/claude/driver.js";
 import { locateSkillsMod } from "../providers/claude/skillsmod.js";
@@ -51,7 +51,7 @@ import type {
   UnconfirmedSteer,
 } from "../providers/spi.js";
 import { CliError } from "../errors.js";
-import type { InteractionMode, ModelSelection, ProvidersConfig, RuntimeMode } from "../types.js";
+import { driverKindOfInstance, type InteractionMode, type ModelSelection, type ProvidersConfig, type RuntimeMode } from "../types.js";
 import {
   captureWorktree,
   diffCheckpointStat,
@@ -212,6 +212,7 @@ export interface TurnOutcome {
 export interface TurnDriverFactories {
   readonly codex?: () => TurnDriver;
   readonly claude?: () => TurnDriver;
+  readonly chatgpt?: () => TurnDriver;
   readonly opencode?: () => TurnDriver;
   readonly harness?: () => TurnDriver;
   readonly acp?: () => TurnDriver;
@@ -223,26 +224,27 @@ const driverCache = new WeakMap<object, WeakMap<object, Map<string, TurnDriver>>
 const defaultFactories: TurnDriverFactories = {};
 
 /**
- * The driver an instance id routes to. `opencode/<provider>` entries share
- * one driver (the provider address travels in the model slug), `harness/<profile>`
- * entries share the harness driver (the profile is resolved per send), `acp/<agent>`
- * entries share the ACP driver (the agent id is resolved per session), `antigravity`
- * runs the official `agy` CLI over ACP v1, and `claudeAgent` is the historical id
- * for the Claude surface that existing threads and configs still carry.
+ * The driver cache & resume-cursor key an instance id routes to.
+ * - `opencode/<provider>`, `harness/<profile>`, and `acp/<agent>` share one
+ *   driver per kind (the target rides per session/send).
+ * - Multi-account instances (`claude/<id>`, `chatgpt/<id>`, `codex/<id>`,
+ *   `antigravity/<id>`) keep their own account-scoped key so separate accounts
+ *   never share credentials, environment variables, sessions, or resume cursors.
+ * - Legacy singleton ids (`claudeAgent`, `codex`, `antigravity`, `agy`) keep
+ *   their historical keys (`claude`, `codex`, `antigravity`).
  */
 export function driverKey(instanceId: string): string {
   const rawKey = instanceId.trim().toLowerCase();
-  return rawKey === "opencode" || rawKey.startsWith("opencode/")
-    ? "opencode"
-    : rawKey === "harness" || rawKey.startsWith("harness/")
-      ? "harness"
-      : rawKey === "acp" || rawKey.startsWith("acp/")
-        ? "acp"
-        : rawKey === "antigravity" || rawKey === "agy"
-          ? "antigravity"
-          : rawKey === "claudeagent"
-            ? "claude"
-            : rawKey;
+  if (rawKey === "opencode" || rawKey.startsWith("opencode/")) return "opencode";
+  if (rawKey === "harness" || rawKey.startsWith("harness/")) return "harness";
+  if (rawKey === "acp" || rawKey.startsWith("acp/")) return "acp";
+  if (rawKey === "antigravity" || rawKey === "agy") return "antigravity";
+  if (rawKey.startsWith("antigravity/")) return rawKey;
+  if (rawKey === "claudeagent" || rawKey === "claude") return "claude";
+  if (rawKey.startsWith("claude/")) return rawKey;
+  if (rawKey === "codex" || rawKey.startsWith("codex/")) return rawKey;
+  if (rawKey === "chatgpt" || rawKey.startsWith("chatgpt/")) return rawKey;
+  return rawKey;
 }
 
 /**
@@ -256,6 +258,7 @@ export function driverForInstance(
   providers?: ProvidersConfig,
 ): TurnDriver {
   const key = driverKey(instanceId);
+  const kind = driverKindOfInstance(instanceId);
   let byFactories = driverCache.get(owner);
   if (!byFactories) {
     byFactories = new WeakMap();
@@ -271,11 +274,12 @@ export function driverForInstance(
   if (existing) {
     if (existing instanceof CodexDriver) existing.setSecretEnv(secretEnv);
     if (existing instanceof AcpDriver && providers !== undefined) {
-      existing.setAgents(
-        existing.provider === "antigravity"
-          ? { antigravity: antigravityLaunchSpec(providers.antigravity) }
-          : resolveAcpAgentsMap(providers.acp),
-      );
+      if (existing.provider === "antigravity") {
+        const resolved = resolveAntigravityAccount(providers.antigravity, instanceId);
+        existing.setAgents({ [resolved.instanceId]: resolved.spec, antigravity: resolved.spec });
+      } else {
+        existing.setAgents(resolveAcpAgentsMap(providers.acp));
+      }
     }
     return existing;
   }
@@ -284,12 +288,36 @@ export function driverForInstance(
   // spawned process: an already-running session cannot be moved to a
   // different binary or config directory. The schema says as much
   // (`appliesAt: "server-restart"`), so a change applies to the next server start.
-  if (key === "claude") driver = factories.claude?.() ?? new ClaudeDriver({ ...(providers?.claude ? { settings: providers.claude } : {}), skillsMod: locateSkillsMod() });
-  else if (key === "codex") driver = factories.codex?.() ?? new CodexDriver({ ...(providers?.codex ? { settings: providers.codex } : {}) });
-  else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
-  else if (key === "harness") driver = factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
-  else if (key === "acp") driver = factories.acp?.() ?? new AcpDriver({ agents: resolveAcpAgentsMap(providers?.acp) });
-  else if (key === "antigravity") driver = factories.antigravity?.() ?? new AcpDriver({ provider: "antigravity", agents: { antigravity: antigravityLaunchSpec(providers?.antigravity) } });
+  if (kind === "claude") {
+    const resolved = resolveClaudeAccount(providers?.claude, instanceId);
+    driver = factories.claude?.() ?? new ClaudeDriver({
+      settings: resolved.settings,
+      env: resolved.env,
+      instanceId: resolved.usageKey,
+      skillsMod: locateSkillsMod(),
+    });
+  } else if (kind === "codex") {
+    driver = factories.codex?.() ?? new CodexDriver({
+      ...(providers?.codex ? { settings: providers.codex } : {}),
+      ...(key !== "codex" ? { instanceId: key } : {}),
+    });
+  } else if (kind === "chatgpt") {
+    driver = factories.chatgpt?.() ?? factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
+  } else if (kind === "opencode") {
+    driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
+  } else if (kind === "harness") {
+    driver = factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
+  } else if (kind === "acp") {
+    driver = factories.acp?.() ?? new AcpDriver({ agents: resolveAcpAgentsMap(providers?.acp) });
+  } else if (kind === "antigravity") {
+    const resolved = resolveAntigravityAccount(providers?.antigravity, instanceId);
+    driver = factories.antigravity?.() ?? new AcpDriver({
+      provider: "antigravity",
+      ...(resolved.accountId ? { instanceId: resolved.instanceId } : {}),
+      env: resolved.env,
+      agents: { [resolved.instanceId]: resolved.spec, antigravity: resolved.spec },
+    });
+  }
   if (!driver) {
     throw new CliError("PROVIDER_UNKNOWN", `No direct driver for provider "${instanceId}".`, {
       details: { instanceId },
@@ -642,7 +670,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // moment's registrations, and the next send or admission refreshes again,
     // so only an edit landing mid-turn waits one extra turn. Rule files need
     // no setup, so they do refresh above.
-    const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
+    const rules = await pendingRuleUpdate(driver, threadId, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), thread.env.path).catch(() => null);
     claimed = null;
     void executeTurn({
       store,
@@ -739,7 +767,7 @@ export async function ensureDriverSession(
   // conversation identity must already be durable when that question appears.
   if (options.store) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
-  await captureRuleBaseline(driver, thread.id, driverKey(selection.instanceId), cwd);
+  await captureRuleBaseline(driver, thread.id, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), cwd);
   if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onUsageLimit);
 }
 

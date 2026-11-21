@@ -167,6 +167,83 @@ export interface ForgeConfig {
   glabPath?: string;
 }
 
+/** Multi-account provider kinds addressed as `<kind>/<id>`. */
+export type AccountProviderKind = "claude" | "chatgpt" | "antigravity";
+
+/**
+ * Shared fields for a configured provider account (`claude/<id>`, `chatgpt/<id>`,
+ * `antigravity/<id>`). Credentials never live here: Claude and Antigravity
+ * isolate CLI-owned logins under `homePath`, and ChatGPT stores OAuth tokens
+ * exclusively in the OS keychain (`src/core/secrets.ts`).
+ */
+export interface ProviderAccountBase {
+  /** Slug within the provider kind; forms `<kind>/<id>`. */
+  id: string;
+  /** Human-readable display name shown in pickers and Settings (e.g. "Personal", "Work"). */
+  label?: string;
+  /** Switch this account off without removing it. Unset means enabled. */
+  enabled?: boolean;
+  /** Default model slug for new threads on this account; overrides the provider-level default. */
+  model?: string;
+  /** Default thinking effort for new threads on this account; overrides the provider-level default. */
+  thinkingEffort?: string;
+  /** Non-secret environment variables merged into this account's CLI process. */
+  env?: Record<string, string>;
+}
+
+/** One configured Claude Code account (`providers.claude.accounts[]`). */
+export interface ClaudeAccountConfig extends ProviderAccountBase {
+  /** Isolated `CLAUDE_CONFIG_DIR` for this account (never overrides `HOME`). */
+  homePath?: string;
+  /** Optional `claude` binary override; inherits `providers.claude.binaryPath`. */
+  binaryPath?: string;
+  /** Optional launch args override; inherits `providers.claude.launchArgs`. */
+  launchArgs?: readonly string[];
+}
+
+/** One configured Antigravity account (`providers.antigravity.accounts[]`). */
+export interface AntigravityAccountConfig extends ProviderAccountBase {
+  /**
+   * Isolated account root directory. When set, Moxen launches `agy` with
+   * `HOME`/`USERPROFILE` pointing here and `--gemini-dir <homePath>/.gemini`.
+   * Caveat: tools spawned by `agy` inherit this `HOME`/`USERPROFILE`.
+   */
+  homePath?: string;
+  /** Optional `agy` binary override; inherits `providers.antigravity.binaryPath`. */
+  binaryPath?: string;
+  /** Optional launch args override; inherits `providers.antigravity.launchArgs`. */
+  launchArgs?: string;
+}
+
+/** One configured Sign in with ChatGPT account (`providers.chatgpt.accounts[]`). */
+export interface ChatGptAccountConfig extends ProviderAccountBase {
+  /** Verified OIDC email from Sign in with ChatGPT (display/pairing metadata only). */
+  email?: string;
+  /** Verified OIDC subject (`sub`). */
+  userId?: string;
+  /** Workspace or organization name selected during sign-in / pairing. */
+  workspaceName?: string;
+  /** Verified ChatGPT workspace/account identifier when available. */
+  accountId?: string;
+  /** Plan tier reported by ChatGPT/Codex (e.g. "plus", "pro", "team"). */
+  planType?: string;
+  /** OS keychain reference (`keychain:...`) for this account's OAuth bundle; never raw tokens. */
+  authRef?: string;
+  /** Paired Codex companion `CODEX_HOME` for live usage windows, reset credits, and image generation. */
+  codexHomePath?: string;
+  /** Optional `codex` binary override for the paired companion; inherits `providers.codex.binaryPath`. */
+  codexBinaryPath?: string;
+  /** Optional `codex` launch args for the paired companion; inherits `providers.codex.launchArgs`. */
+  codexLaunchArgs?: string;
+  /** True once the paired Codex companion identity was verified against this ChatGPT account. */
+  codexVerified?: boolean;
+}
+
+/** Sign in with ChatGPT provider configuration (`providers.chatgpt.*`), backed by Moxen Harness. */
+export interface ChatGptProviderConfig extends Omit<OpencodeProviderConfig, "binaryPath" | "bundledSkills" | "moxenPrompt" | "compactBuffer" | "disabledNativeTools" | "webSearchOrder" | "webFetchOrder"> {
+  accounts?: ChatGptAccountConfig[];
+}
+
 /** Codex app-server, using the CLI login and configuration. */
 export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
   homePath?: string;
@@ -177,6 +254,7 @@ export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundl
 /** First-class Antigravity CLI (`agy`) provider configuration (`providers.antigravity.*`). */
 export interface AntigravityProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
   launchArgs?: string;
+  accounts?: AntigravityAccountConfig[];
 }
 
 /** One configured ACP profile entry (`providers.acp.agents[]`). */
@@ -200,6 +278,7 @@ export interface AcpProviderConfig extends Omit<OpencodeProviderConfig, "binaryP
 export interface ProvidersConfig {
   codex?: CodexProviderConfig;
   claude?: ClaudeProviderConfig;
+  chatgpt?: ChatGptProviderConfig;
   opencode?: OpencodeProviderConfig;
   harness?: HarnessProviderConfig;
   antigravity?: AntigravityProviderConfig;
@@ -533,6 +612,8 @@ export interface ClaudeProviderConfig extends ModelPriceMaps {
   autoCompactPercent?: number;
   /** Run every Claude Code session with Ultracode (workflow orchestration) on. Unset: off. */
   ultracode?: boolean;
+  /** Configured Claude Code accounts (`claude/<id>`). */
+  accounts?: ClaudeAccountConfig[];
 }
 
 export interface RuntimeState {
@@ -763,16 +844,36 @@ export interface WorkspaceResolution {
   branch: string | null;
 }
 
-/** The provider driver an instance id routes to (`opencode/<provider>`, `harness/<profile>`, `acp/<agent>`, `antigravity`, and `claudeAgent`, the historical Claude id), or null for an id no driver owns. */
-export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity" | null {
+/** The provider driver an instance id routes to (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`, `opencode/<provider>`, `harness/<profile>`, `acp/<agent>`, plus legacy `claudeAgent`, `codex`, `antigravity`, `agy`), or null for an id no driver owns. */
+export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | null {
   const key = instanceId.trim().toLowerCase();
-  if (key === "codex") return "codex";
-  if (key === "antigravity" || key === "agy") return "antigravity";
+  if (key === "codex" || key.startsWith("codex/")) return "codex";
+  if (key === "chatgpt" || key.startsWith("chatgpt/")) return "chatgpt";
+  if (key === "antigravity" || key === "agy" || key.startsWith("antigravity/")) return "antigravity";
   if (key === "opencode" || key.startsWith("opencode/")) return "opencode";
   if (key === "harness" || key.startsWith("harness/")) return "harness";
   if (key === "acp" || key.startsWith("acp/")) return "acp";
-  if (key === "claudeagent" || key === "claude") return "claude";
+  if (key === "claudeagent" || key === "claude" || key.startsWith("claude/")) return "claude";
   return null;
+}
+
+/** Parse an account-addressed instance id (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`), or null for legacy/non-account ids. */
+export function parseAccountInstanceId(instanceId: string): { readonly kind: AccountProviderKind; readonly accountId: string } | null {
+  const trimmed = instanceId.trim().toLowerCase();
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return null;
+  const prefix = trimmed.slice(0, slash);
+  const accountId = trimmed.slice(slash + 1).trim();
+  if (!accountId || accountId.includes("/")) return null;
+  if (prefix === "claude" || prefix === "chatgpt" || prefix === "antigravity") {
+    return { kind: prefix, accountId };
+  }
+  return null;
+}
+
+/** Canonical account instance id (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`). */
+export function accountInstanceId(kind: AccountProviderKind, accountId: string): string {
+  return `${kind}/${accountId.trim().toLowerCase()}`;
 }
 
 /** One model a server lists when asked (`harness.models.discover`). */

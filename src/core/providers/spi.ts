@@ -15,11 +15,12 @@ import type { WorktreeIsolation } from "../threads/isolation.js";
 import type { InteractionMode, ModelSelection, RuntimeMode } from "../types.js";
 
 /** Provider surfaces we own. */
-export type ProviderDriverKind = "claude" | "codex" | "opencode" | "harness" | "acp" | "antigravity";
+export type ProviderDriverKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
 
 export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = [
   "claude",
   "codex",
+  "chatgpt",
   "opencode",
   "harness",
   "acp",
@@ -681,5 +682,6 @@ export interface TextCompletionInput {
   readonly model: string;
   readonly prompt: string;
   readonly instructions: string;
+  readonly instanceId?: string;
   readonly signal?: AbortSignal;
 }

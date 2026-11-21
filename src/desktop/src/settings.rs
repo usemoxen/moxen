@@ -33,7 +33,7 @@ fn number(value: &Value, key: &str) -> Option<f64> {
 /// words, like the TUI's `SECTION_LABEL`; anything the snapshot carries that
 /// is not listed here renders at the end, so a newer server's section still
 /// shows up.
-pub const SETTING_SECTIONS: [(&str, &str); 16] = [
+pub const SETTING_SECTIONS: [(&str, &str); 17] = [
     ("general", "General"),
     ("defaults", "Defaults"),
     ("sessions", "Sessions"),
@@ -46,6 +46,7 @@ pub const SETTING_SECTIONS: [(&str, &str); 16] = [
     ("provider:opencode", "OpenCode"),
     ("provider:codex", "Codex"),
     ("provider:antigravity", "Antigravity"),
+    ("provider:chatgpt", "ChatGPT"),
     ("provider:acp", "ACP"),
     ("provider:harness", "Moxen Harness"),
     ("mcp", "MCP servers"),

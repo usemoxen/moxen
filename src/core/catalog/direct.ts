@@ -20,7 +20,8 @@ import path from "node:path";
 
 import { acpProviders } from "../providers/acp/catalog.js";
 import { loadAcpRegistryCatalog, type LoadedAcpRegistry } from "../providers/acp/registry.js";
-import { antigravityProvider } from "../providers/antigravity/catalog.js";
+import { accountDisplayName } from "../providers/accounts.js";
+import { antigravityProviders } from "../providers/antigravity/catalog.js";
 import { codexProvider } from "../providers/codex/catalog.js";
 import { claudeCatalogModels, setLiveClaudeModels } from "../providers/claude/catalog.js";
 import { resolveLiveModels } from "../providers/claude/livemodels.js";
@@ -41,15 +42,26 @@ import {
   type ModelsDevModel,
   type ModelsDevProvider,
 } from "../providers/opencode/catalog.js";
-import type { AcpProviderConfig, AntigravityProviderConfig, CodexProviderConfig, HarnessProviderConfig } from "../types.js";
+import {
+  accountInstanceId,
+  type AcpProviderConfig,
+  type AntigravityProviderConfig,
+  type ChatGptProviderConfig,
+  type ClaudeProviderConfig,
+  type CodexProviderConfig,
+  type HarnessProviderConfig,
+} from "../types.js";
 import type { EffortDescriptor, ModelSummary, ProviderSummary } from "./summary.js";
 
 export interface DirectCatalogOptions {
   readonly env?: NodeJS.ProcessEnv;
-  readonly codex?: CodexProviderConfig;
+  readonly claude?: ClaudeProviderConfig | undefined;
+  readonly chatgpt?: ChatGptProviderConfig | undefined;
+  readonly codex?: CodexProviderConfig | undefined;
   readonly fetchCodexProvider?: () => Promise<ProviderSummary>;
   readonly antigravity?: AntigravityProviderConfig;
   readonly fetchAntigravityProvider?: () => Promise<ProviderSummary>;
+  readonly fetchAntigravityProviders?: () => Promise<ProviderSummary[]>;
   readonly acp?: AcpProviderConfig;
   readonly fetchAcpProviders?: () => Promise<ProviderSummary[]>;
   readonly acpRegistry?: () => Promise<LoadedAcpRegistry>;
@@ -263,37 +275,86 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
   ]);
 
   // The installed Claude Code's own list when known (cached, or fetched when
-  // `fetchClaudeModels` is given); the bundled file otherwise. The
-  // instance id stays `claudeAgent` so existing threads and the
-  // manifest's provider key resolve without translation.
+  // `fetchClaudeModels` is given); the bundled file otherwise. When multi-account
+  // Claude accounts are configured, each appears under `claude/<id>`; otherwise
+  // the historical `claudeAgent` summary stays active.
   setLiveClaudeModels(
     claudeInstalled ? await resolveLiveModels({ storeRoot, fetch: options.fetchClaudeModels }) : null,
   );
-  const claude: ProviderSummary = {
-    instanceId: "claudeAgent",
-    driver: "claude",
-    displayName: "Claude Code",
-    enabled: claudeInstalled,
-    installed: claudeInstalled,
-    status: claudeInstalled ? null : "not installed",
-    authStatus: null,
-    models: claudeCatalogModels().map((model) => ({
+  const claudeModelsFor = (instanceId: string): ModelSummary[] =>
+    claudeCatalogModels().map((model) => ({
       slug: model.slug,
       name: model.name,
       isCustom: false,
       isDefault: model.isDefault,
-      isHidden: isModelHidden(prefs, "claudeAgent", model.slug),
+      isHidden: isModelHidden(prefs, instanceId, model.slug),
       efforts: model.efforts.map((effort) => ({
         id: effort.id,
         label: effort.label,
         choices: effort.choices.map((choice) => ({ id: choice.id, label: choice.label, isDefault: choice.isDefault })),
         currentValue: effort.currentValue,
       })),
-    })),
-    supportedRuntimeModes: null,
-    usageLimits: null,
-    skills: [],
-  };
+    }));
+  const configuredClaudeAccounts = options.claude?.accounts;
+  const claudeList: ProviderSummary[] =
+    configuredClaudeAccounts && configuredClaudeAccounts.length > 0
+      ? configuredClaudeAccounts.map((account) => {
+          const instanceId = accountInstanceId("claude", account.id);
+          const binary = account.binaryPath?.trim() || options.claude?.binaryPath?.trim() || "claude";
+          const accountInstalled = path.isAbsolute(binary)
+            ? (() => { try { return fs.statSync(binary).isFile(); } catch { return false; } })()
+            : binary === "claude"
+              ? claudeInstalled
+              : binaryOnPath(binary, env);
+          const disabled = account.enabled === false;
+          return {
+            instanceId,
+            driver: "claude",
+            displayName: accountDisplayName("claude", account),
+            enabled: accountInstalled && !disabled,
+            installed: accountInstalled,
+            status: !accountInstalled ? "not installed" : disabled ? "disabled" : null,
+            authStatus: null,
+            models: accountInstalled && !disabled ? claudeModelsFor(instanceId) : [],
+            supportedRuntimeModes: null,
+            usageLimits: null,
+            skills: [],
+          };
+        })
+      : [
+          {
+            instanceId: "claudeAgent",
+            driver: "claude",
+            displayName: "Claude Code",
+            enabled: claudeInstalled,
+            installed: claudeInstalled,
+            status: claudeInstalled ? null : "not installed",
+            authStatus: null,
+            models: claudeModelsFor("claudeAgent"),
+            supportedRuntimeModes: null,
+            usageLimits: null,
+            skills: [],
+          },
+        ];
+
+  const chatgptList: ProviderSummary[] = (options.chatgpt?.accounts ?? []).map((account) => {
+    const instanceId = accountInstanceId("chatgpt", account.id);
+    const disabled = account.enabled === false;
+    const signedIn = Boolean(account.authRef);
+    return {
+      instanceId,
+      driver: "chatgpt",
+      displayName: accountDisplayName("chatgpt", account),
+      enabled: !disabled && signedIn,
+      installed: true,
+      status: disabled ? "disabled" : !signedIn ? "Sign in with ChatGPT to use this account." : null,
+      authStatus: signedIn ? (account.planType ?? "chatgpt") : "unauthenticated",
+      models: [],
+      supportedRuntimeModes: null,
+      usageLimits: null,
+      skills: [],
+    };
+  });
 
   const opencode = await opencodeProviders(
     modelsDev,
@@ -308,7 +369,15 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
   const harness = harnessProviders(options.harness, env, (instanceId, slug) => isModelHidden(prefs, instanceId, slug));
 
   const codex = await (options.fetchCodexProvider ?? (() => codexProvider(options.codex, env, options.workingDirectory ?? process.cwd())))();
-  const antigravity = await (options.fetchAntigravityProvider ?? (() => antigravityProvider(options.antigravity, env, options.workingDirectory ?? process.cwd(), undefined, { storeRoot })))();
+  const antigravityList = await (
+    options.fetchAntigravityProviders
+      ?? (options.fetchAntigravityProvider ? async () => [await options.fetchAntigravityProvider!()] : undefined)
+      ?? (() => antigravityProviders(options.antigravity, env, options.workingDirectory ?? process.cwd(), undefined, { storeRoot }))
+  )();
+  const mappedAntigravity = antigravityList.map((provider) => ({
+    ...provider,
+    models: provider.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, provider.instanceId, model.slug) })),
+  }));
   const acp = await (options.fetchAcpProviders ?? (async () => {
     const registry = options.acpRegistry
       ? await options.acpRegistry().catch((): LoadedAcpRegistry => ({ agents: [], source: "empty" }))
@@ -320,9 +389,10 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
     models: provider.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, provider.instanceId, model.slug) })),
   }));
   return [
-    claude,
-    { ...codex, models: codex.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, "codex", model.slug) })) },
-    { ...antigravity, models: antigravity.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, "antigravity", model.slug) })) },
+    ...claudeList,
+    ...chatgptList,
+    { ...codex, models: codex.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, codex.instanceId, model.slug) })) },
+    ...mappedAntigravity,
     ...mappedAcp,
     ...harness,
     ...opencode,

@@ -323,14 +323,21 @@ function defaultRunCommand(
 
 /**
  * Probe Antigravity plan usage and remaining credits via `agy --print /usage`
- * and `agy --print /credits`. Single-flight and cached per executable path.
+ * and `agy --print /credits`. Single-flight and cached per executable + home
+ * isolation scope so separate Antigravity accounts never collide.
  */
+function usageCacheKey(command: string, env: NodeJS.ProcessEnv, explicitKey?: string): string {
+  if (explicitKey) return explicitKey;
+  return `${command}\0${env.HOME ?? ""}\0${env.USERPROFILE ?? ""}`;
+}
+
 export async function probeAntigravityUsage(
   command: string,
   env: NodeJS.ProcessEnv = process.env,
   options: {
     readonly force?: boolean;
     readonly useCache?: boolean;
+    readonly cacheKey?: string;
     readonly now?: () => number;
     readonly timeoutMs?: number;
     readonly run?: AntigravityCommandRunner;
@@ -339,8 +346,9 @@ export async function probeAntigravityUsage(
   const nowFn = options.now ?? Date.now;
   const now = nowFn();
   const useCache = options.useCache ?? options.run === undefined;
+  const key = usageCacheKey(command, env, options.cacheKey);
   if (useCache && !options.force) {
-    const hit = cache.get(command);
+    const hit = cache.get(key);
     if (hit && now - hit.fetchedAt < CACHE_TTL_MS) return hit.snapshot;
   }
 
@@ -356,33 +364,33 @@ export async function probeAntigravityUsage(
       const credits = creditsOut ? parseAntigravityCreditsJson(creditsOut) : null;
       if (windows.length === 0 && credits === null) return null;
       const snapshot: AntigravityUsageSnapshot = { windows, credits };
-      if (useCache) cache.set(command, { fetchedAt: nowFn(), snapshot });
+      if (useCache) cache.set(key, { fetchedAt: nowFn(), snapshot });
       return snapshot;
     })();
     if (useCache) {
-      inFlight.set(command, work);
+      inFlight.set(key, work);
       void work.finally(() => {
-        if (inFlight.get(command) === work) inFlight.delete(command);
+        if (inFlight.get(key) === work) inFlight.delete(key);
       });
     }
     return work;
   };
 
   if (useCache) {
-    const existing = inFlight.get(command);
+    const existing = inFlight.get(key);
     if (existing) {
       if (!options.force) return existing;
       // A forced probe arrived while an earlier probe was already running:
       // chain one fresh probe after it completes rather than returning stale data.
-      const queued = queuedForce.get(command);
+      const queued = queuedForce.get(key);
       if (queued) return queued;
       const next = existing
         .catch(() => null)
         .then(() => {
-          if (queuedForce.get(command) === next) queuedForce.delete(command);
+          if (queuedForce.get(key) === next) queuedForce.delete(key);
           return startProbe();
         });
-      queuedForce.set(command, next);
+      queuedForce.set(key, next);
       return next;
     }
   }

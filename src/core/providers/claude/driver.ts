@@ -121,6 +121,8 @@ import {
 
 export interface ClaudeDriverOptions {
   readonly settings?: Partial<ClaudeSettings>;
+  /** Account-addressed instance id (`claude/<id>`) when running a named Claude account. */
+  readonly instanceId?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly transport?: ClaudeTransport;
   readonly sessionApi?: ClaudeSessionApi;
@@ -422,6 +424,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    */
   private readonly stopTimeoutMs: number;
   private readonly skillsMod: SkillsMod | null;
+  private readonly usageKey: string;
+  private readonly rateLimitInstanceId: string | undefined;
   private readonly sessions = new Map<ThreadId, ClaudeSession>();
   /**
    * Last resumable CLI session id per thread, kept past session teardown.
@@ -452,6 +456,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.usageProbeTimeoutMs = options.usageProbeTimeoutMs ?? 15_000;
     this.stopTimeoutMs = options.stopTimeoutMs ?? 2_000;
     this.skillsMod = options.skillsMod ?? null;
+    const rawId = options.instanceId?.trim().toLowerCase();
+    this.rateLimitInstanceId = rawId && rawId !== "claude" && rawId !== "claudeagent" ? rawId : undefined;
+    this.usageKey = this.rateLimitInstanceId ?? "claude";
   }
 
   get streamEvents(): Stream.Stream<ProviderRuntimeEvent> {
@@ -725,7 +732,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
     if (!session) return null;
     const windows = await this.probeUsage(session);
-    return windows.length > 0 ? { key: "claude", windows } : null;
+    return windows.length > 0 ? { key: this.usageKey, windows } : null;
   };
 
   /**
@@ -797,7 +804,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     const failureCode = instructions === undefined ? "SIDE_QUESTION_FAILED" : "TEXT_COMPLETION_FAILED";
     const label = instructions === undefined ? "The side question" : "Text completion";
     const stringEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(this.baseEnv)) if (typeof value === "string") stringEnv[key] = value;
+    for (const [key, value] of Object.entries(makeClaudeEnv({ homePath: this.settings.homePath }, this.baseEnv))) if (typeof value === "string") stringEnv[key] = value;
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     const prompt: AsyncIterable<SDKUserMessage> = {
@@ -874,7 +881,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    */
   readonly regenerateSessionTitle = async (cursor: string, workingDirectory: string): Promise<string | null> => {
     const stringEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(this.baseEnv)) if (typeof value === "string") stringEnv[key] = value;
+    for (const [key, value] of Object.entries(makeClaudeEnv({ homePath: this.settings.homePath }, this.baseEnv))) if (typeof value === "string") stringEnv[key] = value;
     const query = this.transport.query("/rename", {
       cwd: workingDirectory,
       permissionMode: "default",
@@ -2100,6 +2107,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.publish({
       type: "rate-limits.updated",
       provider: "claude",
+      ...(this.rateLimitInstanceId ? { instanceId: this.rateLimitInstanceId } : {}),
       threadId: session.threadId,
       windows,
       raw: { rateLimitType, status: info.status },
@@ -2414,6 +2422,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       this.publish({
         type: "rate-limits.updated",
         provider: "claude",
+        ...(this.rateLimitInstanceId ? { instanceId: this.rateLimitInstanceId } : {}),
         threadId: session.threadId,
         windows,
         raw: { subscriptionType: mapped.subscriptionType, costUsd: mapped.costUsd },

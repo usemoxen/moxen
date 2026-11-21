@@ -439,6 +439,8 @@ export class DirectConnection implements ClientApi {
       const claudeBinary = providers?.claude?.binaryPath || "claude";
       return await buildDirectProviders({
         harness: providers?.harness,
+        ...(providers?.claude ? { claude: providers.claude } : {}),
+        ...(providers?.chatgpt ? { chatgpt: providers.chatgpt } : {}),
         ...(providers?.codex ? { codex: providers.codex } : {}),
         ...(providers?.antigravity ? { antigravity: providers.antigravity } : {}),
         ...(providers?.acp ? { acp: providers.acp } : {}),

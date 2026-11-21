@@ -43,7 +43,7 @@ const ref = (name: string, label: string, ...steps: Step[]): PageRef => ({ name:
 const page = (label: string): PageRef => ref(label, label, side(label));
 
 /** The sidebar, top to bottom, as the page lists it with no profiles or servers set. */
-export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex", "Antigravity", "ACP agents", "Model servers", "MCP servers", "Skills"].map(page);
+export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex", "Antigravity", "ChatGPT", "ACP agents", "Model servers", "MCP servers", "Skills"].map(page);
 
 const PROFILE_PAGES = ["Endpoint", "Models", "Sampling", "Compaction", "Behaviour", "Prompt", "Template quirks"];
 const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
@@ -304,6 +304,7 @@ function pageOf(descriptor: SettingDescriptor): string {
     "provider:claude": "Claude Code",
     "provider:opencode": "OpenCode",
     "provider:antigravity": "Antigravity",
+    "provider:chatgpt": "ChatGPT",
     "provider:acp": "ACP agents",
     "provider:harness": "Model servers",
     mcp: "MCP servers",
