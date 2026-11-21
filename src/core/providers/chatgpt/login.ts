@@ -90,16 +90,24 @@ export async function startChatGptLoginSession(
   // Avoid unhandled rejection if caller cancels before awaiting.
   donePromise.catch(() => undefined);
 
-  const closeServer = async (): Promise<void> => {
+  const closeServer = async (force = false): Promise<void> => {
     if (!server) return;
     const current = server;
     server = null;
     await new Promise<void>((resolve) => {
       current.close(() => resolve());
+      if (force) {
+        current.closeAllConnections?.();
+      } else {
+        current.closeIdleConnections?.();
+      }
     });
   };
 
-  const finishFromUrl = async (rawUrl: string): Promise<ChatGptLoginCompletion> => {
+  const finishFromUrl = async (
+    rawUrl: string,
+    closeAfter = true,
+  ): Promise<ChatGptLoginCompletion> => {
     if (settled) return await donePromise;
     settled = true;
     try {
@@ -125,11 +133,11 @@ export async function startChatGptLoginSession(
       const authRef = await saveChatGptAuthBundle(normalizedId, bundle, deps.secrets);
       const result: ChatGptLoginCompletion = { accountId: normalizedId, authRef, bundle };
       resolveDone(result);
-      await closeServer();
+      if (closeAfter) await closeServer(true);
       return result;
     } catch (error) {
       rejectDone(error);
-      await closeServer();
+      if (closeAfter) await closeServer(true);
       throw error;
     }
   };
@@ -138,20 +146,22 @@ export async function startChatGptLoginSession(
     server = http.createServer((req, res) => {
       const reqUrl = req.url ?? "/";
       if (!reqUrl.startsWith("/callback")) {
-        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8", connection: "close" });
         res.end("Not found");
         return;
       }
+      const sendAndClose = (status: number, html: string) => {
+        res.writeHead(status, { "content-type": "text/html; charset=utf-8", connection: "close" });
+        res.end(html, () => {
+          void closeServer();
+        });
+      };
       const fullUrl = `http://127.0.0.1:${port}${reqUrl}`;
-      void finishFromUrl(fullUrl).then(
-        () => {
-          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          res.end(SUCCESS_HTML);
-        },
+      void finishFromUrl(fullUrl, false).then(
+        () => sendAndClose(200, SUCCESS_HTML),
         (error: unknown) => {
           const msg = error instanceof Error ? error.message : String(error);
-          res.writeHead(400, { "content-type": "text/html; charset=utf-8" });
-          res.end(errorHtml(msg));
+          sendAndClose(400, errorHtml(msg));
         },
       );
     });
@@ -188,7 +198,7 @@ export async function startChatGptLoginSession(
           donePromise,
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => {
-              void closeServer();
+              void closeServer(true);
               reject(new CliError("CHATGPT_AUTH_TIMEOUT", "Timed out waiting for Sign in with ChatGPT callback."));
             }, timeoutMs);
             timer.unref?.();
@@ -198,13 +208,13 @@ export async function startChatGptLoginSession(
         if (timer) clearTimeout(timer);
       }
     },
-    completeFromUrl: finishFromUrl,
+    completeFromUrl: (callbackUrl: string) => finishFromUrl(callbackUrl, true),
     async cancel(): Promise<void> {
       if (!settled) {
         settled = true;
         rejectDone(new CliError("CHATGPT_AUTH_CANCELLED", "Sign in with ChatGPT was cancelled."));
       }
-      await closeServer();
+      await closeServer(true);
     },
   };
 }

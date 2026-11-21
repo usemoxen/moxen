@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { startChatGptLoginSession } from "../login.js";
 import {
   buildAuthorizationUrl,
   CHATGPT_OAUTH_SCOPES,
@@ -288,5 +289,80 @@ describe("Sign in with ChatGPT OAuth 2.0 PKCE + OIDC (MXN-460)", () => {
     await clearChatGptAuth("personal", { fetch: mockFetch, secrets, now: () => now });
     expect(revokedTokens).toEqual(["rt_fresh_1", "at_fresh_1"]);
     expect(await loadChatGptAuthBundle("personal", secrets)).toBeNull();
+  });
+
+  it("responds to the browser loopback callback with HTML before closing the HTTP server", async () => {
+    const now = 1_800_000_000_000;
+    const nowSec = Math.floor(now / 1000);
+    const secrets = makeMemoryKeychain();
+    let expectedNonce = "";
+
+    const mockFetch: typeof fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith("/.well-known/openid-configuration")) {
+        return new Response(JSON.stringify(DISCOVERY), { status: 200 });
+      }
+      if (url.endsWith("/.well-known/jwks.json")) {
+        return new Response(JSON.stringify({ keys: [publicJwk] }), { status: 200 });
+      }
+      if (url.endsWith("/oauth/token")) {
+        return new Response(
+          JSON.stringify({
+            access_token: "at_loopback",
+            refresh_token: "rt_loopback",
+            scope: CHATGPT_OAUTH_SCOPES.join(" "),
+            expires_in: 3600,
+            id_token: signJwt({
+              iss: OPENAI_OIDC_ISSUER,
+              sub: "usr_loopback",
+              aud: "oaiapp_loopback",
+              exp: nowSec + 3600,
+              nonce: expectedNonce,
+              email: "loopback@example.test",
+              email_verified: true,
+            }),
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const session = await startChatGptLoginSession("personal", {
+      fetch: mockFetch,
+      secrets,
+      now: () => now,
+      bindLoopback: true,
+    });
+    const authUrl = new URL(session.authorizationUrl);
+    const state = authUrl.searchParams.get("state")!;
+    expectedNonce = authUrl.searchParams.get("nonce")!;
+
+    const waitPromise = session.waitForCallback(5_000);
+    const callbackResponse = await fetch(
+      `${session.redirectUri}?code=cb_code_1&state=${encodeURIComponent(state)}&client_id=oaiapp_loopback`,
+    );
+    expect(callbackResponse.status).toBe(200);
+    expect(callbackResponse.headers.get("content-type")).toContain("text/html");
+    const html = await callbackResponse.text();
+    expect(html).toContain("Signed in with ChatGPT");
+
+    const completed = await waitPromise;
+    expect(completed.bundle.clientId).toBe("oaiapp_loopback");
+    expect(completed.bundle.identity.email).toBe("loopback@example.test");
+
+    // Error callback also responds with 400 HTML instead of deadlocking.
+    const errSession = await startChatGptLoginSession("errcase", {
+      fetch: mockFetch,
+      secrets,
+      now: () => now,
+      bindLoopback: true,
+    });
+    const errWait = errSession.waitForCallback(5_000);
+    errWait.catch(() => undefined);
+    const errRes = await fetch(`${errSession.redirectUri}?code=cb_code_2&state=wrong-state&client_id=oaiapp_err`);
+    expect(errRes.status).toBe(400);
+    expect(await errRes.text()).toContain("Sign in with ChatGPT failed");
+    await expect(errWait).rejects.toThrow(/state did not match/);
   });
 });
