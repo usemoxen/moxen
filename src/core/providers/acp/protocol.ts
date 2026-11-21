@@ -1019,9 +1019,64 @@ function parseEnumChoices(rawEnum: unknown, rawNames: unknown): AcpElicitationOp
   return options;
 }
 
+function extractFieldChoices(field: Record<string, unknown>): AcpElicitationOption[] {
+  const type = asNonEmptyString(field["type"]);
+  if (type === "boolean") return [];
+  if (type === "array") {
+    const items = asRecord(field["items"]);
+    const choices = parseSchemaChoices(items?.["anyOf"] ?? items?.["oneOf"]);
+    return choices.length > 0 ? choices : parseEnumChoices(items?.["enum"], items?.["enumNames"]);
+  }
+  const choices = parseSchemaChoices(field["oneOf"] ?? field["anyOf"]);
+  return choices.length > 0 ? choices : parseEnumChoices(field["enum"], field["enumNames"]);
+}
+
+function isFreeTextOtherField(field: Record<string, unknown>): boolean {
+  const type = asNonEmptyString(field["type"]);
+  if (type !== undefined && type !== "string") return false;
+  return extractFieldChoices(field).length === 0;
+}
+
+function findOtherSentinelOption(options: readonly AcpElicitationOption[]): AcpElicitationOption | undefined {
+  return options.find(
+    (option) =>
+      /^(__)?other(__)?$/i.test(option.value.trim()) ||
+      option.label.trim().toLowerCase() === "other",
+  );
+}
+
+function findFoldedOtherFields(properties: Record<string, unknown> | null | undefined): {
+  readonly foldedByParent: Map<string, string>;
+  readonly foldedOtherKeys: Set<string>;
+} {
+  const foldedByParent = new Map<string, string>();
+  const foldedOtherKeys = new Set<string>();
+  if (!properties) return { foldedByParent, foldedOtherKeys };
+
+  for (const [key, rawField] of Object.entries(properties)) {
+    if (!key.endsWith("_other") || key.length <= "_other".length) continue;
+    const parentId = key.slice(0, -"_other".length);
+    if (!Object.prototype.hasOwnProperty.call(properties, parentId)) continue;
+    const otherField = asRecord(rawField) ?? {};
+    if (!isFreeTextOtherField(otherField)) continue;
+    const parentField = asRecord(properties[parentId]) ?? {};
+    const parentType = asNonEmptyString(parentField["type"]);
+    if (parentType === "boolean" || parentType === "number" || parentType === "integer") continue;
+    if (extractFieldChoices(parentField).length === 0) continue;
+    foldedByParent.set(parentId, key);
+    foldedOtherKeys.add(key);
+  }
+
+  return { foldedByParent, foldedOtherKeys };
+}
+
 /**
  * Convert an ACP `elicitation/create` form payload (`{ message, requestedSchema }`)
  * into Moxen's normalized question list for `user-input.request.opened`.
+ *
+ * Paired `<id>_other` free-text string properties adjacent to a choice field `<id>`
+ * (as emitted by `agy acp` for `ask_question`) are folded into the parent question's
+ * `allowCustomAnswer` slot instead of producing a second question tab.
  */
 export function parseAcpElicitationQuestions(params: unknown): {
   readonly message: string;
@@ -1032,8 +1087,10 @@ export function parseAcpElicitationQuestions(params: unknown): {
   const schema = asRecord(rec["requestedSchema"]);
   const properties = asRecord(schema?.["properties"]);
   const entries = properties ? Object.entries(properties) : [];
+  const { foldedByParent, foldedOtherKeys } = findFoldedOtherFields(properties);
+  const visibleEntries = entries.filter(([id]) => !foldedOtherKeys.has(id));
 
-  if (entries.length === 0) {
+  if (visibleEntries.length === 0) {
     return {
       message,
       questions: [
@@ -1050,12 +1107,12 @@ export function parseAcpElicitationQuestions(params: unknown): {
   }
 
   const questions: AcpElicitationQuestion[] = [];
-  for (const [id, rawField] of entries) {
+  for (const [id, rawField] of visibleEntries) {
     const field = asRecord(rawField) ?? {};
     const type = asNonEmptyString(field["type"]);
     const title = asNonEmptyString(field["title"]);
     const description = asNonEmptyString(field["description"]);
-    const question = title ?? description ?? (entries.length === 1 ? message : id);
+    const question = title ?? description ?? (visibleEntries.length === 1 ? message : id);
     const header = title ? id : "Question";
 
     let multiSelect = false;
@@ -1070,15 +1127,16 @@ export function parseAcpElicitationQuestions(params: unknown): {
       ];
     } else if (type === "array") {
       multiSelect = true;
-      const items = asRecord(field["items"]);
-      options = parseSchemaChoices(items?.["anyOf"] ?? items?.["oneOf"]);
-      if (options.length === 0) {
-        options = parseEnumChoices(items?.["enum"], items?.["enumNames"]);
-      }
+      options = extractFieldChoices(field);
     } else {
-      options = parseSchemaChoices(field["oneOf"] ?? field["anyOf"]);
-      if (options.length === 0) {
-        options = parseEnumChoices(field["enum"], field["enumNames"]);
+      options = extractFieldChoices(field);
+    }
+
+    if (foldedByParent.has(id)) {
+      allowCustomAnswer = true;
+      const sentinel = findOtherSentinelOption(options);
+      if (sentinel) {
+        options = options.filter((option) => option !== sentinel);
       }
     }
 
@@ -1143,11 +1201,56 @@ export function buildAcpElicitationResponse(
 ): { readonly action: "accept"; readonly content: Record<string, unknown> } {
   const schema = asRecord(asRecord(params)?.["requestedSchema"]);
   const properties = asRecord(schema?.["properties"]);
+  const requiredSet = new Set(
+    Array.isArray(schema?.["required"])
+      ? schema["required"].filter((entry): entry is string => typeof entry === "string")
+      : [],
+  );
+  const { foldedByParent, foldedOtherKeys } = findFoldedOtherFields(properties);
   const content: Record<string, unknown> = {};
 
   for (const [key, rawValue] of Object.entries(answers)) {
     const field = asRecord(properties?.[key]);
     const type = asNonEmptyString(field?.["type"]);
+    const otherKey = foldedByParent.get(key);
+
+    if (otherKey) {
+      const choices = extractFieldChoices(field ?? {});
+      const knownValues = choices.map((choice) => choice.value);
+      const knownSet = new Set(knownValues);
+      const sentinel = findOtherSentinelOption(choices);
+
+      if (type === "array") {
+        const parts = splitMultiSelectAnswer(rawValue, knownValues);
+        const matched = parts.filter((part) => knownSet.has(part) && (!sentinel || part !== sentinel.value));
+        const custom = parts.filter((part) => !knownSet.has(part));
+        if (custom.length > 0) {
+          content[otherKey] = custom.join(", ");
+          if (matched.length > 0) {
+            content[key] = sentinel ? [...matched, sentinel.value] : matched;
+          } else if (sentinel) {
+            content[key] = [sentinel.value];
+          } else if (requiredSet.has(key)) {
+            content[key] = [];
+          }
+        } else {
+          content[key] = matched;
+        }
+      } else if (knownSet.has(rawValue)) {
+        content[key] = rawValue;
+      } else if (rawValue.trim().length > 0) {
+        content[otherKey] = rawValue;
+        if (sentinel) {
+          content[key] = sentinel.value;
+        }
+      }
+      continue;
+    }
+
+    if (foldedOtherKeys.has(key) && content[key] !== undefined && rawValue.trim().length === 0) {
+      continue;
+    }
+
     if (type === "boolean") {
       const lower = rawValue.trim().toLowerCase();
       content[key] = lower === "true" || lower === "yes" || lower === "1";
@@ -1158,11 +1261,7 @@ export function buildAcpElicitationResponse(
       }
       content[key] = num;
     } else if (type === "array") {
-      const items = asRecord(field?.["items"]);
-      const choices = [
-        ...parseSchemaChoices(items?.["anyOf"] ?? items?.["oneOf"]),
-        ...parseEnumChoices(items?.["enum"], items?.["enumNames"]),
-      ];
+      const choices = extractFieldChoices(field ?? {});
       content[key] = splitMultiSelectAnswer(
         rawValue,
         choices.map((choice) => choice.value),

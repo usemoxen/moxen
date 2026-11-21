@@ -7,10 +7,12 @@ import {
   acpMcpServersOf,
   acpStopReasonToStatus,
   assertSupportedAcpProtocolVersion,
+  buildAcpElicitationResponse,
   buildAcpPromptBlocks,
   extractAcpToolContent,
   normalizeAcpToolCall,
   parseAcpCatalogModels,
+  parseAcpElicitationQuestions,
   parseAcpTurnUsage,
   parseAcpUsageUpdate,
   selectAcpPermissionOutcome,
@@ -221,6 +223,138 @@ describe("ACP wire helpers", () => {
       canonicalTool: "Glob",
       title: "*.ts",
       input: { pattern: "*.ts", path: "src" },
+    });
+  });
+});
+
+describe("ACP elicitation <field>_other folding (MXN-464)", () => {
+  const pairedSchema = {
+    message: "Please answer a few questions",
+    requestedSchema: {
+      type: "object",
+      properties: {
+        q1: {
+          type: "string",
+          title: "Which approach?",
+          oneOf: [
+            { const: "a", title: "Option A" },
+            { const: "b", title: "Option B" },
+          ],
+        },
+        q1_other: {
+          type: "string",
+          title: "Other",
+        },
+        q2: {
+          type: "array",
+          title: "Which targets?",
+          items: {
+            anyOf: [
+              { const: "mac", title: "macOS" },
+              { const: "win", title: "Windows" },
+            ],
+          },
+        },
+        q2_other: {
+          type: "string",
+          title: "Other",
+        },
+        q3: {
+          type: "string",
+          title: "Sentinel choice?",
+          enum: ["x", "y", "__other__"],
+          enumNames: ["Choice X", "Choice Y", "Other"],
+        },
+        q3_other: {
+          type: "string",
+          title: "Other",
+        },
+        notes: {
+          type: "string",
+          title: "Notes",
+        },
+        notes_other: {
+          type: "string",
+          title: "Additional notes",
+        },
+      },
+    },
+  };
+
+  it("folds paired <id>_other free-text fields into their choice parent without creating extra tabs", () => {
+    const parsed = parseAcpElicitationQuestions(pairedSchema);
+    expect(parsed.questions.map((q) => q.id)).toEqual(["q1", "q2", "q3", "notes", "notes_other"]);
+    expect(parsed.questions[0]).toMatchObject({
+      id: "q1",
+      multiSelect: false,
+      allowCustomAnswer: true,
+      options: [
+        { value: "a", label: "Option A" },
+        { value: "b", label: "Option B" },
+      ],
+    });
+    expect(parsed.questions[1]).toMatchObject({
+      id: "q2",
+      multiSelect: true,
+      allowCustomAnswer: true,
+      options: [
+        { value: "mac", label: "macOS" },
+        { value: "win", label: "Windows" },
+      ],
+    });
+    // Strips the redundant "Other" sentinel choice when folded into Moxen's custom answer slot.
+    expect(parsed.questions[2]).toMatchObject({
+      id: "q3",
+      allowCustomAnswer: true,
+      options: [
+        { value: "x", label: "Choice X" },
+        { value: "y", label: "Choice Y" },
+      ],
+    });
+  });
+
+  it("routes standard picks to <id> and custom answers to <id>_other on single- and multi-select fields", () => {
+    expect(
+      buildAcpElicitationResponse(pairedSchema, {
+        q1: "a",
+        q2: "mac, win",
+        q3: "x",
+      }),
+    ).toEqual({
+      action: "accept",
+      content: {
+        q1: "a",
+        q2: ["mac", "win"],
+        q3: "x",
+      },
+    });
+
+    expect(
+      buildAcpElicitationResponse(pairedSchema, {
+        q1: "Custom answer, with commas",
+        q2: "mac, Linux",
+        q3: "Custom sentinel text",
+      }),
+    ).toEqual({
+      action: "accept",
+      content: {
+        q1_other: "Custom answer, with commas",
+        q2: ["mac"],
+        q2_other: "Linux",
+        q3: "__other__",
+        q3_other: "Custom sentinel text",
+      },
+    });
+
+    expect(
+      buildAcpElicitationResponse(pairedSchema, {
+        q2: "Linux only",
+      }),
+    ).toEqual({
+      action: "accept",
+      content: {
+        q2_other: "Linux only",
+      },
     });
   });
 });
