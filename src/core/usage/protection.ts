@@ -116,7 +116,7 @@ export class UsageProtection {
     return this.serialize(async () => {
       const ctx = await this.context();
       const rows = await this.rows(ctx);
-      if (provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider") throw new CliError("USAGE_PROVIDER_WRAP_UP", "Claude Code manages wrap-up. Choose Moxen in Usage wrap-up to request it here.");
+      if (driverKindOfInstance(provider) === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider") throw new CliError("USAGE_PROVIDER_WRAP_UP", "Claude Code manages wrap-up. Choose Moxen in Usage wrap-up to request it here.");
       if (!usageLimitsSnapshot()[provider]?.windows.length) throw new CliError("USAGE_UNAVAILABLE", "This provider has not reported usage windows.");
       const triggering = this.snapshot.forecasts.filter((forecast) => forecast.provider === provider && forecast.shouldWrap);
       await this.begin(ctx, rows, provider, Date.now(), triggering.length ? triggering : undefined);
@@ -158,11 +158,12 @@ export class UsageProtection {
       const reported = turn.usage?.costUsd;
       const key = `${row.thread.id}:${turn.id}`;
       let cost = 0;
-      if (provider === "claude" && reported !== undefined) {
+      const isClaude = driverKindOfInstance(provider) === "claude";
+      if (isClaude && reported !== undefined) {
         const before = previous.get(provider) ?? 0;
         cost = reported >= before ? reported - before : reported;
         previous.set(provider, reported);
-      } else if (provider !== "claude" && turn.usage && !this.counted.has(key)) {
+      } else if (!isClaude && turn.usage && !this.counted.has(key)) {
         // Recorded usage keeps input and cached reads/writes apart already: priced as it is.
         cost = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), turn.usage, fast)?.usd ?? 0;
       }
@@ -376,7 +377,7 @@ export class UsageProtection {
       if (openTurn(turns)?.queue?.summaryFor || (thread.usagePause && thread.usagePause.phase !== "resuming")) return false;
       if (usageKeyForInstance(selection.instanceId) !== provider) return false;
       if (!openTurn(turns) && !this.nativeWrap.has(thread.id)) return false;
-      if (provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" && !this.nativeWrap.has(thread.id)) return false;
+      if (driverKindOfInstance(provider) === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" && !this.nativeWrap.has(thread.id)) return false;
       if (triggering !== undefined && triggering.length > 0 && relevantFor(selection.model).length === 0) return false;
       return true;
     });
@@ -457,7 +458,7 @@ export class UsageProtection {
         let inFlight = 0;
         // Claude totals include native tasks. Count gains, including session resets,
         // rather than adding cumulative snapshots or native child costs again.
-        if (provider === "claude") {
+        if (driverKindOfInstance(provider) === "claude") {
           let previous = 0;
           for (const turn of providerTurns) {
             if (turn.status === "running" || turn.status === "queued") continue;
@@ -487,7 +488,7 @@ export class UsageProtection {
       this.costCounter.set(provider, costUsd);
       for (const window of limits.windows) {
         const forecast = this.forecaster.forecast(provider, window, { activeMs, costUsd, wrapCostUsd, running: running.length });
-        forecasts.push(provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" ? { ...forecast, shouldWrap: false } : forecast);
+        forecasts.push(driverKindOfInstance(provider) === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" ? { ...forecast, shouldWrap: false } : forecast);
       }
     }
     this.snapshot = { forecasts, queue: rows.flatMap(({ thread }) =>
@@ -501,7 +502,7 @@ export class UsageProtection {
     await this.refresh(ctx, now, rows);
     let changed = false;
     for (const { thread } of rows) {
-      if (!thread.archivedAt && thread.usagePause?.phase === "wrapping" && thread.usagePause.provider === "claude" && this.nativeWrap.has(thread.id)) {
+      if (!thread.archivedAt && thread.usagePause?.phase === "wrapping" && driverKindOfInstance(thread.usagePause.provider) === "claude" && this.nativeWrap.has(thread.id)) {
         await this.pause(ctx, thread.id, { ...thread.usagePause, native: true }, now);
       }
     }
@@ -509,7 +510,14 @@ export class UsageProtection {
       const triggering = this.snapshot.forecasts.filter((forecast) => forecast.shouldWrap);
       for (const provider of new Set(triggering.map((forecast) => forecast.provider))) await this.begin(ctx, rows, provider, now, triggering.filter((forecast) => forecast.provider === provider));
       if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
-      if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, rows, "claude", now, triggering.filter((forecast) => forecast.provider === "claude"));
+      const nativeWrapProviders = new Set(
+        rows
+          .filter(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))
+          .map(({ thread, turns }) => usageKeyForInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId)),
+      );
+      for (const provider of nativeWrapProviders) {
+        await this.begin(ctx, rows, provider, now, triggering.filter((forecast) => forecast.provider === provider));
+      }
     }
     if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
     this.nativeWrap.clear();

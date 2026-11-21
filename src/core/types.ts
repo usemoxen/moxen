@@ -167,8 +167,49 @@ export interface ForgeConfig {
   glabPath?: string;
 }
 
+/** Public, credential-free summary of one configured provider account (`providers.accounts` query). */
+export interface ProviderAccountSummary {
+  readonly kind: AccountProviderKind;
+  readonly id: string;
+  readonly instanceId: string;
+  readonly label: string;
+  readonly enabled: boolean;
+  readonly homePath: string | null;
+  readonly binaryPath: string | null;
+  readonly launchArgs: string | null;
+  readonly env: Readonly<Record<string, string>>;
+  readonly model: string | null;
+  readonly thinkingEffort: string | null;
+  readonly email: string | null;
+  readonly workspaceName: string | null;
+  readonly planType: string | null;
+  readonly signedIn: boolean | null;
+  readonly codexHomePath: string | null;
+  readonly codexBinaryPath: string | null;
+  readonly codexLaunchArgs: string | null;
+  readonly codexVerified: boolean;
+}
+
 /** Multi-account provider kinds addressed as `<kind>/<id>`. */
-export type AccountProviderKind = "claude" | "chatgpt" | "antigravity";
+export const ACCOUNT_PROVIDER_KINDS = ["claude", "chatgpt", "antigravity"] as const;
+export type AccountProviderKind = (typeof ACCOUNT_PROVIDER_KINDS)[number];
+
+/** Payload for creating or updating one provider account (`provider.account.save`). */
+export interface ProviderAccountSaveInput {
+  readonly kind: AccountProviderKind;
+  readonly id: string;
+  readonly label?: string | null;
+  readonly enabled?: boolean;
+  readonly homePath?: string | null;
+  readonly binaryPath?: string | null;
+  readonly launchArgs?: string | readonly string[] | null;
+  readonly env?: Readonly<Record<string, string>> | null;
+  readonly model?: string | null;
+  readonly thinkingEffort?: string | null;
+  readonly codexHomePath?: string | null;
+  readonly codexBinaryPath?: string | null;
+  readonly codexLaunchArgs?: string | null;
+}
 
 /**
  * Shared fields for a configured provider account (`claude/<id>`, `chatgpt/<id>`,

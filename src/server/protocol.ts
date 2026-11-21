@@ -33,7 +33,7 @@ import { knowledgeInput } from "../core/knowledge/input.js";
 import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryBefore, type MemoryScope, type MemorySearch, type MemoryType } from "../core/memory/memory.js";
 import { INTERACTION_MODES, requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
-import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
+import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type ProviderUpdateAllResult, type UpdatableProvider } from "../core/catalog/update.js";
 import type { AcpRegistryPreset } from "../core/providers/acp/registry.js";
 import type {
   AskedTask,
@@ -63,7 +63,15 @@ import type { ModelRequest } from "../core/catalog/selection.js";
 import type { SettingView } from "../core/configschema.js";
 import type { McpTestResult } from "../core/mcptest.js";
 import type { HarnessTestResult, ProbeReport } from "../core/providers/harness/probe.js";
-import type { CliConfig, DiscoverResult, HarnessApiFormat } from "../core/types.js";
+import {
+  ACCOUNT_PROVIDER_KINDS,
+  type AccountProviderKind,
+  type CliConfig,
+  type DiscoverResult,
+  type HarnessApiFormat,
+  type ProviderAccountSaveInput,
+  type ProviderAccountSummary,
+} from "../core/types.js";
 import type { GitBranch, GitCommit, GitCommitDetail, GitOverview, GitWorktreeStatus } from "../core/git/history.js";
 import type {
   ForgeCheckRun,
@@ -371,6 +379,14 @@ export type CommandBody =
   | { readonly type: "harness.models.discover"; readonly baseUrl: string; readonly apiFormat: HarnessApiFormat; readonly apiKeyEnv?: string }
   /** Runs a provider CLI's own updater (`claude update`, `opencode upgrade`) on the machine the sessions run on. */
   | { readonly type: "provider.update"; readonly provider: UpdatableProvider }
+  /** Runs provider CLI updaters in parallel across all (or selected) updatable CLIs; one failure never hides others. */
+  | { readonly type: "provider.update-all"; readonly providers?: readonly UpdatableProvider[] }
+  /** Create or edit a configured provider account (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`). */
+  | ({ readonly type: "provider.account.save" } & ProviderAccountSaveInput)
+  /** Remove a configured provider account (and delete any stored ChatGPT OAuth keychain bundle). */
+  | { readonly type: "provider.account.remove"; readonly kind: AccountProviderKind; readonly id: string }
+  /** Enable or disable a configured provider account without deleting it. */
+  | { readonly type: "provider.account.toggle"; readonly kind: AccountProviderKind; readonly id: string; readonly enabled: boolean }
   /**
    * Continue a thread in a new one: same project and checkout, opened with a
    * handoff written from the old thread's ledger. Without a model request the
@@ -519,6 +535,10 @@ export interface CommandResults {
   "harness.profile.probe": ProbeReport & { readonly saved: boolean };
   "harness.models.discover": DiscoverResult;
   "provider.update": ProviderUpdate;
+  "provider.update-all": ProviderUpdateAllResult;
+  "provider.account.save": { readonly account: ProviderAccountSummary; readonly created: boolean; readonly settings: SettingsSnapshot } & Accepted;
+  "provider.account.remove": { readonly removed: boolean; readonly settings: SettingsSnapshot } & Accepted;
+  "provider.account.toggle": { readonly account: ProviderAccountSummary; readonly settings: SettingsSnapshot } & Accepted;
   "thread.continue": { readonly threadId: string; readonly title: string; readonly scheduledFor: string | null } & Accepted;
   "thread.continue-agent": ContinuedOwnThread & Accepted;
   "thread.side-question": { readonly text: string; readonly withContext: boolean; readonly provider: string };
@@ -600,6 +620,8 @@ export type Query =
   | { readonly type: "thread.turn.await"; readonly threadId: string; readonly turnId: string }
   /** The live provider catalog, probed on every call, with hidden-model preferences applied. */
   | { readonly type: "providers.list" }
+  /** Configured multi-account entries (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`), credential-free. */
+  | { readonly type: "providers.accounts" }
   /** Agents advertised by the pinned v1 ACP Registry, with suggested launch commands for this platform. */
   | { readonly type: "acp.registry.list"; readonly forceRefresh?: boolean }
   | { readonly type: "image-generation.availability"; readonly threadId: string }
@@ -791,6 +813,7 @@ export interface QueryResults {
   "research.role.report": DescribedTask;
   "thread.turn.await": { readonly status: TurnStatus };
   "providers.list": { readonly providers: readonly ProviderSummary[] };
+  "providers.accounts": { readonly accounts: readonly ProviderAccountSummary[] };
   doctor: Diagnosis;
   "store.problems": { readonly problems: readonly StoreProblem[] };
   "skills.list": SkillInventory;
@@ -1589,12 +1612,101 @@ export function decodeCommand(value: unknown): Command {
         type,
         provider: requireEnum(record.provider, type, "provider", UPDATABLE_PROVIDERS),
       };
+    case "provider.update-all": {
+      if (record.providers === undefined) return { ...meta, type };
+      if (!Array.isArray(record.providers)) {
+        throw new CliError("INVALID_THREAD_OPTION", `${type} providers must be an array.`, { exitCode: 2 });
+      }
+      const providers = record.providers.map((entry) => requireEnum(entry, type, "providers[]", UPDATABLE_PROVIDERS));
+      return { ...meta, type, providers };
+    }
+    case "provider.account.save":
+      return {
+        ...meta,
+        type,
+        kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
+        id: requireField(record.id, type, "id"),
+        ...optionalNullableString(record, "label", type),
+        ...optionalBoolean(record, "enabled", type),
+        ...optionalNullableString(record, "homePath", type),
+        ...optionalNullableString(record, "binaryPath", type),
+        ...optionalNullableLaunchArgs(record, type),
+        ...optionalNullableEnv(record, type),
+        ...optionalNullableString(record, "model", type),
+        ...optionalNullableString(record, "thinkingEffort", type),
+        ...optionalNullableString(record, "codexHomePath", type),
+        ...optionalNullableString(record, "codexBinaryPath", type),
+        ...optionalNullableString(record, "codexLaunchArgs", type),
+      };
+    case "provider.account.remove":
+      return {
+        ...meta,
+        type,
+        kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
+        id: requireField(record.id, type, "id"),
+      };
+    case "provider.account.toggle":
+      if (typeof record.enabled !== "boolean") {
+        throw new CliError("INVALID_THREAD_OPTION", `${type} requires enabled as a boolean.`, { exitCode: 2 });
+      }
+      return {
+        ...meta,
+        type,
+        kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
+        id: requireField(record.id, type, "id"),
+        enabled: record.enabled,
+      };
     default:
       throw unknownCommand(type);
   }
 }
 
 // -- field decoders ------------------------------------------------------------
+
+function optionalNullableString<K extends string>(
+  record: Record<string, unknown>,
+  key: K,
+  command: string,
+): { [P in K]?: string | null } {
+  const value = record[key];
+  if (value === undefined) return {} as { [P in K]?: string | null };
+  if (value === null || typeof value === "string") return { [key]: value } as { [P in K]?: string | null };
+  throw new CliError("INVALID_THREAD_OPTION", `${command} ${key} must be a string or null.`, { exitCode: 2 });
+}
+
+function optionalNullableLaunchArgs(
+  record: Record<string, unknown>,
+  command: string,
+): { readonly launchArgs?: string | readonly string[] | null } {
+  const value = record.launchArgs;
+  if (value === undefined) return {};
+  if (value === null || typeof value === "string") return { launchArgs: value };
+  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
+    return { launchArgs: value as string[] };
+  }
+  throw new CliError("INVALID_THREAD_OPTION", `${command} launchArgs must be a string, string array, or null.`, { exitCode: 2 });
+}
+
+function optionalNullableEnv(
+  record: Record<string, unknown>,
+  command: string,
+): { readonly env?: Readonly<Record<string, string>> | null } {
+  const value = record.env;
+  if (value === undefined) return {};
+  if (value === null) return { env: null };
+  const map = asRecord(value);
+  if (map === null) {
+    throw new CliError("INVALID_THREAD_OPTION", `${command} env must be a string map or null.`, { exitCode: 2 });
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) {
+    if (typeof v !== "string") {
+      throw new CliError("INVALID_THREAD_OPTION", `${command} env.${k} must be a string.`, { exitCode: 2 });
+    }
+    out[k] = v;
+  }
+  return { env: out };
+}
 
 function optionalString<K extends string>(record: Record<string, unknown>, key: K): { [P in K]?: string } {
   const value = asString(record[key]);
@@ -1776,6 +1888,7 @@ export function decodeQuery(value: unknown): Query {
         turnId: requireField(record.turnId, type, "turnId"),
       };
     case "providers.list":
+    case "providers.accounts":
     case "doctor":
       return { type };
     case "acp.registry.list":

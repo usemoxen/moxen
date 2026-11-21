@@ -18,6 +18,14 @@ export interface ProviderUpdate {
   readonly output: string;
 }
 
+export type ProviderUpdateAllItem =
+  | { readonly provider: UpdatableProvider; readonly ok: true; readonly update: ProviderUpdate }
+  | { readonly provider: UpdatableProvider; readonly ok: false; readonly error: string };
+
+export interface ProviderUpdateAllResult {
+  readonly results: readonly ProviderUpdateAllItem[];
+}
+
 const LABELS: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity" };
 
 /** What to tell the user once an update ran: what changed, and what still runs the old build. */

@@ -13,11 +13,18 @@ import { acpLaunchCommand } from "./acp/transport.js";
 import { codexLaunchCommand } from "./codex/transport.js";
 import { CliError } from "../errors.js";
 import { runProcess } from "../infra/process.js";
-import { describeUpdate, UPDATABLE_PROVIDERS, type ProviderUpdate, type UpdatableProvider } from "../catalog/update.js";
+import {
+  describeUpdate,
+  UPDATABLE_PROVIDERS,
+  type ProviderUpdate,
+  type ProviderUpdateAllItem,
+  type ProviderUpdateAllResult,
+  type UpdatableProvider,
+} from "../catalog/update.js";
 import { parseVersionNumber } from "./semver.js";
 
 export { describeUpdate, UPDATABLE_PROVIDERS };
-export type { ProviderUpdate, UpdatableProvider };
+export type { ProviderUpdate, ProviderUpdateAllItem, ProviderUpdateAllResult, UpdatableProvider };
 
 const COMMANDS: Record<UpdatableProvider, { readonly binary: string; readonly args: readonly string[]; readonly label: string }> = {
   codex: { binary: "codex", args: ["update"], label: "Codex" },
@@ -86,4 +93,27 @@ export async function updateProvider(provider: UpdatableProvider, deps: UpdateDe
   }
   const after = await versionOf(binary, env, run);
   return { provider, before, after, updated: before !== null && after !== null && before !== after, output };
+}
+
+/** Update multiple provider CLIs in parallel; one failure never aborts or hides the others. */
+export async function updateAllProviders(
+  providers: readonly UpdatableProvider[] = UPDATABLE_PROVIDERS,
+  depsFor: (provider: UpdatableProvider) => UpdateDeps = () => ({}),
+): Promise<ProviderUpdateAllResult> {
+  const unique = [...new Set(providers)];
+  const results = await Promise.all(
+    unique.map(async (provider): Promise<ProviderUpdateAllItem> => {
+      try {
+        const update = await updateProvider(provider, depsFor(provider));
+        return { provider, ok: true, update };
+      } catch (cause) {
+        return {
+          provider,
+          ok: false,
+          error: cause instanceof Error ? cause.message : String(cause),
+        };
+      }
+    }),
+  );
+  return { results };
 }

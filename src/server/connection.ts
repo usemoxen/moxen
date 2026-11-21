@@ -38,12 +38,14 @@ import { fetchLiveModels } from "../core/providers/claude/livemodels.js";
 import { SdkTransport } from "../core/providers/claude/transport.js";
 import { diagnose } from "../core/diagnostics/doctor.js";
 import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
+import { removeProviderAccount, setProviderAccountEnabled, summarizeProviderAccounts, upsertProviderAccount } from "../core/providers/accounts.js";
+import { hasSecret, isSecretRef, refName, writeSecret } from "../core/secrets.js";
 import { latestVersions } from "../core/providers/latest.js";
 import { checkForUpdate } from "../core/selfupdate/check.js";
 import { rollbackRelease, updateRelease, type UpdateOptions } from "../core/selfupdate/update.js";
 import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import { readInstall } from "../core/selfupdate/install.js";
-import type { LatestVersions } from "../core/catalog/update.js";
+import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdateAllItem } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary, type ProviderUsageLimits } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
@@ -641,7 +643,7 @@ export class DirectConnection implements ClientApi {
     const ctx = await this.context();
     const thread = await ctx.store.readThreadRecord(threadId);
     const unavailable = (reason: string) => ({ available: false as const, reason });
-    if (!thread || thread.modelSelection.instanceId === "codex") return unavailable("Codex threads use their native image-generation tool.");
+    if (!thread || driverKindOfInstance(thread.modelSelection.instanceId) === "codex") return unavailable("Codex threads use their native image-generation tool.");
     const kind = driverKindOfInstance(thread.modelSelection.instanceId);
     if (!moxenToolsOf(kind === null ? undefined : ctx.config.providers?.[kind]).orchestration ||
         (await ctx.store.readDelegations()).some((row) => row.childThreadId === threadId)) return unavailable("Image generation is unavailable in delegated tasks or with orchestration switched off.");
@@ -1841,6 +1843,62 @@ export class DirectConnection implements ClientApi {
         const providers = (await this.loadConfig()).providers;
         return await this.runProviderUpdate(command.provider, providers?.[command.provider]?.binaryPath);
       }
+      case "provider.update-all": {
+        const providers = (await this.loadConfig()).providers;
+        const targets = [...new Set(command.providers ?? UPDATABLE_PROVIDERS)];
+        const results = await Promise.all(
+          targets.map(async (provider): Promise<ProviderUpdateAllItem> => {
+            try {
+              const update = await this.runProviderUpdate(provider, providers?.[provider]?.binaryPath);
+              return { provider, ok: true, update };
+            } catch (cause) {
+              return { provider, ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+            }
+          }),
+        );
+        return { results };
+      }
+      case "provider.account.save": {
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const saved = upsertProviderAccount(fileConfig, command);
+          await saveConfig(path, normalizeFileConfig(saved.config), skipped);
+          let account = saved.account;
+          if (account.kind === "chatgpt") {
+            const stored = saved.config.providers?.chatgpt?.accounts?.find((entry) => entry.id === account.id);
+            const signedIn = await hasSecret(stored?.authRef);
+            account = { ...account, signedIn };
+          }
+          return { account, created: saved.created, settings: await this.settingsSnapshot(), accepted: true };
+        });
+      }
+      case "provider.account.remove": {
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const result = removeProviderAccount(fileConfig, command.kind, command.id);
+          if (result.removed) {
+            await saveConfig(path, normalizeFileConfig(result.config), skipped);
+            if (result.authRef && isSecretRef(result.authRef)) {
+              await writeSecret(refName(result.authRef), "").catch(() => undefined);
+            }
+          }
+          return { removed: result.removed, settings: await this.settingsSnapshot(), accepted: true };
+        });
+      }
+      case "provider.account.toggle": {
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const updated = setProviderAccountEnabled(fileConfig, command.kind, command.id, command.enabled);
+          await saveConfig(path, normalizeFileConfig(updated.config), skipped);
+          let account = updated.account;
+          if (account.kind === "chatgpt") {
+            const stored = updated.config.providers?.chatgpt?.accounts?.find((entry) => entry.id === account.id);
+            const signedIn = await hasSecret(stored?.authRef);
+            account = { ...account, signedIn };
+          }
+          return { account, settings: await this.settingsSnapshot(), accepted: true };
+        });
+      }
       case "thread.conversation.revert":
         return {
           ...(await revertThread(await this.context(), command.threadId, command.turnCount, {
@@ -2163,7 +2221,7 @@ export class DirectConnection implements ClientApi {
       await this.context();
       return this.driverFor(selection.instanceId);
     }
-    if (driverKey(selection.instanceId) === "codex" && thread.providerSessions?.["codex"] !== undefined) {
+    if (driverKindOfInstance(selection.instanceId) === "codex" && thread.providerSessions?.[driverKey(selection.instanceId)] !== undefined) {
       await this.context();
       return this.driverFor(selection.instanceId);
     }
@@ -2362,6 +2420,17 @@ export class DirectConnection implements ClientApi {
         return { status: await this.turnSettled(query.threadId, query.turnId, signal) };
       case "providers.list":
         return { providers: withLiveUsage(await this.providers()) };
+      case "providers.accounts": {
+        const config = await this.loadConfig();
+        const chatgptAccounts = config.providers?.chatgpt?.accounts ?? [];
+        const signedIn = new Map<string, boolean>();
+        await Promise.all(
+          chatgptAccounts.map(async (account) => {
+            signedIn.set(`chatgpt/${account.id.trim().toLowerCase()}`, await hasSecret(account.authRef));
+          }),
+        );
+        return { accounts: summarizeProviderAccounts(config.providers, signedIn) };
+      }
       case "acp.registry.list": {
         const loaded = await loadAcpRegistryCatalog({
           storeRoot: this.storeRoot,
@@ -2386,8 +2455,8 @@ export class DirectConnection implements ClientApi {
         const thread = await store.readThreadRecord(query.threadId);
         const turns = await store.readTurns(query.threadId);
         const latest = [...turns].reverse().find((turn) => turn.modelSelection)?.modelSelection ?? thread?.modelSelection;
-        const latestDriver = latest !== undefined ? driverKey(latest.instanceId) : null;
-        const partial = latestDriver === "opencode" || latestDriver === "acp" || latestDriver === "antigravity";
+        const latestKind = latest !== undefined ? driverKindOfInstance(latest.instanceId) : null;
+        const partial = latestKind === "opencode" || latestKind === "acp" || latestKind === "antigravity";
         return { live: true, partial, tasks: driver.backgroundTasks?.(query.threadId) ?? [] };
       }
       case "thread.context-reading":
@@ -2407,9 +2476,10 @@ export class DirectConnection implements ClientApi {
         const store = await this.store();
         const thread = await store.readThreadRecord(query.threadId);
         const selection = [...(await store.readTurns(query.threadId))].reverse().find((turn) => turn.modelSelection)?.modelSelection ?? thread?.modelSelection;
-        const harness = selection !== undefined && driverKey(selection.instanceId) === "harness";
-        const historyProvider = harness ? "harness" : selection && driverKey(selection.instanceId) === "codex" ? "codex" : "opencode";
-        const cursor = thread?.providerSessions?.[historyProvider] ?? null;
+        const kind = selection !== undefined ? driverKindOfInstance(selection.instanceId) : null;
+        const historyProvider = kind === "harness" ? "harness" : kind === "codex" ? "codex" : "opencode";
+        const sessionKey = selection !== undefined ? driverKey(selection.instanceId) : historyProvider;
+        const cursor = thread?.providerSessions?.[sessionKey] ?? thread?.providerSessions?.[historyProvider] ?? null;
         const readHistory = driver?.subagentHistory ? (agentId: string) => driver.subagentHistory!(query.threadId, agentId, cursor) : undefined;
         return await subagentTranscript(store, query.threadId, query.agentId, readHistory, historyProvider);
       }

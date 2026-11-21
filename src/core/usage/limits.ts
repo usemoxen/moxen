@@ -155,14 +155,28 @@ function windowKind(label: string): string {
 }
 
 /**
- * The key one thread's usage windows live under. Claude and Codex report for
- * their whole driver; an `opencode/<provider>` instance is its own provider,
- * so Go's windows are its instance's and no other OpenCode instance's.
+ * The key one thread's usage windows live under.
+ * - Multi-account instances (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`,
+ *   `codex/<id>`) keep their own account-scoped key so exhausting one account
+ *   never blocks threads on another account of the same provider.
+ * - `opencode/<provider>` keeps its per-provider instance key (e.g. OpenCode Go).
+ * - Legacy singleton ids (`claudeAgent`, `codex`, `antigravity`, `agy`) map to
+ *   their bare driver kind (`claude`, `codex`, `antigravity`).
  */
 export function usageKeyForInstance(instanceId: string): string {
   const raw = instanceId.trim().toLowerCase();
   const kind = driverKindOfInstance(raw);
-  return kind !== null ? (kind === "opencode" && raw.startsWith("opencode/") ? raw : kind) : raw;
+  if (kind === null) return raw;
+  if (
+    (kind === "claude" && raw.startsWith("claude/"))
+    || (kind === "chatgpt" && raw.startsWith("chatgpt/"))
+    || (kind === "antigravity" && raw.startsWith("antigravity/"))
+    || (kind === "codex" && raw.startsWith("codex/"))
+    || (kind === "opencode" && raw.startsWith("opencode/"))
+  ) {
+    return raw;
+  }
+  return kind;
 }
 
 /**
@@ -227,7 +241,7 @@ export function usageWindowMatchesModel(
   window: { readonly id: string; readonly label: string },
   model?: string | null,
 ): boolean {
-  return provider !== "antigravity" || antigravityWindowMatchesModel(window, model);
+  return driverKindOfInstance(provider) !== "antigravity" || antigravityWindowMatchesModel(window, model);
 }
 
 /** Snapshot windows for one provider filtered to those that govern `model`. */
@@ -237,7 +251,7 @@ export function usageWindowsForModel(
   model?: string | null,
 ): ProviderUsageWindow[] {
   const windows = usageLimitsSnapshot(now)[provider]?.windows ?? [];
-  return provider === "antigravity"
+  return driverKindOfInstance(provider) === "antigravity"
     ? windows.filter((window) => antigravityWindowMatchesModel(window, model))
     : windows;
 }
@@ -255,10 +269,11 @@ export function standingLimit(
 ): { label: string; resetsAt: string } | null {
   const entry = recorded.get(provider);
   if (!entry) return null;
+  const isAntigravity = driverKindOfInstance(provider) === "antigravity";
   const spent = entry.windows
     .filter((window) => {
       if (window.usedPercent < 100 || window.resetsAt === null || Date.parse(window.resetsAt) <= now) return false;
-      if (provider === "antigravity" && !antigravityWindowMatchesModel(window, model)) return false;
+      if (isAntigravity && !antigravityWindowMatchesModel(window, model)) return false;
       return true;
     })
     // Every spent window blocks the account; a session reset cannot clear a weekly limit.

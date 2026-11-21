@@ -22,8 +22,12 @@ import {
   type ChatGptProviderConfig,
   type ClaudeAccountConfig,
   type ClaudeProviderConfig,
+  type CliConfig,
   type CodexProviderConfig,
   type ProviderAccountBase,
+  type ProviderAccountSaveInput,
+  type ProviderAccountSummary,
+  type ProvidersConfig,
 } from "../types.js";
 import { tokenizeLaunchArgs } from "./codex/config.js";
 import type { AcpAgentLaunchSpec } from "./acp/transport.js";
@@ -477,4 +481,318 @@ export function resolveChatGptAccount(
     account,
     codexSettings,
   };
+}
+
+/** Build a public, credential-free summary for one Claude, ChatGPT, or Antigravity account. */
+export function summarizeAccount(
+  kind: "claude",
+  account: ClaudeAccountConfig,
+): ProviderAccountSummary;
+export function summarizeAccount(
+  kind: "antigravity",
+  account: AntigravityAccountConfig,
+): ProviderAccountSummary;
+export function summarizeAccount(
+  kind: "chatgpt",
+  account: ChatGptAccountConfig,
+  signedIn?: boolean,
+): ProviderAccountSummary;
+export function summarizeAccount(
+  kind: AccountProviderKind,
+  account: ClaudeAccountConfig | AntigravityAccountConfig | ChatGptAccountConfig,
+  signedIn?: boolean,
+): ProviderAccountSummary {
+  const id = account.id.trim().toLowerCase();
+  const instanceId = accountInstanceId(kind, id);
+  const label = account.label?.trim() || id;
+  const base = {
+    kind,
+    id,
+    instanceId,
+    label,
+    enabled: account.enabled !== false,
+    env: account.env ? { ...account.env } : {},
+    model: account.model ?? null,
+    thinkingEffort: account.thinkingEffort ?? null,
+  };
+  if (kind === "claude") {
+    const claude = account as ClaudeAccountConfig;
+    return {
+      ...base,
+      homePath: claude.homePath ?? null,
+      binaryPath: claude.binaryPath ?? null,
+      launchArgs: claude.launchArgs?.length ? claude.launchArgs.join(" ") : null,
+      email: null,
+      workspaceName: null,
+      planType: null,
+      signedIn: null,
+      codexHomePath: null,
+      codexBinaryPath: null,
+      codexLaunchArgs: null,
+      codexVerified: false,
+    };
+  }
+  if (kind === "antigravity") {
+    const agy = account as AntigravityAccountConfig;
+    return {
+      ...base,
+      homePath: agy.homePath ?? null,
+      binaryPath: agy.binaryPath ?? null,
+      launchArgs: agy.launchArgs ?? null,
+      email: null,
+      workspaceName: null,
+      planType: null,
+      signedIn: null,
+      codexHomePath: null,
+      codexBinaryPath: null,
+      codexLaunchArgs: null,
+      codexVerified: false,
+    };
+  }
+  const chatgpt = account as ChatGptAccountConfig;
+  return {
+    ...base,
+    homePath: null,
+    binaryPath: null,
+    launchArgs: null,
+    email: chatgpt.email ?? null,
+    workspaceName: chatgpt.workspaceName ?? null,
+    planType: chatgpt.planType ?? null,
+    signedIn: signedIn ?? Boolean(chatgpt.authRef),
+    codexHomePath: chatgpt.codexHomePath ?? null,
+    codexBinaryPath: chatgpt.codexBinaryPath ?? null,
+    codexLaunchArgs: chatgpt.codexLaunchArgs ?? null,
+    codexVerified: Boolean(chatgpt.codexVerified),
+  };
+}
+
+/** Return credential-free summaries of all configured accounts in stable order. */
+export function summarizeProviderAccounts(
+  providers: ProvidersConfig | undefined,
+  signedInByInstance?: ReadonlyMap<string, boolean>,
+): ProviderAccountSummary[] {
+  const out: ProviderAccountSummary[] = [];
+  for (const account of providers?.claude?.accounts ?? []) {
+    out.push(summarizeAccount("claude", account));
+  }
+  for (const account of providers?.chatgpt?.accounts ?? []) {
+    const instanceId = accountInstanceId("chatgpt", account.id.trim().toLowerCase());
+    out.push(summarizeAccount("chatgpt", account, signedInByInstance?.get(instanceId)));
+  }
+  for (const account of providers?.antigravity?.accounts ?? []) {
+    out.push(summarizeAccount("antigravity", account));
+  }
+  return out;
+}
+
+function applyOptionalPatch<T>(existing: T | undefined, patch: T | null | undefined): T | undefined {
+  if (patch === undefined) return existing;
+  if (patch === null) return undefined;
+  if (typeof patch === "string" && patch.trim() === "") return undefined;
+  return patch;
+}
+
+function applyEnvPatch(
+  existing: Record<string, string> | undefined,
+  patch: Readonly<Record<string, string>> | null | undefined,
+): Record<string, string> | undefined {
+  if (patch === undefined) return existing;
+  if (patch === null || Object.keys(patch).length === 0) return undefined;
+  return { ...patch };
+}
+
+/** Create or update one configured provider account, preserving OAuth metadata on edits. */
+export function upsertProviderAccount(
+  config: CliConfig,
+  input: ProviderAccountSaveInput,
+): { readonly config: CliConfig; readonly account: ProviderAccountSummary; readonly created: boolean } {
+  const normalizedId = input.id.trim().toLowerCase();
+  const fieldPath = `providers.${input.kind}.accounts[${normalizedId || input.id}]`;
+
+  if (input.kind === "claude") {
+    const existingList = config.providers?.claude?.accounts ?? [];
+    const existing = existingList.find((entry) => entry.id.trim().toLowerCase() === normalizedId);
+    const launchArgsPatch =
+      input.launchArgs === undefined
+        ? existing?.launchArgs
+        : input.launchArgs === null
+          ? undefined
+          : input.launchArgs;
+    const raw: Record<string, unknown> = {
+      ...(existing ?? {}),
+      id: normalizedId,
+      label: applyOptionalPatch(existing?.label, input.label),
+      enabled: input.enabled !== undefined ? input.enabled : existing?.enabled,
+      homePath: applyOptionalPatch(existing?.homePath, input.homePath),
+      binaryPath: applyOptionalPatch(existing?.binaryPath, input.binaryPath),
+      launchArgs: launchArgsPatch,
+      env: applyEnvPatch(existing?.env, input.env),
+      model: applyOptionalPatch(existing?.model, input.model),
+      thinkingEffort: applyOptionalPatch(existing?.thinkingEffort, input.thinkingEffort),
+    };
+    const saved = normalizeClaudeAccount(raw, fieldPath);
+    const accounts = existing
+      ? existingList.map((entry) => (entry.id.trim().toLowerCase() === saved.id ? saved : entry))
+      : [...existingList, saved];
+    const next: CliConfig = {
+      ...config,
+      providers: {
+        ...config.providers,
+        claude: { ...config.providers?.claude, accounts },
+      },
+    };
+    return { config: next, account: summarizeAccount("claude", saved), created: !existing };
+  }
+
+  if (input.kind === "antigravity") {
+    const existingList = config.providers?.antigravity?.accounts ?? [];
+    const existing = existingList.find((entry) => entry.id.trim().toLowerCase() === normalizedId);
+    const launchArgsString =
+      input.launchArgs === undefined
+        ? existing?.launchArgs
+        : input.launchArgs === null
+          ? undefined
+          : Array.isArray(input.launchArgs)
+            ? input.launchArgs.join(" ")
+            : input.launchArgs;
+    const raw: Record<string, unknown> = {
+      ...(existing ?? {}),
+      id: normalizedId,
+      label: applyOptionalPatch(existing?.label, input.label),
+      enabled: input.enabled !== undefined ? input.enabled : existing?.enabled,
+      homePath: applyOptionalPatch(existing?.homePath, input.homePath),
+      binaryPath: applyOptionalPatch(existing?.binaryPath, input.binaryPath),
+      launchArgs: launchArgsString,
+      env: applyEnvPatch(existing?.env, input.env),
+      model: applyOptionalPatch(existing?.model, input.model),
+      thinkingEffort: applyOptionalPatch(existing?.thinkingEffort, input.thinkingEffort),
+    };
+    const saved = normalizeAntigravityAccount(raw, fieldPath);
+    const accounts = existing
+      ? existingList.map((entry) => (entry.id.trim().toLowerCase() === saved.id ? saved : entry))
+      : [...existingList, saved];
+    const next: CliConfig = {
+      ...config,
+      providers: {
+        ...config.providers,
+        antigravity: { ...config.providers?.antigravity, accounts },
+      },
+    };
+    return { config: next, account: summarizeAccount("antigravity", saved), created: !existing };
+  }
+
+  const existingList = config.providers?.chatgpt?.accounts ?? [];
+  const existing = existingList.find((entry) => entry.id.trim().toLowerCase() === normalizedId);
+  const nextCodexHome = applyOptionalPatch(existing?.codexHomePath, input.codexHomePath);
+  const codexHomeChanged = input.codexHomePath !== undefined && nextCodexHome !== existing?.codexHomePath;
+  const raw: Record<string, unknown> = {
+    ...(existing ?? {}),
+    id: normalizedId,
+    label: applyOptionalPatch(existing?.label, input.label),
+    enabled: input.enabled !== undefined ? input.enabled : existing?.enabled,
+    env: applyEnvPatch(existing?.env, input.env),
+    model: applyOptionalPatch(existing?.model, input.model),
+    thinkingEffort: applyOptionalPatch(existing?.thinkingEffort, input.thinkingEffort),
+    codexHomePath: nextCodexHome,
+    codexBinaryPath: applyOptionalPatch(existing?.codexBinaryPath, input.codexBinaryPath),
+    codexLaunchArgs: applyOptionalPatch(existing?.codexLaunchArgs, input.codexLaunchArgs),
+    // Changing or clearing the companion home invalidates prior identity verification.
+    codexVerified: codexHomeChanged ? undefined : existing?.codexVerified,
+  };
+  const saved = normalizeChatGptAccount(raw, fieldPath);
+  const accounts = existing
+    ? existingList.map((entry) => (entry.id.trim().toLowerCase() === saved.id ? saved : entry))
+    : [...existingList, saved];
+  const next: CliConfig = {
+    ...config,
+    providers: {
+      ...config.providers,
+      chatgpt: { ...config.providers?.chatgpt, accounts },
+    },
+  };
+  return { config: next, account: summarizeAccount("chatgpt", saved), created: !existing };
+}
+
+/** Remove a configured provider account; returns any ChatGPT `authRef` so the caller can clear the keychain. */
+export function removeProviderAccount(
+  config: CliConfig,
+  kind: AccountProviderKind,
+  id: string,
+): { readonly config: CliConfig; readonly removed: boolean; readonly authRef: string | null } {
+  const target = id.trim().toLowerCase();
+  if (kind === "claude") {
+    const existing = config.providers?.claude?.accounts ?? [];
+    const remaining = existing.filter((entry) => entry.id.trim().toLowerCase() !== target);
+    if (remaining.length === existing.length) return { config, removed: false, authRef: null };
+    const { accounts: _old, ...restClaude } = config.providers?.claude ?? {};
+    return {
+      config: {
+        ...config,
+        providers: {
+          ...config.providers,
+          claude: remaining.length > 0 ? { ...restClaude, accounts: remaining } : restClaude,
+        },
+      },
+      removed: true,
+      authRef: null,
+    };
+  }
+  if (kind === "antigravity") {
+    const existing = config.providers?.antigravity?.accounts ?? [];
+    const remaining = existing.filter((entry) => entry.id.trim().toLowerCase() !== target);
+    if (remaining.length === existing.length) return { config, removed: false, authRef: null };
+    const { accounts: _old, ...restAgy } = config.providers?.antigravity ?? {};
+    return {
+      config: {
+        ...config,
+        providers: {
+          ...config.providers,
+          antigravity: remaining.length > 0 ? { ...restAgy, accounts: remaining } : restAgy,
+        },
+      },
+      removed: true,
+      authRef: null,
+    };
+  }
+  const existing = config.providers?.chatgpt?.accounts ?? [];
+  const victim = existing.find((entry) => entry.id.trim().toLowerCase() === target);
+  if (!victim) return { config, removed: false, authRef: null };
+  const remaining = existing.filter((entry) => entry.id.trim().toLowerCase() !== target);
+  const { accounts: _old, ...restChatGpt } = config.providers?.chatgpt ?? {};
+  return {
+    config: {
+      ...config,
+      providers: {
+        ...config.providers,
+        chatgpt: remaining.length > 0 ? { ...restChatGpt, accounts: remaining } : restChatGpt,
+      },
+    },
+    removed: true,
+    authRef: victim.authRef ?? null,
+  };
+}
+
+/** Enable or disable an existing provider account without removing it. */
+export function setProviderAccountEnabled(
+  config: CliConfig,
+  kind: AccountProviderKind,
+  id: string,
+  enabled: boolean,
+): { readonly config: CliConfig; readonly account: ProviderAccountSummary } {
+  const target = id.trim().toLowerCase();
+  const list =
+    kind === "claude"
+      ? config.providers?.claude?.accounts
+      : kind === "chatgpt"
+        ? config.providers?.chatgpt?.accounts
+        : config.providers?.antigravity?.accounts;
+  const found = list?.find((entry) => entry.id.trim().toLowerCase() === target);
+  if (!found) {
+    throw new CliError("ACCOUNT_NOT_FOUND", `No ${kind} account "${id}" is configured.`, {
+      exitCode: 4,
+      details: { kind, id },
+    });
+  }
+  const updated = upsertProviderAccount(config, { kind, id: found.id, enabled });
+  return { config: updated.config, account: updated.account };
 }
