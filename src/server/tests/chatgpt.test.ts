@@ -100,10 +100,9 @@ describe("Sign in with ChatGPT server flow, Codex companion verification, and st
       ],
     });
 
+    // Standalone codex is omitted from user-facing provider catalogs (companion-only under the hood).
     const codex = providers.find((entry) => entry.instanceId === "codex");
-    expect(codex?.installed).toBe(true);
-    expect(codex?.enabled).toBe(false);
-    expect(codex?.status).toContain("Companion only");
+    expect(codex).toBeUndefined();
 
     const chatgpt = providers.find((entry) => entry.instanceId === "chatgpt/personal");
     expect(chatgpt?.enabled).toBe(true);

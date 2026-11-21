@@ -1687,6 +1687,16 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   ...priceSettings("acp"),
   ACP_AGENTS_SETTING,
   {
+    key: "providers.opencode.enabled",
+    label: "Enable OpenCode",
+    description: "Add OpenCode as a provider in Moxen. Off by default until you enable it from Overview or onboarding.",
+    section: "provider:opencode",
+    group: "Setup",
+    hidden: true,
+    kind: { type: "boolean" },
+    defaultValue: false,
+  },
+  {
     key: "providers.opencode.runtimeMode",
     label: "Permissions",
     description: "How much a new OpenCode thread may do without asking.",
@@ -1984,8 +1994,121 @@ const BY_KEY: ReadonlyMap<string, SettingDescriptor> = new Map(
   SETTINGS.map((descriptor) => [descriptor.key, descriptor]),
 );
 
+const ACCOUNT_SETTING_KEY_RE = /^providers\.(claude|chatgpt|antigravity)\.accounts\[([a-z0-9][a-z0-9._-]{0,63})\]\.([a-zA-Z0-9_]+)$/;
+
+export interface ParsedAccountSettingKey {
+  readonly kind: "claude" | "chatgpt" | "antigravity";
+  readonly id: string;
+  readonly field: string;
+}
+
+/** Parse a per-profile setting key like `providers.claude.accounts[personal].runtimeMode`. */
+export function parseAccountSettingKey(key: string): ParsedAccountSettingKey | null {
+  const match = ACCOUNT_SETTING_KEY_RE.exec(key);
+  if (!match) return null;
+  return {
+    kind: match[1] as "claude" | "chatgpt" | "antigravity",
+    id: match[2]!,
+    field: match[3]!,
+  };
+}
+
+function extraAccountFieldDescriptor(parsed: ParsedAccountSettingKey): SettingDescriptor | undefined {
+  const section: SettingSection =
+    parsed.kind === "claude" ? "provider:claude" : parsed.kind === "chatgpt" ? "provider:chatgpt" : "provider:antigravity";
+  const key = `providers.${parsed.kind}.accounts[${parsed.id}].${parsed.field}`;
+  switch (parsed.field) {
+    case "label":
+      return {
+        key,
+        label: "Display name",
+        description: "Human-readable label shown in pickers and Settings.",
+        section,
+        group: "Setup",
+        kind: { type: "string", placeholder: parsed.id },
+        defaultValue: undefined,
+      };
+    case "enabled":
+      return {
+        key,
+        label: "Enabled",
+        description: "Switch this provider profile on or off without removing its configuration.",
+        section,
+        group: "Setup",
+        kind: { type: "boolean" },
+        defaultValue: true,
+      };
+    case "homePath":
+      if (parsed.kind === "antigravity") {
+        return {
+          key,
+          label: "Account home",
+          description: "Isolated HOME/USERPROFILE root for this Antigravity profile (passes --gemini-dir <homePath>/.gemini).",
+          section,
+          group: "Setup",
+          kind: { type: "string", placeholder: `~/.agy-${parsed.id}` },
+          defaultValue: undefined,
+          appliesAt: "server-restart",
+        };
+      }
+      return undefined;
+    case "launchArgs":
+      if (parsed.kind === "claude") {
+        return {
+          key,
+          label: "Launch arguments",
+          description: "Extra CLI arguments passed when spawning Claude Code for this profile.",
+          section,
+          group: "Setup",
+          kind: { type: "string" },
+          defaultValue: undefined,
+          appliesAt: "server-restart",
+        };
+      }
+      return undefined;
+    case "codexHomePath":
+    case "codexBinaryPath":
+    case "codexLaunchArgs":
+      if (parsed.kind === "chatgpt") {
+        const labels = {
+          codexHomePath: "Codex companion home",
+          codexBinaryPath: "Codex companion binary",
+          codexLaunchArgs: "Codex companion launch arguments",
+        } as const;
+        const descriptions = {
+          codexHomePath: "CODEX_HOME for the paired Codex companion (live usage windows, reset credits, and image generation).",
+          codexBinaryPath: "Override the `codex` binary used for this account's paired companion.",
+          codexLaunchArgs: "Extra launch arguments passed to the paired Codex companion.",
+        } as const;
+        return {
+          key,
+          label: labels[parsed.field],
+          description: descriptions[parsed.field],
+          section,
+          group: "Setup",
+          kind: { type: "string", ...(parsed.field === "codexBinaryPath" ? { placeholder: "codex" } : {}) },
+          defaultValue: parsed.field === "codexBinaryPath" ? "codex" : undefined,
+          appliesAt: "server-restart",
+        };
+      }
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+function accountSettingDescriptor(key: string): SettingDescriptor | undefined {
+  const parsed = parseAccountSettingKey(key);
+  if (!parsed) return undefined;
+  const template = BY_KEY.get(`providers.${parsed.kind}.${parsed.field}`);
+  if (template) {
+    return { ...template, key };
+  }
+  return extraAccountFieldDescriptor(parsed);
+}
+
 export function settingDescriptor(key: string): SettingDescriptor | undefined {
-  return BY_KEY.get(key);
+  return BY_KEY.get(key) ?? accountSettingDescriptor(key);
 }
 
 /** Every key, in table order — what `config set` accepts and lists on error. List keys address entries as `key[<id>]…`. */
@@ -1995,12 +2118,13 @@ const LISTS: readonly ListDescriptor[] = SETTINGS.filter((descriptor): descripto
 
 /** What a key into a list setting addresses, or null for any other key. Throws for a malformed one. */
 export function listTarget(key: string): ListTarget | null {
+  if (parseAccountSettingKey(key) !== null) return null;
   return key.includes("[") || LISTS.some((list) => list.key === key) ? resolveListKey(key, LISTS) : null;
 }
 
-/** Whether `config set` accepts the key: a flat key, or an entry or field of a list. */
+/** Whether `config set` accepts the key: a flat key, a per-profile key, or an entry or field of a list. */
 export function isSettingKey(key: string): boolean {
-  if (BY_KEY.has(key)) return true;
+  if (BY_KEY.has(key) || accountSettingDescriptor(key) !== undefined) return true;
   try {
     return listTarget(key) !== null;
   } catch {
@@ -2023,23 +2147,34 @@ function walk(source: unknown, path: readonly string[]): unknown {
   return current;
 }
 
-/**
- * The value in force for a key: what the config holds, else the
- * descriptor's default. Unknown keys read as `undefined` rather than
- * throwing, so a config written by a newer build stays readable.
- */
-export function readSetting(config: CliConfig, key: string): SettingValue {
-  const entry = key.includes("[") ? listTarget(key) : null;
-  if (entry) return readListScalar(config, entry);
-  const raw = walk(config, key.split("."));
+function readRawField(raw: unknown, key: string): SettingValue {
   if (raw === undefined || raw === null) return settingDescriptor(key)?.defaultValue;
   if (typeof raw === "string" || typeof raw === "boolean" || typeof raw === "number") return raw;
+  if (key.endsWith(".launchArgs") && Array.isArray(raw)) return raw.join(" ");
   if ((key.endsWith(".autoHandoffModels") || key.endsWith(".compactAtModels")) && typeof raw === "object") return formatHandoffModels(raw as Record<string, number>);
   if ((key.endsWith(".handoffModels") || key.endsWith(".compactionModels")) && typeof raw === "object") return formatModeModels(raw as Record<string, string>);
   if ((key.endsWith(".modelInputPrices") || key.endsWith(".modelOutputPrices") || key.endsWith(".modelCacheReadPrices") || key.endsWith(".modelCacheWritePrices")) && typeof raw === "object") {
     return formatPriceMap(raw as Record<string, number>);
   }
   return undefined;
+}
+
+/**
+ * The value in force for a key: what the config holds, else the
+ * descriptor's default. Unknown keys read as `undefined` rather than
+ * throwing, so a config written by a newer build stays readable.
+ */
+export function readSetting(config: CliConfig, key: string): SettingValue {
+  const accountKey = parseAccountSettingKey(key);
+  if (accountKey) {
+    const accounts = config.providers?.[accountKey.kind]?.accounts;
+    const found = accounts?.find((entry) => entry.id.trim().toLowerCase() === accountKey.id);
+    if (!found) return settingDescriptor(key)?.defaultValue;
+    return readRawField((found as unknown as Record<string, unknown>)[accountKey.field], key);
+  }
+  const entry = key.includes("[") ? listTarget(key) : null;
+  if (entry) return readListScalar(config, entry);
+  return readRawField(walk(config, key.split(".")), key);
 }
 
 /** A key is never written to the config: only the reference to where the keychain holds it. */
@@ -2176,6 +2311,23 @@ function writeSettingValue(config: CliConfig, key: string, value: SettingValue):
   const descriptor = settingDescriptor(key);
   if (!descriptor) throw new CliError("INVALID_CONFIG_KEY", `Unknown config key: ${key}`);
   const clears = value === "" && descriptor.defaultValue !== "";
+  const accountKey = parseAccountSettingKey(key);
+  if (accountKey) {
+    const providers = { ...(config.providers ?? {}) };
+    const section = { ...(providers[accountKey.kind] ?? {}) };
+    const accounts = [...(section.accounts ?? [])];
+    const idx = accounts.findIndex((entry) => entry.id.trim().toLowerCase() === accountKey.id);
+    if (idx < 0) {
+      throw new CliError("INVALID_CONFIG", `No ${accountKey.kind} profile with id "${accountKey.id}" exists.`);
+    }
+    const updated: Record<string, unknown> = { ...(accounts[idx] as unknown as Record<string, unknown>) };
+    if (clears) delete updated[accountKey.field];
+    else updated[accountKey.field] = value;
+    accounts[idx] = updated as never;
+    section.accounts = accounts as never;
+    providers[accountKey.kind] = section as never;
+    return { ...config, providers };
+  }
   const path = key.split(".");
   const next = { ...config } as Record<string, unknown>;
   let cursor = next;
@@ -2391,4 +2543,66 @@ export function describeSettings(config: CliConfig): readonly SettingView[] {
       ...(inForce ? { inForce } : {}),
     };
   });
+}
+
+/**
+ * Full independent `SettingView[]` for one configured profile (`claude/<id>`,
+ * `chatgpt/<id>`, or `antigravity/<id>`). Each profile gets every setting for
+ * its provider kind with sensible defaults when unset (never inheriting from a
+ * parent `providers.<kind>.*` override).
+ */
+export function describeAccountSettings(
+  config: CliConfig,
+  kind: "claude" | "chatgpt" | "antigravity",
+  id: string,
+): readonly SettingView[] {
+  const normalizedId = id.trim().toLowerCase();
+  const accounts = config.providers?.[kind]?.accounts;
+  const account = accounts?.find((entry) => entry.id.trim().toLowerCase() === normalizedId);
+  if (!account) return [];
+  const section: SettingSection =
+    kind === "claude" ? "provider:claude" : kind === "chatgpt" ? "provider:chatgpt" : "provider:antigravity";
+  const prefix = `providers.${kind}.`;
+  // Build a synthetic view of `config` where `providers[kind]` holds ONLY this profile's own settings
+  // so fallback/effective/web-order calculations read this profile independently (sensible defaults when unset).
+  const isolatedConfig: CliConfig = {
+    ...config,
+    providers: {
+      ...(config.providers ?? {}),
+      [kind]: { ...account },
+    },
+  };
+  const baseDescriptors = SETTINGS.filter((descriptor) => descriptor.section === section && descriptor.hidden !== true);
+  return baseDescriptors.map((base) => {
+    const field = base.key.startsWith(prefix) ? base.key.slice(prefix.length) : base.key;
+    const key = `providers.${kind}.accounts[${normalizedId}].${field}`;
+    const descriptor: SettingDescriptor = { ...base, key };
+    const web = webOrderOf(base);
+    const unavailable = web === null ? undefined : webOrderUnavailable(isolatedConfig, web.provider, web.role);
+    const rawVal = (account as unknown as Record<string, unknown>)[field];
+    const value = readRawField(rawVal, key);
+    const effective = value === undefined || value === "" ? effectiveOf(isolatedConfig, base) : undefined;
+    const shippedPrices = descriptor.kind.type === "string" && descriptor.kind.source === "model-prices" ? DEFAULT_MODEL_PRICES : undefined;
+    return {
+      descriptor,
+      value,
+      explicit: rawVal !== undefined,
+      ...(unavailable ? { unavailable } : {}),
+      ...(web ? { order: webOrderEntries(isolatedConfig, web.provider, web.role) } : {}),
+      ...(shippedPrices ? { shippedPrices } : {}),
+      ...(effective ? { effective } : {}),
+    };
+  });
+}
+
+/** Independent per-profile `SettingView[]` map keyed by `<kind>/<id>` for every configured profile. */
+export function describeAllAccountSettings(config: CliConfig): Readonly<Record<string, readonly SettingView[]>> {
+  const out: Record<string, readonly SettingView[]> = {};
+  for (const kind of ["claude", "chatgpt", "antigravity"] as const) {
+    for (const account of config.providers?.[kind]?.accounts ?? []) {
+      const id = account.id.trim().toLowerCase();
+      out[`${kind}/${id}`] = describeAccountSettings(config, kind, id);
+    }
+  }
+  return out;
 }

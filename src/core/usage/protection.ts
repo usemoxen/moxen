@@ -165,7 +165,7 @@ export class UsageProtection {
         previous.set(provider, reported);
       } else if (!isClaude && turn.usage && !this.counted.has(key)) {
         // Recorded usage keeps input and cached reads/writes apart already: priced as it is.
-        cost = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), turn.usage, fast)?.usd ?? 0;
+        cost = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model, selection.instanceId), turn.usage, fast)?.usd ?? 0;
       }
       if (turn.status !== "completed" && turn.status !== "failed" && turn.status !== "interrupted") continue;
       if (this.counted.has(key)) continue;
@@ -470,7 +470,7 @@ export class UsageProtection {
         }
         else {
           const live = this.live.get(thread.id) ?? turn.usage;
-          if (live) inFlight = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), live, fast)?.usd ?? 0;
+          if (live) inFlight = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model, selection.instanceId), live, fast)?.usd ?? 0;
         }
         const key = `${thread.id}:${turn.id}`;
         inFlight = Math.max(inFlight, this.runningCost.get(key) ?? 0);
@@ -480,7 +480,7 @@ export class UsageProtection {
         const cached = typeof context?.cachedInputTokens === "number" ? context.cachedInputTokens : 0;
         // One wrap-up request per open thread: its context input plus a short
         // output, not the cumulative spend of its previous turns.
-        const estimate = used === null ? null : usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
+        const estimate = used === null ? null : usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model, selection.instanceId), { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
         if (estimate === null) wrapCostUsd = null;
         else if (wrapCostUsd !== null) wrapCostUsd += estimate.usd;
       }

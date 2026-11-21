@@ -669,6 +669,35 @@ function parseAccountEntries<T extends { readonly id: string }>(
   return parsed.length > 0 ? parsed : undefined;
 }
 
+function normalizeAccountProfiles<T extends { readonly id: string }>(
+  accounts: T[] | undefined,
+  listPath: string,
+  fields: readonly string[],
+  skipped?: SkippedConfigEntry[],
+): T[] | undefined {
+  if (!accounts || accounts.length === 0) return undefined;
+  return accounts.map((account) => {
+    const prefix = `${listPath}[${account.id}]`;
+    const normalized = normalizeSection<Record<string, unknown>>(account, prefix, fields, skipped) ?? {};
+    const models = handoffModelsOf(account, prefix, skipped);
+    const prices = modelPricesOf(account, prefix, skipped);
+    // Strip raw string/invalid per-model map fields before merging normalized maps.
+    for (const mapKey of [
+      "autoHandoffModels",
+      "compactAtModels",
+      "handoffModels",
+      "compactionModels",
+      "modelInputPrices",
+      "modelOutputPrices",
+      "modelCacheReadPrices",
+      "modelCacheWritePrices",
+    ]) {
+      delete normalized[mapKey];
+    }
+    return { ...normalized, ...models, ...prices } as T;
+  });
+}
+
 function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): ProvidersConfig | undefined {
   if (raw === undefined) return undefined;
   let input: Record<string, unknown>;
@@ -680,15 +709,17 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     return undefined;
   }
   const result: ProvidersConfig = {};
+  if (input.profilesMigrated !== undefined) {
+    if (typeof input.profilesMigrated === "boolean") {
+      if (input.profilesMigrated) result.profilesMigrated = true;
+    } else if (skipped !== undefined) {
+      skipped.push({ path: "providers.profilesMigrated", message: "providers.profilesMigrated must be true or false.", value: input.profilesMigrated });
+    } else {
+      throw new CliError("INVALID_CONFIG", "providers.profilesMigrated must be true or false.");
+    }
+  }
   if (input.claude !== undefined) guarded(skipped, "providers.claude", input.claude, () => {
-    const accounts = parseAccountEntries<ClaudeAccountConfig>(
-      input.claude,
-      "providers.claude.accounts",
-      normalizeClaudeAccounts,
-      normalizeClaudeAccount,
-      skipped,
-    );
-    const claude = normalizeSection<ClaudeProviderConfig>(input.claude, "providers.claude", [
+    const claudeFields = [
       "binaryPath",
       "homePath",
       "thinkingDisplay",
@@ -722,7 +753,16 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
       "mcpExclude",
       "disabledNativeTools",
       "webSearchOrder", "webFetchOrder",
-    ], skipped);
+    ] as const;
+    const rawAccounts = parseAccountEntries<ClaudeAccountConfig>(
+      input.claude,
+      "providers.claude.accounts",
+      normalizeClaudeAccounts,
+      normalizeClaudeAccount,
+      skipped,
+    );
+    const accounts = normalizeAccountProfiles(rawAccounts, "providers.claude.accounts", claudeFields, skipped);
+    const claude = normalizeSection<ClaudeProviderConfig>(input.claude, "providers.claude", claudeFields, skipped);
     const launchArgs = asSection(input.claude, "providers.claude").launchArgs;
     const args = Array.isArray(launchArgs) && launchArgs.every((entry) => typeof entry === "string") ? (launchArgs as string[]) : undefined;
     const models = handoffModelsOf(input.claude, "providers.claude", skipped);
@@ -738,14 +778,7 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     }
   });
   if (input.chatgpt !== undefined) guarded(skipped, "providers.chatgpt", input.chatgpt, () => {
-    const accounts = parseAccountEntries<ChatGptAccountConfig>(
-      input.chatgpt,
-      "providers.chatgpt.accounts",
-      normalizeChatGptAccounts,
-      normalizeChatGptAccount,
-      skipped,
-    );
-    const chatgpt = normalizeSection<ChatGptProviderConfig>(input.chatgpt, "providers.chatgpt", [
+    const chatgptFields = [
       "runtimeMode",
       "model",
       "thinkingEffort",
@@ -766,7 +799,16 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
       "webFetch",
       "todos",
       "mcpExclude",
-    ], skipped);
+    ] as const;
+    const rawAccounts = parseAccountEntries<ChatGptAccountConfig>(
+      input.chatgpt,
+      "providers.chatgpt.accounts",
+      normalizeChatGptAccounts,
+      normalizeChatGptAccount,
+      skipped,
+    );
+    const accounts = normalizeAccountProfiles(rawAccounts, "providers.chatgpt.accounts", chatgptFields, skipped);
+    const chatgpt = normalizeSection<ChatGptProviderConfig>(input.chatgpt, "providers.chatgpt", chatgptFields, skipped);
     if (chatgpt) delete (chatgpt as unknown as Record<string, unknown>).accounts;
     const cleaned = chatgpt && Object.keys(chatgpt).length > 0 ? chatgpt : undefined;
     const models = handoffModelsOf(input.chatgpt, "providers.chatgpt", skipped);
@@ -782,7 +824,7 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     if (codex || models || prices) result.codex = { ...codex, ...models, ...prices };
   });
   if (input.opencode !== undefined) guarded(skipped, "providers.opencode", input.opencode, () => {
-    const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["binaryPath", "bundledSkills", "compaction", "compactAt", "handoff", "handoffAt", "autoCompact", "compactBuffer", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder", "moxenPrompt"], skipped);
+    const opencode = normalizeSection<OpencodeProviderConfig>(input.opencode, "providers.opencode", ["enabled", "binaryPath", "bundledSkills", "compaction", "compactAt", "handoff", "handoffAt", "autoCompact", "compactBuffer", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "runtimeMode", "model", "thinkingEffort", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder", "moxenPrompt"], skipped);
     const models = handoffModelsOf(input.opencode, "providers.opencode", skipped);
     const prices = modelPricesOf(input.opencode, "providers.opencode", skipped);
     if (opencode || models || prices) result.opencode = { ...opencode, ...models, ...prices };
@@ -801,14 +843,16 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     if (withProfiles || defaults || models || prices) result.harness = { ...defaults, ...withProfiles, ...models, ...prices };
   });
   if (input.antigravity !== undefined) guarded(skipped, "providers.antigravity", input.antigravity, () => {
-    const accounts = parseAccountEntries<AntigravityAccountConfig>(
+    const antigravityFields = ["binaryPath", "launchArgs", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"] as const;
+    const rawAccounts = parseAccountEntries<AntigravityAccountConfig>(
       input.antigravity,
       "providers.antigravity.accounts",
       normalizeAntigravityAccounts,
       normalizeAntigravityAccount,
       skipped,
     );
-    const antigravity = normalizeSection<AntigravityProviderConfig>(input.antigravity, "providers.antigravity", ["binaryPath", "launchArgs", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"], skipped);
+    const accounts = normalizeAccountProfiles(rawAccounts, "providers.antigravity.accounts", antigravityFields, skipped);
+    const antigravity = normalizeSection<AntigravityProviderConfig>(input.antigravity, "providers.antigravity", antigravityFields, skipped);
     if (antigravity) delete (antigravity as unknown as Record<string, unknown>).accounts;
     const cleaned = antigravity && Object.keys(antigravity).length > 0 ? antigravity : undefined;
     const models = handoffModelsOf(input.antigravity, "providers.antigravity", skipped);
@@ -850,7 +894,7 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
   });
   // A newer build's extra providers stay in the file untouched.
   for (const [kind, value] of Object.entries(input)) {
-    if (kind !== "claude" && kind !== "chatgpt" && kind !== "codex" && kind !== "opencode" && kind !== "harness" && kind !== "acp" && kind !== "antigravity") {
+    if (kind !== "profilesMigrated" && kind !== "claude" && kind !== "chatgpt" && kind !== "codex" && kind !== "opencode" && kind !== "harness" && kind !== "acp" && kind !== "antigravity") {
       (result as Record<string, unknown>)[kind] = value;
     }
   }

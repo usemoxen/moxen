@@ -256,6 +256,23 @@ export async function renameStoredProject(
   return renamed;
 }
 
+/** Rewrite stored projects in place when a migration updates fields like `defaultModelSelection`. */
+export async function rewriteStoredProjects(
+  root: string,
+  transform: (project: StoredProject) => StoredProject | null,
+): Promise<number> {
+  const all = await loadAll(root);
+  let changed = 0;
+  const next = all.map((entry) => {
+    const updated = transform(entry);
+    if (updated === null) return entry;
+    changed += 1;
+    return updated;
+  });
+  if (changed > 0) await saveAll(root, next);
+  return changed;
+}
+
 /** Removes a project: a soft delete, so its threads stay readable. */
 export async function removeStoredProject(
   root: string,

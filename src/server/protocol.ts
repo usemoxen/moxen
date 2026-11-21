@@ -1024,6 +1024,12 @@ export interface SettingsSnapshot {
   readonly path: string;
   readonly exists: boolean;
   readonly settings: readonly SettingView[];
+  /**
+   * Independent per-profile settings keyed by canonical `instanceId`
+   * (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`). Each profile carries
+   * its own full setting table, never inheriting parent `providers.<kind>.*`.
+   */
+  readonly accountSettings?: Readonly<Record<string, readonly SettingView[]>>;
 }
 
 // -- runtime decoding --------------------------------------------------------

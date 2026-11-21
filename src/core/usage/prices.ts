@@ -6,6 +6,7 @@
  * stays unpriced (null), never zero; a partial price values the fields it
  * names and counts the rest as zero.
  */
+import { resolveProfileProviderConfig } from "../providers/accounts.js";
 import type { TurnUsage } from "../threads/types.js";
 import type { CliConfig } from "../types.js";
 import generatedOpencodePrices from "./opencode-prices.generated.json" with { type: "json" };
@@ -95,9 +96,10 @@ export function modelPriceFor(
   config: Pick<CliConfig, "providers">,
   kind: ModelPriceKind | null,
   model: string,
+  instanceId?: string,
 ): ModelPrice | null {
   const shipped = DEFAULT_MODEL_PRICES[model];
-  const own = (kind === null ? undefined : config.providers?.[kind]) as
+  const own = (instanceId ? resolveProfileProviderConfig(config, instanceId) : (kind === null ? undefined : config.providers?.[kind])) as
     | { readonly modelInputPrices?: Readonly<Record<string, number>>; readonly modelOutputPrices?: Readonly<Record<string, number>>; readonly modelCacheReadPrices?: Readonly<Record<string, number>>; readonly modelCacheWritePrices?: Readonly<Record<string, number>> }
     | undefined;
   const userInput = own?.modelInputPrices?.[model];

@@ -15,10 +15,11 @@
  * open (a delegated task, one driven from the CLI) was never compacted,
  * while Claude Code's own compaction was switched off for it.
  */
-import { driverKindOfInstance } from "../types.js";
+import { driverKindOfInstance, parseAccountInstanceId } from "../types.js";
+import { resolveProfileProviderConfig } from "../providers/accounts.js";
 import { harnessAskLine } from "../providers/harness/profiles.js";
 import { compactHardTokens, lineInput, lineText, lineTokens, parseLine, type ThresholdLine } from "./lines.js";
-import type { CliConfig, ProvidersConfig } from "../types.js";
+import type { ClaudeAccountConfig, ClaudeProviderConfig, CliConfig, ProvidersConfig } from "../types.js";
 
 export type AutoHandoffMode = "off" | "ask" | "auto";
 
@@ -134,16 +135,37 @@ const percentLine = (value: number | undefined): ThresholdLine | undefined => (v
 const tokensLine = (value: number | undefined): ThresholdLine | undefined => (value === undefined ? undefined : { tokens: value });
 const textLine = (value: string | undefined): ThresholdLine | undefined => (value === undefined ? undefined : (parseLine(value) ?? undefined));
 
-/** Hand off: the model's own choice, the provider's tab, then the global setting, then Ask. */
-export function handoffModeFor(config: LongThreadConfig, kind: LongThreadKind | undefined, model?: string): Sourced<AutoHandoffMode> {
-  const own = kind === undefined ? undefined : config.providers?.[kind];
+function ownConfigAndPrefix(
+  config: Pick<CliConfig, "providers">,
+  kind: LongThreadKind | undefined,
+  instanceId?: string,
+): { readonly own: Record<string, unknown> | undefined; readonly prefix: string | undefined } {
+  if (kind === undefined) return { own: undefined, prefix: undefined };
+  if (instanceId !== undefined) {
+    const parsed = parseAccountInstanceId(instanceId);
+    if (parsed && parsed.kind === kind) {
+      return {
+        own: resolveProfileProviderConfig(config, instanceId) as Record<string, unknown> | undefined,
+        prefix: `providers.${parsed.kind}.accounts[${parsed.accountId}]`,
+      };
+    }
+  }
+  return {
+    own: config.providers?.[kind] as Record<string, unknown> | undefined,
+    prefix: `providers.${kind}`,
+  };
+}
+
+/** Hand off: the model's own choice, the provider's tab (or independent profile), then the global setting, then Ask. */
+export function handoffModeFor(config: LongThreadConfig, kind: LongThreadKind | undefined, model?: string, instanceId?: string): Sourced<AutoHandoffMode> {
+  const { own, prefix } = ownConfigAndPrefix(config, kind, instanceId);
   const candidates: Array<readonly [string, unknown]> = [
-    ...(kind === undefined
+    ...(prefix === undefined
       ? []
       : ([
-          [`providers.${kind}.handoffModels`, model === undefined ? undefined : own?.handoffModels?.[model]],
-          [`providers.${kind}.handoff`, own?.handoff],
-          [`providers.${kind}.autoHandoff`, own?.autoHandoff],
+          [`${prefix}.handoffModels`, model === undefined ? undefined : (own?.handoffModels as Record<string, unknown> | undefined)?.[model]],
+          [`${prefix}.handoff`, own?.handoff],
+          [`${prefix}.autoHandoff`, own?.autoHandoff],
         ] as const)),
     ["longThreads.handoff", config.longThreads?.handoff],
     ["ui.autoHandoff", config.ui?.autoHandoff],
@@ -156,17 +178,17 @@ export function handoffModeFor(config: LongThreadConfig, kind: LongThreadKind | 
  * the global setting, half the window. Older keys sit at their own level, a size
  * before a share as it always was, so an older config resolves as before.
  */
-export function handoffLineFor(config: LongThreadConfig, kind: LongThreadKind | undefined, model?: string): Sourced<ThresholdLine> {
-  const own = kind === undefined ? undefined : config.providers?.[kind];
+export function handoffLineFor(config: LongThreadConfig, kind: LongThreadKind | undefined, model?: string, instanceId?: string): Sourced<ThresholdLine> {
+  const { own, prefix } = ownConfigAndPrefix(config, kind, instanceId);
   return firstOf<ThresholdLine>(
     [
-      ...(kind === undefined
+      ...(prefix === undefined
         ? []
         : ([
-            [`providers.${kind}.autoHandoffModels`, model === undefined ? undefined : tokensLine(own?.autoHandoffModels?.[model])],
-            [`providers.${kind}.handoffAt`, textLine(own?.handoffAt)],
-            [`providers.${kind}.autoHandoffTokens`, tokensLine(own?.autoHandoffTokens)],
-            [`providers.${kind}.autoHandoffPercent`, percentLine(own?.autoHandoffPercent)],
+            [`${prefix}.autoHandoffModels`, model === undefined ? undefined : tokensLine((own?.autoHandoffModels as Record<string, number> | undefined)?.[model])],
+            [`${prefix}.handoffAt`, textLine(own?.handoffAt as string | undefined)],
+            [`${prefix}.autoHandoffTokens`, tokensLine(own?.autoHandoffTokens as number | undefined)],
+            [`${prefix}.autoHandoffPercent`, percentLine(own?.autoHandoffPercent as number | undefined)],
           ] as const)),
       ["longThreads.handoffAt", textLine(config.longThreads?.handoffAt)],
       ["ui.autoHandoffTokens", tokensLine(config.ui?.autoHandoffTokens)],
@@ -182,32 +204,34 @@ export function handoffLineFor(config: LongThreadConfig, kind: LongThreadKind | 
  * default. OpenCode's own compaction is one switch for its whole server, so a
  * model there can only choose while that switch is off, and cannot turn it on.
  */
-export function compactionModeFor(config: Pick<CliConfig, "providers" | "longThreads">, kind: LongThreadKind, model?: string): Sourced<CompactionMode> {
-  const provider = providerCompactionMode(config, kind);
-  const chosen = model === undefined ? undefined : config.providers?.[kind]?.compactionModels?.[model];
+export function compactionModeFor(config: Pick<CliConfig, "providers" | "longThreads">, kind: LongThreadKind, model?: string, instanceId?: string): Sourced<CompactionMode> {
+  const provider = providerCompactionMode(config, kind, instanceId);
+  const { own, prefix } = ownConfigAndPrefix(config, kind, instanceId);
+  const chosen = model === undefined ? undefined : (own?.compactionModels as Record<string, unknown> | undefined)?.[model];
   if (chosen === undefined || !isCompactionMode(chosen)) return provider;
   const mode = GLOBAL_COMPACTION_ON[kind](chosen);
   if (!COMPACTION_MODES[kind].includes(mode)) return provider;
   if (kind === "opencode" && (mode === "provider" || provider.value === "provider")) return provider;
-  return { value: mode, key: `providers.${kind}.compactionModels` };
+  return { value: mode, key: `${prefix ?? `providers.${kind}`}.compactionModels` };
 }
 
 /** Who compacts on `kind` for every model without its own choice. */
-function providerCompactionMode(config: Pick<CliConfig, "providers" | "longThreads">, kind: LongThreadKind): Sourced<CompactionMode> {
-  const own = config.providers?.[kind];
-  const set = own?.compaction;
+function providerCompactionMode(config: Pick<CliConfig, "providers" | "longThreads">, kind: LongThreadKind, instanceId?: string): Sourced<CompactionMode> {
+  const { own, prefix } = ownConfigAndPrefix(config, kind, instanceId);
+  const keyPrefix = prefix ?? `providers.${kind}`;
+  const set = own?.compaction as CompactionMode | undefined;
   const legacy = (): CompactionMode | undefined => {
     if (kind === "claude") {
-      const old = config.providers?.claude?.autoCompact;
+      const old = own?.autoCompact as "claude" | "ask" | "auto" | "off" | undefined;
       return old === "claude" ? "provider" : old;
     }
-    const old = config.providers?.[kind]?.autoCompact;
+    const old = own?.autoCompact as boolean | undefined;
     return old === undefined ? undefined : old ? (kind === "harness" ? "auto" : "provider") : "off";
   };
   return firstOf<CompactionMode>(
     [
-      [`providers.${kind}.compaction`, set !== undefined && COMPACTION_MODES[kind].includes(set) ? set : undefined],
-      [`providers.${kind}.autoCompact`, legacy()],
+      [`${keyPrefix}.compaction`, set !== undefined && COMPACTION_MODES[kind].includes(set) ? set : undefined],
+      [`${keyPrefix}.autoCompact`, legacy()],
       ["longThreads.compaction", isCompactionMode(config.longThreads?.compaction) ? GLOBAL_COMPACTION_ON[kind](config.longThreads.compaction) : undefined],
     ],
     DEFAULT_COMPACTION_MODE[kind],
@@ -222,17 +246,21 @@ function providerCompactionMode(config: Pick<CliConfig, "providers" | "longThrea
  * (which becomes Claude Code's auto-compact window), and the Harness's own
  * rule by window size when nothing is set.
  */
-export function compactLineFor(config: LongThreadConfig, kind: LongThreadKind, model?: string): Sourced<ThresholdLine> | null {
-  const mode = compactionModeFor(config, kind, model).value;
+export function compactLineFor(config: LongThreadConfig, kind: LongThreadKind, model?: string, instanceId?: string): Sourced<ThresholdLine> | null {
+  const mode = compactionModeFor(config, kind, model, instanceId).value;
   if (mode === "off") return null;
-  const own = config.providers?.[kind];
+  const { own, prefix } = ownConfigAndPrefix(config, kind, instanceId);
+  const keyPrefix = prefix ?? `providers.${kind}`;
   const ownLine: Array<readonly [string, ThresholdLine | undefined]> = [
-    [`providers.${kind}.compactAtModels`, model === undefined ? undefined : tokensLine(own?.compactAtModels?.[model])],
-    [`providers.${kind}.compactAt`, textLine(own?.compactAt)],
+    [`${keyPrefix}.compactAtModels`, model === undefined ? undefined : tokensLine((own?.compactAtModels as Record<string, number> | undefined)?.[model])],
+    [`${keyPrefix}.compactAt`, textLine(own?.compactAt as string | undefined)],
   ];
   if (kind === "claude") {
-    const claude = config.providers?.claude;
-    ownLine.push(mode === "provider" ? ["providers.claude.autoCompactWindow", tokensLine(claude?.autoCompactWindow)] : ["providers.claude.autoCompactPercent", percentLine(claude?.autoCompactPercent)]);
+    ownLine.push(
+      mode === "provider"
+        ? [`${keyPrefix}.autoCompactWindow`, tokensLine(own?.autoCompactWindow as number | undefined)]
+        : [`${keyPrefix}.autoCompactPercent`, percentLine(own?.autoCompactPercent as number | undefined)],
+    );
   }
   if (kind === "harness") {
     const harness = config.providers?.harness;
@@ -256,9 +284,9 @@ export interface LongThreadPolicy {
 
 export function longThreadPolicy(config: LongThreadConfig, instanceId: string | undefined, model?: string): LongThreadPolicy {
   const kind = kindOf(instanceId);
-  const handoff = { mode: handoffModeFor(config, kind, model).value, line: handoffLineFor(config, kind, model).value };
+  const handoff = { mode: handoffModeFor(config, kind, model, instanceId).value, line: handoffLineFor(config, kind, model, instanceId).value };
   if (kind === undefined) return { handoff, compact: null };
-  const mode = compactionModeFor(config, kind, model).value;
+  const mode = compactionModeFor(config, kind, model, instanceId).value;
   if (kind === "harness") {
     // On "auto" the Harness compacts inside its own loop. On "ask" its line is the loop's own threshold (profile, model, tab, window).
     if (mode !== "ask" || instanceId === undefined || model === undefined) return { handoff, compact: null };
@@ -266,10 +294,39 @@ export function longThreadPolicy(config: LongThreadConfig, instanceId: string | 
     return { handoff, compact: line === null ? null : { mode: "ask", line } };
   }
   if (mode !== "ask" && mode !== "auto") return { handoff, compact: null };
-  return { handoff, compact: { mode, line: compactLineFor(config, kind, model)?.value ?? DEFAULT_COMPACT_LINE } };
+  return { handoff, compact: { mode, line: compactLineFor(config, kind, model, instanceId)?.value ?? DEFAULT_COMPACT_LINE } };
 }
 
 const harnessCompaction = (mode: CompactionMode): "ask" | "auto" | "off" => (mode === "off" ? "off" : mode === "ask" ? "ask" : "auto");
+
+function resolveClaudeDriverCompaction<T extends ClaudeProviderConfig>(
+  config: LongThreadConfig,
+  section: T | undefined,
+  instanceId?: string,
+): T {
+  const claudeMode = compactionModeFor(config, "claude", undefined, instanceId).value;
+  const claudeLine = compactLineFor(config, "claude", undefined, instanceId);
+  const clampWindow = (tokens: number): number => Math.min(1_000_000, Math.max(100_000, tokens));
+  const claudeWindow = claudeMode === "provider" && claudeLine !== null && "tokens" in claudeLine.value ? clampWindow(claudeLine.value.tokens) : undefined;
+  const claudeModels = [...new Set([...Object.keys(section?.compactionModels ?? {}), ...Object.keys(section?.compactAtModels ?? {})])];
+  const claudeModes: Record<string, "claude" | "ask" | "auto" | "off"> = {};
+  const claudeWindowsByModel: Record<string, number> = {};
+  for (const model of claudeModels) {
+    const mode = compactionModeFor(config, "claude", model, instanceId).value;
+    if (mode !== claudeMode) claudeModes[model] = mode === "provider" ? "claude" : mode;
+    const line = mode === "provider" ? compactLineFor(config, "claude", model, instanceId) : null;
+    if (line !== null && "tokens" in line.value) claudeWindowsByModel[model] = clampWindow(line.value.tokens);
+  }
+  const claudeWindows = Object.keys(claudeWindowsByModel).length > 0 ? claudeWindowsByModel : undefined;
+  const { autoCompactWindow: _window, ...claudeRest } = section ?? ({} as T);
+  return {
+    ...claudeRest,
+    autoCompact: claudeMode === "provider" ? "claude" : claudeMode,
+    ...(claudeWindow !== undefined ? { autoCompactWindow: claudeWindow } : {}),
+    ...(claudeWindows !== undefined ? { autoCompactWindowModels: claudeWindows } : {}),
+    ...(Object.keys(claudeModes).length > 0 ? { autoCompactModels: claudeModes } : {}),
+  } as T;
+}
 
 /**
  * The providers section as the drivers read it, with the long-thread rule
@@ -283,24 +340,12 @@ const harnessCompaction = (mode: CompactionMode): "ask" | "auto" | "off" => (mod
  */
 export function driverProviders(config: LongThreadConfig): ProvidersConfig | undefined {
   const providers = config.providers;
-  const claudeMode = compactionModeFor(config, "claude").value;
-  const claudeLine = compactLineFor(config, "claude");
   const opencodeMode = compactionModeFor(config, "opencode").value;
   const harnessLine = compactLineFor(config, "harness");
-  const clampWindow = (tokens: number): number => Math.min(1_000_000, Math.max(100_000, tokens));
-  const claudeWindow = claudeMode === "provider" && claudeLine !== null && "tokens" in claudeLine.value ? clampWindow(claudeLine.value.tokens) : undefined;
-  // A model with its own choice or size: who compacts its sessions, and Claude Code's window when that is Claude Code.
-  const claudeModels = [...new Set([...Object.keys(providers?.claude?.compactionModels ?? {}), ...Object.keys(providers?.claude?.compactAtModels ?? {})])];
-  const claudeModes: Record<string, "claude" | "ask" | "auto" | "off"> = {};
-  const claudeWindowsByModel: Record<string, number> = {};
-  for (const model of claudeModels) {
-    const mode = compactionModeFor(config, "claude", model).value;
-    if (mode !== claudeMode) claudeModes[model] = mode === "provider" ? "claude" : mode;
-    const line = mode === "provider" ? compactLineFor(config, "claude", model) : null;
-    if (line !== null && "tokens" in line.value) claudeWindowsByModel[model] = clampWindow(line.value.tokens);
-  }
-  const claudeWindows = Object.keys(claudeWindowsByModel).length > 0 ? claudeWindowsByModel : undefined;
-  const { autoCompactWindow: _window, ...claudeRest } = providers?.claude ?? {};
+  const claudeAccounts: ClaudeAccountConfig[] | undefined = providers?.claude?.accounts?.map((account) =>
+    resolveClaudeDriverCompaction(config, account, `claude/${account.id}`),
+  );
+  const claudeResolved = resolveClaudeDriverCompaction(config, providers?.claude);
   const { autoCompact: opencodeOwn, ...opencodeRest } = providers?.opencode ?? {};
   // OpenCode's own switch: on its own compaction, what its older key said (else OpenCode's config decides); otherwise off.
   const opencodeAuto = opencodeMode === "provider" ? (opencodeOwn === true ? true : undefined) : false;
@@ -308,11 +353,8 @@ export function driverProviders(config: LongThreadConfig): ProvidersConfig | und
     ...providers,
     codex: { ...providers?.codex, compaction: compactionModeFor(config, "codex").value },
     claude: {
-      ...claudeRest,
-      autoCompact: claudeMode === "provider" ? "claude" : claudeMode,
-      ...(claudeWindow !== undefined ? { autoCompactWindow: claudeWindow } : {}),
-      ...(claudeWindows !== undefined ? { autoCompactWindowModels: claudeWindows } : {}),
-      ...(Object.keys(claudeModes).length > 0 ? { autoCompactModels: claudeModes } : {}),
+      ...claudeResolved,
+      ...(claudeAccounts ? { accounts: claudeAccounts } : {}),
     },
     opencode: { ...opencodeRest, ...(opencodeAuto !== undefined ? { autoCompact: opencodeAuto } : {}) },
     harness: {

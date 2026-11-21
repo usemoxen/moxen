@@ -267,7 +267,7 @@ export async function antigravityProvider(
   }
 }
 
-/** Build one `ProviderSummary` per configured Antigravity account, or the default singleton when none are listed. */
+/** Build one `ProviderSummary` per configured Antigravity profile (zero providers by default when none are configured). */
 export async function antigravityProviders(
   config: AntigravityProviderConfig | undefined,
   env: NodeJS.ProcessEnv,
@@ -277,7 +277,7 @@ export async function antigravityProviders(
 ): Promise<ProviderSummary[]> {
   const accounts = config?.accounts;
   if (!accounts || accounts.length === 0) {
-    return [await antigravityProvider(config, env, cwd, transport, options)];
+    return [];
   }
   return Promise.all(
     accounts.map((account) => antigravityProvider(config, env, cwd, transport, { ...options, account })),

@@ -38,7 +38,9 @@ import { fetchLiveModels } from "../core/providers/claude/livemodels.js";
 import { SdkTransport } from "../core/providers/claude/transport.js";
 import { diagnose } from "../core/diagnostics/doctor.js";
 import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
-import { removeProviderAccount, resolveChatGptAccount, setProviderAccountEnabled, summarizeAccount, summarizeProviderAccounts, upsertProviderAccount } from "../core/providers/accounts.js";
+import { removeProviderAccount, resolveChatGptAccount, resolveProfileProviderConfig, setProviderAccountEnabled, summarizeAccount, summarizeProviderAccounts, upsertProviderAccount } from "../core/providers/accounts.js";
+import { migrateProviderProfiles } from "../core/providers/migrate.js";
+import { codexProvider } from "../core/providers/codex/catalog.js";
 import { probeCodexCompanion, verifyCodexCompanion, type CodexCompanionProbeResult } from "../core/providers/chatgpt/companion.js";
 import { startChatGptLoginSession, type ChatGptLoginSession } from "../core/providers/chatgpt/login.js";
 import { clearChatGptAuth, loadChatGptAuthBundle, type OAuthDeps } from "../core/providers/chatgpt/oauth.js";
@@ -54,7 +56,7 @@ import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../cor
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
 import { appHomeDir, applyEnvironmentOverrides, defaultConfigPath, loadConfig, normalizeFileConfig, saveConfig, setConfigValueSecure, type ConfigProblem, type LoadedConfig, type SkippedConfigEntry, configKeyCoversPath } from "../core/config.js";
 import { duplicateListItem } from "../core/configlist.js";
-import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
+import { DEFAULT_REMOTE_PORT, describeAllAccountSettings, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
 import { CodexDriver } from "../core/providers/codex/driver.js";
 import { imageGenerationAvailability, imageGenerationModel, type ImageGenerationModel } from "../core/providers/codex/imagegeneration.js";
@@ -419,6 +421,7 @@ export class DirectConnection implements ClientApi {
   /** Profiles with a probe running: two at once would fight over a single-slot server. */
   private readonly probing = new Set<string>();
   private storePromise: Promise<ThreadStore> | null = null;
+  private migrationPromise: Promise<void> | null = null;
   /** Set once an update or rollback has landed: the running code is stale. */
   private restartPending = false;
   /** Distinguishes this connection's claim from another's in the same process. */
@@ -450,12 +453,16 @@ export class DirectConnection implements ClientApi {
     this.providers = options.providers ?? (async () => {
       // A config that cannot be read must not hide the providers that need none of it.
       const providers = await this.readConfigFile().then((read) => read.config.providers, () => undefined);
-      const claudeBinary = providers?.claude?.binaryPath || "claude";
+      const claudeBinary =
+        providers?.claude?.accounts?.find((entry) => entry.binaryPath)?.binaryPath ||
+        providers?.claude?.binaryPath ||
+        "claude";
       return await buildDirectProviders({
         harness: providers?.harness,
         ...(providers?.claude ? { claude: providers.claude } : {}),
         ...(providers?.chatgpt ? { chatgpt: providers.chatgpt } : {}),
         ...(providers?.codex ? { codex: providers.codex } : {}),
+        ...(providers?.opencode ? { opencode: providers.opencode } : {}),
         ...(providers?.antigravity ? { antigravity: providers.antigravity } : {}),
         ...(providers?.acp ? { acp: providers.acp } : {}),
         fetchClaudeModels: () => fetchLiveModels({ transport: new SdkTransport(), binaryPath: claudeBinary }),
@@ -467,13 +474,17 @@ export class DirectConnection implements ClientApi {
     // overrides the config supplies values only, so its path falls back to
     // the resolved default and is never written unless it asks for one.
     const override = options.config;
+    const configPath = options.configPath ?? defaultConfigPath();
     this.readConfigFile = override
       ? async () => {
         const config = await override();
         const fileConfig = normalizeFileConfig(config);
-        return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: config, path: options.configPath ?? defaultConfigPath(), exists: true, skipped: [], problems: [] };
+        return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: config, path: configPath, exists: true, skipped: [], problems: [] };
       }
-      : async () => await loadConfig(options.configPath);
+      : async () => {
+        await this.ensureProfilesMigrated(configPath);
+        return await loadConfig(options.configPath);
+      };
     this.loadConfig = async () => {
       const { config } = await this.readConfigFile();
       // What the drivers read, with the long-thread lines already resolved (global ones included).
@@ -656,23 +667,27 @@ export class DirectConnection implements ClientApi {
     const unavailable = (reason: string) => ({ available: false as const, reason });
     if (!thread || driverKindOfInstance(thread.modelSelection.instanceId) === "codex") return unavailable("Codex threads use their native image-generation tool.");
     const kind = driverKindOfInstance(thread.modelSelection.instanceId);
-    if (!moxenToolsOf(kind === null ? undefined : ctx.config.providers?.[kind]).orchestration ||
+    if (!moxenToolsOf(resolveProfileProviderConfig(ctx.config, thread.modelSelection.instanceId)).orchestration ||
         (await ctx.store.readDelegations()).some((row) => row.childThreadId === threadId)) return unavailable("Image generation is unavailable in delegated tasks or with orchestration switched off.");
     if (isNativeToolDisabled(ctx.config.providers?.codex?.disabledNativeTools, "image_generation", "codex")) return unavailable("Codex image generation is switched off.");
 
     // ChatGPT threads require a verified paired Codex companion for their account.
     let codexInstanceId = "codex";
+    let companionSettings = ctx.config.providers?.codex;
     if (kind === "chatgpt") {
       const resolved = resolveChatGptAccount(ctx.config.providers?.chatgpt, ctx.config.providers?.codex, thread.modelSelection.instanceId);
       if (!resolved.account?.codexVerified) {
         return unavailable("Link a verified Codex companion in Settings → Providers to enable image generation for this ChatGPT account.");
       }
       codexInstanceId = resolved.accountId ? `codex/${resolved.accountId}` : "codex";
+      companionSettings = resolved.codexSettings ?? undefined;
     }
     try {
       const driver = this.driverFor(codexInstanceId);
       if (!(driver instanceof CodexDriver)) return unavailable("The Codex driver cannot check image-generation eligibility.");
-      const provider = (await this.providers()).find((entry) => entry.instanceId === "codex");
+      const provider =
+        (await this.providers()).find((entry) => entry.instanceId === "codex") ??
+        (await codexProvider(companionSettings, process.env, thread.env.path));
       if (!provider?.installed) return unavailable("Codex must be installed as a companion for image generation.");
       const selection = imageGenerationModel(provider.models);
       if (!selection) return unavailable("Image generation requires a released Luna model in Codex's catalog with a supported reasoning effort other than none.");
@@ -839,9 +854,28 @@ export class DirectConnection implements ClientApi {
     return { profile, model, config, path };
   }
 
+  private async ensureProfilesMigrated(configPath: string): Promise<void> {
+    if (!this.migrationPromise) {
+      this.migrationPromise = (async () => {
+        try {
+          const store = await this.store();
+          await migrateProviderProfiles({ configPath, storeRoot: this.storeRoot, store });
+        } catch (cause) {
+          void this.logThreadFailure("profiles-migration", cause instanceof Error ? cause.message : String(cause));
+        }
+      })();
+    }
+    await this.migrationPromise;
+  }
+
   private async settingsSnapshot(): Promise<SettingsSnapshot> {
     const { config, path, exists } = await this.readConfigFile();
-    return { path, exists, settings: describeSettings(config) };
+    return {
+      path,
+      exists,
+      settings: describeSettings(config),
+      accountSettings: describeAllAccountSettings(config),
+    };
   }
 
   /**

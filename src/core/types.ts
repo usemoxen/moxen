@@ -232,32 +232,42 @@ export interface ProviderAccountBase {
   env?: Record<string, string>;
 }
 
-/** One configured Claude Code account (`providers.claude.accounts[]`). */
-export interface ClaudeAccountConfig extends ProviderAccountBase {
-  /** Isolated `CLAUDE_CONFIG_DIR` for this account (never overrides `HOME`). */
+/**
+ * One configured Claude Code profile (`providers.claude.accounts[]`).
+ * Independently configurable across all Claude Code settings (seeded with
+ * sensible defaults when unset; never inherits a parent `providers.claude.*`).
+ */
+export interface ClaudeAccountConfig extends ProviderAccountBase, Omit<ClaudeProviderConfig, "accounts" | "model" | "thinkingEffort"> {
+  /** Isolated `CLAUDE_CONFIG_DIR` for this profile (never overrides `HOME`). */
   homePath?: string;
-  /** Optional `claude` binary override; inherits `providers.claude.binaryPath`. */
+  /** `claude` executable path for this profile. Default: `claude` on PATH. */
   binaryPath?: string;
-  /** Optional launch args override; inherits `providers.claude.launchArgs`. */
+  /** Extra CLI launch arguments for this profile. */
   launchArgs?: readonly string[];
 }
 
-/** One configured Antigravity account (`providers.antigravity.accounts[]`). */
-export interface AntigravityAccountConfig extends ProviderAccountBase {
+/**
+ * One configured Antigravity profile (`providers.antigravity.accounts[]`).
+ * Independently configurable across all Antigravity settings.
+ */
+export interface AntigravityAccountConfig extends ProviderAccountBase, Omit<AntigravityProviderConfig, "accounts" | "model" | "thinkingEffort"> {
   /**
    * Isolated account root directory. When set, Moxen launches `agy` with
    * `HOME`/`USERPROFILE` pointing here and `--gemini-dir <homePath>/.gemini`.
    * Caveat: tools spawned by `agy` inherit this `HOME`/`USERPROFILE`.
    */
   homePath?: string;
-  /** Optional `agy` binary override; inherits `providers.antigravity.binaryPath`. */
+  /** `agy` binary path for this profile. Default: `agy` on PATH. */
   binaryPath?: string;
-  /** Optional launch args override; inherits `providers.antigravity.launchArgs`. */
+  /** Extra CLI launch arguments for this profile. */
   launchArgs?: string;
 }
 
-/** One configured Sign in with ChatGPT account (`providers.chatgpt.accounts[]`). */
-export interface ChatGptAccountConfig extends ProviderAccountBase {
+/**
+ * One configured Sign in with ChatGPT profile (`providers.chatgpt.accounts[]`).
+ * Independently configurable across all ChatGPT/Harness settings.
+ */
+export interface ChatGptAccountConfig extends ProviderAccountBase, Omit<ChatGptProviderConfig, "accounts" | "model" | "thinkingEffort"> {
   /** Verified OIDC email from Sign in with ChatGPT (display/pairing metadata only). */
   email?: string;
   /** Verified OIDC subject (`sub`). */
@@ -272,9 +282,9 @@ export interface ChatGptAccountConfig extends ProviderAccountBase {
   authRef?: string;
   /** Paired Codex companion `CODEX_HOME` for live usage windows, reset credits, and image generation. */
   codexHomePath?: string;
-  /** Optional `codex` binary override for the paired companion; inherits `providers.codex.binaryPath`. */
+  /** `codex` binary path for the paired companion. Default: `codex` on PATH. */
   codexBinaryPath?: string;
-  /** Optional `codex` launch args for the paired companion; inherits `providers.codex.launchArgs`. */
+  /** Extra launch args for the paired Codex companion. */
   codexLaunchArgs?: string;
   /** True once the paired Codex companion identity was verified against this ChatGPT account. */
   codexVerified?: boolean;
@@ -317,6 +327,8 @@ export interface AcpProviderConfig extends Omit<OpencodeProviderConfig, "binaryP
 }
 
 export interface ProvidersConfig {
+  /** Set to true once legacy provider settings/threads have been migrated to opt-in independent profiles. */
+  profilesMigrated?: boolean;
   codex?: CodexProviderConfig;
   claude?: ClaudeProviderConfig;
   chatgpt?: ChatGptProviderConfig;
@@ -513,6 +525,8 @@ export interface HarnessProfileConfig {
 
 /** What the user may set for OpenCode. Its external-server URL and password are not offered yet (see `configschema.ts`). */
 export interface OpencodeProviderConfig extends ModelPriceMaps {
+  /** Opt-in switch for OpenCode (single provider, disabled by default until added in Overview or onboarding). */
+  enabled?: boolean;
   memory?: boolean;
   /** Who compacts: OpenCode itself, Moxen (asking first, or on its own), or nobody. Unset: `autoCompact` (off when false), else OpenCode. */
   compaction?: "provider" | "ask" | "auto" | "off";

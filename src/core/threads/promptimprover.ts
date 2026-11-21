@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { DEFAULT_PROMPT_IMPROVER_MODEL, DEFAULT_PROMPT_IMPROVER_PROVIDER } from "../configschema.js";
 import { CliError } from "../errors.js";
+import { resolveProfileProviderConfig } from "../providers/accounts.js";
 import { driverKindOfInstance, type CliConfig, type ModelSelection } from "../types.js";
 import type { TextCompletionInput } from "../providers/spi.js";
 import { projectInstructions } from "./instructions.js";
@@ -64,8 +65,7 @@ export async function improvePrompt(
   const selection = promptImproverSelection(config);
   const { provider, model } = selection;
   const destination = input.modelSelection?.instanceId ?? config.provider;
-  const kind = destination ? driverKindOfInstance(destination) : null;
-  const providerInstructions = kind ? config.providers?.[kind]?.instructions : undefined;
+  const providerInstructions = destination ? resolveProfileProviderConfig(config, destination)?.instructions : undefined;
   const profileInstructions = destination?.startsWith("harness/") ? config.providers?.harness?.profiles?.find((profile) => `harness/${profile.id}` === destination)?.systemPromptAppend : undefined;
   const [rules, project] = await Promise.all([readHarnessRuleFiles(directory), projectInstructions(directory)]);
   let remaining = MAX_CONTEXT;

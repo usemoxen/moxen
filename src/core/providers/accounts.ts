@@ -344,6 +344,60 @@ export interface ResolvedClaudeAccount {
   readonly env: NodeJS.ProcessEnv;
 }
 
+/**
+ * Resolve the independent provider configuration for an exact `instanceId`.
+ *
+ * - Multi-account profiles (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`)
+ *   return ONLY that profile's own independent settings (seeded with sensible
+ *   built-in defaults when unset; never inheriting a parent `providers.<kind>.*`).
+ * - Single-provider / non-account kinds (`opencode`, `harness`, `acp`, `codex`)
+ *   return `config.providers?.[kind]`.
+ */
+export function resolveProfileProviderConfig(
+  config: Pick<CliConfig, "providers">,
+  instanceId: string,
+):
+  | ClaudeProviderConfig
+  | ChatGptProviderConfig
+  | AntigravityProviderConfig
+  | CodexProviderConfig
+  | ProvidersConfig["opencode"]
+  | ProvidersConfig["harness"]
+  | ProvidersConfig["acp"]
+  | undefined {
+  const parsed = parseAccountInstanceId(instanceId);
+  if (parsed) {
+    if (parsed.kind === "claude") {
+      return config.providers?.claude?.accounts?.find(
+        (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
+      );
+    }
+    if (parsed.kind === "chatgpt") {
+      return config.providers?.chatgpt?.accounts?.find(
+        (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
+      );
+    }
+    return config.providers?.antigravity?.accounts?.find(
+      (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
+    );
+  }
+  const raw = instanceId.trim().toLowerCase();
+  if (raw === "opencode" || raw.startsWith("opencode/")) return config.providers?.opencode;
+  if (raw === "harness" || raw.startsWith("harness/")) return config.providers?.harness;
+  if (raw === "acp" || raw.startsWith("acp/")) return config.providers?.acp;
+  if (raw === "codex" || raw.startsWith("codex/")) return config.providers?.codex;
+  if (raw === "claudeagent" || raw === "claude") {
+    return config.providers?.claude?.accounts?.[0] ?? config.providers?.claude;
+  }
+  if (raw === "antigravity" || raw === "agy") {
+    return config.providers?.antigravity?.accounts?.[0] ?? config.providers?.antigravity;
+  }
+  if (raw === "chatgpt") {
+    return config.providers?.chatgpt?.accounts?.[0] ?? config.providers?.chatgpt;
+  }
+  return undefined;
+}
+
 /** Resolve effective Claude settings and isolated env (`CLAUDE_CONFIG_DIR` only, never `HOME`) for `instanceId`. */
 export function resolveClaudeAccount(
   config: ClaudeProviderConfig | undefined,
@@ -355,16 +409,15 @@ export function resolveClaudeAccount(
   const account = accountId !== null
     ? config?.accounts?.find((entry) => entry.id.trim().toLowerCase() === accountId)
     : undefined;
-  const merged: ClaudeProviderConfig = {
-    ...(config ?? {}),
-    ...(account?.binaryPath !== undefined ? { binaryPath: account.binaryPath } : {}),
-    ...(account?.homePath !== undefined ? { homePath: account.homePath } : {}),
-    ...(account?.launchArgs !== undefined ? { launchArgs: account.launchArgs } : {}),
-    ...(account?.model !== undefined ? { model: account.model } : {}),
-    ...(account?.thinkingEffort !== undefined ? { thinkingEffort: account.thinkingEffort } : {}),
-  };
+  // Independent profile: when addressed as `claude/<id>`, use ONLY that profile's own settings
+  // (sensible defaults when unset; never inherit a parent `providers.claude.*`).
+  const settings: ClaudeProviderConfig = account
+    ? { ...account }
+    : accountId !== null
+      ? {}
+      : { ...(config ?? {}) };
   const withExtra = account?.env ? { ...baseEnv, ...account.env } : baseEnv;
-  const env = makeClaudeEnv({ homePath: merged.homePath ?? "" }, withExtra);
+  const env = makeClaudeEnv({ homePath: settings.homePath ?? "" }, withExtra);
   const canonicalId = accountId !== null ? accountInstanceId("claude", accountId) : "claudeAgent";
   return {
     accountId,
@@ -372,7 +425,7 @@ export function resolveClaudeAccount(
     usageKey: accountId !== null ? canonicalId : "claude",
     displayName: account ? accountDisplayName("claude", account) : accountId ? `Claude Code (${accountId})` : "Claude Code",
     enabled: account?.enabled !== false,
-    settings: merged,
+    settings,
     env,
   };
 }
@@ -404,11 +457,11 @@ export function resolveAntigravityAccount(
   const account = accountId !== null
     ? config?.accounts?.find((entry) => entry.id.trim().toLowerCase() === accountId)
     : undefined;
-  const mergedConfig: AntigravityProviderConfig = {
-    ...(config ?? {}),
-    ...(account?.binaryPath !== undefined ? { binaryPath: account.binaryPath } : {}),
-    ...(account?.launchArgs !== undefined ? { launchArgs: account.launchArgs } : {}),
-  };
+  const mergedConfig: AntigravityProviderConfig = account
+    ? { ...account }
+    : accountId !== null
+      ? {}
+      : { ...(config ?? {}) };
   const resolvedHome = account?.homePath?.trim() ? path.resolve(expandHome(account.homePath.trim())) : null;
   const env = antigravityAccountEnv(account?.homePath, baseEnv, account?.env);
   const canonicalId = accountId !== null ? accountInstanceId("antigravity", accountId) : "antigravity";

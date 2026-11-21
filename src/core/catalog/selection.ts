@@ -111,26 +111,27 @@ export function asModelSelection(value: unknown): ModelSelection | null {
   return candidate as unknown as ModelSelection;
 }
 
-/** The defaults the user set on a provider's own settings page (with per-account model/effort overrides winning over provider-level defaults). */
+/** The defaults the user set on a provider's own settings page. Configured profiles (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`) are fully independent and never inherit a parent `providers.<kind>.*`. */
 export function providerDefaults(config: Pick<CliConfig, "providers">, instanceId: string): { runtimeMode?: RuntimeMode; model?: string; thinkingEffort?: string } {
+  const parsed = parseAccountInstanceId(instanceId);
+  if (parsed) {
+    const accounts =
+      parsed.kind === "claude"
+        ? config.providers?.claude?.accounts
+        : parsed.kind === "chatgpt"
+          ? config.providers?.chatgpt?.accounts
+          : config.providers?.antigravity?.accounts;
+    const account = accounts?.find((entry) => entry.id.trim().toLowerCase() === parsed.accountId);
+    if (!account) return {};
+    return {
+      ...(account.runtimeMode !== undefined ? { runtimeMode: account.runtimeMode } : {}),
+      ...(account.model !== undefined ? { model: account.model } : {}),
+      ...(account.thinkingEffort !== undefined ? { thinkingEffort: account.thinkingEffort } : {}),
+    };
+  }
   const kind = driverKindOfInstance(instanceId);
   if (kind === null) return {};
-  const base = config.providers?.[kind] ?? {};
-  const parsed = parseAccountInstanceId(instanceId);
-  if (!parsed) return base;
-  const accounts =
-    parsed.kind === "claude"
-      ? config.providers?.claude?.accounts
-      : parsed.kind === "chatgpt"
-        ? config.providers?.chatgpt?.accounts
-        : config.providers?.antigravity?.accounts;
-  const account = accounts?.find((entry) => entry.id.trim().toLowerCase() === parsed.accountId);
-  if (!account) return base;
-  return {
-    ...base,
-    ...(account.model !== undefined ? { model: account.model } : {}),
-    ...(account.thinkingEffort !== undefined ? { thinkingEffort: account.thinkingEffort } : {}),
-  };
+  return config.providers?.[kind] ?? {};
 }
 
 /** The permission mode a new thread on `instanceId` starts in: the provider's own default, else the global one. */

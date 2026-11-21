@@ -255,7 +255,8 @@ describe("per-account runtime and cache isolation", () => {
       },
     });
 
-    expect(providerDefaults(config, "claude/personal").model).toBe("claude-sonnet-5-5");
+    // Independent per-profile settings: claude/personal never inherits parent providers.claude.model.
+    expect(providerDefaults(config, "claude/personal").model).toBeUndefined();
     expect(providerDefaults(config, "claude/work").model).toBe("claude-opus-5-5");
     expect(providerDefaults(config, "claude/work").thinkingEffort).toBe("high");
     const sel = resolveModelSelection(null, config, { prompt: "hi", provider: "claude/work" });

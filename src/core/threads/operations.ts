@@ -38,6 +38,7 @@ import { CliError } from "../errors.js";
 import { storedInteractionMode } from "../interactionmode.js";
 import { disabledNativeToolNames, effectiveDisabledNativeTools } from "../nativetools.js";
 import { codexImageGenDisabledTools } from "../providers/chatgpt/companion.js";
+import { resolveProfileProviderConfig } from "../providers/accounts.js";
 import { moxenToolsOf, outOfProcess, parseNameList, resolveMcpServers, routeMcpServers, type McpServerEntry, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
 import { runProcess } from "../infra/process.js";
 import { renameReplacing, writeAtomic } from "../infra/atomic.js";
@@ -321,7 +322,7 @@ async function sessionSetup(
   const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
   const delegation = await delegationOf(ctx.store, thread.id);
   const kind = driverKindOfInstance(instanceId);
-  const providerConfig = kind === null ? undefined : ctx.config.providers?.[kind];
+  const providerConfig = resolveProfileProviderConfig(ctx.config, instanceId);
   // A delegated thread gets Moxen's tools less the ones that delegate (it does not delegate again), and so does a provider
   // the user turned orchestration off for; `web_fetch` is switched on its own. With both off, the server is left out.
   const reach = moxenToolsOf(providerConfig);
@@ -359,7 +360,7 @@ async function sessionSetup(
   const { servers: mcpServers, disabledTools: disabledMcpTools } = kind === null ? { servers: merged, disabledTools: [] } : routeMcpServers(merged, kind, providerConfig?.mcpExclude);
   // Only Claude Code and OpenCode ship tools to switch off or tips to give; the Harness has its own.
   const nativeKind = kind === "codex" || kind === "claude" || kind === "opencode" ? kind : null;
-  const nativeConfig = nativeKind === null ? undefined : ctx.config.providers?.[nativeKind];
+  const nativeConfig = nativeKind === null ? undefined : (providerConfig as { readonly disabledNativeTools?: string; readonly webSearchOrder?: string; readonly webFetchOrder?: string } | undefined);
   // Global, then this provider's, then the project's (a Harness profile's own come after, in its driver).
   const user = [ctx.config.instructions, providerConfig?.instructions, fromProject].filter((entry): entry is string => Boolean(entry?.trim()));
   const running = runningModelOf(thread.modelSelection, instanceId);
@@ -415,7 +416,7 @@ async function sessionSetup(
     // So the session is watched between turns (background turns and tasks).
     store: ctx.store,
     delegated: delegation !== null,
-    idleTtlMs: sessionTtlFor(ctx.config, kind),
+    idleTtlMs: sessionTtlFor(ctx.config, instanceId),
     moxenMemory: memory !== "off",
     instructionsUpdate:
       plan.update === null
@@ -946,10 +947,9 @@ export async function armPendingScheduledTurns(ctx: OperationContext): Promise<v
 /** Automatic continues in a row before moxen stops trying, unless `usageLimitContinues` says otherwise (Claude Code's own cap). */
 export const MAX_USAGE_CONTINUES = 2;
 
-/** Whether a usage limit on this instance's provider is waited out: its own switch, else the global one. */
+/** Whether a usage limit on this instance's provider (or independent profile) is waited out: its own switch, else the global one. */
 export function autoContinuesAt(config: OperationContext["config"], instanceId: string): boolean {
-  const kind = driverKindOfInstance(instanceId);
-  return (kind === null ? undefined : config.providers?.[kind]?.autoContinueAtUsageLimit) ?? config.autoContinueAtUsageLimit === true;
+  return resolveProfileProviderConfig(config, instanceId)?.autoContinueAtUsageLimit ?? config.autoContinueAtUsageLimit === true;
 }
 
 /** The runner hook that schedules a continue after a usage limit, when config asks for it on this turn's provider. */
