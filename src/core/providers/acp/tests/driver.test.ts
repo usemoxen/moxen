@@ -17,7 +17,11 @@ import {
 } from "../../../threads/requestactivity.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "../../../threads/toolactivity.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
-import { AcpDriver } from "../driver.js";
+import {
+  ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER,
+  ANTIGRAVITY_NO_NATIVE_SUBAGENTS_INSTRUCTION,
+  AcpDriver,
+} from "../driver.js";
 import { ACP_PROTOCOL_VERSION } from "../protocol.js";
 import { FakeAcpTransport } from "./fakes.js";
 
@@ -2247,6 +2251,64 @@ describe("ACP native subagent status events (MXN-445)", () => {
       expect(events.some((e) => e.type === "thread.state.changed" && e.state === "rate-limited")).toBe(false);
     } finally {
       await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+});
+
+describe("Antigravity native subagent discouragement & reminder (MXN-465)", () => {
+  it("prepends no-native-subagents guidance and sends a one-shot corrective steer reminder when invoke_subagent is called", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    try {
+      await Effect.runPromise(driver.startSession({ ...START, instructions: "# Base\nFollow repo rules." }));
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "inspect codebase" }));
+      const server = transport.sessions[0]!.server;
+
+      const firstPrompt = server.requests.find((r) => r.method === "session/prompt");
+      const firstText = String((firstPrompt?.params as { prompt?: Array<{ text?: string }> })?.prompt?.[0]?.text ?? "");
+      expect(firstText).toContain("# Base\nFollow repo rules.");
+      expect(firstText).toContain(ANTIGRAVITY_NO_NATIVE_SUBAGENTS_INSTRUCTION);
+      expect(firstText).toContain("inspect codebase");
+
+      // Native subagent tool call triggers an automatic mid-turn reminder once per turn.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "sub-1",
+        kind: "other",
+        title: "Run invoke_subagent",
+        status: "in_progress",
+        rawInput: { TypeName: "research", Role: "Researcher", Prompt: "Scan files" },
+      });
+      await vi.waitFor(() =>
+        expect(server.requests.filter((r) => r.method === "session/prompt")).toHaveLength(2),
+      );
+      const reminderReq = server.requests.filter((r) => r.method === "session/prompt")[1];
+      const reminderText = String((reminderReq?.params as { prompt?: Array<{ text?: string }> })?.prompt?.[0]?.text ?? "");
+      expect(reminderText).toBe(ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER);
+
+      // Follow-up updates or a second native subagent call in the same turn do not spam reminders.
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "sub-1",
+        status: "completed",
+      });
+      server.notifyUpdate("acp-sess-1", {
+        sessionUpdate: "tool_call",
+        toolCallId: "sub-2",
+        kind: "other",
+        title: "Run define_subagent",
+        status: "completed",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(server.requests.filter((r) => r.method === "session/prompt")).toHaveLength(2);
+
+      // Finish both prompts cleanly: original prompt + reminder steer.
+      server.finishPrompt("end_turn");
+      server.finishPrompt("end_turn");
+      const outcome = await driver.awaitTurn("thread-1", sent.turnId);
+      expect(outcome.status).toBe("completed");
+    } finally {
       await Effect.runPromise(driver.stopAll());
     }
   });

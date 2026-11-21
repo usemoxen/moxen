@@ -21,12 +21,14 @@ describe("Moxen's system prompt for OpenCode", () => {
     expect(prompt).not.toContain("<task-notification>");
     // Moxen has no plan mode, so the prompt does not mention one.
     expect(prompt).not.toContain("plan mode");
+    // Native subagents are always denied, so the prompt never directs the model to use them.
+    expect(prompt).not.toContain("A subagent works");
     // The cadence of status updates is the runtime instructions' to set, so the prompt does not set a second one.
     expect(prompt).not.toContain("Before your first tool call");
   });
 
   it("does not point the model at a tool the server was told to leave off, and carries nothing that changes between turns", () => {
-    const prompt = buildOpencodeSystemPrompt("webfetch,websearch,subagent,question");
+    const prompt = buildOpencodeSystemPrompt("webfetch,websearch,question");
     expect(prompt).not.toContain("On the web, prefer");
     expect(prompt).not.toContain("A subagent works");
     expect(prompt).not.toContain("ask with question");

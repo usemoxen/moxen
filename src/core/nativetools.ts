@@ -9,9 +9,10 @@
  * What is left out on purpose: the tools Moxen's own settings already own
  * (the to-do list's `todos`, plan mode's enter and exit), Claude Code's native
  * subagent tool (both names, `Agent` and `Task`, blocked in every
- * Moxen-started session so there is nothing to switch), and OpenCode's session,
- * worktree and browser utilities, which ask for no permission and so have
- * nothing to deny.
+ * Moxen-started session so there is nothing to switch), OpenCode's native
+ * `subagent` tool (always denied in every Moxen-started OpenCode server so
+ * delegation stays in Moxen threads), and OpenCode's session, worktree and
+ * browser utilities, which ask for no permission and so have nothing to deny.
  */
 import { CliError } from "./errors.js";
 
@@ -63,10 +64,12 @@ export const OPENCODE_NATIVE_TOOLS: readonly NativeTool[] = [
   { name: "execute", label: "Code mode", group: "Commands", summary: "Runs code that calls other tools." },
   { name: "websearch", label: "Web search", group: "Web", summary: "Searches the web through the selected integration." },
   { name: "webfetch", label: "Web fetch", group: "Web", summary: "Fetches a URL as markdown, text or HTML." },
-  { name: "subagent", label: "Subagents", group: "Agents", summary: "Starts a child agent." },
   { name: "skill", label: "Skills", group: "Agents", summary: "Loads a skill." },
   { name: "question", label: "Ask a question", group: "Interaction", summary: "Asks you a question." },
 ];
+
+/** OpenCode permission actions Moxen always denies on servers it starts (native subagents bypass Moxen thread delegation). */
+export const OPENCODE_ALWAYS_DENIED_TOOLS: readonly string[] = ["subagent"];
 
 /** Feature switches verified with the installed CLI's strict configuration validator. */
 export const CODEX_NATIVE_TOOLS: readonly NativeTool[] = [
@@ -120,14 +123,15 @@ export function isNativeToolDisabled(setting: string | undefined, name: string, 
 
 /**
  * What an OpenCode server is started with so the tools stay off: `websearch:
- * false`, and a `deny` rule on `*` for every other action. Both take the tool
- * out of the model's list (checked on OpenCode 2.1.2: a model asked for its
- * tools no longer names them). Nothing when none is off.
+ * false`, and a `deny` rule on `*` for every other action (including OpenCode's
+ * native `subagent` tool, which is always denied so multi-agent work routes
+ * through Moxen's delegated threads). Both take the tool out of the model's
+ * list (checked on OpenCode 2.1.2: a model asked for its tools no longer names
+ * them).
  */
 export function opencodeDisabledToolConfig(setting: string | undefined): { websearch?: false; permissions?: Array<{ action: string; resource: string; effect: "deny" }> } {
   const names = disabledNativeToolNames(setting).map((name) => name.toLowerCase());
-  if (names.length === 0) return {};
-  const denied = names.filter((name) => name !== "websearch");
+  const denied = [...new Set([...names.filter((name) => name !== "websearch"), ...OPENCODE_ALWAYS_DENIED_TOOLS])];
   return {
     ...(names.includes("websearch") ? { websearch: false as const } : {}),
     ...(denied.length > 0 ? { permissions: denied.map((action) => ({ action, resource: "*", effect: "deny" as const })) } : {}),

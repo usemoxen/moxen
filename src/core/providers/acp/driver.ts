@@ -186,6 +186,41 @@ interface AcpReasoningState {
   readonly startedAt: number;
 }
 
+const ANTIGRAVITY_NATIVE_SUBAGENT_TOOLS = new Set([
+  "invoke_subagent",
+  "define_subagent",
+  "manage_subagents",
+  "swarm",
+  "run_workflow",
+]);
+
+/**
+ * Runtime guidance prepended to fresh Antigravity sessions so the model uses
+ * Moxen's delegated threads instead of its built-in subagent/swarm tools
+ * (which `agy` does not yet allow disabling via flag or permission rule).
+ */
+export const ANTIGRAVITY_NO_NATIVE_SUBAGENTS_INSTRUCTION = [
+  "# Subagents",
+  "Do not call your built-in subagent or swarm tools (`invoke_subagent`, `define_subagent`, `manage_subagents`, `send_message`, `swarm`, or `run_workflow`). Their transcripts are invisible in Moxen and bypass Moxen's thread tracking.",
+  "When work should be delegated to another agent, use Moxen's thread delegation tools (for example `delegate` / `task_*`) instead, or perform small lookups yourself directly.",
+].join("\n");
+
+/**
+ * Corrective reminder delivered automatically if Antigravity invokes a native
+ * subagent/swarm tool anyway during a turn.
+ */
+export const ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER =
+  "<system-reminder>Do not use Antigravity's built-in subagent or swarm tools (`invoke_subagent`, `define_subagent`, `manage_subagents`, `swarm`, `run_workflow`). Their output is hidden from the user in Moxen. Use Moxen's delegated thread tools (`delegate`, `task_status`, `task_send`, etc.) or handle the work directly instead.</system-reminder>";
+
+function isAntigravityNativeSubagentTool(canonicalTool: string, rawTitle: string | null): boolean {
+  if (canonicalTool === "Agent") return true;
+  if (ANTIGRAVITY_NATIVE_SUBAGENT_TOOLS.has(canonicalTool.toLowerCase())) return true;
+  if (rawTitle && /^run\s+(invoke_subagent|define_subagent|manage_subagents|swarm|run_workflow)\b/iu.test(rawTitle.trim())) {
+    return true;
+  }
+  return false;
+}
+
 interface AcpTranscriptTurn {
   readonly id: TurnId;
   readonly prompt: string;
@@ -202,6 +237,7 @@ interface AcpTranscriptTurn {
   readonly activePrompts: Set<InFlightAcpPrompt>;
   compacting: boolean;
   compacted: boolean;
+  sentNativeSubagentReminder: boolean;
   usage: TokenUsageDelta | null;
   sawUsageUpdate: boolean;
   hasAssistantTextSinceLastTool: boolean;
@@ -1163,6 +1199,14 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           this.sessionTitles.set(acpSessionId, initialTitle);
         }
 
+        const baseInstructions = !resumed && input.instructions?.trim() ? input.instructions.trim() : null;
+        const initialInstructions =
+          !resumed && this.provider === "antigravity"
+            ? baseInstructions
+              ? `${baseInstructions}\n\n${ANTIGRAVITY_NO_NATIVE_SUBAGENTS_INSTRUCTION}`
+              : ANTIGRAVITY_NO_NATIVE_SUBAGENTS_INSTRUCTION
+            : baseInstructions;
+
         const startedAt = new Date().toISOString();
         session = {
           threadId: input.threadId,
@@ -1178,7 +1222,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           delegated: input.delegated === true,
           runtimeMode: input.runtimeMode ?? "auto",
           acpSessionId,
-          pendingInstructions: !resumed && input.instructions?.trim() ? input.instructions.trim() : null,
+          pendingInstructions: initialInstructions,
           modes,
           configOptions,
           currentModel:
@@ -1300,6 +1344,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           activePrompts: new Set(),
           compacting,
           compacted: false,
+          sentNativeSubagentReminder: false,
           usage: null,
           sawUsageUpdate: false,
           hasAssistantTextSinceLastTool: false,
@@ -2251,6 +2296,14 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         },
       });
 
+      if (
+        this.provider === "antigravity" &&
+        !turn.sentNativeSubagentReminder &&
+        isAntigravityNativeSubagentTool(canonicalTool, rawTitle)
+      ) {
+        this.remindAntigravityNoNativeSubagents(session, turn);
+      }
+
       if (terminal) {
         this.clearBackgroundPromotionTimer(session, toolCallId);
         this.finishBackgroundTask(session, state, state.turnId);
@@ -2262,6 +2315,54 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
       this.scheduleBackgroundTurnSettle(session);
     }
+  }
+
+  private queuePendingInstruction(session: AcpSession, instruction: string): void {
+    if (session.pendingInstructions?.includes(instruction)) return;
+    session.pendingInstructions = session.pendingInstructions
+      ? `${session.pendingInstructions}\n\n${instruction}`
+      : instruction;
+  }
+
+  private clearQueuedPendingInstruction(session: AcpSession, instruction: string): void {
+    if (!session.pendingInstructions) return;
+    if (session.pendingInstructions === instruction) {
+      session.pendingInstructions = null;
+      return;
+    }
+    const stripped = session.pendingInstructions
+      .split("\n\n")
+      .filter((part) => part !== instruction)
+      .join("\n\n")
+      .trim();
+    session.pendingInstructions = stripped.length > 0 ? stripped : null;
+  }
+
+  private remindAntigravityNoNativeSubagents(session: AcpSession, turn: AcpTranscriptTurn): void {
+    turn.sentNativeSubagentReminder = true;
+    // Queue as a next-turn fallback first in case the turn finishes before a steer lands or steering is rejected.
+    this.queuePendingInstruction(session, ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER);
+    if (session.closed || turn.status !== "running" || turn.origin === "background" || this.steerTurn === undefined) {
+      return;
+    }
+    // Best-effort mid-turn steer without joining `turn.activePrompts` so normal turn settlement is never blocked.
+    void session.peer
+      .request(
+        ACP_METHODS.sessionPrompt,
+        {
+          sessionId: session.acpSessionId,
+          prompt: [{ type: "text", text: ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER }],
+        },
+        this.promptTimeoutMs,
+      )
+      .then(
+        () => {
+          this.clearQueuedPendingInstruction(session, ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER);
+        },
+        () => {
+          // Leave the fallback reminder queued in `session.pendingInstructions` for the next turn.
+        },
+      );
   }
 
   private findTurnWithTool(session: AcpSession, toolCallId: string): AcpTranscriptTurn | null {
@@ -2290,6 +2391,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       activePrompts: new Set(),
       compacting: false,
       compacted: false,
+      sentNativeSubagentReminder: false,
       usage: null,
       sawUsageUpdate: false,
       hasAssistantTextSinceLastTool: false,
