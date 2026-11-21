@@ -15,8 +15,7 @@
  * open (a delegated task, one driven from the CLI) was never compacted,
  * while Claude Code's own compaction was switched off for it.
  */
-import { driverKindOfInstance, parseAccountInstanceId } from "../types.js";
-import { resolveProfileProviderConfig } from "../providers/accounts.js";
+import { driverKindOfInstance, parseAccountInstanceId, resolveProfileProviderConfig } from "../types.js";
 import { harnessAskLine } from "../providers/harness/profiles.js";
 import { compactHardTokens, lineInput, lineText, lineTokens, parseLine, type ThresholdLine } from "./lines.js";
 import type { ClaudeAccountConfig, ClaudeProviderConfig, CliConfig, ProvidersConfig } from "../types.js";

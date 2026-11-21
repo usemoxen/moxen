@@ -855,10 +855,28 @@ pub struct Snapshot {
     pub path: String,
     pub exists: bool,
     pub settings: Vec<SettingView>,
+    /// Independent per-profile settings keyed by canonical `instanceId`
+    /// (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`).
+    pub account_settings: BTreeMap<String, Vec<SettingView>>,
 }
 
 impl Snapshot {
     pub fn from_json(value: &Value) -> Option<Self> {
+        let account_settings = value
+            .get("accountSettings")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .map(|(instance_id, entries)| {
+                        let views = entries
+                            .as_array()
+                            .map(|items| items.iter().filter_map(SettingView::from_json).collect())
+                            .unwrap_or_default();
+                        (instance_id.clone(), views)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Some(Self {
             path: text(value, "path").unwrap_or_default(),
             exists: boolean(value, "exists").unwrap_or(false),
@@ -867,11 +885,20 @@ impl Snapshot {
                 .and_then(Value::as_array)
                 .map(|settings| settings.iter().filter_map(SettingView::from_json).collect())
                 .unwrap_or_default(),
+            account_settings,
         })
     }
 
     pub fn find(&self, key: &str) -> Option<&SettingView> {
-        self.settings.iter().find(|view| view.key == key)
+        self.settings
+            .iter()
+            .find(|view| view.key == key)
+            .or_else(|| {
+                self.account_settings
+                    .values()
+                    .flat_map(|views| views.iter())
+                    .find(|view| view.key == key)
+            })
     }
 
     /// The sections the snapshot covers, in page order, skipping empties.

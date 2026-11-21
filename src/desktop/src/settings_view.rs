@@ -680,14 +680,21 @@ pub fn render(
     }
     w.sync_settings(cx);
     let snapshot = w.source.settings();
+    let accounts: Vec<settings::ProviderAccountSummary> = match w.source.provider_accounts().as_deref() {
+        Some(Ok(list)) => list.clone(),
+        _ => vec![],
+    };
     let tabs = snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.as_ref().as_ref().ok())
-        .map(tabs)
+        .map(|snap| tabs(snap, &accounts))
         .unwrap_or_default();
     let selected = tabs
         .iter()
-        .position(|tab| tab.section == w.settings_tab.0 && tab.group == w.settings_tab.1.as_deref())
+        .position(|tab| {
+            tab.section == w.settings_tab.0
+                && tab.group.as_deref() == w.settings_tab.1.as_deref()
+        })
         .or_else(|| tabs.iter().position(|tab| tab.section == w.settings_tab.0))
         .unwrap_or(0);
     let tab = tabs.get(selected);
@@ -821,28 +828,44 @@ const RAIL_WIDTH: f32 = 190.;
 const RAIL_GUTTER: f32 = 8.;
 const RAIL_ITEM_PADDING: f32 = 10.;
 
-struct SettingsTab<'a> {
-    section: &'a str,
-    group: Option<&'a str>,
+struct SettingsTab {
+    section: String,
+    group: Option<String>,
     category: &'static str,
-    label: &'a str,
+    label: String,
 }
 
-fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
+fn account_short_kind(kind: &str) -> &'static str {
+    match kind {
+        "claude" => "Claude",
+        "chatgpt" => "ChatGPT",
+        "antigravity" => "Antigravity",
+        _ => "Provider",
+    }
+}
+
+fn tabs(snapshot: &Snapshot, accounts: &[settings::ProviderAccountSummary]) -> Vec<SettingsTab> {
     let mut tabs = Vec::new();
+    let opencode_enabled = snapshot
+        .find("providers.opencode.enabled")
+        .is_some_and(|view| view.value == SettingValue::Flag(true));
+
     for section in snapshot.sections() {
-        // Standalone Codex is retired in favor of Sign in with ChatGPT (Codex stays as a verified companion).
-        if section == "provider:codex" {
+        // Static per-provider pages are replaced by Overview + dynamic independent profile tabs
+        // (plus single opt-in OpenCode when enabled). Standalone Codex is companion-only.
+        if matches!(
+            section,
+            "provider:codex"
+                | "provider:claude"
+                | "provider:chatgpt"
+                | "provider:antigravity"
+                | "provider:opencode"
+        ) {
             continue;
         }
         let category = match section {
             "provider:harness" => "Moxen Harness",
             "provider:acp" => "ACP",
-            "provider:claude"
-            | "provider:codex"
-            | "provider:opencode"
-            | "provider:antigravity"
-            | "provider:chatgpt" => "Providers",
             "mcp" | "skills" => "Integrations",
             _ => "Moxen",
         };
@@ -862,22 +885,22 @@ fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
             for group in groups {
                 if !tabs
                     .iter()
-                    .any(|tab: &SettingsTab| tab.section == section && tab.group == Some(group))
+                    .any(|tab: &SettingsTab| tab.section == section && tab.group.as_deref() == Some(group))
                 {
                     tabs.push(SettingsTab {
-                        section,
-                        group: Some(group),
+                        section: section.to_owned(),
+                        group: Some(group.to_owned()),
                         category,
-                        label: group,
+                        label: group.to_owned(),
                     });
                 }
             }
         } else {
             tabs.push(SettingsTab {
-                section,
+                section: section.to_owned(),
                 group: None,
                 category,
-                label: section_label(section),
+                label: section_label(section).to_owned(),
             });
         }
     }
@@ -889,24 +912,41 @@ fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
         tabs.insert(
             index,
             SettingsTab {
-                section,
+                section: section.to_owned(),
                 group: None,
                 category: "Moxen",
-                label,
+                label: label.to_owned(),
             },
         );
     }
-    if let Some(first_provider) = tabs.iter().position(|tab| tab.category == "Providers") {
-        tabs.insert(
-            first_provider,
-            SettingsTab {
-                section: "providers:overview",
-                group: None,
-                category: "Providers",
-                label: "Overview",
-            },
-        );
+    let providers_at = tabs
+        .iter()
+        .position(|tab| tab.category != "Moxen")
+        .unwrap_or(tabs.len());
+    let mut provider_tabs = Vec::with_capacity(1 + accounts.len() + usize::from(opencode_enabled));
+    provider_tabs.push(SettingsTab {
+        section: "providers:overview".to_owned(),
+        group: None,
+        category: "Providers",
+        label: "Overview".to_owned(),
+    });
+    for account in accounts {
+        provider_tabs.push(SettingsTab {
+            section: "providers:profile".to_owned(),
+            group: Some(account.instance_id.clone()),
+            category: "Providers",
+            label: format!("{} · {}", account_short_kind(&account.kind), account.label),
+        });
     }
+    if opencode_enabled {
+        provider_tabs.push(SettingsTab {
+            section: "provider:opencode".to_owned(),
+            group: None,
+            category: "Providers",
+            label: "OpenCode".to_owned(),
+        });
+    }
+    tabs.splice(providers_at..providers_at, provider_tabs);
     tabs
 }
 
@@ -917,7 +957,7 @@ fn rail_tip_left(text_width: f32) -> Option<f32> {
 
 fn rail(
     w: &Workspace,
-    tabs: &[SettingsTab<'_>],
+    tabs: &[SettingsTab],
     selected_index: usize,
     window: &Window,
     cx: &mut Context<Workspace>,
@@ -939,10 +979,14 @@ fn rail(
                     .px(px(RAIL_ITEM_PADDING))
                     .into_any_element()
             });
-            let label = crate::language::tr(tab.label).into_owned();
+            let label = if tab.section == "providers:profile" {
+                tab.label.clone()
+            } else {
+                crate::language::tr(&tab.label).into_owned()
+            };
             let selected = selected_index == at;
-            let section = tab.section.to_owned();
-            let group = tab.group.map(str::to_owned);
+            let section = tab.section.clone();
+            let group = tab.group.clone();
             let mut run = window.text_style().to_run(label.len());
             run.font.family = theme::FONT.into();
             let width = window
@@ -1003,11 +1047,14 @@ fn rail(
         }))
 }
 
-fn body(w: &Workspace, tab: Option<&SettingsTab<'_>>, cx: &mut Context<Workspace>) -> AnyElement {
+fn body(w: &Workspace, tab: Option<&SettingsTab>, cx: &mut Context<Workspace>) -> AnyElement {
     let content: AnyElement = match tab {
         Some(tab) if tab.section == "remote" => remote_tab(w, cx),
         Some(tab) if tab.section == "updates" => updates_tab(w, cx),
         Some(tab) if tab.section == "providers:overview" => providers_overview_tab(w, cx),
+        Some(tab) if tab.section == "providers:profile" => {
+            provider_profile_tab(w, tab.group.as_deref(), cx)
+        }
         _ => section_tab(w, tab, cx),
     };
     div()
@@ -1017,7 +1064,7 @@ fn body(w: &Workspace, tab: Option<&SettingsTab<'_>>, cx: &mut Context<Workspace
                 format!(
                     "settings-content-{}-{}",
                     tab.section,
-                    tab.group.unwrap_or_default()
+                    tab.group.as_deref().unwrap_or_default()
                 )
             },
         ))
@@ -1036,7 +1083,7 @@ fn body(w: &Workspace, tab: Option<&SettingsTab<'_>>, cx: &mut Context<Workspace
 
 fn section_tab(
     w: &Workspace,
-    tab: Option<&SettingsTab<'_>>,
+    tab: Option<&SettingsTab>,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let snapshot = w.source.settings();
@@ -1056,7 +1103,7 @@ fn section_tab(
         .filter(|view| {
             view.section == tab.section
                 && view.visible(snapshot)
-                && (tab.group.is_none() || view.group.as_deref() == tab.group)
+                && (tab.group.is_none() || view.group.as_deref() == tab.group.as_deref())
         })
         .collect();
     if views.is_empty() && tab.section != "skills" {
@@ -4642,15 +4689,6 @@ fn account_kind_name(kind: &str) -> &'static str {
     }
 }
 
-fn account_kind_section(kind: &str) -> &'static str {
-    match kind {
-        "claude" => "provider:claude",
-        "chatgpt" => "provider:chatgpt",
-        "antigravity" => "provider:antigravity",
-        _ => "providers:overview",
-    }
-}
-
 fn account_status_subtitle(account: &settings::ProviderAccountSummary) -> String {
     if !account.enabled {
         return "Disabled".into();
@@ -4678,11 +4716,223 @@ fn account_status_subtitle(account: &settings::ProviderAccountSummary) -> String
     parts.join(" · ")
 }
 
+/// Independent per-profile settings page for a configured `claude/<id>`, `chatgpt/<id>`,
+/// or `antigravity/<id>` profile: account identity/auth/env header plus every independent
+/// setting from `snapshot.account_settings[instance_id]`.
+fn provider_profile_tab(
+    w: &Workspace,
+    instance_id: Option<&str>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let Some(instance_id) = instance_id else {
+        return loading("Select a provider profile.").into_any_element();
+    };
+    let snapshot = w.source.settings();
+    let Some(snapshot) = snapshot.as_ref() else {
+        return loading("Reading settings…").into_any_element();
+    };
+    let snapshot = match snapshot.as_ref() {
+        Ok(snapshot) => snapshot,
+        Err(message) => return error_row(message, w, cx).into_any_element(),
+    };
+    let accounts: Vec<settings::ProviderAccountSummary> = match w.source.provider_accounts().as_deref() {
+        Some(Ok(list)) => list.clone(),
+        _ => vec![],
+    };
+    let Some(account) = accounts.iter().find(|entry| entry.instance_id == instance_id) else {
+        return loading("This provider profile is no longer configured.").into_any_element();
+    };
+
+    let mut out = div().flex().flex_col().gap(px(6.));
+    let is_chatgpt = account.kind == "chatgpt";
+    let toggle_kind = account.kind.clone();
+    let toggle_id = account.id.clone();
+    let next_enabled = !account.enabled;
+    let remove_kind = account.kind.clone();
+    let remove_id = account.id.clone();
+    let remove_instance = account.instance_id.clone();
+    let env_kind = account.kind.clone();
+    let env_id = account.id.clone();
+    let env_str = account
+        .env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut header_card = div()
+        .rounded(px(8.))
+        .p(px(12.))
+        .bg(color("sunk"))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color("ink"))
+                        .child(format!(
+                            "{} · {}",
+                            account_kind_name(&account.kind),
+                            account.label
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(small_button(
+                            ("profile-header-toggle", 0),
+                            if account.enabled { "On" } else { "Off" },
+                            "Enable or disable this profile",
+                            cx.listener(move |this, _, _, cx| {
+                                this.source.toggle_provider_account(
+                                    &toggle_kind,
+                                    &toggle_id,
+                                    next_enabled,
+                                );
+                                cx.notify();
+                            }),
+                        ))
+                        .child(small_button(
+                            ("profile-header-env", 0),
+                            "Env vars",
+                            "Edit environment variables (KEY=VALUE) for this profile",
+                            cx.listener(move |this, _, _, cx| {
+                                this.open_settings_form(
+                                    SettingsForm::AccountField {
+                                        kind: env_kind.clone(),
+                                        id: env_id.clone(),
+                                        field: "env".into(),
+                                        title: "Environment variables (KEY=VALUE)".into(),
+                                    },
+                                    &env_str,
+                                    cx,
+                                );
+                            }),
+                        ))
+                        .child(small_button(
+                            ("profile-header-remove", 0),
+                            "Remove",
+                            "Remove this provider profile from Moxen",
+                            cx.listener(move |this, _, _, cx| {
+                                this.confirm_settings(
+                                    format!("Remove {remove_instance}?"),
+                                    "Removes this profile from config (and clears any ChatGPT OAuth tokens from keychain).".into(),
+                                    SettingsConfirm::RemoveAccount {
+                                        kind: remove_kind.clone(),
+                                        id: remove_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            }),
+                        )),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(color("ink-2"))
+                .child(format!(
+                    "{} · {}",
+                    account.instance_id,
+                    account_status_subtitle(account)
+                )),
+        );
+
+    if is_chatgpt {
+        let signed_in = account.signed_in == Some(true);
+        let login_id = account.id.clone();
+        let login_label = account.label.clone();
+        let logout_id = account.id.clone();
+        let pair_id = account.id.clone();
+        let confirm_pair_id = account.id.clone();
+        let mut bar = div().flex().flex_wrap().gap(px(6.));
+        if signed_in {
+            bar = bar
+                .child(small_button(
+                    ("profile-chatgpt-logout", 0),
+                    "Sign out",
+                    "Revoke ChatGPT OAuth tokens and clear keychain",
+                    cx.listener(move |this, _, _, cx| {
+                        this.source.logout_chatgpt(&logout_id);
+                        cx.notify();
+                    }),
+                ))
+                .child(small_button(
+                    ("profile-chatgpt-pair", 0),
+                    "Verify Codex companion",
+                    "Verify paired CODEX_HOME against your signed-in ChatGPT identity",
+                    cx.listener(move |this, _, _, cx| {
+                        this.source.pair_chatgpt_codex(&pair_id, false);
+                        cx.notify();
+                    }),
+                ))
+                .child(small_button(
+                    ("profile-chatgpt-pair-confirm", 0),
+                    "Confirm workspace",
+                    "Confirm workspace pairing when email matches without a shared workspace ID",
+                    cx.listener(move |this, _, _, cx| {
+                        this.source.pair_chatgpt_codex(&confirm_pair_id, true);
+                        cx.notify();
+                    }),
+                ));
+        } else {
+            bar = bar.child(small_button(
+                ("profile-chatgpt-login", 0),
+                "Sign in with ChatGPT",
+                "Authenticate via OpenAI OAuth 2.0 + OIDC in your browser",
+                cx.listener(move |this, _, _, cx| {
+                    this.source
+                        .start_chatgpt_login(&login_id, Some(&login_label));
+                    cx.notify();
+                }),
+            ));
+        }
+        header_card = header_card.child(bar);
+        if !account.codex_verified {
+            header_card = header_card.child(
+                div()
+                    .text_xs()
+                    .text_color(color("ink-2"))
+                    .child("Unpaired: link a verified Codex companion for live usage windows and image generation."),
+            );
+        }
+    }
+
+    out = out.child(header_card);
+
+    if let Some(views) = snapshot.account_settings.get(instance_id) {
+        let mut group = String::new();
+        for view in views.iter().filter(|view| view.visible(snapshot)) {
+            if view.group.as_deref() != Some(group.as_str()) && view.group.is_some() {
+                group = view.group.clone().unwrap_or_default();
+                out = out.child(group_heading(&group));
+            }
+            out = out.child(setting_row(w, view, cx));
+        }
+    }
+    out.into_any_element()
+}
+
 /// Providers overview: master-detail manager for multi-account logins (`claude/<id>`,
-/// `chatgpt/<id>`, `antigravity/<id>`), inline runtime/env editing, and Update / Update all.
+/// `chatgpt/<id>`, `antigravity/<id>`), single opt-in OpenCode, and Update / Update all.
 fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let accounts_state = w.source.provider_accounts();
     let updates_state = w.source.updates();
+    let opencode_enabled = w
+        .source
+        .settings()
+        .as_deref()
+        .and_then(|res| res.as_ref().ok())
+        .and_then(|snap| snap.find("providers.opencode.enabled"))
+        .is_some_and(|view| view.value == SettingValue::Flag(true));
     let accounts: Vec<settings::ProviderAccountSummary> = match accounts_state.as_deref() {
         Some(Ok(list)) => list.clone(),
         _ => vec![],
@@ -4863,7 +5113,28 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                         this.open_settings_form(SettingsForm::AddAccount { kind }, "", cx);
                     }),
                 )
-            }),
+            })
+            .child(small_button(
+                ("providers-opencode-toggle", 0),
+                if opencode_enabled {
+                    "Disable OpenCode"
+                } else {
+                    "+ Enable OpenCode"
+                },
+                "Opt in to or disable the single OpenCode provider",
+                cx.listener(move |this, _, _, cx| {
+                    let next = !opencode_enabled;
+                    this.write_setting(
+                        "providers.opencode.enabled",
+                        if next { "true" } else { "false" },
+                        cx,
+                    );
+                    if next {
+                        this.select_settings_section("provider:opencode", None);
+                    }
+                    cx.notify();
+                }),
+            )),
     );
 
     // Right column: detail editor for selected account
@@ -4878,7 +5149,7 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
     if let Some(account) = selected {
         let is_chatgpt = account.kind == "chatgpt";
         let ver = version_for(&account.kind);
-        let section_target = account_kind_section(&account.kind).to_string();
+        let open_instance = account.instance_id.clone();
         let remove_kind = account.kind.clone();
         let remove_id = account.id.clone();
         let remove_instance = account.instance_id.clone();
@@ -4910,10 +5181,13 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                         .gap(px(6.))
                         .child(small_button(
                             ("providers-detail-open-section", 0),
-                            "Provider settings",
-                            "Open shared provider-level settings",
+                            "Full profile settings",
+                            "Open this profile's complete independent settings page",
                             cx.listener(move |this, _, _, cx| {
-                                this.select_settings_section(&section_target, None);
+                                this.select_settings_section(
+                                    "providers:profile",
+                                    Some(&open_instance),
+                                );
                                 cx.notify();
                             }),
                         ))
@@ -5190,12 +5464,48 @@ mod tests {
     #[test]
     fn providers_overview_leads_the_providers_category_including_chatgpt() {
         let snapshot = crate::mock_settings::snapshot_fixture();
-        let provider_tabs: Vec<_> = super::tabs(&snapshot)
+        // With zero configured accounts and OpenCode disabled, only Overview appears under Providers.
+        let empty_provider_tabs: Vec<_> = super::tabs(&snapshot, &[])
             .into_iter()
             .filter(|tab| tab.category == "Providers")
             .map(|tab| tab.section)
             .collect();
-        assert_eq!(provider_tabs.first().copied(), Some("providers:overview"));
+        assert_eq!(empty_provider_tabs, vec!["providers:overview"]);
+
+        // Once profiles are configured, each appears as a top-level independent page under Providers.
+        let accounts = vec![settings::ProviderAccountSummary {
+            kind: "chatgpt".into(),
+            id: "work".into(),
+            instance_id: "chatgpt/work".into(),
+            label: "Work".into(),
+            enabled: true,
+            home_path: None,
+            binary_path: None,
+            launch_args: None,
+            model: None,
+            thinking_effort: None,
+            env: Default::default(),
+            email: Some("dev@example.test".into()),
+            plan_type: Some("plus".into()),
+            workspace_name: None,
+            signed_in: Some(true),
+            codex_home_path: None,
+            codex_binary_path: None,
+            codex_launch_args: None,
+            codex_verified: false,
+        }];
+        let populated: Vec<_> = super::tabs(&snapshot, &accounts)
+            .into_iter()
+            .filter(|tab| tab.category == "Providers")
+            .map(|tab| (tab.section, tab.label))
+            .collect();
+        assert_eq!(
+            populated,
+            vec![
+                ("providers:overview".to_string(), "Overview".to_string()),
+                ("providers:profile".to_string(), "ChatGPT · Work".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -5208,10 +5518,10 @@ mod tests {
     fn harness_pages_follow_the_table_order_and_leave_the_profile_editor_reachable() {
         let mut snapshot = crate::mock_settings::snapshot_fixture();
         let harness_pages = |snapshot: &settings::Snapshot| {
-            super::tabs(snapshot)
+            super::tabs(snapshot, &[])
                 .into_iter()
                 .filter(|tab| tab.category == "Moxen Harness")
-                .map(|tab| tab.label.to_owned())
+                .map(|tab| tab.label)
                 .collect::<Vec<_>>()
         };
         assert_eq!(

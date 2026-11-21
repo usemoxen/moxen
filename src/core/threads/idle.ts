@@ -15,8 +15,7 @@
  */
 import * as Effect from "effect/Effect";
 
-import { resolveProfileProviderConfig } from "../providers/accounts.js";
-import type { CliConfig } from "../types.js";
+import { resolveProfileProviderConfig, type CliConfig } from "../types.js";
 import type { ThreadStore } from "./store.js";
 import { failureMessage, reportThreadFailure } from "./failures.js";
 import { openTurn } from "./threads.js";

@@ -6,6 +6,8 @@ import { GitFooter, GitTab, type RequestOpener } from "../../features/gitpanel/g
 import type { OpenCommit } from "../../features/gitpanel/useGitPanel.js";
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
 import { SidePanelFrame, SideTabBar } from "../../features/sidepanel/sidepanel.js";
+import { describeAllAccountSettings } from "../../../core/configschema.js";
+import { summarizeProviderAccounts } from "../../../core/providers/accounts.js";
 import { describeSettings, DEFAULTS_FOR_RENDER_CHECK } from "./settingsFixture.js";
 import type { ForgeDetection, ForgeRequest, ForgeRequestStatus, GitOverview, MergeStrategy } from "../../../server/api.js";
 import { baseChoices, resolveBase } from "../../model/gitpanel.js";
@@ -45,15 +47,26 @@ const PROVIDERS: ProviderSummary[] = [
 async function runSettings(): Promise<void> {
   const written: Array<{ key: string; value: string }> = [];
   const updated: string[] = [];
+  const configWithProfile = {
+    ...DEFAULTS_FOR_RENDER_CHECK,
+    providers: {
+      ...DEFAULTS_FOR_RENDER_CHECK.providers,
+      claude: { accounts: [{ id: "personal", label: "Personal" }] },
+      opencode: { enabled: true },
+    },
+  };
   const snapshot = {
     path: "/home/dev/.moxen/config.json",
     exists: true,
-    settings: describeSettings(DEFAULTS_FOR_RENDER_CHECK),
+    settings: describeSettings(configWithProfile),
+    accountSettings: describeAllAccountSettings(configWithProfile),
   };
+  const accounts = summarizeProviderAccounts(configWithProfile.providers);
   function Harness() {
     return (
       <SettingsModal
         snapshot={snapshot}
+        accounts={accounts}
         loading={false}
         saving={null}
         error={null}
@@ -98,7 +111,7 @@ async function runSettings(): Promise<void> {
   console.log("--- settings page ---");
   console.log(frame);
   // Every section is a tab down the left; the first one's settings show.
-  for (const expected of ["Settings", "config.json", "General", "Defaults", "Sessions", "Long threads", "Agent context", "Git and forges", "Claude Code", "Unknown folders"]) {
+  for (const expected of ["Settings", "config.json", "General", "Defaults", "Sessions", "Long threads", "Agent context", "Git and forges", "Overview", "Claude · Personal", "Unknown folders"]) {
     if (!frame.includes(expected)) fail(`settings page is missing "${expected}"`);
   }
   if (frame.includes("Idle session lifetime")) fail("settings page shows another section's settings under General");
@@ -181,20 +194,20 @@ async function runSettings(): Promise<void> {
   // The later sections: a restart-only setting says so, and a boolean
   // flips in place on click.
   const sideRows = setup.captureCharFrame().split("\n");
-  const claudeTab = sideRows.findIndex((row) => row.includes("Claude Code") && row.indexOf("Claude Code") < 28);
-  if (claudeTab < 0) fail("the settings sidebar has no Claude Code tab");
-  await act(async () => setup.mockMouse.click(sideRows[claudeTab]!.indexOf("Claude Code") + 1, claudeTab));
+  const claudeTab = sideRows.findIndex((row) => row.includes("Claude · Personal") && row.indexOf("Claude · Personal") < 28);
+  if (claudeTab < 0) fail("the settings sidebar has no Claude · Personal tab");
+  await act(async () => setup.mockMouse.click(sideRows[claudeTab]!.indexOf("Claude · Personal") + 1, claudeTab));
   await setup.flush();
   const claude = setup.captureCharFrame();
-  console.log("--- settings page, Claude Code tab ---");
+  console.log("--- settings page, Claude profile tab ---");
   console.log(claude);
-  if (!claude.includes("Permissions") || !claude.includes("Effort")) fail("the Claude Code tab does not lead with its thread defaults");
-  // The update card: the version, where it stands against the floor, and the button.
-  if (!claude.includes("2.1.280") || !claude.includes("Older than the 2.1.292")) fail("the Claude Code tab does not say its install is older than the floor");
-  if (!claude.includes("[ Update ]") || !claude.includes("claude update")) fail("the Claude Code tab has no update button naming what it runs");
+  if (!claude.includes("Permissions") || !claude.includes("Effort")) fail("the Claude profile tab does not lead with its thread defaults");
+  // The profile header card: the version, where it stands against the floor, and the update action.
+  if (!claude.includes("2.1.280") || !claude.includes("Older than the 2.1.292")) fail("the Claude profile tab does not say its install is older than the floor");
+  if (!claude.includes("Update")) fail("the Claude profile tab has no update button");
   await act(async () => setup.mockInput.pressKey("u"));
   await setup.flush();
-  if (updated.join() !== "claude") fail(`pressing u on the Claude Code tab updated ${JSON.stringify(updated)}`);
+  if (updated.join() !== "claude") fail(`pressing u on the Claude profile tab updated ${JSON.stringify(updated)}`);
 
   // A provider's Model lists that provider's catalog rather than asking for a slug.
   const claudeRows = setup.captureCharFrame().split("\n");

@@ -1,4 +1,4 @@
-import { driverKindOfInstance, type CliConfig } from "../../core/types.js";
+import { driverKindOfInstance, parseAccountInstanceId, type CliConfig } from "../../core/types.js";
 import { configuredModel } from "../../core/catalog/selection.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
 import { updateState, versionNumber, type UpdatableProvider } from "../../core/catalog/update.js";
@@ -411,6 +411,11 @@ function valueOf(settings: readonly SettingView[], key: string): string | undefi
  * the provider's catalog default does.
  */
 export function configuredDefaultModel(settings: readonly SettingView[], instanceId: string): string | undefined {
+  const parsed = parseAccountInstanceId(instanceId);
+  if (parsed) {
+    const accountModel = valueOf(settings, `providers.${parsed.kind}.accounts[${parsed.accountId}].model`);
+    if (accountModel !== undefined) return accountModel;
+  }
   const model = (kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity") => ({ model: valueOf(settings, `providers.${kind}.model`) });
   const provider = valueOf(settings, "provider");
   const global = valueOf(settings, "model");
@@ -432,9 +437,9 @@ function offered(providers: readonly ProviderSummary[]): readonly ProviderSummar
   return providers.filter((provider) => provider.enabled);
 }
 
-/** The provider an MCP access setting (`providers.<kind>.mcpExclude`) belongs to. */
+/** The provider an MCP access setting (`providers.<kind>.mcpExclude` or `providers.<kind>.accounts[<id>].mcpExclude`) belongs to. */
 function mcpAccessKind(key: string): "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | null {
-  const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)\.mcpExclude$/.exec(key)?.[1];
+  const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)(?:\.accounts\[[^\]]+\])?\.mcpExclude$/.exec(key)?.[1];
   return kind === "codex" || kind === "claude" || kind === "chatgpt" || kind === "opencode" || kind === "harness" || kind === "acp" || kind === "antigravity" ? kind : null;
 }
 

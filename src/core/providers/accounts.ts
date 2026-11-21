@@ -344,59 +344,7 @@ export interface ResolvedClaudeAccount {
   readonly env: NodeJS.ProcessEnv;
 }
 
-/**
- * Resolve the independent provider configuration for an exact `instanceId`.
- *
- * - Multi-account profiles (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`)
- *   return ONLY that profile's own independent settings (seeded with sensible
- *   built-in defaults when unset; never inheriting a parent `providers.<kind>.*`).
- * - Single-provider / non-account kinds (`opencode`, `harness`, `acp`, `codex`)
- *   return `config.providers?.[kind]`.
- */
-export function resolveProfileProviderConfig(
-  config: Pick<CliConfig, "providers">,
-  instanceId: string,
-):
-  | ClaudeProviderConfig
-  | ChatGptProviderConfig
-  | AntigravityProviderConfig
-  | CodexProviderConfig
-  | ProvidersConfig["opencode"]
-  | ProvidersConfig["harness"]
-  | ProvidersConfig["acp"]
-  | undefined {
-  const parsed = parseAccountInstanceId(instanceId);
-  if (parsed) {
-    if (parsed.kind === "claude") {
-      return config.providers?.claude?.accounts?.find(
-        (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
-      );
-    }
-    if (parsed.kind === "chatgpt") {
-      return config.providers?.chatgpt?.accounts?.find(
-        (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
-      );
-    }
-    return config.providers?.antigravity?.accounts?.find(
-      (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
-    );
-  }
-  const raw = instanceId.trim().toLowerCase();
-  if (raw === "opencode" || raw.startsWith("opencode/")) return config.providers?.opencode;
-  if (raw === "harness" || raw.startsWith("harness/")) return config.providers?.harness;
-  if (raw === "acp" || raw.startsWith("acp/")) return config.providers?.acp;
-  if (raw === "codex" || raw.startsWith("codex/")) return config.providers?.codex;
-  if (raw === "claudeagent" || raw === "claude") {
-    return config.providers?.claude?.accounts?.[0] ?? config.providers?.claude;
-  }
-  if (raw === "antigravity" || raw === "agy") {
-    return config.providers?.antigravity?.accounts?.[0] ?? config.providers?.antigravity;
-  }
-  if (raw === "chatgpt") {
-    return config.providers?.chatgpt?.accounts?.[0] ?? config.providers?.chatgpt;
-  }
-  return undefined;
-}
+export { resolveProfileProviderConfig } from "../types.js";
 
 /** Resolve effective Claude settings and isolated env (`CLAUDE_CONFIG_DIR` only, never `HOME`) for `instanceId`. */
 export function resolveClaudeAccount(

@@ -6,9 +6,8 @@
  * stays unpriced (null), never zero; a partial price values the fields it
  * names and counts the rest as zero.
  */
-import { resolveProfileProviderConfig } from "../providers/accounts.js";
 import type { TurnUsage } from "../threads/types.js";
-import type { CliConfig } from "../types.js";
+import { resolveProfileProviderConfig, type CliConfig } from "../types.js";
 import generatedOpencodePrices from "./opencode-prices.generated.json" with { type: "json" };
 
 /** Context-size pricing tier: applies when prompt tokens (`input + cacheRead + cacheCreate`) exceed `afterTokens`. */

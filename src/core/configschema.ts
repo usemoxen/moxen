@@ -2572,11 +2572,19 @@ export function describeAccountSettings(
       [kind]: { ...account },
     },
   };
-  const baseDescriptors = SETTINGS.filter((descriptor) => descriptor.section === section && descriptor.hidden !== true);
+  const baseDescriptors = SETTINGS.filter((descriptor) => descriptor.section === section);
   return baseDescriptors.map((base) => {
     const field = base.key.startsWith(prefix) ? base.key.slice(prefix.length) : base.key;
     const key = `providers.${kind}.accounts[${normalizedId}].${field}`;
-    const descriptor: SettingDescriptor = { ...base, key };
+    const visibleWhen =
+      base.visibleWhen !== undefined && base.visibleWhen.key.startsWith(prefix)
+        ? { ...base.visibleWhen, key: `providers.${kind}.accounts[${normalizedId}].${base.visibleWhen.key.slice(prefix.length)}` }
+        : base.visibleWhen;
+    const descriptor: SettingDescriptor = {
+      ...base,
+      key,
+      ...(visibleWhen !== undefined ? { visibleWhen } : {}),
+    };
     const web = webOrderOf(base);
     const unavailable = web === null ? undefined : webOrderUnavailable(isolatedConfig, web.provider, web.role);
     const rawVal = (account as unknown as Record<string, unknown>)[field];

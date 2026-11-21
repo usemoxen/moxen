@@ -34,6 +34,28 @@ const KIND_NAME: Record<AccountProviderKind, string> = {
   antigravity: "Antigravity",
 };
 
+const SHORT_KIND_NAME: Record<AccountProviderKind, string> = {
+  claude: "Claude",
+  chatgpt: "ChatGPT",
+  antigravity: "Antigravity",
+};
+
+/** Compact top-level sidebar label for an independent configured provider profile. */
+export function profileSidebarLabel(account: Pick<ProviderAccountSummary, "kind" | "label">): string {
+  return `${SHORT_KIND_NAME[account.kind]} · ${account.label}`;
+}
+
+type AddableProviderKind = AccountProviderKind | "opencode";
+
+function addableKindName(kind: AddableProviderKind): string {
+  return kind === "opencode" ? "OpenCode" : KIND_NAME[kind];
+}
+
+function addableKindDescription(kind: AddableProviderKind): string {
+  if (kind === "opencode") return t("settings.providers.kindDesc.opencode");
+  return kindDescription(kind);
+}
+
 function cliDisplayName(cli: UpdatableProvider): string {
   if (cli === "claude") return "Claude Code";
   if (cli === "opencode") return "OpenCode";
@@ -251,6 +273,59 @@ function AccountRowCard({
   );
 }
 
+function OpencodeOverviewRow({
+  id,
+  version,
+  active,
+  width,
+  onOpen,
+  onDisable,
+}: {
+  id: string;
+  version: string | null;
+  active: boolean;
+  width: number;
+  onOpen: () => void;
+  onDisable: () => void;
+}) {
+  const { hovered, handlers } = useHover();
+  const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
+  const toggleText = `${toggleLabel(true)}  ›`;
+  const titleText = `OpenCode${version ? `  v${version}` : ""}`;
+  const leftWidth = Math.max(10, width - toggleText.length - 6);
+  return (
+    <box
+      id={id}
+      style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 1, paddingRight: 1 }}
+      backgroundColor={bg}
+      onMouseDown={onOpen}
+      selectable={false}
+      {...handlers}
+    >
+      <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={bg}>
+        <box style={{ flexDirection: "row", flexShrink: 1 }} backgroundColor={bg}>
+          <text fg={active ? COLOR.accent : COLOR.faint} bg={bg} selectable={false}>
+            {active ? "▌ " : "  "}
+          </text>
+          <OverflowText fg={active ? COLOR.bright : COLOR.text} bg={bg} width={leftWidth} active={active || hovered} selectable={false}>
+            {titleText}
+          </OverflowText>
+        </box>
+        <box onMouseDown={onDisable} backgroundColor={bg}>
+          <text fg={COLOR.added} bg={bg} selectable={false}>
+            {toggleText}
+          </text>
+        </box>
+      </box>
+      <box style={{ flexDirection: "row", height: 1, paddingLeft: 2 }} backgroundColor={bg}>
+        <OverflowText fg={COLOR.dim} bg={bg} width={Math.max(10, width - 5)} active={active || hovered} selectable={false}>
+          {t("settings.providers.opencodeSubtitle")}
+        </OverflowText>
+      </box>
+    </box>
+  );
+}
+
 function AddProviderRow({
   id,
   active,
@@ -446,8 +521,207 @@ function DetailFieldCard({
   );
 }
 
+export interface ProfileAccountHeaderProps {
+  readonly account: ProviderAccountSummary;
+  readonly providers: readonly ProviderSummary[] | null;
+  readonly versions: {
+    readonly codex?: ProviderCheckView;
+    readonly claude: ProviderCheckView;
+    readonly opencode: ProviderCheckView;
+    readonly antigravity?: ProviderCheckView;
+  } | null;
+  readonly latest?: LatestVersions | null;
+  readonly updating: ReadonlySet<UpdatableProvider>;
+  readonly saving: boolean;
+  readonly error: string | null;
+  readonly width: number;
+  readonly onSaveAccount: (input: ProviderAccountSaveInput) => Promise<boolean>;
+  readonly onToggleAccount: (kind: AccountProviderKind, id: string, enabled: boolean) => Promise<void>;
+  readonly onRemoveAccount: (kind: AccountProviderKind, id: string) => Promise<void>;
+  readonly onUpdate: (provider: UpdatableProvider) => void;
+  readonly onRemoved: () => void;
+  readonly onChatGptLogin?: (accountId: string, label?: string) => Promise<{ readonly authorizationUrl: string; readonly done: Promise<void> } | null>;
+  readonly onChatGptLogout?: (accountId: string) => Promise<void>;
+  readonly onChatGptPairCodex?: (accountId: string, confirmWorkspace?: boolean) => Promise<{ readonly verified: boolean; readonly needsConfirmation: boolean; readonly reason: string | null } | null>;
+}
+
+/**
+ * Top identity, auth, CLI update, env, and removal card for an independent
+ * provider profile settings page (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`).
+ */
+export function ProfileAccountHeader({
+  account,
+  providers,
+  versions,
+  latest,
+  updating,
+  saving,
+  error,
+  width,
+  onSaveAccount,
+  onToggleAccount,
+  onRemoveAccount,
+  onUpdate,
+  onRemoved,
+  onChatGptLogin,
+  onChatGptLogout,
+  onChatGptPairCodex,
+}: ProfileAccountHeaderProps) {
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [editingEnv, setEditingEnv] = useState(false);
+  const [authUrlPending, setAuthUrlPending] = useState<string | null>(null);
+  const [pairFeedback, setPairFeedback] = useState<{ readonly text: string; readonly needsConfirmation: boolean } | null>(null);
+
+  useEffect(() => {
+    setConfirmRemove(false);
+    setEditingEnv(false);
+    setAuthUrlPending(null);
+    setPairFeedback(null);
+  }, [account.instanceId]);
+
+  const cliKind: UpdatableProvider = account.kind === "claude" ? "claude" : account.kind === "antigravity" ? "antigravity" : "codex";
+  const check = versions?.[cliKind];
+  const latestEntry = latest === null || latest === undefined ? undefined : { enabled: latest.enabled, latest: null, channel: null, ...latest[cliKind] };
+  const versionLine = providerVersionLine(check, latestEntry);
+  const versionTone = versionLine.tone === "warn" ? COLOR.warn : versionLine.tone === "update" ? COLOR.accent : versionLine.tone === "ok" ? COLOR.added : COLOR.dim;
+  const ver = versionNumber(check?.version ?? null);
+  const status = accountStatusLine(account, providers);
+  const envStr = formatEnvMap(account.env);
+  const busyUpdate = updating.has(cliKind);
+
+  return (
+    <box
+      style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1, paddingTop: 1, paddingBottom: 1, paddingLeft: 1, paddingRight: 1, width }}
+      backgroundColor={SURFACE.panel}
+      selectable={false}
+    >
+      <box style={{ flexDirection: "row", height: 1, justifyContent: "space-between" }} backgroundColor={SURFACE.panel}>
+        <OverflowText fg={COLOR.bright} bg={SURFACE.panel} attributes={TextAttributes.BOLD} width={Math.max(12, width - 10)} selectable={false}>
+          {`${KIND_NAME[account.kind]} · ${account.label}`}
+        </OverflowText>
+        <box onMouseDown={() => void onToggleAccount(account.kind, account.id, !account.enabled)} backgroundColor={SURFACE.panel}>
+          <text fg={account.enabled ? COLOR.added : COLOR.dim} bg={SURFACE.panel} selectable={false}>
+            {toggleLabel(account.enabled)}
+          </text>
+        </box>
+      </box>
+      <OverflowText fg={COLOR.dim} bg={SURFACE.panel} width={Math.max(12, width - 4)} selectable={false}>
+        {`${account.instanceId}${ver ? ` · v${ver}` : ""}${status ? ` · ${status}` : ""}`}
+      </OverflowText>
+      {account.kind !== "chatgpt" && check !== undefined ? (
+        <text fg={versionTone} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+          {versionLine.status}
+        </text>
+      ) : null}
+      <box style={{ flexDirection: "row", flexWrap: "wrap", gap: 1, marginTop: 1 }} backgroundColor={SURFACE.panel}>
+        {account.kind === "chatgpt" ? (
+          account.signedIn ? (
+            <>
+              <Chip
+                label={t("settings.providers.signOut")}
+                onPress={() => {
+                  setPairFeedback(null);
+                  void onChatGptLogout?.(account.id);
+                }}
+              />
+              <Chip
+                label={pairFeedback?.needsConfirmation ? t("settings.providers.confirmPairCodex") : t("settings.providers.pairCodex")}
+                accent
+                onPress={() => {
+                  if (!onChatGptPairCodex) return;
+                  const confirm = pairFeedback?.needsConfirmation === true;
+                  void onChatGptPairCodex(account.id, confirm).then((res) => {
+                    if (!res) return;
+                    setPairFeedback(res.verified ? null : { text: res.reason ?? "", needsConfirmation: res.needsConfirmation });
+                  });
+                }}
+              />
+            </>
+          ) : (
+            <Chip
+              label={authUrlPending ? t("settings.providers.signingIn") : t("settings.providers.signInChatGpt")}
+              disabled={authUrlPending !== null || !onChatGptLogin}
+              accent
+              onPress={() => {
+                if (authUrlPending !== null || !onChatGptLogin) return;
+                setPairFeedback(null);
+                void onChatGptLogin(account.id, account.label).then((started) => {
+                  if (!started) return;
+                  setAuthUrlPending(started.authorizationUrl);
+                  openBrowserUrl(started.authorizationUrl);
+                  void started.done.finally(() => setAuthUrlPending(null));
+                });
+              }}
+            />
+          )
+        ) : (
+          <Chip
+            label={busyUpdate ? t("settings.providers.updatingLabel") : t("settings.providers.updateLabel")}
+            disabled={busyUpdate}
+            accent
+            onPress={() => {
+              if (!busyUpdate) onUpdate(cliKind);
+            }}
+          />
+        )}
+        <Chip label={t("settings.providers.editEnv")} onPress={() => setEditingEnv((open) => !open)} />
+        <Chip
+          label={confirmRemove ? t("settings.providers.removeAgain") : t("settings.providers.remove")}
+          danger
+          onPress={() => {
+            if (confirmRemove) {
+              setConfirmRemove(false);
+              void onRemoveAccount(account.kind, account.id).then(onRemoved);
+            } else {
+              setConfirmRemove(true);
+            }
+          }}
+        />
+        {saving ? <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{t("settings.reading")}</text> : null}
+      </box>
+      {editingEnv ? (
+        <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+          <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{t("settings.providers.field.env")}</text>
+          <TextField
+            initial={envStr}
+            fallback={t("le.unset")}
+            width={Math.max(18, width - 6)}
+            onSubmit={(raw) => {
+              setEditingEnv(false);
+              void onSaveAccount({ kind: account.kind, id: account.id, env: parseEnvText(raw) });
+            }}
+          />
+        </box>
+      ) : null}
+      {authUrlPending ? (
+        <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+          {t("settings.providers.openAuthUrl", { url: authUrlPending })}
+        </text>
+      ) : account.kind === "chatgpt" && !account.codexVerified ? (
+        <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+          {t("settings.providers.unpairedHint")}
+        </text>
+      ) : null}
+      {pairFeedback?.text ? (
+        <text fg={COLOR.danger} bg={SURFACE.panel} wrapMode="word" selectable={false}>{pairFeedback.text}</text>
+      ) : null}
+      {confirmRemove ? (
+        <text fg={COLOR.warn} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+          {t("settings.providers.confirmRemove", { id: account.instanceId })}
+        </text>
+      ) : null}
+      {error ? (
+        <text fg={COLOR.danger} bg={SURFACE.panel} wrapMode="word" selectable={false}>{error}</text>
+      ) : null}
+    </box>
+  );
+}
+
 export interface ProvidersOverviewPanelProps {
   readonly accounts: readonly ProviderAccountSummary[];
+  readonly opencodeEnabled?: boolean;
+  readonly onToggleOpencode?: (enabled: boolean) => void;
+  readonly onOpenOpencode?: () => void;
   readonly selectedInstance: string | null;
   readonly onSelectAccount: (instanceId: string | null) => void;
   readonly providers: readonly ProviderSummary[] | null;
@@ -478,6 +752,9 @@ export interface ProvidersOverviewPanelProps {
 
 export function ProvidersOverviewPanel({
   accounts,
+  opencodeEnabled = false,
+  onToggleOpencode,
+  onOpenOpencode,
   selectedInstance,
   onSelectAccount,
   providers,
@@ -519,10 +796,15 @@ export function ProvidersOverviewPanel({
     ? null
     : (accounts.find((entry) => entry.instanceId === selectedInstance) ?? null);
   const detailFields = selected ? fieldsForAccount(selected) : [];
+  const addableKinds: readonly AddableProviderKind[] = opencodeEnabled
+    ? ACCOUNT_PROVIDER_KINDS
+    : [...ACCOUNT_PROVIDER_KINDS, "opencode"];
 
-  // Unified focus stops on Overview: accounts -> "+ Add provider" -> installed CLIs.
-  const addStop = accounts.length;
-  const cliStart = accounts.length + 1;
+  // Unified focus stops on Overview: accounts -> optional OpenCode -> "+ Add provider" -> installed CLIs.
+  const opencodeStop = opencodeEnabled ? accounts.length : -1;
+  const configuredCount = accounts.length + (opencodeEnabled ? 1 : 0);
+  const addStop = configuredCount;
+  const cliStart = configuredCount + 1;
   const totalStops = cliStart + UPDATABLE_PROVIDERS.length;
   const safeCursor = Math.min(cursor, Math.max(0, totalStops - 1));
 
@@ -531,12 +813,14 @@ export function ProvidersOverviewPanel({
     const targetId =
       safeCursor < accounts.length
         ? `providers-account-${safeCursor}`
-        : safeCursor === addStop
-          ? "providers-add-row"
-          : `providers-cli-${UPDATABLE_PROVIDERS[safeCursor - cliStart]}`;
+        : safeCursor === opencodeStop
+          ? "providers-opencode-row"
+          : safeCursor === addStop
+            ? "providers-add-row"
+            : `providers-cli-${UPDATABLE_PROVIDERS[safeCursor - cliStart]}`;
     const timer = setTimeout(() => scrollRef.current?.scrollChildIntoView(targetId), 0);
     return () => clearTimeout(timer);
-  }, [safeCursor, accounts.length, addStop, cliStart, selected, wizard]);
+  }, [safeCursor, accounts.length, opencodeStop, addStop, cliStart, selected, wizard]);
 
   useKeyboard((key) => {
     if (key.defaultPrevented) return;
@@ -555,11 +839,18 @@ export function ProvidersOverviewPanel({
       }
       if (wizard.step === "kind") {
         if (key.name === "down" || key.name === "j") {
-          setWizard({ step: "kind", kindIndex: Math.min(wizard.kindIndex + 1, ACCOUNT_PROVIDER_KINDS.length - 1) });
+          setWizard({ step: "kind", kindIndex: Math.min(wizard.kindIndex + 1, addableKinds.length - 1) });
         } else if (key.name === "up" || key.name === "k") {
           setWizard({ step: "kind", kindIndex: Math.max(wizard.kindIndex - 1, 0) });
         } else if (enter) {
-          setWizard({ step: "id", kind: ACCOUNT_PROVIDER_KINDS[wizard.kindIndex]! });
+          const picked = addableKinds[wizard.kindIndex]!;
+          if (picked === "opencode") {
+            setWizard(null);
+            onToggleOpencode?.(true);
+            onOpenOpencode?.();
+          } else {
+            setWizard({ step: "id", kind: picked });
+          }
         }
       }
       return;
@@ -612,6 +903,8 @@ export function ProvidersOverviewPanel({
           setConfirmRemove(false);
           onSelectAccount(target.instanceId);
         }
+      } else if (safeCursor === opencodeStop) {
+        onOpenOpencode?.();
       } else if (safeCursor === addStop) {
         setWizard({ step: "kind", kindIndex: 0 });
       } else {
@@ -621,6 +914,8 @@ export function ProvidersOverviewPanel({
     } else if (key.name === "space" && safeCursor < accounts.length) {
       const target = accounts[safeCursor];
       if (target) void onToggleAccount(target.kind, target.id, !target.enabled);
+    } else if (key.name === "space" && safeCursor === opencodeStop) {
+      onToggleOpencode?.(false);
     } else if (key.name === "a" && !key.ctrl && !key.meta) {
       setWizard({ step: "kind", kindIndex: 0 });
     } else if (key.name === "u" && !key.shift && !key.ctrl && !key.meta && safeCursor >= cliStart) {
@@ -647,7 +942,7 @@ export function ProvidersOverviewPanel({
                 {t("settings.providers.addKind")}
               </text>
               <box style={{ flexDirection: "column", marginTop: 1 }}>
-                {ACCOUNT_PROVIDER_KINDS.map((kind, at) => {
+                {addableKinds.map((kind, at) => {
                   const focused = at === wizard.kindIndex;
                   const bg = focused ? SURFACE.hover : SURFACE.raised;
                   return (
@@ -655,15 +950,23 @@ export function ProvidersOverviewPanel({
                       key={kind}
                       style={{ flexDirection: "column", marginBottom: 1, paddingLeft: 1, paddingRight: 1 }}
                       backgroundColor={bg}
-                      onMouseDown={() => setWizard({ step: "id", kind })}
+                      onMouseDown={() => {
+                        if (kind === "opencode") {
+                          setWizard(null);
+                          onToggleOpencode?.(true);
+                          onOpenOpencode?.();
+                        } else {
+                          setWizard({ step: "id", kind });
+                        }
+                      }}
                       selectable={false}
                     >
                       <text fg={focused ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>
-                        {`${focused ? "▌ " : "  "}${KIND_NAME[kind]}`}
+                        {`${focused ? "▌ " : "  "}${addableKindName(kind)}`}
                       </text>
                       <box style={{ paddingLeft: 2 }} backgroundColor={bg}>
                         <text fg={COLOR.dim} bg={bg} wrapMode="word" selectable={false}>
-                          {kindDescription(kind)}
+                          {addableKindDescription(kind)}
                         </text>
                       </box>
                     </box>
@@ -956,7 +1259,7 @@ export function ProvidersOverviewPanel({
         verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}
       >
         <SectionHeading label={t("settings.providers.accountsHeading")} width={width} first />
-        {accounts.length === 0 ? (
+        {configuredCount === 0 ? (
           <box
             style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 1, paddingRight: 1 }}
             backgroundColor={SURFACE.panel}
@@ -967,29 +1270,44 @@ export function ProvidersOverviewPanel({
             </text>
           </box>
         ) : (
-          accounts.map((account, at) => {
-            const cliKind: UpdatableProvider =
-              account.kind === "claude" ? "claude" : account.kind === "antigravity" ? "antigravity" : "codex";
-            const ver = versionNumber(versions?.[cliKind]?.version ?? null);
-            return (
-              <AccountRowCard
-                key={account.instanceId}
-                id={`providers-account-${at}`}
-                account={account}
-                version={ver}
-                status={accountStatusLine(account, providers)}
-                active={at === safeCursor}
+          <>
+            {accounts.map((account, at) => {
+              const cliKind: UpdatableProvider =
+                account.kind === "claude" ? "claude" : account.kind === "antigravity" ? "antigravity" : "codex";
+              const ver = versionNumber(versions?.[cliKind]?.version ?? null);
+              return (
+                <AccountRowCard
+                  key={account.instanceId}
+                  id={`providers-account-${at}`}
+                  account={account}
+                  version={ver}
+                  status={accountStatusLine(account, providers)}
+                  active={at === safeCursor}
+                  width={width}
+                  onOpen={() => {
+                    setCursor(at);
+                    setDetailCursor(0);
+                    setConfirmRemove(false);
+                    onSelectAccount(account.instanceId);
+                  }}
+                  onToggle={() => void onToggleAccount(account.kind, account.id, !account.enabled)}
+                />
+              );
+            })}
+            {opencodeEnabled ? (
+              <OpencodeOverviewRow
+                id="providers-opencode-row"
+                version={versionNumber(versions?.opencode?.version ?? null)}
+                active={safeCursor === opencodeStop}
                 width={width}
                 onOpen={() => {
-                  setCursor(at);
-                  setDetailCursor(0);
-                  setConfirmRemove(false);
-                  onSelectAccount(account.instanceId);
+                  setCursor(opencodeStop);
+                  onOpenOpencode?.();
                 }}
-                onToggle={() => void onToggleAccount(account.kind, account.id, !account.enabled)}
+                onDisable={() => onToggleOpencode?.(false)}
               />
-            );
-          })
+            ) : null}
+          </>
         )}
         <AddProviderRow
           id="providers-add-row"

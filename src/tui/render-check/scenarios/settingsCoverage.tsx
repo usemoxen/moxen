@@ -20,20 +20,23 @@ export async function runSettingsCoverage(): Promise<void> {
     // A fresh page for each: opening a profile or a server replaces the sidebar with its own.
     for (const ref of pages) {
       const setup = await testRender(settingsPage(HEIGHT, config), { width: 100, height: HEIGHT, exitOnCtrlC: false });
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
-      await setup.flush();
-      if (config === DEFAULT_CONFIG && ref === pages[0]) {
-        const sidebar = setup
-          .captureCharFrame()
-          .split("\n")
-          .slice(4, -3)
-          .map((row) => row.slice(0, 26).replace(/[▌│]/g, "").trim())
-          .filter((text) => text !== "" && text !== text.toUpperCase());
-        if (sidebar.join("|") !== DEFAULT_PAGES.map((entry) => entry.label).join("|")) fail(`the settings sidebar lists ${JSON.stringify(sidebar)}, not the pages the visual harness walks (${JSON.stringify(DEFAULT_PAGES.map((entry) => entry.label))})`);
+      try {
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
+        await setup.flush();
+        if (config === DEFAULT_CONFIG && ref === pages[0]) {
+          const sidebar = setup
+            .captureCharFrame()
+            .split("\n")
+            .slice(4, -3)
+            .map((row) => row.slice(0, 26).replace(/[▌│]/g, "").trim())
+            .filter((text) => text !== "" && text !== text.toUpperCase());
+          if (sidebar.join("|") !== DEFAULT_PAGES.map((entry) => entry.label).join("|")) fail(`the settings sidebar lists ${JSON.stringify(sidebar)}, not the pages the visual harness walks (${JSON.stringify(DEFAULT_PAGES.map((entry) => entry.label))})`);
+        }
+        await walk(setup, ref.steps);
+        shown.push(setup.captureCharFrame());
+      } finally {
+        setup.renderer.destroy();
       }
-      await walk(setup, ref.steps);
-      shown.push(setup.captureCharFrame());
-      setup.renderer.destroy();
     }
   }
   const text = shown.join("\n");

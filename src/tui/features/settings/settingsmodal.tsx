@@ -7,7 +7,7 @@ import { useKeyboard } from "@opentui/react";
 import { ListEditor, type Screen as EditorScreen } from "./listeditor.js";
 import { itemRows } from "../../model/listeditor.js";
 import { McpAccessEditor } from "./mcpaccess.js";
-import { ProvidersOverviewPanel } from "./providersoverview.js";
+import { ProfileAccountHeader, profileSidebarLabel, ProvidersOverviewPanel } from "./providersoverview.js";
 import { SkillsPanel } from "./skillspanel.js";
 import { WebOrderEditor } from "./weborder.js";
 import { HandoffModelsEditor } from "./handoffmodels.js";
@@ -84,7 +84,7 @@ interface SettingItem {
 /** The left column: section labels plus the selection bar and a gap. */
 const TAB_WIDTH = 25;
 
-type SettingsTab = SettingSection | "providers:overview";
+type SettingsTab = SettingSection | "providers:overview" | "providers:profile";
 
 /** The sidebar's categories, top to bottom: each names the sections filed under it. */
 const SECTION_CATEGORY: Record<SettingsTab, string> = {
@@ -97,6 +97,7 @@ const SECTION_CATEGORY: Record<SettingsTab, string> = {
   interface: "Moxen",
   git: "Moxen",
   "providers:overview": "Providers",
+  "providers:profile": "Providers",
   "provider:codex": "Providers",
   "provider:claude": "Providers",
   "provider:chatgpt": "Providers",
@@ -107,6 +108,14 @@ const SECTION_CATEGORY: Record<SettingsTab, string> = {
   mcp: "Integrations",
   skills: "Integrations",
 };
+
+/** Provider sections that are replaced by dynamic independent per-profile pages in the sidebar. */
+const STATIC_PROVIDER_SECTIONS: ReadonlySet<SettingSection> = new Set<SettingSection>([
+  "provider:codex",
+  "provider:claude",
+  "provider:chatgpt",
+  "provider:antigravity",
+]);
 
 /** Sections long enough to be split in the sidebar, one entry per heading on the page. */
 const PAGED_SECTIONS: ReadonlySet<SettingsTab> = new Set<SettingsTab>(["provider:harness", "provider:acp"]);
@@ -342,6 +351,20 @@ export function SettingsModal({
   /** The per-model prices setting whose editor fills the right pane. */
   const [pricesOpen, setPricesOpen] = useState<string | null>(null);
 
+  const opencodeEnabled = snapshot?.settings.find((view) => view.descriptor.key === "providers.opencode.enabled")?.value === true;
+  const activeAccount = useMemo(
+    () => (tab === "providers:profile" && selectedAccount !== null ? (loadedAccounts.find((entry) => entry.instanceId === selectedAccount) ?? null) : null),
+    [tab, selectedAccount, loadedAccounts],
+  );
+  const activeSettings = useMemo(() => {
+    if (!snapshot) return [];
+    if (tab === "providers:profile" && selectedAccount !== null) {
+      const profileViews = snapshot.accountSettings?.[selectedAccount] ?? [];
+      return [...profileViews, ...snapshot.settings];
+    }
+    return snapshot.settings;
+  }, [snapshot, tab, selectedAccount]);
+
   const sections = useMemo(
     () => SETTING_SECTIONS.filter((section) => section === "skills" || snapshot?.settings.some((view) => view.descriptor.section === section && view.descriptor.hidden !== true) === true),
     [snapshot],
@@ -349,25 +372,38 @@ export function SettingsModal({
   const items = useMemo<readonly SettingItem[]>(() => {
     if (!snapshot) return [];
     const valueOf = (key: string): string => {
-      const view = snapshot.settings.find((entry) => entry.descriptor.key === key);
+      const view = activeSettings.find((entry) => entry.descriptor.key === key);
       return view?.value === undefined ? "" : String(view.value);
     };
-    return snapshot.settings
-      .filter((view) => view.descriptor.section === tab && view.descriptor.hidden !== true && (pageGroup === null || view.descriptor.group === pageGroup))
+    const sourceViews =
+      tab === "providers:profile" && selectedAccount !== null
+        ? (snapshot.accountSettings?.[selectedAccount] ?? [])
+        : snapshot.settings.filter((view) => view.descriptor.section === tab && (pageGroup === null || view.descriptor.group === pageGroup));
+    return sourceViews
+      .filter((view) => view.descriptor.hidden !== true)
       .filter((view) => view.descriptor.visibleWhen === undefined || view.descriptor.visibleWhen.in.includes(valueOf(view.descriptor.visibleWhen.key)))
       .map((view) => ({
         descriptor: view.descriptor,
         value: view.value,
         explicit: view.explicit,
-        control: settingControl(view.descriptor, view.value, snapshot.settings, providers),
+        control: settingControl(view.descriptor, view.value, activeSettings, providers),
         ...(view.items ? { entries: view.items } : {}),
         ...(view.unavailable ? { unavailable: view.unavailable } : {}),
         ...(view.inForce ? { inForce: view.inForce } : {}),
       }));
-  }, [snapshot, tab, pageGroup, providers]);
+  }, [snapshot, activeSettings, tab, selectedAccount, pageGroup, providers]);
 
   /** The provider the open tab is about, when it can be updated from here. */
-  const updatable = tab === "providers:overview" ? null : updatableProviderOf(tab);
+  const updatable: UpdatableProvider | null =
+    tab === "providers:overview"
+      ? null
+      : tab === "providers:profile"
+        ? activeAccount?.kind === "claude"
+          ? "claude"
+          : activeAccount?.kind === "antigravity"
+            ? "antigravity"
+            : null
+        : updatableProviderOf(tab);
 
   const safe = items.length === 0 ? -1 : Math.min(index, items.length - 1);
   const current = safe >= 0 ? items[safe] : undefined;
@@ -422,7 +458,7 @@ export function SettingsModal({
   const focusedList = listOpen !== null && NESTED_LISTS.includes(listOpen) && editorScreen.profile !== null ? listOpen : null;
   /** A page that holds nothing but one list is not shown: the list is. */
   const onlyList = (section: SettingsTab, group: string | null): string | null => {
-    if (section === "providers:overview") return null;
+    if (section === "providers:overview" || section === "providers:profile") return null;
     const shown = (snapshot?.settings ?? []).filter((view) => view.descriptor.section === section && view.descriptor.hidden !== true && (group === null || view.descriptor.group === group));
     return shown.length === 1 && shown[0]!.descriptor.kind.type === "list" ? shown[0]!.descriptor.key : null;
   };
@@ -452,39 +488,38 @@ export function SettingsModal({
     }
     const pushEntries = (list: (typeof nested)[number], indent: string) =>
       list.items.forEach((item, at) => out.push({ section: list.section, group: list.group, label: item.title, prefix: `${indent}${at === list.items.length - 1 ? "└ " : "├ "}`, profile: item.id, list: list.key }));
-    let pushedOverview = false;
-    for (const section of sections) {
-      // Standalone Codex is retired in favor of Sign in with ChatGPT (Codex stays under the hood as a verified companion).
-      if (section === "provider:codex") continue;
-      if (!pushedOverview && SECTION_CATEGORY[section] === "Providers") {
-        pushedOverview = true;
-        out.push({ section: "providers:overview", group: null, label: t("settings.providers.overview"), prefix: "" });
+    let pushedProviders = false;
+    const pushProvidersCategory = () => {
+      if (pushedProviders) return;
+      pushedProviders = true;
+      out.push({ section: "providers:overview", group: null, label: t("settings.providers.overview"), prefix: "" });
+      for (const account of loadedAccounts) {
+        out.push({
+          section: "providers:profile",
+          group: null,
+          label: profileSidebarLabel(account),
+          prefix: "",
+          accountInstance: account.instanceId,
+        });
       }
+      if (opencodeEnabled) {
+        out.push({ section: "provider:opencode", group: null, label: tx(SECTION_LABEL["provider:opencode"]), prefix: "" });
+      }
+    };
+    for (const section of sections) {
+      if (SECTION_CATEGORY[section] === "Providers") {
+        pushProvidersCategory();
+        continue;
+      }
+      if (!pushedProviders && SECTION_CATEGORY[section] !== "Moxen") {
+        pushProvidersCategory();
+      }
+      if (STATIC_PROVIDER_SECTIONS.has(section)) continue;
       // A paged section is a category of its own: its pages sit directly under the category heading, with no row for the section.
       if (!PAGED_SECTIONS.has(section)) out.push({ section, group: null, label: tx(SECTION_LABEL[section]), prefix: "" });
       if (!snapshot) continue;
       if (!PAGED_SECTIONS.has(section)) {
         for (const list of nested) if (list.section === section && list.group === null) pushEntries(list, "");
-        const accountKind: AccountProviderKind | null =
-          section === "provider:claude"
-            ? "claude"
-            : section === "provider:chatgpt"
-              ? "chatgpt"
-              : section === "provider:antigravity"
-                ? "antigravity"
-                : null;
-        if (accountKind !== null) {
-          const matching = loadedAccounts.filter((account) => account.kind === accountKind);
-          matching.forEach((account, at) => {
-            out.push({
-              section: "providers:overview",
-              group: null,
-              label: account.label,
-              prefix: at === matching.length - 1 ? "└ " : "├ ",
-              accountInstance: account.instanceId,
-            });
-          });
-        }
         continue;
       }
       const seen: string[] = [];
@@ -502,8 +537,9 @@ export function SettingsModal({
         for (const list of nested) if (list.section === section && list.group === group) pushEntries(list, "");
       });
     }
+    pushProvidersCategory();
     return out;
-  }, [sections, snapshot, focusedList, editorScreen.profile, editorScreen.model, loadedAccounts, language]);
+  }, [sections, snapshot, focusedList, editorScreen.profile, editorScreen.model, loadedAccounts, opencodeEnabled, language]);
 
   /** Open an entry of a nested list in its editor, on one of its headings (the first when none is asked for). */
   const openEntry = (listKey: string, entryId: string, heading: string | null) => {
@@ -524,8 +560,8 @@ export function SettingsModal({
       setEditorScreen({ profile: null, model: null });
       setEditorHeading(null);
     } else if (entry.accountInstance !== undefined) {
-      switchTab("providers:overview", null);
       setSelectedAccount(entry.accountInstance);
+      switchTab("providers:profile", null);
     } else if (entry.model !== undefined && entry.heading !== undefined) setEditorHeading(entry.heading);
     else if (entry.profile !== undefined && entry.list !== undefined) openEntry(entry.list, entry.profile, entry.heading ?? null);
     else {
@@ -536,10 +572,10 @@ export function SettingsModal({
   const entryActive = (entry: SidebarEntry): boolean => {
     if (entry.back === true) return false;
     if (entry.accountInstance !== undefined) {
-      return tab === "providers:overview" && selectedAccount === entry.accountInstance;
+      return tab === "providers:profile" && selectedAccount === entry.accountInstance;
     }
     if (entry.section === "providers:overview") {
-      return tab === "providers:overview" && selectedAccount === null;
+      return tab === "providers:overview";
     }
     if (focusedList !== null) {
       if (entry.profile !== editorScreen.profile) return false;
@@ -567,12 +603,24 @@ export function SettingsModal({
   };
   const stepTab = (delta: number) => {
     // Entries and their headings are reached by click or from the list; stepping goes page to page.
-    const pages = entries.filter((entry) => entry.profile === undefined && entry.accountInstance === undefined && entry.back !== true && !(PAGED_SECTIONS.has(entry.section) && entry.group === null));
+    const pages = entries.filter((entry) => entry.profile === undefined && entry.back !== true && !(PAGED_SECTIONS.has(entry.section) && entry.group === null));
     if (pages.length === 0) return;
-    const at = Math.max(0, pages.findIndex((entry) => entry.section === tab && entry.group === pageGroup));
+    const at = Math.max(
+      0,
+      pages.findIndex((entry) =>
+        entry.accountInstance !== undefined
+          ? tab === "providers:profile" && selectedAccount === entry.accountInstance
+          : entry.section === tab && entry.group === pageGroup,
+      ),
+    );
     const next = pages[(at + delta + pages.length) % pages.length]!;
-    if (next.section === "providers:overview") setSelectedAccount(null);
-    switchTab(next.section, next.group);
+    if (next.accountInstance !== undefined) {
+      setSelectedAccount(next.accountInstance);
+      switchTab("providers:profile", null);
+    } else {
+      if (next.section === "providers:overview") setSelectedAccount(null);
+      switchTab(next.section, next.group);
+    }
   };
 
   const activate = (item: SettingItem) => {
@@ -620,7 +668,7 @@ export function SettingsModal({
     // A new provider or model may not take what is saved beside it: unset that rather than keep a value it refuses.
     if (providers === null) return;
     const saved = (name: string) => {
-      const found = snapshot?.settings.find((view) => view.descriptor.key === name)?.value;
+      const found = activeSettings.find((view) => view.descriptor.key === name)?.value;
       return typeof found === "string" && found !== "" ? found : undefined;
     };
     const modelsOf = (instance: string | undefined, kind: string | undefined) =>
@@ -637,7 +685,7 @@ export function SettingsModal({
       if (effort !== undefined && value !== "" && !takesEffort(kept, effort)) onSet("thinkingEffort", "");
       return;
     }
-    const modelKey = /^(providers\.[a-z]+\.)?model$/.exec(key);
+    const modelKey = /^(providers\.[a-z]+(?:\.accounts\[[^\]]+\])?\.)?model$/.exec(key);
     if (modelKey === null || value === "") return;
     const effortKey = `${modelKey[1] ?? ""}thinkingEffort`;
     const effort = saved(effortKey);
@@ -809,8 +857,8 @@ export function SettingsModal({
               {entries.map((entry, at) => {
                 // A category heads its first section; inside an open entry the sidebar is only the way back, so none shows.
                 const category = SECTION_CATEGORY[entry.section];
-                const top = entry.prefix === "" && entry.profile === undefined && entry.accountInstance === undefined && entry.back !== true;
-                const before = entries.slice(0, at).findLast((candidate) => candidate.prefix === "" && candidate.profile === undefined && candidate.accountInstance === undefined);
+                const top = entry.prefix === "" && entry.profile === undefined && entry.back !== true;
+                const before = entries.slice(0, at).findLast((candidate) => candidate.prefix === "" && candidate.profile === undefined);
                 const heads = top && focusedList === null && (before === undefined || SECTION_CATEGORY[before.section] !== category);
                 return (
                   <Fragment key={`${entry.section}#${entry.group ?? ""}#${entry.profile ?? ""}#${entry.accountInstance ?? ""}#${entry.heading ?? ""}${entry.back === true ? "#back" : ""}`}>
@@ -838,8 +886,21 @@ export function SettingsModal({
               ) : tab === "providers:overview" ? (
                 <ProvidersOverviewPanel
                   accounts={loadedAccounts}
-                  selectedInstance={selectedAccount}
-                  onSelectAccount={setSelectedAccount}
+                  opencodeEnabled={opencodeEnabled}
+                  onToggleOpencode={(enabled) => {
+                    void onSet("providers.opencode.enabled", enabled ? "true" : "false");
+                  }}
+                  onOpenOpencode={() => switchTab("provider:opencode", null)}
+                  selectedInstance={null}
+                  onSelectAccount={(instanceId) => {
+                    if (instanceId === null) {
+                      setSelectedAccount(null);
+                      switchTab("providers:overview", null);
+                    } else {
+                      setSelectedAccount(instanceId);
+                      switchTab("providers:profile", null);
+                    }
+                  }}
                   providers={providers}
                   versions={versions}
                   latest={latest}
@@ -856,59 +917,6 @@ export function SettingsModal({
                   onUpdateAll={handleUpdateAll}
                   onOpenSection={(section) => switchTab(section, null)}
                   onClose={() => { markModalDismissed(); onClose(); }}
-                  onChatGptLogin={async (accountId, label) => {
-                    if (!client) return null;
-                    setAccountError(null);
-                    try {
-                      const started = await client.dispatch({
-                        type: "chatgpt.login.start",
-                        accountId,
-                        ...(label ? { label } : {}),
-                      });
-                      const done = client
-                        .dispatch({ type: "chatgpt.login.complete", sessionId: started.sessionId })
-                        .then(() => reloadAccounts())
-                        .catch((cause: unknown) => {
-                          setAccountError(cause instanceof Error ? cause.message : String(cause));
-                        });
-                      return { authorizationUrl: started.authorizationUrl, done };
-                    } catch (cause) {
-                      setAccountError(cause instanceof Error ? cause.message : String(cause));
-                      return null;
-                    }
-                  }}
-                  onChatGptLogout={async (accountId) => {
-                    if (!client) return;
-                    setAccountSaving(true);
-                    setAccountError(null);
-                    try {
-                      await client.dispatch({ type: "chatgpt.logout", accountId });
-                      await reloadAccounts();
-                    } catch (cause) {
-                      setAccountError(cause instanceof Error ? cause.message : String(cause));
-                    } finally {
-                      setAccountSaving(false);
-                    }
-                  }}
-                  onChatGptPairCodex={async (accountId, confirmWorkspace) => {
-                    if (!client) return null;
-                    setAccountSaving(true);
-                    setAccountError(null);
-                    try {
-                      const res = await client.dispatch({
-                        type: "chatgpt.codex.pair",
-                        accountId,
-                        ...(confirmWorkspace === true ? { confirmWorkspace: true } : {}),
-                      });
-                      await reloadAccounts();
-                      return { verified: res.verified, needsConfirmation: res.needsConfirmation, reason: res.reason };
-                    } catch (cause) {
-                      setAccountError(cause instanceof Error ? cause.message : String(cause));
-                      return null;
-                    } finally {
-                      setAccountSaving(false);
-                    }
-                  }}
                 />
               ) : handoffItem !== undefined && handoffItem.control.kind === "handoff" ? (
                 <HandoffModelsEditor
@@ -921,7 +929,7 @@ export function SettingsModal({
                   onChange={(field, slug, next) => {
                     // Each field has its own key beside the row's (`providers.<kind>.compactAtModels`, …).
                     const key = `${handoffItem.descriptor.key.slice(0, handoffItem.descriptor.key.lastIndexOf(".") + 1)}${MODEL_OVERRIDE_KEY[field]}`;
-                    const current = snapshot.settings.find((view) => view.descriptor.key === key)?.value;
+                    const current = activeSettings.find((view) => view.descriptor.key === key)?.value;
                     void onSet(key, withModelOverride(field, current, slug, next));
                   }}
                   onExit={() => setHandoffOpen(null)}
@@ -936,7 +944,7 @@ export function SettingsModal({
                   onChange={(field, slug, next) => {
                     // Each field writes to its own key beside the row's (`modelInputPrices`, `modelOutputPrices`, …).
                     const key = `${pricesItem.descriptor.key.slice(0, pricesItem.descriptor.key.lastIndexOf(".") + 1)}${MODEL_PRICE_KEY[field]}`;
-                    const current = snapshot.settings.find((view) => view.descriptor.key === key)?.value;
+                    const current = activeSettings.find((view) => view.descriptor.key === key)?.value;
                     void onSet(key, withModelPrice(current, slug, next));
                   }}
                   onExit={() => setPricesOpen(null)}
@@ -1062,7 +1070,80 @@ export function SettingsModal({
                 </>
               ) : (
                 <>
-                  {updatable === null ? null : (
+                  {activeAccount === null ? null : (
+                    <ProfileAccountHeader
+                      account={activeAccount}
+                      providers={providers}
+                      versions={versions}
+                      latest={latest}
+                      updating={updating}
+                      saving={accountSaving}
+                      error={accountError}
+                      width={paneWidth}
+                      onSaveAccount={handleSaveAccount}
+                      onToggleAccount={handleToggleAccount}
+                      onRemoveAccount={handleRemoveAccount}
+                      onUpdate={onUpdate}
+                      onRemoved={() => {
+                        setSelectedAccount(null);
+                        switchTab("providers:overview", null);
+                      }}
+                      onChatGptLogin={async (accountId, label) => {
+                        if (!client) return null;
+                        setAccountError(null);
+                        try {
+                          const started = await client.dispatch({
+                            type: "chatgpt.login.start",
+                            accountId,
+                            ...(label ? { label } : {}),
+                          });
+                          const done = client
+                            .dispatch({ type: "chatgpt.login.complete", sessionId: started.sessionId })
+                            .then(() => reloadAccounts())
+                            .catch((cause: unknown) => {
+                              setAccountError(cause instanceof Error ? cause.message : String(cause));
+                            });
+                          return { authorizationUrl: started.authorizationUrl, done };
+                        } catch (cause) {
+                          setAccountError(cause instanceof Error ? cause.message : String(cause));
+                          return null;
+                        }
+                      }}
+                      onChatGptLogout={async (accountId) => {
+                        if (!client) return;
+                        setAccountSaving(true);
+                        setAccountError(null);
+                        try {
+                          await client.dispatch({ type: "chatgpt.logout", accountId });
+                          await reloadAccounts();
+                        } catch (cause) {
+                          setAccountError(cause instanceof Error ? cause.message : String(cause));
+                        } finally {
+                          setAccountSaving(false);
+                        }
+                      }}
+                      onChatGptPairCodex={async (accountId, confirmWorkspace) => {
+                        if (!client) return null;
+                        setAccountSaving(true);
+                        setAccountError(null);
+                        try {
+                          const res = await client.dispatch({
+                            type: "chatgpt.codex.pair",
+                            accountId,
+                            ...(confirmWorkspace === true ? { confirmWorkspace: true } : {}),
+                          });
+                          await reloadAccounts();
+                          return { verified: res.verified, needsConfirmation: res.needsConfirmation, reason: res.reason };
+                        } catch (cause) {
+                          setAccountError(cause instanceof Error ? cause.message : String(cause));
+                          return null;
+                        } finally {
+                          setAccountSaving(false);
+                        }
+                      }}
+                    />
+                  )}
+                  {activeAccount !== null || updatable === null ? null : (
                     <ProviderUpdateCard
                       provider={updatable}
                       check={versions?.[updatable]}

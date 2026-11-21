@@ -3,6 +3,8 @@ import { testRender } from "../testrender.js";
 
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
+import { describeAllAccountSettings } from "../../../core/configschema.js";
+import { summarizeProviderAccounts } from "../../../core/providers/accounts.js";
 import { describeSettings } from "./settingsFixture.js";
 import { normalizeConfig, setConfigValue } from "../../../core/config.js";
 import { fail } from "../helpers.js";
@@ -30,13 +32,32 @@ export async function runHandoffModels(): Promise<void> {
       skills: [],
     },
   ];
-  const initial = normalizeConfig({ providers: { claude: { autoHandoffModels: { "claude-opus-5": 500_000, "gone-model": "300k" }, compactAtModels: { "claude-opus-5": 400_000 } } } });
+  const initial = normalizeConfig({
+    providers: {
+      claude: {
+        accounts: [
+          {
+            id: "personal",
+            label: "Personal",
+            autoHandoffModels: { "claude-opus-5": 500_000, "gone-model": "300k" },
+            compactAtModels: { "claude-opus-5": 400_000 },
+          },
+        ],
+      },
+    },
+  });
   const written: Array<{ key: string; value: string }> = [];
   const Host = () => {
     const [config, setConfig] = useState(initial);
     return (
       <SettingsModal
-        snapshot={{ path: "/home/dev/.moxen/config.json", exists: true, settings: describeSettings(config) }}
+        snapshot={{
+          path: "/home/dev/.moxen/config.json",
+          exists: true,
+          settings: describeSettings(config),
+          accountSettings: describeAllAccountSettings(config),
+        }}
+        accounts={summarizeProviderAccounts(config.providers)}
         loading={false}
         saving={null}
         error={null}
@@ -77,19 +98,19 @@ export async function runHandoffModels(): Promise<void> {
   await settle();
 
   const side = setup.captureCharFrame().split("\n");
-  const claudeRow = side.findIndex((row) => row.includes("Claude Code") && row.indexOf("Claude Code") < 28 && row.includes("│"));
-  await act(async () => setup.mockMouse.click(side[claudeRow]!.indexOf("Claude Code") + 1, claudeRow));
+  const claudeRow = side.findIndex((row) => row.includes("Claude · Personal") && row.indexOf("Claude · Personal") < 28 && row.includes("│"));
+  await act(async () => setup.mockMouse.click(side[claudeRow]!.indexOf("Claude · Personal") + 1, claudeRow));
   await settle();
   // The row sits under "Long threads", below the fold: step down to it by its place on the page.
-  const page = describeSettings(initial).filter((view) => view.descriptor.section === "provider:claude" && view.descriptor.hidden !== true)
+  const page = (describeAllAccountSettings(initial)["claude/personal"] ?? []).filter((view) => view.descriptor.hidden !== true)
     // A row another one switches off is not on the page to step over.
     .filter((view, _at, all) => {
       const when = view.descriptor.visibleWhen;
       return when === undefined || when.in.includes(String(all.find((other) => other.descriptor.key === when.key)?.value ?? ""));
     });
-  const place = page.findIndex((view) => view.descriptor.key === "providers.claude.autoHandoffModels");
-  if (place < 0) fail("Claude Code's page has no Per model row");
-  if (page.some((view) => view.descriptor.key === "providers.claude.compactAtModels")) fail("the per-model compaction sizes still have a row of their own");
+  const place = page.findIndex((view) => view.descriptor.key === "providers.claude.accounts[personal].autoHandoffModels");
+  if (place < 0) fail("Claude profile page has no Per model row");
+  if (page.some((view) => view.descriptor.key === "providers.claude.accounts[personal].compactAtModels")) fail("the per-model compaction sizes still have a row of their own");
   for (let step = 0; step < place; step += 1) await act(async () => setup.mockInput.pressArrow("down"));
   await settle();
   const shown = setup.captureCharFrame();
@@ -122,7 +143,7 @@ export async function runHandoffModels(): Promise<void> {
   await act(async () => setup.mockInput.pressEnter());
   await settle();
   const handoffWrite = written.at(-1);
-  if (handoffWrite?.key !== "providers.claude.handoffModels" || handoffWrite.value !== "claude-sonnet-5=off") fail(`choosing Off wrote ${JSON.stringify(handoffWrite)}`);
+  if (handoffWrite?.key !== "providers.claude.accounts[personal].handoffModels" || handoffWrite.value !== "claude-sonnet-5=off") fail(`choosing Off wrote ${JSON.stringify(handoffWrite)}`);
 
   // Hand off at: the slider, one stop right of 200K.
   await act(async () => setup.mockInput.pressArrow("down"));
@@ -136,7 +157,7 @@ export async function runHandoffModels(): Promise<void> {
   await act(async () => setup.mockInput.pressEnter());
   await settle();
   const sizeWrite = written.at(-1);
-  if (sizeWrite?.key !== "providers.claude.autoHandoffModels" || sizeWrite.value !== "claude-opus-5=500000, gone-model=300000, claude-sonnet-5=256000") fail(`picking a size wrote ${JSON.stringify(sizeWrite)}`);
+  if (sizeWrite?.key !== "providers.claude.accounts[personal].autoHandoffModels" || sizeWrite.value !== "claude-opus-5=500000, gone-model=300000, claude-sonnet-5=256000") fail(`picking a size wrote ${JSON.stringify(sizeWrite)}`);
 
   // d on a field lets it follow the provider again.
   await act(async () => setup.mockInput.pressKey("d"));

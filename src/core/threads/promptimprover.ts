@@ -3,8 +3,7 @@ import path from "node:path";
 
 import { DEFAULT_PROMPT_IMPROVER_MODEL, DEFAULT_PROMPT_IMPROVER_PROVIDER } from "../configschema.js";
 import { CliError } from "../errors.js";
-import { resolveProfileProviderConfig } from "../providers/accounts.js";
-import { driverKindOfInstance, type CliConfig, type ModelSelection } from "../types.js";
+import { driverKindOfInstance, resolveProfileProviderConfig, type CliConfig, type ModelSelection } from "../types.js";
 import type { TextCompletionInput } from "../providers/spi.js";
 import { projectInstructions } from "./instructions.js";
 import { readHarnessRuleFiles } from "./rulefiles.js";

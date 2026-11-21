@@ -3,6 +3,8 @@ import { testRender } from "../testrender.js";
 
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
+import { describeAllAccountSettings } from "../../../core/configschema.js";
+import { summarizeProviderAccounts } from "../../../core/providers/accounts.js";
 import { describeSettings } from "./settingsFixture.js";
 import { normalizeConfig, setConfigValue } from "../../../core/config.js";
 import { fail } from "../helpers.js";
@@ -45,8 +47,14 @@ export async function runModelPrices(): Promise<void> {
   const initial = normalizeConfig({
     providers: {
       claude: {
-        modelInputPrices: { "claude-opus-5": 6, "retired-model": 1.5 },
-        modelOutputPrices: { "claude-opus-5": 30 },
+        accounts: [
+          {
+            id: "personal",
+            label: "Personal",
+            modelInputPrices: { "claude-opus-5": 6, "retired-model": 1.5 },
+            modelOutputPrices: { "claude-opus-5": 30 },
+          },
+        ],
       },
     },
   });
@@ -55,7 +63,13 @@ export async function runModelPrices(): Promise<void> {
     const [config, setConfig] = useState(initial);
     return (
       <SettingsModal
-        snapshot={{ path: "/home/dev/.moxen/config.json", exists: true, settings: describeSettings(config) }}
+        snapshot={{
+          path: "/home/dev/.moxen/config.json",
+          exists: true,
+          settings: describeSettings(config),
+          accountSettings: describeAllAccountSettings(config),
+        }}
+        accounts={summarizeProviderAccounts(config.providers)}
         loading={false}
         saving={null}
         error={null}
@@ -96,19 +110,19 @@ export async function runModelPrices(): Promise<void> {
   await settle();
 
   const side = setup.captureCharFrame().split("\n");
-  const claudeRow = side.findIndex((row) => row.includes("Claude Code") && row.indexOf("Claude Code") < 28 && row.includes("│"));
-  await act(async () => setup.mockMouse.click(side[claudeRow]!.indexOf("Claude Code") + 1, claudeRow));
+  const claudeRow = side.findIndex((row) => row.includes("Claude · Personal") && row.indexOf("Claude · Personal") < 28 && row.includes("│"));
+  await act(async () => setup.mockMouse.click(side[claudeRow]!.indexOf("Claude · Personal") + 1, claudeRow));
   await settle();
 
-  const page = describeSettings(initial)
-    .filter((view) => view.descriptor.section === "provider:claude" && view.descriptor.hidden !== true)
+  const page = (describeAllAccountSettings(initial)["claude/personal"] ?? [])
+    .filter((view) => view.descriptor.hidden !== true)
     .filter((view, _at, all) => {
       const when = view.descriptor.visibleWhen;
       return when === undefined || when.in.includes(String(all.find((other) => other.descriptor.key === when.key)?.value ?? ""));
     });
-  const place = page.findIndex((view) => view.descriptor.key === "providers.claude.modelInputPrices");
-  if (place < 0) fail("Claude Code's page has no Prices per model row");
-  if (page.some((view) => view.descriptor.key === "providers.claude.modelOutputPrices")) fail("Output price still has a separate row");
+  const place = page.findIndex((view) => view.descriptor.key === "providers.claude.accounts[personal].modelInputPrices");
+  if (place < 0) fail("Claude profile page has no Prices per model row");
+  if (page.some((view) => view.descriptor.key === "providers.claude.accounts[personal].modelOutputPrices")) fail("Output price still has a separate row");
   for (let step = 0; step < place; step += 1) await act(async () => setup.mockInput.pressArrow("down"));
   await settle();
   const shown = setup.captureCharFrame();
@@ -161,7 +175,7 @@ export async function runModelPrices(): Promise<void> {
   await act(async () => setup.mockInput.pressEnter());
   await settle();
   const write = written.at(-1);
-  if (write?.key !== "providers.claude.modelInputPrices" || write.value !== "claude-opus-5=6, retired-model=1.5, claude-sonnet-5-5=3.5") {
+  if (write?.key !== "providers.claude.accounts[personal].modelInputPrices" || write.value !== "claude-opus-5=6, retired-model=1.5, claude-sonnet-5-5=3.5") {
     fail(`editing Input price wrote ${JSON.stringify(write)}`);
   }
   const afterEdit = setup.captureCharFrame();
