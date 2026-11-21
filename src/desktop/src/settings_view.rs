@@ -831,6 +831,10 @@ struct SettingsTab<'a> {
 fn tabs(snapshot: &Snapshot) -> Vec<SettingsTab<'_>> {
     let mut tabs = Vec::new();
     for section in snapshot.sections() {
+        // Standalone Codex is retired in favor of Sign in with ChatGPT (Codex stays as a verified companion).
+        if section == "provider:codex" {
+            continue;
+        }
         let category = match section {
             "provider:harness" => "Moxen Harness",
             "provider:acp" => "ACP",

@@ -37,7 +37,7 @@ export async function runSettingsCoverage(): Promise<void> {
     }
   }
   const text = shown.join("\n");
-  const missing = SETTINGS.filter((descriptor) => descriptor.hidden !== true && !text.includes(descriptor.label)).map((descriptor) => `${descriptor.key} ("${descriptor.label}")`);
+  const missing = SETTINGS.filter((descriptor) => descriptor.hidden !== true && descriptor.section !== "provider:codex" && !text.includes(descriptor.label)).map((descriptor) => `${descriptor.key} ("${descriptor.label}")`);
   if (missing.length > 0) fail(`settings the page never shows: ${missing.join(", ")}`);
   console.log(`--- settings coverage: ${SETTINGS.filter((descriptor) => descriptor.hidden !== true).length} settings on ${DEFAULT_PAGES.length + CONFIGURED_PAGES.length} pages ---`);
 }

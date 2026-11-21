@@ -44,6 +44,52 @@ export function describeUpdate(update: ProviderUpdate): string {
   return `${label} was not changed${at}${verdict === undefined ? "." : `: ${verdict}`}`;
 }
 
+export interface UpdateStatusSummary {
+  readonly tone: "ok" | "warn" | "error";
+  readonly label: string;
+}
+
+const ANSI_ESCAPE_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/gu;
+const LEADING_DECORATION_RE = /^[│├└─┌┐┘┤┬┴┼✓✔•\s]+/u;
+const UP_TO_DATE_RE =
+  /up[\s-]+to[\s-]+date|already\s+(?:on\s+the\s+)?latest|latest\s+version.*already\s+installed|already\s+installed|not\s+upgrading.*already|nothing\s+to\s+upgrade/iu;
+
+function cleanUpdateLine(raw: string): string {
+  return raw.replace(ANSI_ESCAPE_RE, "").replace(LEADING_DECORATION_RE, "").trim();
+}
+
+/**
+ * Concise, UI-safe status line for a finished CLI update result, stripping raw
+ * box-drawing glyphs and recognizing common "already up to date" outputs across
+ * Claude Code, OpenCode, Codex (Homebrew/npm), and Antigravity.
+ */
+export function summarizeUpdateStatus(item: ProviderUpdateAllItem): UpdateStatusSummary {
+  if (!item.ok) {
+    const cleaned = cleanUpdateLine(item.error.split("\n")[0] ?? item.error);
+    return { tone: "error", label: cleaned || "Update failed" };
+  }
+  const { update } = item;
+  if (update.updated) {
+    if (update.before && update.after) {
+      return { tone: "ok", label: `Updated v${update.before} → v${update.after}` };
+    }
+    return { tone: "ok", label: update.after ? `Updated to v${update.after}` : "Updated" };
+  }
+  const lines = update.output
+    .split("\n")
+    .map(cleanUpdateLine)
+    .filter((line) => line.length > 0);
+  const last = lines.at(-1);
+  if (
+    lines.length === 0 ||
+    lines.some((line) => UP_TO_DATE_RE.test(line)) ||
+    (last !== undefined && /^done\.?$/iu.test(last))
+  ) {
+    return { tone: "ok", label: "Up to date" };
+  }
+  return { tone: "warn", label: last! };
+}
+
 /** The `x.y.z` in a `--version` line such as `opencode v2.0.19` or `2.1.292 (Claude Code)`, or null. */
 export function versionNumber(line: string | null): string | null {
   return line?.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/)?.[0] ?? null;

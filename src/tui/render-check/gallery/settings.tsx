@@ -44,7 +44,7 @@ const ref = (name: string, label: string, ...steps: Step[]): PageRef => ({ name:
 const page = (label: string): PageRef => ref(label, label, side(label));
 
 /** The sidebar, top to bottom, as the page lists it with no profiles or servers set. */
-export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Overview", "Claude Code", "OpenCode", "Codex", "Antigravity", "ChatGPT", "ACP agents", "Model servers", "MCP servers", "Skills"].map(page);
+export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Overview", "Claude Code", "OpenCode", "Antigravity", "ChatGPT", "ACP agents", "Model servers", "MCP servers", "Skills"].map(page);
 
 const PROFILE_PAGES = ["Endpoint", "Models", "Sampling", "Compaction", "Behaviour", "Prompt", "Template quirks"];
 const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
@@ -55,7 +55,7 @@ const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
  * and every profile and MCP server gets pages, wizards and editors.
  */
 export const CONFIGURED_PAGES: readonly PageRef[] = [
-  ...["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex"].map(page),
+  ...["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Overview", "Claude Code", "OpenCode"].map(page),
   ref("Harness Defaults", "Defaults (Harness)", side("Defaults", 1)),
   page("Tools"),
   ref("Harness Long threads", "Long threads (Harness)", side("Long threads", 1)),

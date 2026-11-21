@@ -454,6 +454,8 @@ export function SettingsModal({
       list.items.forEach((item, at) => out.push({ section: list.section, group: list.group, label: item.title, prefix: `${indent}${at === list.items.length - 1 ? "└ " : "├ "}`, profile: item.id, list: list.key }));
     let pushedOverview = false;
     for (const section of sections) {
+      // Standalone Codex is retired in favor of Sign in with ChatGPT (Codex stays under the hood as a verified companion).
+      if (section === "provider:codex") continue;
       if (!pushedOverview && SECTION_CATEGORY[section] === "Providers") {
         pushedOverview = true;
         out.push({ section: "providers:overview", group: null, label: t("settings.providers.overview"), prefix: "" });
