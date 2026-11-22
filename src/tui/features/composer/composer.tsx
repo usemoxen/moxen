@@ -204,6 +204,7 @@ export function Composer({
   focused,
   placeholder,
   model,
+  accountLabel,
   modelColor,
   effort,
   permission,
@@ -262,6 +263,8 @@ export function Composer({
   placeholder: string;
   /** Pretty model name — never the raw provider slug. */
   model: string;
+  /** Account qualifier (e.g. `Trial`) shown beside the model when multiple accounts of that provider exist. */
+  accountLabel?: string | null | undefined;
   /** Provider-brand color for the model name (Claude/OpenCode); null/undefined falls back to the default text color. */
   modelColor?: string | null | undefined;
   /** Effort knob value (e.g. `xhigh`); null hides the segment. */
@@ -882,6 +885,13 @@ export function Composer({
         </text>
       ) : (
         <HoverText text={model} color={modelColor ?? COLOR.text} hoverColor={COLOR.bright} onClick={onModelClick} />
+      )}
+      {accountLabel === null || accountLabel === undefined || accountLabel.length === 0 ? null : onModelClick === undefined ? (
+        <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>
+          {` (${accountLabel})`}
+        </text>
+      ) : (
+        <HoverText text={` (${accountLabel})`} color={COLOR.dim} hoverColor={COLOR.bright} onClick={onModelClick} />
       )}
       {effort === null || effort === undefined || effort.length === 0 ? null : onEffortClick === undefined ? (
         <text fg={COLOR.warn} bg={SURFACE.raised} selectable={false}>

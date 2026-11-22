@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import {
   defaultEffortChoice,
+  displayAccountLabel,
   displayEffort,
   displayModelName,
   findProviderForInstance,
@@ -106,6 +107,29 @@ describe("displayModelName", () => {
 
   it("renders a dash without a selection", () => {
     expect(displayModelName(providers(), undefined)).toBe("-");
+  });
+});
+
+describe("displayAccountLabel", () => {
+  it("shows the account qualifier only when multiple accounts of the same provider exist", () => {
+    const base = {
+      enabled: true,
+      installed: true,
+      status: null,
+      authStatus: null,
+      models: [],
+      usageLimits: null,
+      supportedRuntimeModes: null,
+      skills: [],
+    };
+    const multi = [
+      { ...base, instanceId: "chatgpt/default", driver: "chatgpt", displayName: "ChatGPT (Default)" },
+      { ...base, instanceId: "chatgpt/trial", driver: "chatgpt", displayName: "ChatGPT (Trial)" },
+      { ...base, instanceId: "claude/default", driver: "claude", displayName: "Claude Code (Default)" },
+    ];
+    expect(displayAccountLabel(multi, { instanceId: "chatgpt/trial", model: "gpt-6.2-astra" })).toBe("Trial");
+    expect(displayAccountLabel(multi, { instanceId: "chatgpt/default", model: "gpt-6.2-astra" })).toBe("Default");
+    expect(displayAccountLabel(multi, { instanceId: "claude/default", model: "claude-opus-5-5" })).toBeNull();
   });
 });
 

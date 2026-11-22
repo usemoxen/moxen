@@ -7,7 +7,8 @@ import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { ListEditor, type Screen as EditorScreen } from "./listeditor.js";
 import { itemRows } from "../../model/listeditor.js";
 import { McpAccessEditor } from "./mcpaccess.js";
-import { ProfileAccountHeader, profileSidebarLabel, ProvidersOverviewPanel } from "./providersoverview.js";
+import { AccountUsageRows, ProfileAccountHeader, profileSidebarLabel, ProvidersOverviewPanel } from "./providersoverview.js";
+import { providerUsageLimitsFor } from "../../model/sidepanel.js";
 import { SkillsPanel } from "./skillspanel.js";
 import { WebOrderEditor } from "./weborder.js";
 import { HandoffModelsEditor } from "./handoffmodels.js";
@@ -1231,6 +1232,15 @@ export function SettingsModal({
                       check={versions?.[updatable]}
                       latest={latest === null ? undefined : { enabled: latest.enabled, latest: null, channel: null, ...latest[updatable] }}
                       updating={updating.has(updatable)}
+                      usage={
+                        updatable === "opencode"
+                          ? providerUsageLimitsFor(usageByInstance, {
+                              instanceId: "opencode/opencode-go",
+                              usageLimits: providers?.find((entry) => entry.instanceId === "opencode/opencode-go")?.usageLimits ?? null,
+                            })
+                          : null
+                      }
+                      usageHeading={updatable === "opencode" ? "OpenCode Go" : undefined}
                       width={paneWidth}
                       onUpdate={() => onUpdate(updatable)}
                     />
@@ -1496,6 +1506,8 @@ function ProviderUpdateCard({
   check,
   latest,
   updating,
+  usage,
+  usageHeading,
   width,
   onUpdate,
 }: {
@@ -1503,6 +1515,8 @@ function ProviderUpdateCard({
   check: ProviderCheckView | undefined;
   latest: LatestView | undefined;
   updating: boolean;
+  usage?: ProviderUsageLimits | null;
+  usageHeading?: string | undefined;
   width: number;
   onUpdate: () => void;
 }) {
@@ -1529,6 +1543,7 @@ function ProviderUpdateCard({
       </box>
       <text fg={tone} bg={SURFACE.panel} wrapMode="word" selectable={false}>{line.status}</text>
       <text content={prose(t("settings.update.note", { command: PROVIDER_UPDATER[provider] }), COLOR.dim)} bg={SURFACE.panel} wrapMode="word" selectable={false} />
+      {usage ? <AccountUsageRows limits={usage} width={width} bg={SURFACE.panel} {...(usageHeading ? { heading: usageHeading } : {})} /> : null}
     </box>
   );
 }

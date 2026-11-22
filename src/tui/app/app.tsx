@@ -1394,6 +1394,7 @@ export function App({
     providersError,
     reload: reloadProviders,
     model,
+    accountLabel,
     effort,
     permission,
     permissionChoices,
@@ -3036,6 +3037,7 @@ export function App({
                 focused={composerFocused}
                 placeholder={composerPlaceholder}
                 model={model}
+                accountLabel={accountLabel}
                 modelColor={modelColor}
                 effort={effort === null || effort === undefined ? effort : tx(effort)}
                 permission={permission}
@@ -3220,6 +3222,7 @@ export function App({
             placeholder={composerPlaceholder}
             suggestion={suggestedPrompt}
             model={model}
+            accountLabel={accountLabel}
             modelColor={modelColor}
             effort={effort === null || effort === undefined ? effort : tx(effort)}
             permission={permission}

@@ -239,14 +239,16 @@ function usageToneColor(tone: "normal" | "warn" | "danger"): string {
   return tone === "danger" ? COLOR.danger : tone === "warn" ? COLOR.warn : COLOR.dim;
 }
 
-function AccountUsageRows({
+export function AccountUsageRows({
   limits,
   width,
   bg = SURFACE.panel,
+  heading,
 }: {
   limits: ProviderUsageLimits | null;
   width: number;
   bg?: string;
+  heading?: string;
 }) {
   if (!limits || (limits.windows.length === 0 && typeof limits.credits !== "number")) return null;
   const inner = Math.max(18, width - 4);
@@ -268,18 +270,21 @@ function AccountUsageRows({
   const barWidth = Math.max(4, inner - labelWidth - valueWidth - 2);
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }} backgroundColor={bg} selectable={false}>
+      {heading ? <text fg={COLOR.dim} bg={bg} selectable={false}>{heading}</text> : null}
       {groups.map((group, groupIndex) => (
         <box key={group.title ?? "default"} style={{ flexDirection: "column", flexShrink: 0, ...(groupIndex > 0 ? { marginTop: 1 } : {}) }} backgroundColor={bg}>
           {group.title === null ? null : <text fg={COLOR.dim} bg={bg} selectable={false}>{group.title}</text>}
           {group.rows.map(({ window, label, percent, resetLabel }) => {
             const fraction = Math.max(0, Math.min(1, window.usedPercent / 100));
-            const filled = Math.round(fraction * barWidth);
+            const filled = fraction <= 0 ? 0 : Math.max(1, Math.min(barWidth, Math.round(fraction * barWidth)));
+            const empty = Math.max(0, barWidth - filled);
             const barColor = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
             return (
               <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={bg}>
                 <OverflowText fg={COLOR.text} bg={bg} width={labelWidth + 1} padToWidth suffix=" " selectable={false}>{label}</OverflowText>
-                <text fg={barColor} bg={bg} selectable={false}>{"█".repeat(filled)}</text>
-                <text fg={COLOR.faint} bg={bg} selectable={false}>{"░".repeat(Math.max(0, barWidth - filled))}</text>
+                {/* An empty <text> still takes a cell: omit empty halves so 0% and 100% bars align identically. */}
+                {filled > 0 ? <text fg={barColor} bg={bg} selectable={false}>{"█".repeat(filled)}</text> : null}
+                {empty > 0 ? <text fg={COLOR.faint} bg={bg} selectable={false}>{"░".repeat(empty)}</text> : null}
                 <text fg={COLOR.dim} bg={bg} selectable={false}>{` ${percent.padStart(percentWidth)}`}</text>
                 {resetWidth > 0 ? <text fg={COLOR.faint} bg={bg} selectable={false}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
               </box>
@@ -366,6 +371,7 @@ function AccountRowCard({
 function OpencodeOverviewRow({
   id,
   version,
+  usage,
   active,
   width,
   onOpen,
@@ -373,6 +379,7 @@ function OpencodeOverviewRow({
 }: {
   id: string;
   version: string | null;
+  usage: ProviderUsageLimits | null;
   active: boolean;
   width: number;
   onOpen: () => void;
@@ -383,6 +390,8 @@ function OpencodeOverviewRow({
   const toggleText = `${toggleLabel(true)}  ›`;
   const titleText = `OpenCode${version ? `  v${version}` : ""}`;
   const leftWidth = Math.max(10, width - toggleText.length - 6);
+  const compact = compactPlanUsage(usage, formatResetShort);
+  const subWidth = Math.max(10, width - 5 - (compact ? compact.text.length + 2 : 0));
   return (
     <box
       id={id}
@@ -407,10 +416,13 @@ function OpencodeOverviewRow({
           </text>
         </box>
       </box>
-      <box style={{ flexDirection: "row", height: 1, paddingLeft: 2 }} backgroundColor={bg}>
-        <OverflowText fg={COLOR.dim} bg={bg} width={Math.max(10, width - 5)} active={active || hovered} selectable={false}>
+      <box style={{ flexDirection: "row", height: 1, paddingLeft: 2, justifyContent: "space-between" }} backgroundColor={bg}>
+        <OverflowText fg={COLOR.dim} bg={bg} width={subWidth} active={active || hovered} selectable={false}>
           {t("settings.providers.opencodeSubtitle")}
         </OverflowText>
+        {compact ? (
+          <text fg={usageToneColor(compact.tone)} bg={bg} selectable={false}>{compact.text}</text>
+        ) : null}
       </box>
     </box>
   );
@@ -1802,6 +1814,10 @@ export function ProvidersOverviewPanel({
               <OpencodeOverviewRow
                 id="providers-opencode-row"
                 version={versionNumber(versions?.opencode?.version ?? null)}
+                usage={providerUsageLimitsFor(usageByInstance, {
+                  instanceId: "opencode/opencode-go",
+                  usageLimits: providers?.find((entry) => entry.instanceId === "opencode/opencode-go")?.usageLimits ?? null,
+                })}
                 active={safeCursor === opencodeStop}
                 width={width}
                 onOpen={() => {

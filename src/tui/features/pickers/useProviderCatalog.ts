@@ -9,7 +9,7 @@ import {
 } from "../../../core/catalog/permissions.js";
 import { rebaseContinueSelection } from "../../model/continue.js";
 import type { ModelSelection, ProviderOptionSelection, RuntimeMode } from "../../../core/types.js";
-import { displayEffort, displayModelName, findProviderForInstance } from "../../model/display.js";
+import { displayAccountLabel, displayEffort, displayModelName, findProviderForInstance } from "../../model/display.js";
 import { providerColor } from "../../theme.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { PickerName } from "./pickerTypes.js";
@@ -239,6 +239,7 @@ export function useProviderCatalog(params: {
   // intentionally not shown. The model lives in exactly one place: the
   // composer footer. The timeline subtitle and status bar carry status only.
   const model = displayModelName(providers, effectiveModelSelection);
+  const accountLabel = displayAccountLabel(providers, effectiveModelSelection);
   const effort = displayEffort(providers, effectiveModelSelection);
 
   /** The open thread's own provider — undefined until the catalog has
@@ -276,6 +277,7 @@ export function useProviderCatalog(params: {
     reload: load,
     providersError,
     model,
+    accountLabel,
     effort,
     permission,
     permissionChoices,

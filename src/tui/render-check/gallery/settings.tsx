@@ -7,7 +7,7 @@ import type { CliConfig } from "../../../core/types.js";
 import { SETTINGS, describeAllAccountSettings, describeSettings, type SettingDescriptor } from "../../../core/configschema.js";
 import { summarizeProviderAccounts } from "../../../core/providers/accounts.js";
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
-import { ProfileAccountHeader, ProvidersOverviewPanel } from "../../features/settings/providersoverview.js";
+import { AccountUsageRows, ProfileAccountHeader, ProvidersOverviewPanel } from "../../features/settings/providersoverview.js";
 import { SkillsPanel } from "../../features/settings/skillspanel.js";
 import { skillsClient } from "../skillsfixture.js";
 import { tx } from "../../i18n/index.js";
@@ -561,6 +561,29 @@ export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntrie
         onRemoveAccount={async () => undefined}
         onUpdate={noop}
         onRemoved={noop}
+      />
+    </Stage>
+  ),
+}, {
+  id: "account-usage-rows",
+  group: "settings",
+  title: "Account usage rows: aligned 0%, partial, and 100% quota bars",
+  width: 72,
+  height: 10,
+  element: () => (
+    <Stage width={72} height={10}>
+      <AccountUsageRows
+        heading="OpenCode Go"
+        width={68}
+        limits={{
+          checkedAt: "2026-11-22T02:00:00.000Z",
+          windows: [
+            { id: "session", kind: "session", label: "Session", usedPercent: 0, resetsAt: "2026-11-22T05:00:00.000Z" },
+            { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 60, resetsAt: "2026-11-28T05:00:00.000Z" },
+            { id: "monthly", kind: "monthly", label: "Monthly", usedPercent: 100, resetsAt: null },
+          ],
+          unavailable: null,
+        }}
       />
     </Stage>
   ),

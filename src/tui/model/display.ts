@@ -1,7 +1,7 @@
 import { type MessageKey, t } from "../i18n/index.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
 import type { EffortDescriptor, ModelSummary } from "../../core/catalog/summary.js";
-import { driverKindOfInstance, type ModelSelection, type ThreadEnvelope } from "../../core/types.js";
+import { driverKindOfInstance, parseAccountInstanceId, type ModelSelection, type ThreadEnvelope } from "../../core/types.js";
 
 /**
  * Resolve a thread or selection's `instanceId` against the live provider catalog.
@@ -71,6 +71,27 @@ export function displayModelName(
   );
   if (model !== undefined) return model.name;
   return prettifyModelSlug(selection.model);
+}
+
+/**
+ * Account qualifier for a model selection (e.g. `"Default"`, `"Trial"`) when
+ * more than one account of the same provider kind is configured in the catalog,
+ * so the composer header distinguishes accounts without adding clutter for
+ * single-account setups.
+ */
+export function displayAccountLabel(
+  providers: readonly ProviderSummary[] | null | undefined,
+  selection: ModelSelection | undefined,
+): string | null {
+  if (!providers || !selection) return null;
+  const provider = findProviderForInstance(providers, selection.instanceId);
+  if (!provider) return null;
+  const parsed = parseAccountInstanceId(provider.instanceId);
+  if (!parsed) return null;
+  const siblings = providers.filter((entry) => parseAccountInstanceId(entry.instanceId)?.kind === parsed.kind);
+  if (siblings.length < 2) return null;
+  const match = /\(([^)]+)\)\s*$/u.exec(provider.displayName ?? "");
+  return match?.[1]?.trim() || parsed.accountId;
 }
 
 /**
