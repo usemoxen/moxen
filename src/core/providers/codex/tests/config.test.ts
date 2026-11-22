@@ -69,6 +69,14 @@ describe("codex config", () => {
       "x=1",
     ]);
     expect(codexAppServerArgs()).toEqual(["app-server"]);
+    expect(codexAppServerArgs("", {}, "~/.moxen/accounts/chatgpt/trial")).toEqual([
+      "app-server",
+      "-c",
+      "cli_auth_credentials_store=file",
+    ]);
+    expect(
+      codexAppServerArgs("-c cli_auth_credentials_store=keyring", {}, "~/.moxen/accounts/chatgpt/trial"),
+    ).toEqual(["app-server", "-c", "cli_auth_credentials_store=keyring"]);
   });
 
   it("resolves the home from settings, CODEX_HOME, then ~/.codex", () => {

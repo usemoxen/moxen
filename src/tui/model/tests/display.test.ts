@@ -5,6 +5,7 @@ import {
   defaultEffortChoice,
   displayEffort,
   displayModelName,
+  findProviderForInstance,
   isEffortDescriptor,
   isTerminalTooSmall,
   describeEffort,
@@ -260,5 +261,36 @@ describe("describeEffort", () => {
   it("has nothing to say about a level it does not know, except that it is the default", () => {
     expect(describeEffort("turbo", false)).toBeUndefined();
     expect(describeEffort("turbo", true)).toBe("The default effort for this model");
+  });
+});
+
+describe("findProviderForInstance", () => {
+  const catalog: ProviderSummary[] = [
+    {
+      ...providers()[0]!,
+      instanceId: "antigravity/default",
+      driver: "antigravity",
+      displayName: "Antigravity (Default)",
+    },
+    {
+      ...providers()[0]!,
+      instanceId: "antigravity/work",
+      driver: "antigravity",
+      displayName: "Antigravity (Work)",
+    },
+    {
+      ...providers()[1]!,
+      instanceId: "claude/default",
+      driver: "claude",
+      displayName: "Claude Code (Default)",
+    },
+  ];
+
+  it("matches explicit account instanceIds strictly and resolves legacy bare IDs to <driver>/default", () => {
+    expect(findProviderForInstance(catalog, "antigravity/work")?.instanceId).toBe("antigravity/work");
+    expect(findProviderForInstance(catalog, "antigravity/missing")).toBeUndefined();
+    expect(findProviderForInstance(catalog, "antigravity")?.instanceId).toBe("antigravity/default");
+    expect(findProviderForInstance(catalog, "claudeAgent")?.instanceId).toBe("claude/default");
+    expect(findProviderForInstance(catalog, "claude")?.instanceId).toBe("claude/default");
   });
 });

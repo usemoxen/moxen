@@ -9,7 +9,7 @@ import {
 } from "../../../core/catalog/permissions.js";
 import { rebaseContinueSelection } from "../../model/continue.js";
 import type { ModelSelection, ProviderOptionSelection, RuntimeMode } from "../../../core/types.js";
-import { displayEffort, displayModelName } from "../../model/display.js";
+import { displayEffort, displayModelName, findProviderForInstance } from "../../model/display.js";
 import { providerColor } from "../../theme.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { PickerName } from "./pickerTypes.js";
@@ -244,7 +244,7 @@ export function useProviderCatalog(params: {
   /** The open thread's own provider — undefined until the catalog has
       loaded at least once. Backs both the `$` skill picker and the
       provider-brand color on the model name. */
-  const currentProvider = providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId);
+  const currentProvider = findProviderForInstance(providers, effectiveModelSelection?.instanceId);
   /**
    * Offerable permission levels for the open thread's provider (every known
    * mode until the catalog loads or when the driver states nothing), and
@@ -267,7 +267,7 @@ export function useProviderCatalog(params: {
    */
   const labelFor = (selection: ModelSelection | undefined): ModelLabel => {
     const name = displayModelName(providers, selection);
-    const driver = providers?.find((candidate) => candidate.instanceId === selection?.instanceId)?.driver;
+    const driver = findProviderForInstance(providers, selection?.instanceId)?.driver;
     return { name, color: providerColor(driver, selection?.instanceId, name) };
   };
 

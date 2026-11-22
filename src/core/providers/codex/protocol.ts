@@ -18,6 +18,7 @@ export const CODEX_METHODS = {
   turnInterrupt: "turn/interrupt",
   feedbackUpload: "feedback/upload",
   accountRead: "account/read",
+  accountLogout: "account/logout",
   accountLoginStart: "account/login/start",
   accountLoginCancel: "account/login/cancel",
   modelList: "model/list",

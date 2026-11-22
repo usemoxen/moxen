@@ -1992,6 +1992,7 @@ export class DirectConnection implements ClientApi {
         if (!existingClaude && !existingAgy && !existingChatGpt) {
           throw new CliError("ACCOUNT_NOT_FOUND", `No ${command.kind} account "${normalizedId}" is configured.`, { exitCode: 4 });
         }
+        let expectedEmail: string | null = null;
         if (command.kind === "chatgpt") {
           const bundle = await loadChatGptAuthBundle(normalizedId, this.chatgptOAuth?.secrets);
           if (!bundle) {
@@ -2000,6 +2001,7 @@ export class DirectConnection implements ClientApi {
               `ChatGPT account "${normalizedId}" is not signed in. Sign in with ChatGPT before signing in its Codex companion.`,
             );
           }
+          expectedEmail = bundle.identity.email ?? null;
         }
         const savedHome = existingClaude?.homePath ?? existingAgy?.homePath ?? existingChatGpt?.codexHomePath;
         // Always assign a Moxen-managed isolated folder for non-default accounts (or when requested)
@@ -2039,6 +2041,7 @@ export class DirectConnection implements ClientApi {
                   ? existingAgy?.launchArgs
                   : existingChatGpt?.codexLaunchArgs,
             env: existingClaude?.env ?? existingAgy?.env ?? existingChatGpt?.env,
+            ...(expectedEmail ? { expectedEmail } : {}),
           },
           this.providerAccountLoginDeps,
         );
@@ -2259,7 +2262,10 @@ export class DirectConnection implements ClientApi {
         if (!existing) {
           throw new CliError("ACCOUNT_NOT_FOUND", `No chatgpt account "${normalizedId}" is configured.`, { exitCode: 4 });
         }
-        const codexHomePath = command.codexHomePath ?? existing.codexHomePath;
+        const codexHomePath =
+          command.codexHomePath ??
+          existing.codexHomePath ??
+          (normalizedId !== "default" ? managedAccountHomeDisplayPath("chatgpt", normalizedId) : undefined);
         const codexBinaryPath = command.codexBinaryPath ?? existing.codexBinaryPath;
         const codexLaunchArgs = command.codexLaunchArgs ?? existing.codexLaunchArgs;
         const companionDriver = new CodexDriver({

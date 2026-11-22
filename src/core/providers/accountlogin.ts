@@ -78,6 +78,8 @@ export interface ProviderAccountLoginInput {
   readonly launchArgs?: string | readonly string[] | undefined;
   readonly env?: Readonly<Record<string, string>> | undefined;
   readonly cwd?: string | undefined;
+  /** Expected account email (for ChatGPT Codex companion login guidance). */
+  readonly expectedEmail?: string | null | undefined;
 }
 
 export type LoginChildSpawner = (
@@ -455,6 +457,8 @@ async function startCodexCompanionLoginSession(
       10_000,
     );
     peer.notify(CODEX_METHODS.initialized, {});
+    // Clear any stale or mismatched login inside this isolated CODEX_HOME before starting fresh OAuth.
+    await peer.request(CODEX_METHODS.accountLogout, {}, 5_000).catch(() => undefined);
     const started = asRecord(await peer.request(CODEX_METHODS.accountLoginStart, { type: "chatgpt" }, 15_000));
     authUrl = asString(started?.authUrl);
     loginId = asString(started?.loginId);
@@ -487,9 +491,13 @@ async function startCodexCompanionLoginSession(
     // Codex app-server returns `authUrl` and expects the client to open the browser.
     openBrowser: true,
     needsCodeInput: false,
-    message: homePath
-      ? `Sign in to the Codex companion in your browser (saved to ${homePath}).`
-      : "Sign in to the Codex companion in your browser.",
+    message: input.expectedEmail
+      ? homePath
+        ? `Sign in to the Codex companion as ${input.expectedEmail} in your browser (saved to ${homePath}). Use a private window if your browser is signed into another ChatGPT account.`
+        : `Sign in to the Codex companion as ${input.expectedEmail} in your browser. Use a private window if your browser is signed into another ChatGPT account.`
+      : homePath
+        ? `Sign in to the Codex companion in your browser (saved to ${homePath}).`
+        : "Sign in to the Codex companion in your browser.",
     async waitForCompletion(timeoutMs = DEFAULT_LOGIN_TIMEOUT_MS): Promise<ProviderAccountLoginCompletion> {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {

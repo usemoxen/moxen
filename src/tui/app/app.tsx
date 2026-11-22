@@ -77,7 +77,7 @@ import {
 } from "../../core/attachments.js";
 import type { ImageAttachmentUpload } from "../../core/attachments.js";
 import { clipboardFileName } from "../model/hostClipboard.js";
-import { defaultEffortId, describeEffort, isEffortDescriptor, modelRowDetail, turnModelSelection } from "../model/display.js";
+import { defaultEffortId, describeEffort, findProviderForInstance, isEffortDescriptor, modelRowDetail, turnModelSelection } from "../model/display.js";
 import { configuredDefaultModel } from "../model/settings.js";
 import { formatContextUsage, formatTokenCount, groupTurns } from "../model/turns.js";
 import { waitSpans } from "../model/waits.js";
@@ -1434,7 +1434,7 @@ export function App({
   // -- side panel (Diff / Agents / Context / Background) --------------------
   const sidePanelOpen = sidePanel.tab !== null && !creating && !showRunView;
   const turnKey = `${selected?.latestTurn?.turnId ?? ""}:${selected?.latestTurn?.state ?? ""}`;
-  const currentProvider = providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId) ?? null;
+  const currentProvider = findProviderForInstance(providers, effectiveModelSelection?.instanceId) ?? null;
   const [planUsageRead, setPlanUsageRead] = useState(false);
   const planUsage = usePlanUsage(
     client,
@@ -2519,9 +2519,9 @@ export function App({
     }
     if (picker === "effort") {
       const current = effectiveModelSelection;
-      const catalogModel = providers
-        .find((provider) => provider.instanceId === current?.instanceId)
-        ?.models.find((model) => model.slug === current?.model);
+      const catalogModel = findProviderForInstance(providers, current?.instanceId)?.models.find(
+        (model) => model.slug === current?.model,
+      );
       const descriptors = catalogModel?.efforts ?? [];
       return {
         kind: "sliders",
@@ -2602,7 +2602,7 @@ export function App({
     // no in-picker provider switch, so only that provider's models are offered
     // (even when the instance has since been disabled — the thread is already
     // on it). Hidden models are skipped except the current one.
-    const provider = providers.find((candidate) => candidate.instanceId === current?.instanceId);
+    const provider = findProviderForInstance(providers, current?.instanceId);
     const offered = provider === undefined ? [] : offerableModels(provider, current?.model);
     const activeUsageHeader = provider === undefined ? {} : modelHeaderUsage(provider);
     return {
@@ -2617,7 +2617,7 @@ export function App({
             label: model.name,
             ...modelRowDetail(model),
             selected: current?.model === model.slug,
-            onPick: () => pickModel({ instanceId: provider!.instanceId, model: model.slug }),
+            onPick: () => pickModel({ instanceId: current?.instanceId ?? provider!.instanceId, model: model.slug }),
           })),
         },
       ],
@@ -3802,7 +3802,7 @@ export function App({
               ? creating
                 ? t("app.select_model_8631")
                 : t("picker.selectModelOf", { provider: 
-                    providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId)
+                    findProviderForInstance(providers, effectiveModelSelection?.instanceId)
                       ?.displayName ?? t("app.current_provider_8fb0")
                   })
               : picker === "effort"

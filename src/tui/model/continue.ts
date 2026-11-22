@@ -1,6 +1,6 @@
 import type { ModelSelection } from "../../core/types.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
-import { defaultEffortChoice, isEffortDescriptor } from "./display.js";
+import { defaultEffortChoice, findProviderForInstance, isEffortDescriptor } from "./display.js";
 
 export interface ContinueModelChoice {
   readonly instanceId: string;
@@ -24,9 +24,9 @@ export function rebaseContinueSelection(
   providers: readonly ProviderSummary[] | null,
   choice: ContinueModelChoice,
 ): ModelSelection {
-  const catalogModel = providers
-    ?.find((provider) => provider.instanceId === choice.instanceId)
-    ?.models.find((model) => model.slug === choice.model);
+  const catalogModel = findProviderForInstance(providers, choice.instanceId)?.models.find(
+    (model) => model.slug === choice.model,
+  );
   const kept = (base?.options ?? []).filter((option) => {
     if (typeof option.value === "boolean") return true;
     const descriptor = catalogModel?.efforts.find((effort) => effort.id === option.id);

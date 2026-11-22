@@ -96,9 +96,17 @@ export function tokenizeLaunchArgs(raw: string): string[] {
 export function codexAppServerArgs(
   launchArgs = "",
   env: NodeJS.ProcessEnv = process.env,
+  homePath = "",
 ): string[] {
   const raw = appEnv("CODEX_LAUNCH_ARGS", env)?.trim() || launchArgs.trim();
-  return ["app-server", ...tokenizeLaunchArgs(raw)];
+  const tokenized = tokenizeLaunchArgs(raw);
+  const hasStoreOverride = tokenized.some((arg) => arg.includes("cli_auth_credentials_store"));
+  // Isolate multi-account CODEX_HOME profiles onto per-directory file storage so
+  // separate accounts never collide in the host OS keyring.
+  const storeArgs = homePath.trim().length > 0 && !hasStoreOverride
+    ? ["-c", "cli_auth_credentials_store=file"]
+    : [];
+  return ["app-server", ...storeArgs, ...tokenized];
 }
 
 /** `homePath` → dir, else `CODEX_HOME`, else `~/.codex`. */
