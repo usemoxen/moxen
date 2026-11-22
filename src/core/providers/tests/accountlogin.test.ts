@@ -171,9 +171,20 @@ describe("in-app account login, managed profile folders, and Codex companion use
       ),
     ).toMatchObject({ verified: true, needsConfirmation: false, reason: null });
 
+    // Personal plan (`plus`) with no named workspace auto-verifies on verified email match
+    // even when OIDC `sub` differs from Codex's internal `user-...` ID.
+    expect(
+      verifyCodexCompanion(
+        { userId: "auth0|different", email: "dev@example.test", emailVerified: true },
+        probed.account,
+        probed.rateLimits,
+      ),
+    ).toMatchObject({ verified: true, needsConfirmation: false, reason: null });
+
+    // Named / team workspaces still require explicit confirmation when IDs cannot be cross-checked.
     const manual = verifyCodexCompanion(
       { userId: "auth0|different", email: "dev@example.test", emailVerified: true },
-      probed.account,
+      { ...probed.account, planType: "team", workspaceName: "Acme" },
       probed.rateLimits,
     );
     expect(manual.needsConfirmation).toBe(true);

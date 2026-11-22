@@ -54,6 +54,17 @@ function normId(value: string | null | undefined): string | null {
   return trimmed && trimmed.length > 0 ? trimmed : null;
 }
 
+const PERSONAL_PLAN_TYPES = new Set(["free", "go", "plus", "pro", "prolite", "promax"]);
+
+function isPersonalPlanWithoutWorkspace(
+  codexAccount: CodexCompanionAccount,
+  oidcWorkspace: string | null,
+): boolean {
+  if (oidcWorkspace !== null || normId(codexAccount.workspaceName) !== null) return false;
+  const plan = codexAccount.planType?.trim().toLowerCase() ?? "";
+  return PERSONAL_PLAN_TYPES.has(plan);
+}
+
 /**
  * Compare a verified Sign in with ChatGPT OIDC identity against a Codex
  * companion's live `account/read` and `account/rateLimits/read` responses.
@@ -119,10 +130,18 @@ export function verifyCodexCompanion(
   const userIdMatched = Boolean(oidcUserId && codexUserId && oidcUserId === codexUserId);
   const emailMatched = Boolean(oidcEmail && codexEmail && oidcEmail === codexEmail && identity.emailVerified);
 
-  // Automatic verification requires matching email (when present) AND a matching
-  // non-email identifier (accountId or userId) so Personal vs Business workspaces
-  // under the same email are never silently linked.
-  if (accountIdMatched || (userIdMatched && (!oidcAccountId || !codexAccountId))) {
+  // Automatic verification requires matching email (when present) AND either:
+  // - a matching non-email identifier (accountId or userId), OR
+  // - a verified email match on a personal ChatGPT plan with no named workspace
+  //   (Sign in with ChatGPT's OIDC `id_token` omits `chatgpt_account_id` / `chatgpt_user_id`,
+  //   and personal plans have a single personal workspace). Team/Business/Enterprise or
+  //   named workspaces still require explicit confirmation so Personal vs Business
+  //   workspaces under the same email are never silently linked.
+  if (
+    accountIdMatched ||
+    (userIdMatched && (!oidcAccountId || !codexAccountId)) ||
+    (emailMatched && isPersonalPlanWithoutWorkspace(codexAccount, oidcWorkspace))
+  ) {
     return {
       ...base,
       verified: true,
