@@ -44,6 +44,9 @@ export function pickRow(row: PickerRow): void {
 export interface PickerSection {
   header?: string;
   headerColor?: string;
+  /** Optional right-aligned summary on the section header line (e.g. per-account usage limits). */
+  headerMeta?: string;
+  headerMetaColor?: string;
   rows: PickerRow[];
 }
 
@@ -281,12 +284,20 @@ export function PickerModal({
         ) : (
           visibleSections.map((section, sectionIndex) => (
             <box key={sectionIndex} style={{ flexDirection: "column", flexShrink: 0 }}>
-              {section.header === undefined ? null : (
-                <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: sectionIndex === 0 ? 0 : 1 }}>
-                  <text fg={section.headerColor ?? COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{`${section.header} `}</text>
-                  <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"─".repeat(Math.max(0, inner - section.header.length - 2))}</text>
-                </box>
-              )}
+              {section.header === undefined ? null : (() => {
+                const meta = section.headerMeta?.trim() ?? "";
+                const reserved = section.header.length + 2 + (meta.length > 0 ? meta.length + 1 : 0);
+                const ruleLen = Math.max(0, inner - reserved);
+                return (
+                  <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: sectionIndex === 0 ? 0 : 1 }}>
+                    <text fg={section.headerColor ?? COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{`${section.header} `}</text>
+                    <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"─".repeat(ruleLen)}</text>
+                    {meta.length > 0 ? (
+                      <text fg={section.headerMetaColor ?? COLOR.dim} bg={SURFACE.raised} selectable={false}>{` ${meta}`}</text>
+                    ) : null}
+                  </box>
+                );
+              })()}
               {section.rows.map((row) => {
                 const active = visible[safe]?.key === row.key;
                 const disabled = row.disabled === true;

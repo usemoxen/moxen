@@ -303,6 +303,69 @@ export function planUsageGauges(
   return gauges;
 }
 
+export interface CompactPlanUsageSummary {
+  readonly text: string;
+  readonly tone: "normal" | "warn" | "danger";
+}
+
+/**
+ * Resolve the live usage limits for a specific provider instance, without
+ * bleeding driver-level legacy buckets across multi-account instances
+ * (`claude/work`, `chatgpt/personal`, `antigravity/work`).
+ */
+export function providerUsageLimitsFor<
+  L extends { windows: ReadonlyArray<{ id: string; kind: string; label: string; usedPercent: number; resetsAt?: string | null }>; credits?: number | null },
+>(
+  planUsage: Readonly<Record<string, L>> | null | undefined,
+  provider: { readonly instanceId: string; readonly driver?: string; readonly usageLimits?: L | null } | null | undefined,
+): L | null {
+  if (!provider) return null;
+  const exact = planUsage?.[provider.instanceId];
+  if (exact !== undefined) return exact;
+  const lower = provider.instanceId.trim().toLowerCase();
+  const isMultiAccount =
+    lower.startsWith("claude/") ||
+    lower.startsWith("chatgpt/") ||
+    lower.startsWith("antigravity/") ||
+    lower.startsWith("codex/");
+  if (!isMultiAccount && provider.driver) {
+    const byDriver = planUsage?.[provider.driver];
+    if (byDriver !== undefined) return byDriver;
+  }
+  return provider.usageLimits ?? null;
+}
+
+/**
+ * Single-line compact usage summary for model picker headers and account rows
+ * (e.g. `5h 18% · wk 42%` or `5h 100% ↻ 45m`). Returns null when no usage
+ * windows or credits have been reported.
+ */
+export function compactPlanUsage(
+  limits: {
+    readonly windows: ReadonlyArray<{ readonly id: string; readonly kind: string; readonly label: string; readonly usedPercent: number; readonly resetsAt?: string | null }>;
+    readonly credits?: number | null;
+  } | null | undefined,
+  formatReset?: (resetsAt: string) => string | null,
+): CompactPlanUsageSummary | null {
+  if (!limits) return null;
+  const gauges = planUsageGauges(limits);
+  if (gauges.length === 0) {
+    if (typeof limits.credits === "number") {
+      return { text: `${limits.credits.toLocaleString()} cr`, tone: "normal" };
+    }
+    return null;
+  }
+  const maxPct = Math.max(...gauges.map((g) => g.percent));
+  const tone: "normal" | "warn" | "danger" = maxPct >= 90 ? "danger" : maxPct >= 70 ? "warn" : "normal";
+  const parts = gauges.slice(0, 2).map((g) => `${g.short} ${Math.round(g.percent)}%`);
+  if (maxPct >= 90 && formatReset) {
+    const hot = limits.windows.find((w) => w.usedPercent >= 90 && w.resetsAt);
+    const reset = hot?.resetsAt ? formatReset(hot.resetsAt) : null;
+    if (reset) parts.push(reset);
+  }
+  return { text: parts.join(" · "), tone };
+}
+
 /**
  * A subagent's last message as a short preview: the report is markdown
  * (`---` rules, `# headings`, `**bold**`), which reads as noise squeezed into

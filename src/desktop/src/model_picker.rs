@@ -129,7 +129,9 @@ fn list(
         if shown.is_empty() {
             continue;
         }
-        out = out.child(header(provider));
+        let limits_data = w.source.limits();
+        let limits = crate::usage::provider_limits(limits_data.as_deref(), Some(catalog), &provider.instance);
+        out = out.child(header(provider, limits));
         for model in shown {
             out = out.child(model_row(provider, model, current, row, cx));
             row += 1;
@@ -153,7 +155,7 @@ fn matches(model: &ModelInfo, query: &str) -> bool {
             .is_some_and(|range| range.to_lowercase().contains(query))
 }
 
-fn header(provider: &Provider) -> Div {
+fn header(provider: &Provider, limits: Option<&crate::usage::ProviderLimits>) -> Div {
     let mut head = div()
         .flex()
         .items_center()
@@ -174,6 +176,16 @@ fn header(provider: &Provider) -> Div {
                 .text_size(px(11.5))
                 .text_color(color("ink-2"))
                 .child(why),
+        );
+    } else if let Some((summary, tone)) =
+        crate::usage::compact_usage_summary(limits, crate::live::now_ms())
+    {
+        head = head.child(div().flex_1()).child(
+            div()
+                .font_family(theme::MONO)
+                .text_size(px(11.))
+                .text_color(color(tone))
+                .child(summary),
         );
     }
     head

@@ -50,9 +50,25 @@ export function TextField({
   onSubmit: (text: string) => void;
 }) {
   const ref = useRef<TextareaRenderable | null>(null);
+  const mountedRef = useRef(false);
   const [text, setText] = useState(initial);
   const clean = (raw: string) => (multiline ? raw.replace(/\r\n?/g, "\n").trim() : raw.replace(/\s*[\r\n]+\s*/g, " ").trim());
   const hidden = secret === true;
+  const resetToInitial = (next: string) => {
+    const node = ref.current;
+    if (node !== null) {
+      node.clear();
+      if (next.length > 0) node.insertText(next);
+    }
+    setText(next);
+  };
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+    resetToInitial(initial);
+  }, [initial]);
   const height = text.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / Math.max(10, width - 4))), 0);
   useEffect(() => {
     if (onGrow === undefined) return;
@@ -107,7 +123,11 @@ export function TextField({
               setText("");
             }
           }}
-          onSubmit={() => onSubmit(clean(ref.current?.plainText ?? text))}
+          onSubmit={() => {
+            const submitted = clean(ref.current?.plainText ?? text);
+            resetToInitial(initial);
+            onSubmit(submitted);
+          }}
         />
         {hidden && text !== "" ? (
           // The text itself is drawn in the box's own colour; asterisks stand over it, one for each character, wrapping where it does.

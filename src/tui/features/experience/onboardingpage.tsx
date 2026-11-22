@@ -414,7 +414,7 @@ export function OnboardingPage({
       {projects.filter((project) => !project.scratch).map((project) => button(String(project.title), () => onProject(project.id), { chosen: projectId === project.id, detail: String(project.workspaceRoot ?? "") }))}
       {folder ? <box style={{ flexDirection: "column", marginTop: 1 }}>
         <text fg={COLOR.bright}>{t("guide.folderPrompt")}</text>
-        <TextField initial="" placeholder={t("guide.folderPrompt")} width={inner} onSubmit={(text) => { void addFolder(text); }} />
+        <TextField key="onboarding-folder" initial="" placeholder={t("guide.folderPrompt")} width={inner} onSubmit={(text) => { void addFolder(text); }} />
         <HoverButton label={t("guide.cancelFolder")} fg={COLOR.dim} onClick={() => setFolder(false)} />
       </box> : button(t("guide.addFolder"), () => setFolder(true))}
       <text fg={COLOR.dim} style={{ marginTop: 1 }}>{t("guide.readySummary", { model: selection?.model ?? t("guide.noModel"), memory: memoryLabels[memory]! })}</text>

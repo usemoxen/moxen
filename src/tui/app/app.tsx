@@ -156,7 +156,7 @@ import { useTerminalVisible } from "../hooks/useTerminalVisible.js";
 import { useContextBreakdown, usePlanUsage, useSidePanel, useUsageProtection } from "../features/sidepanel/useSidePanel.js";
 import { isProtectCommand } from "../model/usagepause.js";
 import { threadProtectionNotice, usageProtectionNotices } from "../model/usageprotection.js";
-import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
+import { agentThreads, compactPlanUsage, effectiveContextBreakdown, nativeSubagents, planUsageGauges, providerUsageLimitsFor, type SideTab } from "../model/sidepanel.js";
 import { useComposer } from "../features/composer/useComposer.js";
 import { useProviderCatalog } from "../features/pickers/useProviderCatalog.js";
 import { NO_PROJECT, useThreadCreation } from "./hooks/useThreadCreation.js";
@@ -2555,6 +2555,18 @@ export function App({
     // Hidden models (`providerModelPreferences`) are skipped except the
     // current one, which stays marked so a since-hidden selection still
     // reads.
+    const modelHeaderUsage = (provider: (typeof providers)[number]) => {
+      const limits = providerUsageLimitsFor(planUsage, provider);
+      const summary = compactPlanUsage(limits, (resetsAt) => {
+        const target = new Date(resetsAt);
+        return Number.isNaN(target.getTime()) ? null : `↻ ${untilLabel(target, now).replace(/^in /u, "")}`;
+      });
+      if (!summary) return {};
+      return {
+        headerMeta: summary.text,
+        headerMetaColor: summary.tone === "danger" ? COLOR.danger : summary.tone === "warn" ? COLOR.warn : COLOR.dim,
+      };
+    };
     if (creating) {
       return {
         kind: "list",
@@ -2575,6 +2587,7 @@ export function App({
           })
           .map(({ provider, models, pinned }) => ({
             header: provider.displayName ?? provider.instanceId,
+            ...modelHeaderUsage(provider),
             rows: models.map((model) => ({
               key: `${provider.instanceId}:${model.slug}`,
               label: model.name,
@@ -2591,10 +2604,14 @@ export function App({
     // on it). Hidden models are skipped except the current one.
     const provider = providers.find((candidate) => candidate.instanceId === current?.instanceId);
     const offered = provider === undefined ? [] : offerableModels(provider, current?.model);
+    const activeUsageHeader = provider === undefined ? {} : modelHeaderUsage(provider);
     return {
       kind: "list",
       sections: [
         {
+          ...(provider !== undefined && activeUsageHeader.headerMeta !== undefined
+            ? { header: provider.displayName ?? provider.instanceId, ...activeUsageHeader }
+            : {}),
           rows: offered.map((model) => ({
             key: `${provider?.instanceId}:${model.slug}`,
             label: model.name,

@@ -4942,6 +4942,22 @@ fn provider_profile_tab(
         );
     }
 
+    let limits_data = w.source.limits();
+    let catalog_ref = match w.source.catalog() {
+        crate::model::CatalogState::Ready(catalog) => Some(catalog),
+        _ => None,
+    };
+    let account_limits = crate::usage::provider_limits(
+        limits_data.as_deref(),
+        catalog_ref.as_deref(),
+        &account.instance_id,
+    );
+    if let Some(usage_block) =
+        crate::usage::compact_usage_rows(account_limits, crate::live::now_ms())
+    {
+        header_card = header_card.child(usage_block);
+    }
+
     out = out.child(header_card);
 
     if let Some(views) = snapshot.account_settings.get(instance_id) {
@@ -5090,13 +5106,43 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                                 }),
                             )),
                     )
-                    .child(
+                    .child({
+                        let limits_data = w.source.limits();
+                        let catalog_ref = match w.source.catalog() {
+                            crate::model::CatalogState::Ready(catalog) => Some(catalog),
+                            _ => None,
+                        };
+                        let acct_limits = crate::usage::provider_limits(
+                            limits_data.as_deref(),
+                            catalog_ref.as_deref(),
+                            &account.instance_id,
+                        );
+                        let summary = crate::usage::compact_usage_summary(
+                            acct_limits,
+                            crate::live::now_ms(),
+                        );
                         div()
-                            .text_xs()
-                            .text_color(color("ink-2"))
-                            .truncate()
-                            .child(sub),
-                    ),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .text_color(color("ink-2"))
+                                    .truncate()
+                                    .child(sub),
+                            )
+                            .children(summary.map(|(text, tone)| {
+                                div()
+                                    .font_family(theme::MONO)
+                                    .text_size(px(11.))
+                                    .text_color(color(tone))
+                                    .child(text)
+                            }))
+                    }),
             );
         }
     }
@@ -5345,6 +5391,22 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                     }),
                 )),
             );
+        }
+
+        let detail_limits_data = w.source.limits();
+        let detail_catalog_ref = match w.source.catalog() {
+            crate::model::CatalogState::Ready(catalog) => Some(catalog),
+            _ => None,
+        };
+        let detail_limits = crate::usage::provider_limits(
+            detail_limits_data.as_deref(),
+            detail_catalog_ref.as_deref(),
+            &account.instance_id,
+        );
+        if let Some(usage_block) =
+            crate::usage::compact_usage_rows(detail_limits, crate::live::now_ms())
+        {
+            detail_col = detail_col.child(usage_block);
         }
 
         detail_col = detail_col.child(ui::caps("Runtime"));

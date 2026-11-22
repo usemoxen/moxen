@@ -703,7 +703,7 @@ export function ListEditor({
             <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{overlay.title}</text>
             <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{overlay.hint}</text>
             <TextField
-              key={overlay.title}
+              key={`${overlay.title}:${overlay.initial}`}
               initial={overlay.initial}
               placeholder={overlay.placeholder}
               secret={overlay.secret}

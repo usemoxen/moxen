@@ -46,7 +46,7 @@ import {
   type ProviderAccountSaveInput,
   type ProviderAccountSummary,
 } from "../../../core/types.js";
-import type { ProviderSummary } from "../../../core/catalog/summary.js";
+import type { ProviderSummary, ProviderUsageLimits } from "../../../core/catalog/summary.js";
 import type { SettingsSnapshot } from "../../../server/api.js";
 import type { McpRunner } from "../../../core/providers/harness/presets.js";
 
@@ -239,6 +239,7 @@ export function SettingsModal({
   const [tab, setTab] = useState<SettingsTab>(initialSection);
   const memoryStatus = useMemoryRuntime(client, tab === "memory");
   const [loadedAccounts, setLoadedAccounts] = useState<readonly ProviderAccountSummary[]>(initialAccounts ?? []);
+  const [usageByInstance, setUsageByInstance] = useState<Readonly<Record<string, ProviderUsageLimits>> | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [accountSaving, setAccountSaving] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
@@ -258,6 +259,18 @@ export function SettingsModal({
         if (alive) setLoadedAccounts(res.accounts);
       })
       .catch(() => undefined);
+    void client
+      .query({ type: "usage.limits" })
+      .then((res) => {
+        if (alive) setUsageByInstance(res.providers);
+      })
+      .catch(() => undefined);
+    void client
+      .query({ type: "usage.refresh" })
+      .then((res) => {
+        if (alive) setUsageByInstance(res.providers);
+      })
+      .catch(() => undefined);
     return () => {
       alive = false;
     };
@@ -265,8 +278,12 @@ export function SettingsModal({
 
   const reloadAccounts = async () => {
     if (!client) return;
-    const res = await client.query({ type: "providers.accounts" });
-    setLoadedAccounts(res.accounts);
+    const [acctRes, limitsRes] = await Promise.all([
+      client.query({ type: "providers.accounts" }),
+      client.query({ type: "usage.limits" }).catch(() => null),
+    ]);
+    setLoadedAccounts(acctRes.accounts);
+    if (limitsRes) setUsageByInstance(limitsRes.providers);
   };
 
   const handleSaveAccount = async (input: ProviderAccountSaveInput): Promise<boolean> => {
@@ -902,6 +919,7 @@ export function SettingsModal({
                     }
                   }}
                   providers={providers}
+                  usageByInstance={usageByInstance}
                   versions={versions}
                   latest={latest}
                   updating={updating}
@@ -1157,6 +1175,7 @@ export function SettingsModal({
                     <ProfileAccountHeader
                       account={activeAccount}
                       providers={providers}
+                      usageByInstance={usageByInstance}
                       versions={versions}
                       latest={latest}
                       updating={updating}

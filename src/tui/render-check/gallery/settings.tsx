@@ -471,6 +471,16 @@ export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntrie
         selectedInstance={null}
         onSelectAccount={noop}
         providers={SETTINGS_PROVIDERS}
+        usageByInstance={{
+          "chatgpt/work": {
+            checkedAt: "2026-11-22T02:00:00.000Z",
+            windows: [
+              { id: "session", kind: "session", label: "5h", usedPercent: 22, resetsAt: "2026-11-22T05:00:00.000Z" },
+              { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 45, resetsAt: null },
+            ],
+            unavailable: null,
+          },
+        }}
         versions={{
           claude: { ok: true, installed: true, version: "2.1.330 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
           opencode: { ok: true, installed: true, version: "opencode v2.3.2", login: "inherit", minVersion: "2.0.0" },
@@ -525,6 +535,16 @@ export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntrie
           codexVerified: true,
         }}
         providers={SETTINGS_PROVIDERS}
+        usageByInstance={{
+          "chatgpt/work": {
+            checkedAt: "2026-11-22T02:00:00.000Z",
+            windows: [
+              { id: "session", kind: "session", label: "5h", usedPercent: 22, resetsAt: "2026-11-22T05:00:00.000Z" },
+              { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 45, resetsAt: null },
+            ],
+            unavailable: null,
+          },
+        }}
         versions={{
           claude: { ok: true, installed: true, version: "2.1.330 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
           opencode: { ok: true, installed: true, version: "opencode v2.3.2", login: "inherit", minVersion: "2.0.0" },

@@ -3145,7 +3145,14 @@ function withLiveUsage(providers: readonly ProviderSummary[]): ProviderSummary[]
   const live = usageLimitsSnapshot();
   return providers.map((provider) => {
     if (provider.usageLimits !== null) return provider;
-    const limits = live[usageKeyForInstance(provider.instanceId)] ?? live[provider.driver];
+    const key = usageKeyForInstance(provider.instanceId);
+    const lower = provider.instanceId.trim().toLowerCase();
+    const isMultiAccount =
+      lower.startsWith("claude/") ||
+      lower.startsWith("chatgpt/") ||
+      lower.startsWith("antigravity/") ||
+      lower.startsWith("codex/");
+    const limits = isMultiAccount ? live[key] : (live[key] ?? live[provider.driver]);
     return limits === undefined ? provider : { ...provider, usageLimits: limits };
   });
 }

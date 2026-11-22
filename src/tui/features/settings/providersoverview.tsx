@@ -4,7 +4,7 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
 
-import type { ProviderSummary } from "../../../core/catalog/summary.js";
+import type { ProviderSummary, ProviderUsageLimits } from "../../../core/catalog/summary.js";
 import {
   summarizeUpdateStatus,
   UPDATABLE_PROVIDERS,
@@ -24,6 +24,8 @@ import {
 import { useHover } from "../../hooks/useHover.js";
 import { t } from "../../i18n/index.js";
 import { providerVersionLine, type ProviderCheckView } from "../../model/settings.js";
+import { compactPlanUsage, planUsageGroups, providerUsageLimitsFor } from "../../model/sidepanel.js";
+import { untilLabel } from "../../model/thread.js";
 import { COLOR, SURFACE } from "../../theme.js";
 import { Chip } from "../../ui/chip.js";
 import { OverflowText } from "../../ui/overflowtext.js";
@@ -214,11 +216,80 @@ function SectionHeading({ label, width, first }: { label: string; width: number;
   );
 }
 
+function formatResetShort(resetsAt: string, now: number = Date.now()): string | null {
+  const target = new Date(resetsAt);
+  if (Number.isNaN(target.getTime())) return null;
+  return `↻ ${untilLabel(target, now).replace(/^in /u, "")}`;
+}
+
+function usageToneColor(tone: "normal" | "warn" | "danger"): string {
+  return tone === "danger" ? COLOR.danger : tone === "warn" ? COLOR.warn : COLOR.dim;
+}
+
+function AccountUsageRows({
+  limits,
+  width,
+  bg = SURFACE.panel,
+}: {
+  limits: ProviderUsageLimits | null;
+  width: number;
+  bg?: string;
+}) {
+  if (!limits || (limits.windows.length === 0 && typeof limits.credits !== "number")) return null;
+  const inner = Math.max(18, width - 4);
+  const now = Date.now();
+  const groups = planUsageGroups(limits.windows).map((group) => ({
+    title: group.title,
+    rows: group.rows.map(({ window, label }) => ({
+      window,
+      label,
+      percent: `${Math.round(window.usedPercent)}%`,
+      resetLabel: window.resetsAt ? formatResetShort(window.resetsAt, now) : null,
+    })),
+  }));
+  const rows = groups.flatMap((group) => group.rows);
+  const labelWidth = rows.length > 0 ? Math.min(Math.max(...rows.map((r) => r.label.length)), Math.max(6, Math.floor(inner * 0.3))) : 0;
+  const percentWidth = rows.length > 0 ? Math.max(...rows.map((r) => r.percent.length)) : 0;
+  const resetWidth = rows.length > 0 ? Math.max(0, ...rows.map((r) => r.resetLabel?.length ?? 0)) : 0;
+  const valueWidth = percentWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
+  const barWidth = Math.max(4, inner - labelWidth - valueWidth - 2);
+  return (
+    <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }} backgroundColor={bg} selectable={false}>
+      {groups.map((group, groupIndex) => (
+        <box key={group.title ?? "default"} style={{ flexDirection: "column", flexShrink: 0, ...(groupIndex > 0 ? { marginTop: 1 } : {}) }} backgroundColor={bg}>
+          {group.title === null ? null : <text fg={COLOR.dim} bg={bg} selectable={false}>{group.title}</text>}
+          {group.rows.map(({ window, label, percent, resetLabel }) => {
+            const fraction = Math.max(0, Math.min(1, window.usedPercent / 100));
+            const filled = Math.round(fraction * barWidth);
+            const barColor = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
+            return (
+              <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={bg}>
+                <OverflowText fg={COLOR.text} bg={bg} width={labelWidth + 1} padToWidth suffix=" " selectable={false}>{label}</OverflowText>
+                <text fg={barColor} bg={bg} selectable={false}>{"█".repeat(filled)}</text>
+                <text fg={COLOR.faint} bg={bg} selectable={false}>{"░".repeat(Math.max(0, barWidth - filled))}</text>
+                <text fg={COLOR.dim} bg={bg} selectable={false}>{` ${percent.padStart(percentWidth)}`}</text>
+                {resetWidth > 0 ? <text fg={COLOR.faint} bg={bg} selectable={false}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
+              </box>
+            );
+          })}
+        </box>
+      ))}
+      {typeof limits.credits === "number" ? (
+        <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between", ...(rows.length > 0 ? { marginTop: 1 } : {}) }} backgroundColor={bg}>
+          <text fg={COLOR.dim} bg={bg} selectable={false}>{t("side.remaining_credits_9c4e")}</text>
+          <text fg={COLOR.text} bg={bg} selectable={false}>{limits.credits.toLocaleString()}</text>
+        </box>
+      ) : null}
+    </box>
+  );
+}
+
 function AccountRowCard({
   id,
   account,
   version,
   status,
+  usage,
   active,
   width,
   onOpen,
@@ -228,6 +299,7 @@ function AccountRowCard({
   account: ProviderAccountSummary;
   version: string | null;
   status: string;
+  usage: ProviderUsageLimits | null;
   active: boolean;
   width: number;
   onOpen: () => void;
@@ -240,6 +312,8 @@ function AccountRowCard({
   const versionSuffix = version ? `  v${version}` : "";
   const leftWidth = Math.max(10, width - toggleText.length - 6);
   const subText = `${account.instanceId}${status ? ` · ${status}` : ""}`;
+  const compact = compactPlanUsage(usage, formatResetShort);
+  const subWidth = Math.max(10, width - 5 - (compact ? compact.text.length + 2 : 0));
   return (
     <box
       id={id}
@@ -264,10 +338,13 @@ function AccountRowCard({
           </text>
         </box>
       </box>
-      <box style={{ flexDirection: "row", height: 1, paddingLeft: 2 }} backgroundColor={bg}>
-        <OverflowText fg={COLOR.dim} bg={bg} width={Math.max(10, width - 5)} active={active || hovered} selectable={false}>
+      <box style={{ flexDirection: "row", height: 1, paddingLeft: 2, justifyContent: "space-between" }} backgroundColor={bg}>
+        <OverflowText fg={COLOR.dim} bg={bg} width={subWidth} active={active || hovered} selectable={false}>
           {subText}
         </OverflowText>
+        {compact ? (
+          <text fg={usageToneColor(compact.tone)} bg={bg} selectable={false}>{compact.text}</text>
+        ) : null}
       </box>
     </box>
   );
@@ -390,11 +467,12 @@ function CliRowCard({
   const newest = latest?.enabled ? latest[cli]?.latest ?? null : null;
   const hasNewer = newest !== null && installedVer !== null && versionLine.tone === "update";
 
-  const actionText = busy
+  const actionLabel = busy
     ? t("settings.providers.updatingLabel")
     : hasNewer
       ? t("settings.providers.updateToLabel", { version: newest })
       : t("settings.providers.updateLabel");
+  const actionText = `[ ${actionLabel} ]`;
 
   let statusText: string;
   let statusColor: string;
@@ -532,6 +610,7 @@ export interface AccountLoginStartView {
 export interface ProfileAccountHeaderProps {
   readonly account: ProviderAccountSummary;
   readonly providers: readonly ProviderSummary[] | null;
+  readonly usageByInstance?: Readonly<Record<string, ProviderUsageLimits>> | null;
   readonly versions: {
     readonly codex?: ProviderCheckView;
     readonly claude: ProviderCheckView;
@@ -561,6 +640,7 @@ export interface ProfileAccountHeaderProps {
 export function ProfileAccountHeader({
   account,
   providers,
+  usageByInstance,
   versions,
   latest,
   updating,
@@ -624,6 +704,11 @@ export function ProfileAccountHeader({
   const status = accountStatusLine(account, providers);
   const envStr = formatEnvMap(account.env);
   const busyUpdate = updating.has(cliKind);
+  const catalogProvider = providers?.find((entry) => entry.instanceId === account.instanceId);
+  const accountUsage = providerUsageLimitsFor(usageByInstance, {
+    instanceId: account.instanceId,
+    usageLimits: catalogProvider?.usageLimits ?? null,
+  });
 
   return (
     <box
@@ -649,11 +734,13 @@ export function ProfileAccountHeader({
           {versionLine.status}
         </text>
       ) : null}
-      <box style={{ flexDirection: "row", flexWrap: "wrap", gap: 1, marginTop: 1 }} backgroundColor={SURFACE.panel}>
+      <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
         {account.kind === "chatgpt" ? (
           account.signedIn ? (
             <>
               <Chip
+                bracketed
+                surface={SURFACE.panel}
                 label={t("settings.providers.signOut")}
                 onPress={() => {
                   setPairFeedback(null);
@@ -662,6 +749,8 @@ export function ProfileAccountHeader({
               />
               {!account.codexVerified && onAccountLogin ? (
                 <Chip
+                  bracketed
+                  surface={SURFACE.panel}
                   label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signInCodex")}
                   disabled={cliLoginPending !== null}
                   accent
@@ -669,6 +758,8 @@ export function ProfileAccountHeader({
                 />
               ) : null}
               <Chip
+                bracketed
+                surface={SURFACE.panel}
                 label={pairFeedback?.needsConfirmation ? t("settings.providers.confirmPairCodex") : t("settings.providers.pairCodex")}
                 accent
                 onPress={() => {
@@ -683,6 +774,8 @@ export function ProfileAccountHeader({
             </>
           ) : (
             <Chip
+              bracketed
+              surface={SURFACE.panel}
               label={authUrlPending ? t("settings.providers.signingIn") : t("settings.providers.signInChatGpt")}
               disabled={authUrlPending !== null || !onChatGptLogin}
               accent
@@ -702,6 +795,8 @@ export function ProfileAccountHeader({
           <>
             {onAccountLogin ? (
               <Chip
+                bracketed
+                surface={SURFACE.panel}
                 label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signIn")}
                 disabled={cliLoginPending !== null}
                 accent
@@ -709,6 +804,8 @@ export function ProfileAccountHeader({
               />
             ) : null}
             <Chip
+              bracketed
+              surface={SURFACE.panel}
               label={busyUpdate ? t("settings.providers.updatingLabel") : t("settings.providers.updateLabel")}
               disabled={busyUpdate}
               accent
@@ -718,8 +815,10 @@ export function ProfileAccountHeader({
             />
           </>
         )}
-        <Chip label={t("settings.providers.editEnv")} onPress={() => setEditingEnv((open) => !open)} />
+        <Chip bracketed surface={SURFACE.panel} label={t("settings.providers.editEnv")} onPress={() => setEditingEnv((open) => !open)} />
         <Chip
+          bracketed
+          surface={SURFACE.panel}
           label={confirmRemove ? t("settings.providers.removeAgain") : t("settings.providers.remove")}
           danger
           onPress={() => {
@@ -733,6 +832,7 @@ export function ProfileAccountHeader({
         />
         {saving ? <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{t("settings.reading")}</text> : null}
       </box>
+      <AccountUsageRows limits={accountUsage} width={width} bg={SURFACE.panel} />
       {editingEnv ? (
         <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
           <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{t("settings.providers.field.env")}</text>
@@ -785,6 +885,7 @@ export interface ProvidersOverviewPanelProps {
   readonly selectedInstance: string | null;
   readonly onSelectAccount: (instanceId: string | null) => void;
   readonly providers: readonly ProviderSummary[] | null;
+  readonly usageByInstance?: Readonly<Record<string, ProviderUsageLimits>> | null;
   readonly versions: {
     readonly codex?: ProviderCheckView;
     readonly claude: ProviderCheckView;
@@ -819,6 +920,7 @@ export function ProvidersOverviewPanel({
   selectedInstance,
   onSelectAccount,
   providers,
+  usageByInstance,
   versions,
   latest,
   updating,
@@ -993,7 +1095,7 @@ export function ProvidersOverviewPanel({
     return (
       <box style={{ flexDirection: "column", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-          <Chip label={t("ui.back")} onPress={() => setWizard(null)} accent />
+          <Chip bracketed surface={SURFACE.raised} label={t("ui.back")} onPress={() => setWizard(null)} accent />
         </box>
         <box style={{ flexDirection: "column", marginTop: 1 }}>
           <text fg={COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>
@@ -1132,14 +1234,14 @@ export function ProvidersOverviewPanel({
     return (
       <box style={{ flexDirection: "column", flexGrow: 1 }} backgroundColor={SURFACE.raised}>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.raised}>
-          <Chip label={t("ui.back")} onPress={() => onSelectAccount(null)} accent />
+          <Chip bracketed surface={SURFACE.raised} label={t("ui.back")} onPress={() => onSelectAccount(null)} accent />
           <box style={{ flexDirection: "row", gap: 1 }} backgroundColor={SURFACE.raised}>
             <box onMouseDown={() => void onToggleAccount(selected.kind, selected.id, !selected.enabled)} backgroundColor={SURFACE.raised}>
               <text fg={selected.enabled ? COLOR.added : COLOR.dim} bg={SURFACE.raised} selectable={false}>
                 {toggleLabel(selected.enabled)}
               </text>
             </box>
-            <Chip label={t("settings.providers.openProvider")} onPress={() => onOpenSection(kindToSection(selected.kind))} accent />
+            <Chip bracketed surface={SURFACE.raised} label={t("settings.providers.openProvider")} onPress={() => onOpenSection(kindToSection(selected.kind))} accent />
           </box>
         </box>
 
@@ -1159,9 +1261,11 @@ export function ProvidersOverviewPanel({
           </OverflowText>
           {selected.kind === "chatgpt" ? (
             <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
-              <box style={{ flexDirection: "row", flexWrap: "wrap", gap: 1 }} backgroundColor={SURFACE.panel}>
+              <box style={{ flexDirection: "row", flexWrap: "wrap" }} backgroundColor={SURFACE.panel}>
                 {selected.signedIn ? (
                   <Chip
+                    bracketed
+                    surface={SURFACE.panel}
                     label={t("settings.providers.signOut")}
                     onPress={() => {
                       setPairFeedback(null);
@@ -1170,6 +1274,8 @@ export function ProvidersOverviewPanel({
                   />
                 ) : (
                   <Chip
+                    bracketed
+                    surface={SURFACE.panel}
                     label={authUrlPending ? t("settings.providers.signingIn") : t("settings.providers.signInChatGpt")}
                     disabled={authUrlPending !== null || !onChatGptLogin}
                     accent
@@ -1187,6 +1293,8 @@ export function ProvidersOverviewPanel({
                 )}
                 {selected.signedIn && !selected.codexVerified && onAccountLogin ? (
                   <Chip
+                    bracketed
+                    surface={SURFACE.panel}
                     label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signInCodex")}
                     disabled={cliLoginPending !== null}
                     accent
@@ -1215,6 +1323,8 @@ export function ProvidersOverviewPanel({
                 ) : null}
                 {selected.signedIn ? (
                   <Chip
+                    bracketed
+                    surface={SURFACE.panel}
                     label={pairFeedback?.needsConfirmation ? t("settings.providers.confirmPairCodex") : t("settings.providers.pairCodex")}
                     accent
                     onPress={() => {
@@ -1255,8 +1365,10 @@ export function ProvidersOverviewPanel({
             </box>
           ) : onAccountLogin ? (
             <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
-              <box style={{ flexDirection: "row", gap: 1 }} backgroundColor={SURFACE.panel}>
+              <box style={{ flexDirection: "row" }} backgroundColor={SURFACE.panel}>
                 <Chip
+                  bracketed
+                  surface={SURFACE.panel}
                   label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signIn")}
                   disabled={cliLoginPending !== null}
                   accent
@@ -1283,6 +1395,14 @@ export function ProvidersOverviewPanel({
               ) : null}
             </box>
           ) : null}
+          <AccountUsageRows
+            limits={providerUsageLimitsFor(usageByInstance, {
+              instanceId: selected.instanceId,
+              usageLimits: providers?.find((entry) => entry.instanceId === selected.instanceId)?.usageLimits ?? null,
+            })}
+            width={width}
+            bg={SURFACE.panel}
+          />
         </box>
 
         <scrollbox
@@ -1313,6 +1433,8 @@ export function ProvidersOverviewPanel({
           })}
           <box style={{ flexDirection: "row", marginTop: 2, paddingLeft: 1, gap: 2 }} backgroundColor={SURFACE.raised}>
             <Chip
+              bracketed
+              surface={SURFACE.raised}
               label={confirmRemove ? t("settings.providers.removeAgain") : t("settings.providers.remove")}
               keyHint="r"
               danger
@@ -1366,12 +1488,16 @@ export function ProvidersOverviewPanel({
         </text>
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
           <Chip
+            bracketed
+            surface={SURFACE.raised}
             label={t("settings.providers.addButton")}
             keyHint="a"
             accent
             onPress={() => setWizard({ step: "kind", kindIndex: 0 })}
           />
           <Chip
+            bracketed
+            surface={SURFACE.raised}
             label={updatingAll ? t("settings.providers.updatingAll") : t("settings.providers.updateAllButton")}
             keyHint="U"
             disabled={updatingAll}
@@ -1411,6 +1537,10 @@ export function ProvidersOverviewPanel({
                   account={account}
                   version={ver}
                   status={accountStatusLine(account, providers)}
+                  usage={providerUsageLimitsFor(usageByInstance, {
+                    instanceId: account.instanceId,
+                    usageLimits: providers?.find((entry) => entry.instanceId === account.instanceId)?.usageLimits ?? null,
+                  })}
                   active={at === safeCursor}
                   width={width}
                   onOpen={() => {

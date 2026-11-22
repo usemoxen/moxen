@@ -194,13 +194,22 @@ impl LimitsData {
     }
 
     /// The limits for a thread's provider: its own account first, then its
-    /// driver's, as the TUI's composer does.
+    /// driver's (for non-account legacy instances), never bleeding another
+    /// account's limits across `kind/id` profiles.
     pub fn for_instance(&self, instance: &str) -> Option<&ProviderLimits> {
         let key = instance.trim().to_lowercase();
-        self.providers.get(&key).or_else(|| {
-            let kind = driver_kind(&key)?;
-            self.providers.get(kind)
-        })
+        if let Some(exact) = self.providers.get(&key) {
+            return Some(exact);
+        }
+        if key.starts_with("claude/")
+            || key.starts_with("chatgpt/")
+            || key.starts_with("antigravity/")
+            || key.starts_with("codex/")
+        {
+            return None;
+        }
+        let kind = driver_kind(&key)?;
+        self.providers.get(kind)
     }
 }
 
@@ -415,6 +424,134 @@ pub fn plan_gauges(limits: Option<&ProviderLimits>) -> Vec<Gauge> {
         }
     }
     gauges
+}
+
+/// Compact single-line reading of a provider's plan usage for model picker
+/// headers and Settings account rows (e.g. `5h 18% · wk 42%`), paired with its
+/// design-system color token (`ink-2`, `held`, or `broken`).
+pub fn compact_usage_summary(
+    limits: Option<&ProviderLimits>,
+    now: i64,
+) -> Option<(String, &'static str)> {
+    let limits = limits?;
+    let gauges = plan_gauges(Some(limits));
+    if gauges.is_empty() {
+        return limits
+            .credits
+            .map(|credits| (format!("{} cr", format_count(credits.round() as i64)), "ink-2"));
+    }
+    let max_pct = gauges
+        .iter()
+        .map(|g| g.percent)
+        .fold(0.0_f64, f64::max);
+    let tone = if max_pct >= 90. {
+        "broken"
+    } else if max_pct >= 70. {
+        "held"
+    } else {
+        "ink-2"
+    };
+    let mut parts: Vec<String> = gauges
+        .iter()
+        .take(2)
+        .map(|g| format!("{} {}%", g.short, g.percent.round() as i64))
+        .collect();
+    if max_pct >= 90.
+        && let Some(reset) = limits
+            .windows
+            .iter()
+            .find(|w| w.used_percent >= 90. && w.resets_at.is_some())
+            .and_then(|w| reset_label(w.resets_at.as_deref(), now))
+    {
+        parts.push(reset);
+    }
+    Some((parts.join(" · "), tone))
+}
+
+/// Compact vertical usage bar list for account headers in Settings.
+pub fn compact_usage_rows(limits: Option<&ProviderLimits>, now: i64) -> Option<Div> {
+    let limits = limits?;
+    if limits.windows.is_empty() && limits.credits.is_none() {
+        return None;
+    }
+    let groups = plan_usage_groups(&limits.windows);
+    let mut out = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .pt(px(4.))
+        .border_t_1()
+        .border_color(color("line"));
+    for group in groups {
+        if let Some(title) = group.title {
+            out = out.child(
+                div()
+                    .font_family(theme::MONO)
+                    .text_size(px(11.))
+                    .text_color(color("ink-2"))
+                    .child(title),
+            );
+        }
+        for row in group.rows {
+            let reset = reset_label(row.resets_at.as_deref(), now);
+            let fraction = (row.used_percent / 100.).clamp(0., 1.) as f32;
+            let bar_token = if row.used_percent >= 90. {
+                "broken"
+            } else if row.used_percent >= 70. {
+                "held"
+            } else {
+                "label-2"
+            };
+            out = out.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .font_family(theme::MONO)
+                    .text_size(px(11.5))
+                    .child(
+                        div()
+                            .w(px(76.))
+                            .flex_shrink_0()
+                            .truncate()
+                            .text_color(color("ink-2"))
+                            .child(row.label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(5.))
+                            .rounded(px(2.5))
+                            .bg(color("sunk"))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(fraction))
+                                    .rounded(px(2.5))
+                                    .bg(color(bar_token)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_color(color("ink"))
+                            .child(format!("{}%", row.used_percent.round() as i64)),
+                    )
+                    .children(reset.map(|r| div().text_color(color("ink-2")).child(r))),
+            );
+        }
+    }
+    if let Some(credits) = limits.credits {
+        out = out.child(
+            div()
+                .flex()
+                .justify_between()
+                .font_family(theme::MONO)
+                .text_size(px(11.5))
+                .child(div().text_color(color("ink-2")).child("Credits"))
+                .child(div().text_color(color("ink")).child(format_count(credits.round() as i64))),
+        );
+    }
+    Some(out)
 }
 
 /// `0` → `"$0.00"`, `1.234` → `"$1.23"`, `0.0041` → `"$0.0041"` (small spends
@@ -2126,5 +2263,36 @@ mod tests {
         assert_eq!(super::driver_kind("antigravity/alt"), Some("antigravity"));
         assert_eq!(super::driver_kind("codex/companion"), Some("codex"));
         assert_eq!(super::driver_kind("unknown/x"), None);
+    }
+
+    #[test]
+    fn compact_usage_summary_and_multi_account_isolation() {
+        let data = LimitsData::from_json(&serde_json::json!({
+            "providers": {
+                "antigravity": {
+                    "windows": [{ "id": "session", "kind": "session", "label": "5h", "usedPercent": 95.0, "resetsAt": null }]
+                },
+                "antigravity/personal": {
+                    "windows": [
+                        { "id": "session", "kind": "session", "label": "5h", "usedPercent": 22.0, "resetsAt": null },
+                        { "id": "weekly", "kind": "weekly", "label": "Weekly", "usedPercent": 41.0, "resetsAt": null }
+                    ]
+                }
+            }
+        }));
+        let personal = data.for_instance("antigravity/personal");
+        assert!(personal.is_some());
+        assert_eq!(
+            super::compact_usage_summary(personal, 0),
+            Some(("5h 22% · wk 41%".to_string(), "ink-2"))
+        );
+        // Unrecorded sibling account must not inherit the driver-level bucket.
+        assert!(data.for_instance("antigravity/work").is_none());
+        // Legacy non-account instance keeps driver fallback and danger tone at >= 90%.
+        let legacy = data.for_instance("antigravity");
+        assert_eq!(
+            super::compact_usage_summary(legacy, 0),
+            Some(("5h 95%".to_string(), "broken"))
+        );
     }
 }
