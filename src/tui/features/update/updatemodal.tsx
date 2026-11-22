@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 
 import type { UpdateCheck, UpdateProgress, UpdateStage } from "../../../core/selfupdate/vocabulary.js";
@@ -48,7 +48,7 @@ export function UpdateModal({ view, serverName, screenWidth, screenHeight, onIns
   };
   const install = () => { if (actions.includes("install")) onInstall(); };
   const again = () => { if (actions.includes("check")) onCheck(); };
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || (key.ctrl && key.name === "c")) { markModalDismissed(); onClose(); return; }
     if (key.name === "u") install();
     if (key.name === "c") again();
@@ -58,7 +58,7 @@ export function UpdateModal({ view, serverName, screenWidth, screenHeight, onIns
     if (key.name === "pageup") scroll.current?.scrollBy(-8);
     if (key.name === "down") scroll.current?.scrollBy(1);
     if (key.name === "up") scroll.current?.scrollBy(-1);
-  });
+  }, { capture: true });
 
   const latest = check?.latest ?? null;
   const showNotes = latest !== null && latest.notes.trim() !== "" && check !== null && check.status === "available" && (view.phase === "ready" || view.phase === "failed");

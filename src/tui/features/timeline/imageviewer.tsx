@@ -1,6 +1,7 @@
 import type { BoxRenderable, CliRenderer } from "@opentui/core";
 import { createContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { useKeyboard, useRenderer } from "@opentui/react";
+import { useRenderer } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { useHover } from "../../hooks/useHover.js";
 import { t } from "../../i18n/index.js";
@@ -160,7 +161,7 @@ export function ImageViewer({ image, onClose, onOpenExternally }: { image: Viewe
     if (next !== undefined) { current = next; emit(); }
   };
   const zoom = (factor: number) => changeView((value) => zoomImage(value, factor));
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (isModalOpen() || key.ctrl || key.meta || key.option) return;
     if (key.name === "escape") onClose();
     else if (key.name === "left" && !key.shift) step(-1);
@@ -173,7 +174,7 @@ export function ImageViewer({ image, onClose, onOpenExternally }: { image: Viewe
     } else return;
     key.preventDefault();
     key.stopPropagation();
-  });
+  }, { active: !isModalOpen() });
   const publish = () => {
     const node = ref.current;
     if (node !== null) setPane(renderer, { x: node.screenX, y: node.screenY, width: node.width, height: node.height });

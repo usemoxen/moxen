@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { useHover } from "../../hooks/useHover.js";
 import { type MessageKey, t } from "../../i18n/index.js";
@@ -76,7 +76,7 @@ export function ModelPricesEditor({
     for (const { field } of FIELDS) if (model.custom[field] !== null) onChange(field, model.slug, null);
   };
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     const escape = key.name === "escape" || key.name === "esc";
     // While the numeric input is open, TextField owns typing; only Escape cancels back to the model page.
     if (editing !== null) {
@@ -112,7 +112,7 @@ export function ModelPricesEditor({
       return;
     }
     if (clearKey) return clearModel(models[at]);
-  });
+  }, { capture: true });
 
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   useEffect(() => {
@@ -157,6 +157,10 @@ export function ModelPricesEditor({
             setEditError(null);
             onChange(editing, open.slug, parsed.value);
             setEditing(null);
+          }}
+          onCancel={() => {
+            setEditing(null);
+            setEditError(null);
           }}
         />
         {editError === null ? null : (

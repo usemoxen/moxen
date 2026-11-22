@@ -3,7 +3,7 @@ import { OverflowText } from "../../ui/overflowtext.js";
 import { t, tx } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -51,7 +51,7 @@ export function McpAccessEditor({
   };
   const setAll = (on: boolean) => write(on ? new Set([...off].filter((name) => !servers.some((server) => server.name === name && server.locked === null))) : new Set([...off, ...servers.filter((server) => server.locked === null).map((server) => server.name)]));
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     // Claimed, so the page behind does not also read this esc or arrow.
     key.preventDefault();
     const escape = key.name === "escape" || key.name === "esc";
@@ -62,7 +62,7 @@ export function McpAccessEditor({
     if (enter || key.name === "space" || key.name === "right") return toggle(servers[at]);
     if (!key.ctrl && !key.meta && key.name === "a") return setAll(true);
     if (!key.ctrl && !key.meta && key.name === "n") return setAll(false);
-  });
+  }, { capture: true });
 
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   useEffect(() => {

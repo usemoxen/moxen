@@ -2,7 +2,7 @@ import { OverflowText } from "../../ui/overflowtext.js";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { StyledText, TextAttributes, fg } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { ListEditor, type Screen as EditorScreen } from "./listeditor.js";
 import { itemRows } from "../../model/listeditor.js";
@@ -720,7 +720,7 @@ export function SettingsModal({
   const handoffItem = handoffOpen === null ? undefined : items.find((item) => item.descriptor.key === handoffOpen);
   const pricesItem = pricesOpen === null ? undefined : items.find((item) => item.descriptor.key === pricesOpen);
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (managing || showUpdate) return;
     if ((tab === "skills" || tab === "providers:overview") && key.name !== "tab") return;
     // The list editor owns every key while it is open, and one it has already acted on is not ours.
@@ -791,7 +791,7 @@ export function SettingsModal({
       return;
     }
     if ((enter || key.name === "space") && current !== undefined) activate(current);
-  });
+  }, { capture: true });
 
   // Keep the selected setting (or option) in view. Cards wrap their
   // descriptions, so their heights are the layout's to know, not ours.
@@ -1397,6 +1397,7 @@ export function SettingsModal({
                         setEditing(null);
                         onSet(item.descriptor.key, text);
                       }}
+                      onCancel={() => setEditing(null)}
                     />
                     </Fragment>
                     );
@@ -1592,6 +1593,7 @@ function SettingCard({
   onActivate,
   onGrow,
   onSubmit,
+  onCancel,
 }: {
   item: SettingItem;
   /** The top card sits flush with the first tab beside it; the others are spaced from the one above. */
@@ -1603,6 +1605,7 @@ function SettingCard({
   onActivate: () => void;
   onGrow: () => void;
   onSubmit: (text: string) => void;
+  onCancel: () => void;
 }) {
   const { hovered, handlers } = useHover();
   const { descriptor, value, explicit } = item;
@@ -1658,6 +1661,7 @@ function SettingCard({
           width={width}
           onGrow={onGrow}
           onSubmit={onSubmit}
+          onCancel={onCancel}
         />
       ) : null}
       <text content={prose(descriptor.description, item.unavailable !== undefined ? COLOR.faint : COLOR.dim)} bg={bg} wrapMode="word" selectable={false} />

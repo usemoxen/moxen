@@ -1,7 +1,8 @@
 import { OverflowText } from "./overflowtext.js";
 import { t } from "../i18n/index.js";
 import type { ReactNode } from "react";
-import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { useTerminalDimensions } from "@opentui/react";
+import { useKeyLayer } from "../hooks/useKeyLayer.js";
 
 import { COLOR, SURFACE } from "../theme.js";
 import { isTerminalTooSmall, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH } from "../model/display.js";
@@ -23,11 +24,11 @@ import { isTerminalTooSmall, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH } from "../
 export function MinSizeGate({ children, onQuit }: { children: ReactNode; onQuit: () => void }) {
   const { width, height } = useTerminalDimensions();
   const gated = isTerminalTooSmall(width, height);
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     // Same chord as the app's own quit flow; while gated there is no
     // visible menu to escalate through, so the first press quits.
-    if (gated && key.name === "c" && key.ctrl === true) onQuit();
-  });
+    if (key.name === "c" && key.ctrl === true) onQuit();
+  }, { active: gated, priority: 100, capture: true, allowDuringTextInput: true });
   if (!gated) return <>{children}</>;
 
   const inner = Math.max(0, width - 4);

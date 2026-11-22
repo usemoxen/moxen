@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import path from "node:path";
 
@@ -138,7 +138,7 @@ export function OnboardingPage({
     const timer = setTimeout(() => scroll.current?.scrollChildIntoView("guide-memory-setup"), 0);
     return () => clearTimeout(timer);
   }, [step, showMemorySetup, settings.saving, memoryStatus?.phase, memoryStatus?.busy, memoryStatus?.validation?.checkedAt]);
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (list !== null) return; // The embedded editor owns its keys; it never replaces this page.
     if (folder) { if (key.name === "escape" && !disabled) setFolder(false); return; }
     if (searching !== null) {
@@ -159,7 +159,7 @@ export function OnboardingPage({
     if (key.name === "left" || key.name === "right") controls[focus]?.move?.(key.name === "left" ? -1 : 1);
     if (key.name === "]" && step < GUIDE_STEPS.length - 1) next();
     if (key.name === "[" && step > 0) changeStep(step - 1);
-  });
+  }, { capture: true });
   const button = (label: string, run: () => void, options: { chosen?: boolean; tone?: string; detail?: string; width?: number } = {}) => {
     const at = controls.push({ run }) - 1;
     return <GuideChoice key={label} id={`guide-control-${at}`} label={label} detail={options.detail} choice={options.chosen !== undefined} chosen={options.chosen ?? false} active={focus === at} tone={options.tone ?? COLOR.accent} width={options.width ?? inner} onPick={() => { setFocus(at); if (!disabled) run(); }} />;
@@ -414,7 +414,7 @@ export function OnboardingPage({
       {projects.filter((project) => !project.scratch).map((project) => button(String(project.title), () => onProject(project.id), { chosen: projectId === project.id, detail: String(project.workspaceRoot ?? "") }))}
       {folder ? <box style={{ flexDirection: "column", marginTop: 1 }}>
         <text fg={COLOR.bright}>{t("guide.folderPrompt")}</text>
-        <TextField key="onboarding-folder" initial="" placeholder={t("guide.folderPrompt")} width={inner} onSubmit={(text) => { void addFolder(text); }} />
+        <TextField key="onboarding-folder" initial="" placeholder={t("guide.folderPrompt")} width={inner} onCancel={() => { if (!disabled) setFolder(false); }} onSubmit={(text) => { void addFolder(text); }} />
         <HoverButton label={t("guide.cancelFolder")} fg={COLOR.dim} onClick={() => setFolder(false)} />
       </box> : button(t("guide.addFolder"), () => setFolder(true))}
       <text fg={COLOR.dim} style={{ marginTop: 1 }}>{t("guide.readySummary", { model: selection?.model ?? t("guide.noModel"), memory: memoryLabels[memory]! })}</text>

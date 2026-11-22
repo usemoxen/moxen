@@ -5,7 +5,8 @@ import os from "node:os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CliRenderer, ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
-import { useKeyboard, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
+import { useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
+import { useKeyLayer } from "../hooks/useKeyLayer.js";
 
 import { applyShellFrame, emptyShellState, threadStatus, visibleThreads, type ShellState } from "../model/shell.js";
 import { Timeline } from "../features/timeline/timeline.js";
@@ -1096,7 +1097,7 @@ export function App({
       closePicker,
     });
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     // Esc closes the full-screen image from any pane (the composer's own Esc goes through `escapeComposer`).
     if (key.name === "escape" && focus !== "composer" && !quitConfirmOpen && picker === null && closeImageViewer()) return;
     // The full-size quit confirm owns its keys exactly like a modal does:
@@ -1285,7 +1286,7 @@ export function App({
       return;
     }
     scrollPane(chatScrollRef.current, key.name);
-  });
+  }, { priority: -10 });
 
   // Cancelling a delegated task's automatic continue asks whether its parent
   // hears about it; the modal below owns that choice.

@@ -2,7 +2,7 @@ import { overflowColumns, textWidth } from "../../model/textoverflow.js";
 import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useEffect, useMemo, useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { SearchField } from "../../ui/searchfield.js";
 import { ModalShell } from "../../ui/modalshell.js";
@@ -171,7 +171,7 @@ export function PickerModal({
 
   const safe = visible.length === 0 ? -1 : Math.min(index, visible.length - 1);
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     // "esc" alias included: some inputs report the raw alias instead of the
     // canonical "escape".
     if (key.name === "escape" || key.name === "esc") {
@@ -224,7 +224,7 @@ export function PickerModal({
       onFilterChange(`${filter}${sequence}`);
       setIndex(0);
     }
-  });
+  }, { capture: true });
 
   const inner = Math.max(10, width - 4);
   // The scrollbar and the content's right padding take two columns of a row.

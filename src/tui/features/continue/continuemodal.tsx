@@ -1,4 +1,4 @@
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { useMemo, useState } from "react";
 import { TextAttributes } from "@opentui/core";
 
@@ -120,7 +120,7 @@ export function ContinueModal({
     if (next !== undefined) applyEffort(descriptorId, next.id);
   };
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") {
       markModalDismissed();
       onClose();
@@ -147,7 +147,7 @@ export function ContinueModal({
         if (descriptor !== undefined) stepEffort(descriptor.id, delta);
       }
     }
-  });
+  }, { capture: true });
 
   const width = Math.min(72, Math.max(40, screenWidth - 6));
   // Title, the provider and model rows and every slider, plus the buttons

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { t } from "../../i18n/index.js";
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -98,7 +98,7 @@ export function QueueList({ groups, rows, focusId, selection, showRemoved, entri
   const focusRow = rows[at];
   const selected = selection ? entries.filter((entry) => selection.includes(entry.turnId)) : [];
   const moveTo = (to: number) => { const row = rows[Math.max(0, Math.min(rows.length - 1, to))]; if (row) handlers.focus(rowId(row)); };
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") { if (selection) handlers.clearSelection(); else handlers.close(); return; }
     if (key.ctrl && key.name === "a") { handlers.selectAll(); return; }
     if (key.ctrl && (key.name === "up" || key.name === "down")) { handlers.move(key.name); return; }
@@ -112,7 +112,7 @@ export function QueueList({ groups, rows, focusId, selection, showRemoved, entri
       const action = actionOfKey(key.name);
       if (action) handlers.act(action);
     }
-  });
+  }, { capture: true });
 
   const waitingCount = groups.upNext.length + groups.held.length;
   const stateWidth = Math.min(24, Math.max(10, ...rows.flatMap((row) => row.kind === "entry" ? [textWidth(queueEntryState(row.entry, now))] : [])));

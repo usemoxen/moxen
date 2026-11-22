@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -67,13 +67,13 @@ export function ChoiceList({ choices, width, height, emptyText, onBack }: {
 }) {
   const pickable = choices.map((choice, at) => (choice.header || !choice.onPick ? -1 : at)).filter((at) => at >= 0);
   const [focus, setFocus] = useFocus(pickable);
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") { onBack(); return; }
     const at = pickable.indexOf(focus);
     if (key.name === "down") setFocus(pickable[Math.min(pickable.length - 1, at + 1)] ?? focus);
     else if (key.name === "up") setFocus(pickable[Math.max(0, at - 1)] ?? focus);
     else if (key.name === "return" || key.name === "kpenter") choices[focus]?.onPick?.();
-  });
+  }, { capture: true });
   const ref = useKeepInView(Math.max(0, focus - (choices[focus - 1]?.header ? 1 : 0)), focus, height);
   if (!choices.length) return <text fg={COLOR.dim} bg={SURFACE.raised}>{emptyText ?? ""}</text>;
   return <scrollbox ref={ref} style={{ flexGrow: 1 }} stickyStart="top" verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>

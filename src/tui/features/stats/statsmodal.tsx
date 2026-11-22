@@ -1,6 +1,6 @@
 import { OverflowText } from "../../ui/overflowtext.js";
 import { useState, type ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import type { ClientApi } from "../../../server/api.js";
@@ -295,7 +295,7 @@ export function StatsModal({
   const providerNames = new Map((providers ?? []).map((provider) => [provider.instanceId, provider.displayName ?? provider.instanceId] as const));
   const inner = Math.max(20, width - 4);
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") {
       markModalDismissed();
       onClose();
@@ -306,7 +306,7 @@ export function StatsModal({
     } else if (key.sequence === "r") {
       setRange((current) => STATS_RANGES[(STATS_RANGES.indexOf(current) + 1) % STATS_RANGES.length]!);
     }
-  });
+  }, { capture: true });
 
   let body: ReactNode;
   if (stats === null || all === null) {

@@ -3,7 +3,7 @@ import { OverflowText } from "../../ui/overflowtext.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { TextField } from "./textfield.js";
 import { Slider, SliderDefault } from "../../ui/slider.js";
@@ -533,7 +533,7 @@ export function ListEditor({
     } else setConfirm({ action, id });
   };
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     const escape = key.name === "escape" || key.name === "esc";
     const enter = key.name === "return" || key.name === "enter";
     // Both this editor and the settings page listen to every key. Leaving the
@@ -623,7 +623,7 @@ export function ListEditor({
         });
       }
     }
-  });
+  }, { capture: true });
 
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const scrollTarget = overlay?.type === "pick" || overlay?.type === "multi" ? `list-option-${overlay.index}` : `list-row-${profile === undefined ? at : rowIndex}`;
@@ -713,6 +713,7 @@ export function ListEditor({
                 setOverlay(null);
                 overlay.submit(text);
               }}
+              onCancel={() => setOverlay(null)}
             />
           </>
         ) : profile === undefined ? (

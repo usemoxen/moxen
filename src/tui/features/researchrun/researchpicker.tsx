@@ -1,4 +1,4 @@
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { useState } from "react";
 
 import { RESEARCH_CRITIC_COUNTS, RESEARCH_MAX_RESEARCHERS } from "../../../core/threads/researchvocab.js";
@@ -72,7 +72,7 @@ export function ResearchPickerModal({
     markModalDismissed();
     onSingle();
   };
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "left" || key.name === "h") setState((current) => stepPicker(current, -1));
     else if (key.name === "right" || key.name === "l") setState((current) => stepPicker(current, 1));
     else if (key.name === "up" || key.name === "k") setState((current) => moveRow(current, -1));
@@ -80,7 +80,7 @@ export function ResearchPickerModal({
     else if (key.name === "return") start();
     else if (key.name === "escape" || key.name === "o") single();
     else if (key.sequence !== undefined && /^[1-8]$/u.test(key.sequence) && state.row === "researchers") setState((current) => setResearchers(current, Number(key.sequence)));
-  });
+  }, { capture: true });
   const inner = PICKER_SIZE.width - 4;
   const dots = Array.from({ length: RESEARCH_MAX_RESEARCHERS }, (_, at) => at < size.researchers);
   const row = (name: PickerRow | "finalizer", label: string, control: React.ReactNode, count: string, role: ResearchRole, note?: string) => {

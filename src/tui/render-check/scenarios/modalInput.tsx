@@ -2,6 +2,7 @@ import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
 import type { ClientApi } from "../../../server/api.js";
+import { SettingsModal } from "../../features/settings/settingsmodal.js";
 import { App, client, emitLiveRef, permissionRequestedFrame, userInputRequestedFrame } from "../fixtures.js";
 import { fail } from "../helpers.js";
 import { testRender } from "../testrender.js";
@@ -90,5 +91,187 @@ export async function runModalInput(): Promise<void> {
     } finally {
       await act(async () => setup.renderer.destroy());
     }
+  }
+
+  // Nested TextField inside ProfileAccountHeader (Antigravity code-paste login) must capture
+  // typing, Tab, Enter, and Escape without leaking into SettingsModal's setting rows or closing it.
+  const submittedCodes: string[] = [];
+  let cancelledLogins = 0;
+  let modalClosed = false;
+  let updatesTriggered = 0;
+  const accountClient: ClientApi = {
+    ...client,
+    query: (async (query) => {
+      if (query.type === "providers.accounts") {
+        return {
+          accounts: [
+            {
+              kind: "antigravity",
+              id: "default",
+              instanceId: "antigravity/default",
+              label: "Default",
+              enabled: true,
+              homePath: "~/.moxen/accounts/antigravity/default",
+              binaryPath: null,
+              launchArgs: null,
+              env: {},
+              model: null,
+              thinkingEffort: null,
+              email: null,
+              workspaceName: null,
+              planType: null,
+              signedIn: false,
+              codexHomePath: null,
+              codexBinaryPath: null,
+              codexLaunchArgs: null,
+              codexVerified: false,
+            },
+          ],
+        };
+      }
+      if (query.type === "settings.read") {
+        return { path: "config.json", exists: true, settings: describeSettings(DEFAULTS_FOR_RENDER_CHECK) };
+      }
+      return client.query(query);
+    }) as ClientApi["query"],
+    dispatch: (async (command) => {
+      if (command.type === "provider.account.login.start") {
+        return {
+          sessionId: "sess-agy-1",
+          kind: "antigravity",
+          accountId: "default",
+          homePath: "~/.moxen/accounts/antigravity/default",
+          authorizationUrl: "https://accounts.google.com/o/oauth2/auth?client_id=test-long-url",
+          openBrowser: false,
+          needsCodeInput: true,
+          message: "Sign in with Google in your browser (saved to ~/.moxen/accounts/antigravity/default), then paste the authorization code below.",
+        };
+      }
+      if (command.type === "provider.account.login.complete") {
+        submittedCodes.push((command as { readonly code?: string }).code ?? "");
+        return { kind: "antigravity", accountId: "default", homePath: "~/.moxen/accounts/antigravity/default" };
+      }
+      if (command.type === "provider.account.login.cancel") {
+        cancelledLogins += 1;
+        return { cancelled: true };
+      }
+      return client.dispatch(command);
+    }) as ClientApi["dispatch"],
+  };
+  const nested = await testRender(
+    <SettingsModal
+      snapshot={{ path: "config.json", exists: true, settings: describeSettings(DEFAULTS_FOR_RENDER_CHECK) }}
+      loading={false}
+      saving={null}
+      error={null}
+      providers={null}
+      versions={{
+        claude: { ok: true, installed: true, version: "2.1.330", login: "inherit", minVersion: "2.1.0" },
+        opencode: { ok: true, installed: true, version: "2.3.2", login: "inherit", minVersion: "2.0.0" },
+        antigravity: { ok: true, installed: true, version: "1.5.14", login: "inherit", minVersion: "1.0.0" },
+      }}
+      latest={null}
+      updating={new Set()}
+      client={accountClient}
+      accounts={[
+        {
+          kind: "antigravity",
+          id: "default",
+          instanceId: "antigravity/default",
+          label: "Default",
+          enabled: true,
+          homePath: "~/.moxen/accounts/antigravity/default",
+          binaryPath: null,
+          launchArgs: null,
+          env: {},
+          model: null,
+          thinkingEffort: null,
+          email: null,
+          workspaceName: null,
+          planType: null,
+          signedIn: false,
+          codexHomePath: null,
+          codexBinaryPath: null,
+          codexLaunchArgs: null,
+          codexVerified: false,
+        },
+      ]}
+      initialSection="provider:antigravity"
+      run={null}
+      notice={null}
+      screenWidth={130}
+      screenHeight={38}
+      left={4}
+      top={1}
+      width={122}
+      height={36}
+      onSet={() => undefined}
+      onDuplicate={() => undefined}
+      onTest={() => undefined}
+      onTestMcp={() => undefined}
+      onProbe={() => undefined}
+      onDiscover={() => Promise.resolve({ ok: true, models: [], host: "" })}
+      onExport={() => undefined}
+      onImport={() => undefined}
+      onUpdate={() => { updatesTriggered += 1; }}
+      onClose={() => { modalClosed = true; }}
+    />,
+    { width: 130, height: 38, exitOnCtrlC: false },
+  );
+  try {
+    for (let attempt = 0; !nested.captureCharFrame().includes("Antigravity · Default"); attempt += 1) {
+      if (attempt === 60) fail("modal input: Settings sidebar did not render Antigravity · Default");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+      await nested.flush();
+    }
+    await clickText(nested, "Antigravity · Default");
+    for (let attempt = 0; !nested.captureCharFrame().includes("[ Sign in ]"); attempt += 1) {
+      if (attempt === 60) fail("modal input: Antigravity profile header did not render [ Sign in ]");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+      await nested.flush();
+    }
+    await clickText(nested, "[ Sign in ]");
+    for (let attempt = 0; !nested.captureCharFrame().includes("Paste authorization code"); attempt += 1) {
+      if (attempt === 60) fail("modal input: Antigravity code TextField did not appear");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+      await nested.flush();
+    }
+    // Type characters that are normally SettingsModal shortcuts (u, j, k), press Tab, then Enter.
+    await act(async () => nested.mockInput.typeText("code-ujk-42"));
+    await nested.flush();
+    await act(async () => nested.mockInput.pressKey("TAB"));
+    await nested.flush();
+    await act(async () => nested.mockInput.pressEnter());
+    await nested.flush();
+    for (let attempt = 0; submittedCodes.length === 0; attempt += 1) {
+      if (attempt === 60) fail("modal input: Enter inside ProfileAccountHeader TextField did not submit code");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+      await nested.flush();
+    }
+    const afterSubmit = nested.captureCharFrame();
+    if (submittedCodes[0] !== "code-ujk-42") fail(`modal input: unexpected submitted code ${JSON.stringify(submittedCodes)}`);
+    if (updatesTriggered !== 0) fail("modal input: typing 'u' in TextField leaked to SettingsModal onUpdate");
+    if (modalClosed) fail("modal input: Enter in TextField closed SettingsModal");
+    if (afterSubmit.includes("← Back") || afterSubmit.includes("Choose an option")) {
+      fail("modal input: Enter in ProfileAccountHeader TextField leaked to SettingsModal and opened a setting picker");
+    }
+
+    // Re-open sign-in and press Escape: should cancel ONLY the login TextField, keeping SettingsModal open.
+    await clickText(nested, "[ Sign in ]");
+    for (let attempt = 0; !nested.captureCharFrame().includes("Paste authorization code"); attempt += 1) {
+      if (attempt === 60) fail("modal input: Antigravity code TextField did not re-open");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+      await nested.flush();
+    }
+    await act(async () => nested.mockInput.pressEscape());
+    await nested.flush();
+    for (let attempt = 0; cancelledLogins === 0; attempt += 1) {
+      if (attempt === 60) fail("modal input: Escape inside TextField did not cancel login");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+      await nested.flush();
+    }
+    if (modalClosed) fail("modal input: Escape inside ProfileAccountHeader TextField leaked and closed SettingsModal");
+  } finally {
+    await act(async () => nested.renderer.destroy());
   }
 }

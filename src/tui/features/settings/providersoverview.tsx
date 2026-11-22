@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import type { ProviderSummary, ProviderUsageLimits } from "../../../core/catalog/summary.js";
 import {
@@ -544,6 +544,7 @@ function DetailFieldCard({
   width,
   onStartEdit,
   onSave,
+  onCancel,
 }: {
   id: string;
   field: DetailField;
@@ -552,6 +553,7 @@ function DetailFieldCard({
   width: number;
   onStartEdit: () => void;
   onSave: (value: string) => void;
+  onCancel: () => void;
 }) {
   const { hovered, handlers } = useHover();
   const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
@@ -593,6 +595,7 @@ function DetailFieldCard({
             fallback={t("le.unset")}
             width={Math.max(18, width - 6)}
             onSubmit={onSave}
+            onCancel={onCancel}
           />
         </box>
       ) : null}
@@ -873,6 +876,7 @@ export function ProfileAccountHeader({
               setEditingEnv(false);
               void onSaveAccount({ kind: account.kind, id: account.id, env: parseEnvText(raw) });
             }}
+            onCancel={() => setEditingEnv(false)}
           />
         </box>
       ) : null}
@@ -910,6 +914,11 @@ export function ProfileAccountHeader({
                   void cliLoginPending
                     .submitCode?.(trimmed)
                     .finally(() => setCliLoginPending(null));
+                }}
+                onCancel={() => {
+                  const doCancel = cliLoginPending.cancel;
+                  setCliLoginPending(null);
+                  void doCancel?.();
                 }}
               />
               <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
@@ -1099,7 +1108,7 @@ export function ProvidersOverviewPanel({
     return () => clearTimeout(timer);
   }, [safeCursor, accounts.length, opencodeStop, addStop, cliStart, selected, wizard]);
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.defaultPrevented) return;
     const escape = key.name === "escape" || key.name === "esc";
     const enter = key.name === "return" || key.name === "enter";
@@ -1201,7 +1210,7 @@ export function ProvidersOverviewPanel({
     } else if (key.sequence === "U" && !key.ctrl && !key.meta) {
       onUpdateAll();
     }
-  });
+  }, { capture: (key) => key.name !== "tab" });
 
   if (wizard !== null) {
     return (
@@ -1266,6 +1275,7 @@ export function ProvidersOverviewPanel({
                   if (!id) return;
                   setWizard({ step: "label", kind: wizard.kind, id });
                 }}
+                onCancel={() => setWizard(null)}
               />
             </>
           ) : wizard.step === "label" ? (
@@ -1280,6 +1290,7 @@ export function ProvidersOverviewPanel({
                 fallback={wizard.id}
                 width={Math.max(20, width - 4)}
                 onSubmit={(value) => setWizard({ step: "home", kind: wizard.kind, id: wizard.id, label: value.trim() })}
+                onCancel={() => setWizard(null)}
               />
             </>
           ) : (
@@ -1312,6 +1323,7 @@ export function ProvidersOverviewPanel({
                     }
                   });
                 }}
+                onCancel={() => setWizard(null)}
               />
             </>
           )}
@@ -1550,6 +1562,11 @@ export function ProvidersOverviewPanel({
                             .submitCode?.(trimmed)
                             .finally(() => setCliLoginPending(null));
                         }}
+                        onCancel={() => {
+                          const doCancel = cliLoginPending.cancel;
+                          setCliLoginPending(null);
+                          void doCancel?.();
+                        }}
                       />
                       <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
                         {cliLoginPending.url ? (
@@ -1624,6 +1641,7 @@ export function ProvidersOverviewPanel({
                     setEditingField(field.id);
                   }}
                   onSave={(next) => saveField(field.id, next)}
+                  onCancel={() => setEditingField(null)}
                 />
               </Fragment>
             );

@@ -1,4 +1,4 @@
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 import { previewPlacement, type LoadedImage, type Rect } from "../../model/imagethumb.js";
@@ -79,7 +79,7 @@ export function ImagePreviewLayer({ screenWidth, screenHeight }: { screenWidth: 
     setDrawFailed(false);
   }, [preview]);
   // Typing or a key-driven scroll moves what the preview is anchored to.
-  useKeyboard(() => clearImagePreview());
+  useKeyLayer(() => clearImagePreview(), { active: preview !== null && !modalOpen && !viewing, priority: 50, allowDuringTextInput: true });
 
   if (preview === null || modalOpen || viewing) return null;
   // Nothing drawable (over the native ceiling, or corrupt), or a draw that
