@@ -85,6 +85,13 @@ function defaultIdPlaceholder(): string {
   return "personal";
 }
 
+function isCliAuthenticated(account: ProviderAccountSummary, catalog: readonly ProviderSummary[] | null): boolean {
+  if (account.email) return true;
+  if (account.signedIn !== null) return account.signedIn;
+  const live = catalog?.find((entry) => entry.instanceId === account.instanceId);
+  return live?.authStatus !== null && live?.authStatus !== undefined && live.authStatus !== "unauthenticated";
+}
+
 function accountStatusLine(account: ProviderAccountSummary, catalog: readonly ProviderSummary[] | null): string {
   if (!account.enabled) return t("settings.providers.disabled");
   const parts: string[] = [];
@@ -95,8 +102,13 @@ function accountStatusLine(account: ProviderAccountSummary, catalog: readonly Pr
   } else {
     const live = catalog?.find((entry) => entry.instanceId === account.instanceId);
     if (live?.status) parts.push(live.status);
-    else if (live?.authStatus) parts.push(t("settings.providers.authenticated"));
-    else if (account.homePath) parts.push(account.homePath);
+    else if (account.signedIn === true || (live?.authStatus && live.authStatus !== "unauthenticated")) {
+      parts.push(t("settings.providers.authenticated"));
+    } else if (account.signedIn === false) {
+      parts.push(t("settings.providers.notSignedIn"));
+    } else if (account.homePath) {
+      parts.push(account.homePath);
+    }
   }
   if (account.planType) parts.push(account.planType);
   if (account.codexVerified) parts.push(t("settings.providers.codexVerified"));
@@ -461,7 +473,7 @@ function CliRowCard({
   onUpdate: () => void;
 }) {
   const { hovered, handlers } = useHover();
-  const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.panel;
+  const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
   const installedVer = versionNumber(check?.version ?? null);
   const latestEntry = latest === null ? undefined : { enabled: latest.enabled, latest: null, channel: null, ...latest[cli] };
   const versionLine = providerVersionLine(check, latestEntry);
@@ -825,16 +837,25 @@ export function ProfileAccountHeader({
           )
         ) : (
           <>
-            {onAccountLogin ? (
-              <Chip
-                bracketed
-                surface={SURFACE.panel}
-                label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signIn")}
-                disabled={cliLoginPending !== null}
-                accent
-                onPress={startCliLogin}
-              />
-            ) : null}
+            {onAccountLogin ? (() => {
+              const authenticated = isCliAuthenticated(account, providers);
+              return (
+                <Chip
+                  bracketed
+                  surface={SURFACE.panel}
+                  label={
+                    cliLoginPending
+                      ? t("settings.providers.signingIn")
+                      : authenticated
+                        ? t("settings.providers.switchAccount")
+                        : t("settings.providers.signIn")
+                  }
+                  disabled={cliLoginPending !== null}
+                  {...(!authenticated ? { accent: true } : {})}
+                  onPress={startCliLogin}
+                />
+              );
+            })() : null}
             <Chip
               bracketed
               surface={SURFACE.panel}
@@ -1514,15 +1535,23 @@ export function ProvidersOverviewPanel({
                 </text>
               ) : null}
             </box>
-          ) : onAccountLogin ? (
+          ) : onAccountLogin ? (() => {
+            const authenticated = isCliAuthenticated(selected, providers);
+            return (
             <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
               <box style={{ flexDirection: "row" }} backgroundColor={SURFACE.panel}>
                 <Chip
                   bracketed
                   surface={SURFACE.panel}
-                  label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signIn")}
+                  label={
+                    cliLoginPending
+                      ? t("settings.providers.signingIn")
+                      : authenticated
+                        ? t("settings.providers.switchAccount")
+                        : t("settings.providers.signIn")
+                  }
                   disabled={cliLoginPending !== null}
-                  accent
+                  {...(!authenticated ? { accent: true } : {})}
                   onPress={() => {
                     if (cliLoginPending !== null) return;
                     void onAccountLogin(selected.kind, selected.id).then((started) => {
@@ -1608,7 +1637,8 @@ export function ProvidersOverviewPanel({
                 </box>
               ) : null}
             </box>
-          ) : null}
+            );
+          })() : null}
           <AccountUsageRows
             limits={providerUsageLimitsFor(usageByInstance, {
               instanceId: selected.instanceId,

@@ -20,7 +20,7 @@ import path from "node:path";
 
 import { acpProviders } from "../providers/acp/catalog.js";
 import { loadAcpRegistryCatalog, type LoadedAcpRegistry } from "../providers/acp/registry.js";
-import { accountDisplayName } from "../providers/accounts.js";
+import { accountDisplayName, probeClaudeAccountAuth } from "../providers/accounts.js";
 import { discoverChatGptModels, toChatGptModelSummary, type ChatGptModelInfo } from "../providers/chatgpt/catalog.js";
 import { ensureFreshChatGptToken } from "../providers/chatgpt/oauth.js";
 import { antigravityProviders } from "../providers/antigravity/catalog.js";
@@ -310,6 +310,7 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
         ? claudeInstalled
         : binaryOnPath(binary, env);
     const disabled = account.enabled === false;
+    const auth = accountInstalled && !disabled ? probeClaudeAccountAuth(account, env) : null;
     return {
       instanceId,
       driver: "claude",
@@ -317,7 +318,7 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
       enabled: accountInstalled && !disabled,
       installed: accountInstalled,
       status: !accountInstalled ? "not installed" : disabled ? "disabled" : null,
-      authStatus: null,
+      authStatus: auth?.signedIn ? (auth.email ? "oauth" : "authenticated") : null,
       models: accountInstalled && !disabled ? claudeModelsFor(instanceId) : [],
       supportedRuntimeModes: null,
       usageLimits: null,

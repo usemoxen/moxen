@@ -7,6 +7,8 @@
  * isolate CLI-owned logins via directory/environment isolation; ChatGPT keeps
  * its OAuth tokens exclusively in the OS keychain (`keychain:...` ref only).
  */
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { appHomeDir, expandHome } from "../config.js";
@@ -494,27 +496,116 @@ export function resolveChatGptAccount(
 }
 
 /** Build a public, credential-free summary for one Claude, ChatGPT, or Antigravity account. */
+/** Non-secret authentication status & identity probed from a CLI account's local state. */
+export interface AccountAuthProbe {
+  readonly signedIn: boolean;
+  readonly email: string | null;
+}
+
+function readJsonRecord(filePath: string): Record<string, unknown> | null {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function expandAccountHome(raw: string, homeDir: string): string {
+  const trimmed = raw.trim();
+  if (trimmed === "~") return homeDir;
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return path.join(homeDir, trimmed.slice(2));
+  }
+  return expandHome(trimmed);
+}
+
+/**
+ * Inspect non-secret Claude Code authentication metadata for an account:
+ * reads only `oauthAccount.emailAddress` / `accountUuid` from `.claude.json`
+ * (or checks `ANTHROPIC_API_KEY` in env) without touching or returning tokens.
+ */
+export function probeClaudeAccountAuth(
+  account: Pick<ClaudeAccountConfig, "homePath" | "env">,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  homeDir: string = os.homedir(),
+): AccountAuthProbe {
+  const configuredHome = account.homePath?.trim();
+  const envConfigDir = account.env?.CLAUDE_CONFIG_DIR?.trim() || baseEnv.CLAUDE_CONFIG_DIR?.trim();
+  const claudeJsonPath = configuredHome
+    ? path.join(path.resolve(expandAccountHome(configuredHome, homeDir)), ".claude.json")
+    : envConfigDir
+      ? path.join(path.resolve(expandAccountHome(envConfigDir, homeDir)), ".claude.json")
+      : path.join(homeDir, ".claude.json");
+  const root = readJsonRecord(claudeJsonPath);
+  const oauth =
+    root && root.oauthAccount !== null && typeof root.oauthAccount === "object" && !Array.isArray(root.oauthAccount)
+      ? (root.oauthAccount as Record<string, unknown>)
+      : null;
+  const email = typeof oauth?.emailAddress === "string" && oauth.emailAddress.trim().length > 0 ? oauth.emailAddress.trim() : null;
+  const accountUuid = typeof oauth?.accountUuid === "string" && oauth.accountUuid.trim().length > 0 ? oauth.accountUuid.trim() : null;
+  if (email || accountUuid) {
+    return { signedIn: true, email };
+  }
+  const hasApiKey = Boolean(account.env?.ANTHROPIC_API_KEY?.trim() || baseEnv.ANTHROPIC_API_KEY?.trim());
+  return { signedIn: hasApiKey, email: null };
+}
+
+/**
+ * Inspect non-secret Antigravity (`agy`) authentication metadata for an account:
+ * checks `cache/acp-auth-state.json` and extracts only `id_token_email` / presence
+ * from `antigravity-oauth-token` without ever returning or logging any token.
+ */
+export function probeAntigravityAccountAuth(
+  account: Pick<AntigravityAccountConfig, "homePath" | "env">,
+  _baseEnv: NodeJS.ProcessEnv = process.env,
+  homeDir: string = os.homedir(),
+): AccountAuthProbe {
+  const configuredHome = account.homePath?.trim();
+  const resolvedBase = configuredHome ? path.resolve(expandAccountHome(configuredHome, homeDir)) : homeDir;
+  const agyDir = path.join(resolvedBase, ".gemini", "antigravity-cli");
+  const tokenDoc = readJsonRecord(path.join(agyDir, "antigravity-oauth-token"));
+  const email =
+    typeof tokenDoc?.id_token_email === "string" && tokenDoc.id_token_email.trim().length > 0
+      ? tokenDoc.id_token_email.trim()
+      : null;
+  const hasToken = typeof tokenDoc?.token === "string" && tokenDoc.token.trim().length > 0;
+  if (email || hasToken) {
+    return { signedIn: true, email };
+  }
+  const authState = readJsonRecord(path.join(agyDir, "cache", "acp-auth-state.json"));
+  const methodId = typeof authState?.methodId === "string" && authState.methodId.trim().length > 0 ? authState.methodId.trim() : null;
+  return { signedIn: methodId !== null, email: null };
+}
+
 export function summarizeAccount(
   kind: "claude",
   account: ClaudeAccountConfig,
+  auth?: boolean | AccountAuthProbe,
 ): ProviderAccountSummary;
 export function summarizeAccount(
   kind: "antigravity",
   account: AntigravityAccountConfig,
+  auth?: boolean | AccountAuthProbe,
 ): ProviderAccountSummary;
 export function summarizeAccount(
   kind: "chatgpt",
   account: ChatGptAccountConfig,
-  signedIn?: boolean,
+  auth?: boolean | AccountAuthProbe,
 ): ProviderAccountSummary;
 export function summarizeAccount(
   kind: AccountProviderKind,
   account: ClaudeAccountConfig | AntigravityAccountConfig | ChatGptAccountConfig,
-  signedIn?: boolean,
+  auth?: boolean | AccountAuthProbe,
 ): ProviderAccountSummary {
   const id = account.id.trim().toLowerCase();
   const instanceId = accountInstanceId(kind, id);
   const label = account.label?.trim() || id;
+  const probedSignedIn = typeof auth === "boolean" ? auth : auth?.signedIn;
+  const probedEmail = typeof auth === "object" && auth !== null ? auth.email : null;
   const base = {
     kind,
     id,
@@ -532,10 +623,10 @@ export function summarizeAccount(
       homePath: claude.homePath ?? null,
       binaryPath: claude.binaryPath ?? null,
       launchArgs: claude.launchArgs?.length ? claude.launchArgs.join(" ") : null,
-      email: null,
+      email: probedEmail,
       workspaceName: null,
       planType: null,
-      signedIn: null,
+      signedIn: probedSignedIn ?? null,
       codexHomePath: null,
       codexBinaryPath: null,
       codexLaunchArgs: null,
@@ -549,10 +640,10 @@ export function summarizeAccount(
       homePath: agy.homePath ?? null,
       binaryPath: agy.binaryPath ?? null,
       launchArgs: agy.launchArgs ?? null,
-      email: null,
+      email: probedEmail,
       workspaceName: null,
       planType: null,
-      signedIn: null,
+      signedIn: probedSignedIn ?? null,
       codexHomePath: null,
       codexBinaryPath: null,
       codexLaunchArgs: null,
@@ -565,10 +656,10 @@ export function summarizeAccount(
     homePath: null,
     binaryPath: null,
     launchArgs: null,
-    email: chatgpt.email ?? null,
+    email: chatgpt.email ?? probedEmail ?? null,
     workspaceName: chatgpt.workspaceName ?? null,
     planType: chatgpt.planType ?? null,
-    signedIn: signedIn ?? Boolean(chatgpt.authRef),
+    signedIn: probedSignedIn ?? Boolean(chatgpt.authRef),
     codexHomePath: chatgpt.codexHomePath ?? null,
     codexBinaryPath: chatgpt.codexBinaryPath ?? null,
     codexLaunchArgs: chatgpt.codexLaunchArgs ?? null,
@@ -579,18 +670,20 @@ export function summarizeAccount(
 /** Return credential-free summaries of all configured accounts in stable order. */
 export function summarizeProviderAccounts(
   providers: ProvidersConfig | undefined,
-  signedInByInstance?: ReadonlyMap<string, boolean>,
+  authByInstance?: ReadonlyMap<string, boolean | AccountAuthProbe>,
 ): ProviderAccountSummary[] {
   const out: ProviderAccountSummary[] = [];
   for (const account of providers?.claude?.accounts ?? []) {
-    out.push(summarizeAccount("claude", account));
+    const instanceId = accountInstanceId("claude", account.id.trim().toLowerCase());
+    out.push(summarizeAccount("claude", account, authByInstance?.get(instanceId)));
   }
   for (const account of providers?.chatgpt?.accounts ?? []) {
     const instanceId = accountInstanceId("chatgpt", account.id.trim().toLowerCase());
-    out.push(summarizeAccount("chatgpt", account, signedInByInstance?.get(instanceId)));
+    out.push(summarizeAccount("chatgpt", account, authByInstance?.get(instanceId)));
   }
   for (const account of providers?.antigravity?.accounts ?? []) {
-    out.push(summarizeAccount("antigravity", account));
+    const instanceId = accountInstanceId("antigravity", account.id.trim().toLowerCase());
+    out.push(summarizeAccount("antigravity", account, authByInstance?.get(instanceId)));
   }
   return out;
 }

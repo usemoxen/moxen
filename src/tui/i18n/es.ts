@@ -495,6 +495,7 @@ export const es: Catalog = {
   "settings.providers.hint": "↑↓ mover · intro abrir · espacio activar · a añadir · U actualizar todos · esc",
   "settings.providers.detailHint": "↑↓ mover · intro editar · espacio activar · r quitar · esc volver",
   "settings.providers.signIn": "Iniciar sesión",
+  "settings.providers.switchAccount": "Cambiar cuenta",
   "settings.providers.signInCodex": "Iniciar sesión en Codex",
   "settings.providers.signInChatGpt": "Iniciar sesión con ChatGPT",
   "settings.providers.signingIn": "Esperando inicio de sesión…",

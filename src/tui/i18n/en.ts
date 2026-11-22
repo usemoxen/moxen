@@ -501,6 +501,7 @@ export const en = {
   "settings.providers.hint": "↑↓ move · enter open · space toggle · a add · U update all · esc",
   "settings.providers.detailHint": "↑↓ move · enter edit · space toggle · r remove · esc back",
   "settings.providers.signIn": "Sign in",
+  "settings.providers.switchAccount": "Switch account",
   "settings.providers.signInCodex": "Sign in Codex companion",
   "settings.providers.signInChatGpt": "Sign in with ChatGPT",
   "settings.providers.signingIn": "Waiting for sign-in…",

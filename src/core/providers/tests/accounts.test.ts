@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -12,6 +13,8 @@ import {
   normalizeAntigravityAccounts,
   normalizeChatGptAccounts,
   normalizeClaudeAccounts,
+  probeAntigravityAccountAuth,
+  probeClaudeAccountAuth,
   resolveAntigravityAccount,
   resolveClaudeAccount,
 } from "../accounts.js";
@@ -305,5 +308,46 @@ describe("per-account runtime and cache isolation", () => {
       ["chatgpt/personal", true, "plus"],
       ["chatgpt/work", false, "unauthenticated"],
     ]);
+  });
+
+  it("probes non-secret Claude and Antigravity account emails and signed-in state from isolated homes", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "moxen-acct-auth-"));
+    try {
+      const claudeHome = path.join(tmp, "claude-default");
+      fs.mkdirSync(claudeHome, { recursive: true });
+      expect(probeClaudeAccountAuth({ homePath: claudeHome }, {}, tmp)).toEqual({ signedIn: false, email: null });
+
+      fs.writeFileSync(
+        path.join(claudeHome, ".claude.json"),
+        JSON.stringify({ oauthAccount: { emailAddress: "claude@example.com", accountUuid: "u-1" } }),
+      );
+      expect(probeClaudeAccountAuth({ homePath: claudeHome }, {}, tmp)).toEqual({
+        signedIn: true,
+        email: "claude@example.com",
+      });
+      expect(probeClaudeAccountAuth({ homePath: path.join(tmp, "missing"), env: { ANTHROPIC_API_KEY: "test" } }, {}, tmp)).toEqual({
+        signedIn: true,
+        email: null,
+      });
+
+      const agyHome = path.join(tmp, "agy-default");
+      const agyDir = path.join(agyHome, ".gemini", "antigravity-cli");
+      fs.mkdirSync(path.join(agyDir, "cache"), { recursive: true });
+      expect(probeAntigravityAccountAuth({ homePath: agyHome }, {}, tmp)).toEqual({ signedIn: false, email: null });
+
+      fs.writeFileSync(path.join(agyDir, "cache", "acp-auth-state.json"), JSON.stringify({ methodId: "oauth-personal" }));
+      expect(probeAntigravityAccountAuth({ homePath: agyHome }, {}, tmp)).toEqual({ signedIn: true, email: null });
+
+      fs.writeFileSync(
+        path.join(agyDir, "antigravity-oauth-token"),
+        JSON.stringify({ token: "opaque", auth_method: "oauth-personal", id_token_email: "agy@example.com" }),
+      );
+      expect(probeAntigravityAccountAuth({ homePath: agyHome }, {}, tmp)).toEqual({
+        signedIn: true,
+        email: "agy@example.com",
+      });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

@@ -39,7 +39,7 @@ import { SdkTransport } from "../core/providers/claude/transport.js";
 import { diagnose } from "../core/diagnostics/doctor.js";
 import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
 import type { AccountProviderKind } from "../core/types.js";
-import { managedAccountHomeDisplayPath, removeProviderAccount, resolveChatGptAccount, resolveProfileProviderConfig, setProviderAccountEnabled, summarizeAccount, summarizeProviderAccounts, upsertProviderAccount } from "../core/providers/accounts.js";
+import { managedAccountHomeDisplayPath, probeAntigravityAccountAuth, probeClaudeAccountAuth, removeProviderAccount, resolveChatGptAccount, resolveProfileProviderConfig, setProviderAccountEnabled, summarizeAccount, summarizeProviderAccounts, upsertProviderAccount, type AccountAuthProbe } from "../core/providers/accounts.js";
 import { startProviderAccountLoginSession, type ProviderAccountLoginDeps, type ProviderAccountLoginSession } from "../core/providers/accountlogin.js";
 import { migrateProviderProfiles } from "../core/providers/migrate.js";
 import { codexProvider } from "../core/providers/codex/catalog.js";
@@ -875,6 +875,18 @@ export class DirectConnection implements ClientApi {
     await this.migrationPromise;
   }
 
+  /** Fast local-file auth/email probes for Claude and Antigravity profiles (no Keychain IPC). */
+  private probeCliAccountAuth(providers: CliConfig["providers"]): Map<string, boolean | AccountAuthProbe> {
+    const auth = new Map<string, boolean | AccountAuthProbe>();
+    for (const account of providers?.claude?.accounts ?? []) {
+      auth.set(`claude/${account.id.trim().toLowerCase()}`, probeClaudeAccountAuth(account));
+    }
+    for (const account of providers?.antigravity?.accounts ?? []) {
+      auth.set(`antigravity/${account.id.trim().toLowerCase()}`, probeAntigravityAccountAuth(account));
+    }
+    return auth;
+  }
+
   private async settingsSnapshot(): Promise<SettingsSnapshot> {
     const { config, path, exists } = await this.readConfigFile();
     return {
@@ -882,6 +894,7 @@ export class DirectConnection implements ClientApi {
       exists,
       settings: describeSettings(config),
       accountSettings: describeAllAccountSettings(config),
+      accounts: summarizeProviderAccounts(config.providers, this.probeCliAccountAuth(config.providers)),
     };
   }
 
@@ -1943,6 +1956,12 @@ export class DirectConnection implements ClientApi {
             const stored = saved.config.providers?.chatgpt?.accounts?.find((entry) => entry.id === account.id);
             const signedIn = await hasSecret(stored?.authRef);
             account = { ...account, signedIn };
+          } else if (account.kind === "claude") {
+            const stored = saved.config.providers?.claude?.accounts?.find((entry) => entry.id === account.id);
+            if (stored) account = summarizeAccount("claude", stored, probeClaudeAccountAuth(stored));
+          } else if (account.kind === "antigravity") {
+            const stored = saved.config.providers?.antigravity?.accounts?.find((entry) => entry.id === account.id);
+            if (stored) account = summarizeAccount("antigravity", stored, probeAntigravityAccountAuth(stored));
           }
           return { account, created: saved.created, settings: await this.settingsSnapshot(), accepted: true };
         });
@@ -1970,6 +1989,12 @@ export class DirectConnection implements ClientApi {
             const stored = updated.config.providers?.chatgpt?.accounts?.find((entry) => entry.id === account.id);
             const signedIn = await hasSecret(stored?.authRef);
             account = { ...account, signedIn };
+          } else if (account.kind === "claude") {
+            const stored = updated.config.providers?.claude?.accounts?.find((entry) => entry.id === account.id);
+            if (stored) account = summarizeAccount("claude", stored, probeClaudeAccountAuth(stored));
+          } else if (account.kind === "antigravity") {
+            const stored = updated.config.providers?.antigravity?.accounts?.find((entry) => entry.id === account.id);
+            if (stored) account = summarizeAccount("antigravity", stored, probeAntigravityAccountAuth(stored));
           }
           return { account, settings: await this.settingsSnapshot(), accepted: true };
         });
@@ -2129,11 +2154,11 @@ export class DirectConnection implements ClientApi {
             entry.kind === "claude"
               ? (() => {
                   const found = config.providers?.claude?.accounts?.find((item) => item.id.trim().toLowerCase() === entry.id);
-                  return found ? summarizeAccount("claude", found) : null;
+                  return found ? summarizeAccount("claude", found, probeClaudeAccountAuth(found)) : null;
                 })()
               : (() => {
                   const found = config.providers?.antigravity?.accounts?.find((item) => item.id.trim().toLowerCase() === entry.id);
-                  return found ? summarizeAccount("antigravity", found) : null;
+                  return found ? summarizeAccount("antigravity", found, probeAntigravityAccountAuth(found)) : null;
                 })();
           return {
             account,
@@ -2852,13 +2877,13 @@ export class DirectConnection implements ClientApi {
       case "providers.accounts": {
         const config = await this.loadConfig();
         const chatgptAccounts = config.providers?.chatgpt?.accounts ?? [];
-        const signedIn = new Map<string, boolean>();
+        const authByInstance = this.probeCliAccountAuth(config.providers);
         await Promise.all(
           chatgptAccounts.map(async (account) => {
-            signedIn.set(`chatgpt/${account.id.trim().toLowerCase()}`, await hasSecret(account.authRef));
+            authByInstance.set(`chatgpt/${account.id.trim().toLowerCase()}`, await hasSecret(account.authRef));
           }),
         );
-        return { accounts: summarizeProviderAccounts(config.providers, signedIn) };
+        return { accounts: summarizeProviderAccounts(config.providers, authByInstance) };
       }
       case "acp.registry.list": {
         const loaded = await loadAcpRegistryCatalog({

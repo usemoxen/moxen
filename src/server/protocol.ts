@@ -1054,6 +1054,11 @@ export interface SettingsSnapshot {
    * its own full setting table, never inheriting parent `providers.<kind>.*`.
    */
   readonly accountSettings?: Readonly<Record<string, readonly SettingView[]>>;
+  /**
+   * Configured multi-account provider summaries so Settings opens with the
+   * sidebar and Overview populated immediately without waiting on a second RPC.
+   */
+  readonly accounts?: readonly ProviderAccountSummary[];
 }
 
 // -- runtime decoding --------------------------------------------------------
