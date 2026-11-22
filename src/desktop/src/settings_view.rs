@@ -590,8 +590,16 @@ impl Workspace {
                     self.settings_error = Some("Type an account id (for example: personal or work).".into());
                 } else {
                     let instance_id = format!("{kind}/{slug}");
-                    self.source
-                        .save_provider_account(serde_json::json!({ "kind": kind, "id": slug }));
+                    let mut payload = serde_json::json!({ "kind": kind, "id": slug });
+                    if slug != "default" {
+                        let managed = format!("~/.moxen/accounts/{kind}/{slug}");
+                        if kind == "chatgpt" {
+                            payload["codexHomePath"] = serde_json::Value::String(managed);
+                        } else {
+                            payload["homePath"] = serde_json::Value::String(managed);
+                        }
+                    }
+                    self.source.save_provider_account(payload);
                     self.settings_account = Some(instance_id);
                     self.settings_form = None;
                 }
@@ -4853,18 +4861,31 @@ fn provider_profile_tab(
         let logout_id = account.id.clone();
         let pair_id = account.id.clone();
         let confirm_pair_id = account.id.clone();
+        let codex_login_id = account.id.clone();
         let mut bar = div().flex().flex_wrap().gap(px(6.));
         if signed_in {
-            bar = bar
-                .child(small_button(
-                    ("profile-chatgpt-logout", 0),
-                    "Sign out",
-                    "Revoke ChatGPT OAuth tokens and clear keychain",
+            bar = bar.child(small_button(
+                ("profile-chatgpt-logout", 0),
+                "Sign out",
+                "Revoke ChatGPT OAuth tokens and clear keychain",
+                cx.listener(move |this, _, _, cx| {
+                    this.source.logout_chatgpt(&logout_id);
+                    cx.notify();
+                }),
+            ));
+            if !account.codex_verified {
+                bar = bar.child(small_button(
+                    ("profile-chatgpt-codex-login", 0),
+                    "Sign in Codex companion",
+                    "Launch Codex login into this profile's isolated CODEX_HOME and verify pairing",
                     cx.listener(move |this, _, _, cx| {
-                        this.source.logout_chatgpt(&logout_id);
+                        this.source
+                            .start_provider_account_login("chatgpt", &codex_login_id);
                         cx.notify();
                     }),
-                ))
+                ));
+            }
+            bar = bar
                 .child(small_button(
                     ("profile-chatgpt-pair", 0),
                     "Verify Codex companion",
@@ -4901,9 +4922,24 @@ fn provider_profile_tab(
                 div()
                     .text_xs()
                     .text_color(color("ink-2"))
-                    .child("Unpaired: link a verified Codex companion for live usage windows and image generation."),
+                    .child("Unpaired: sign in or verify a Codex companion for live usage windows and image generation."),
             );
         }
+    } else {
+        let login_kind = account.kind.clone();
+        let login_id = account.id.clone();
+        header_card = header_card.child(
+            div().flex().flex_wrap().gap(px(6.)).child(small_button(
+                ("profile-cli-login", 0),
+                "Sign in",
+                "Launch CLI login inside this profile's isolated folder",
+                cx.listener(move |this, _, _, cx| {
+                    this.source
+                        .start_provider_account_login(&login_kind, &login_id);
+                    cx.notify();
+                }),
+            )),
+        );
     }
 
     out = out.child(header_card);
@@ -5230,18 +5266,31 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
             let logout_id = account.id.clone();
             let pair_id = account.id.clone();
             let confirm_pair_id = account.id.clone();
+            let codex_login_id = account.id.clone();
             let mut chatgpt_bar = div().flex().flex_wrap().gap(px(6.));
             if signed_in {
-                chatgpt_bar = chatgpt_bar
-                    .child(small_button(
-                        ("providers-chatgpt-logout", 0),
-                        "Sign out",
-                        "Revoke ChatGPT OAuth tokens and clear keychain",
+                chatgpt_bar = chatgpt_bar.child(small_button(
+                    ("providers-chatgpt-logout", 0),
+                    "Sign out",
+                    "Revoke ChatGPT OAuth tokens and clear keychain",
+                    cx.listener(move |this, _, _, cx| {
+                        this.source.logout_chatgpt(&logout_id);
+                        cx.notify();
+                    }),
+                ));
+                if !account.codex_verified {
+                    chatgpt_bar = chatgpt_bar.child(small_button(
+                        ("providers-chatgpt-codex-login", 0),
+                        "Sign in Codex companion",
+                        "Launch Codex login into this profile's isolated CODEX_HOME and verify pairing",
                         cx.listener(move |this, _, _, cx| {
-                            this.source.logout_chatgpt(&logout_id);
+                            this.source
+                                .start_provider_account_login("chatgpt", &codex_login_id);
                             cx.notify();
                         }),
-                    ))
+                    ));
+                }
+                chatgpt_bar = chatgpt_bar
                     .child(small_button(
                         ("providers-chatgpt-pair", 0),
                         "Verify Codex companion",
@@ -5278,9 +5327,24 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                     div()
                         .text_xs()
                         .text_color(color("ink-2"))
-                        .child("Unpaired: link a verified Codex companion for live usage windows and image generation."),
+                        .child("Unpaired: sign in or verify a Codex companion for live usage windows and image generation."),
                 );
             }
+        } else {
+            let login_kind = account.kind.clone();
+            let login_id = account.id.clone();
+            detail_col = detail_col.child(
+                div().flex().flex_wrap().gap(px(6.)).child(small_button(
+                    ("providers-cli-login", 0),
+                    "Sign in",
+                    "Launch CLI login inside this profile's isolated folder",
+                    cx.listener(move |this, _, _, cx| {
+                        this.source
+                            .start_provider_account_login(&login_kind, &login_id);
+                        cx.notify();
+                    }),
+                )),
+            );
         }
 
         detail_col = detail_col.child(ui::caps("Runtime"));

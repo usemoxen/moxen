@@ -16,6 +16,7 @@ import {
 import type { SettingSection } from "../../../core/configschema.js";
 import {
   ACCOUNT_PROVIDER_KINDS,
+  managedAccountHomeDisplayPath,
   type AccountProviderKind,
   type ProviderAccountSaveInput,
   type ProviderAccountSummary,
@@ -74,8 +75,7 @@ function kindToSection(kind: AccountProviderKind): SettingSection {
 }
 
 function defaultHomeHint(kind: AccountProviderKind, id: string): string {
-  const prefix = kind === "claude" ? "~/.claude-" : kind === "antigravity" ? "~/.agy-" : "~/.codex-";
-  return `${prefix}${id}`;
+  return managedAccountHomeDisplayPath(kind, id);
 }
 
 function defaultIdPlaceholder(): string {
@@ -521,6 +521,14 @@ function DetailFieldCard({
   );
 }
 
+export interface AccountLoginStartView {
+  readonly authorizationUrl: string | null;
+  readonly openBrowser: boolean;
+  readonly message: string | null;
+  readonly homePath: string | null;
+  readonly done: Promise<{ readonly verified?: boolean; readonly needsConfirmation?: boolean; readonly reason?: string | null } | void>;
+}
+
 export interface ProfileAccountHeaderProps {
   readonly account: ProviderAccountSummary;
   readonly providers: readonly ProviderSummary[] | null;
@@ -543,6 +551,7 @@ export interface ProfileAccountHeaderProps {
   readonly onChatGptLogin?: (accountId: string, label?: string) => Promise<{ readonly authorizationUrl: string; readonly done: Promise<void> } | null>;
   readonly onChatGptLogout?: (accountId: string) => Promise<void>;
   readonly onChatGptPairCodex?: (accountId: string, confirmWorkspace?: boolean) => Promise<{ readonly verified: boolean; readonly needsConfirmation: boolean; readonly reason: string | null } | null>;
+  readonly onAccountLogin?: (kind: AccountProviderKind, id: string) => Promise<AccountLoginStartView | null>;
 }
 
 /**
@@ -566,18 +575,45 @@ export function ProfileAccountHeader({
   onChatGptLogin,
   onChatGptLogout,
   onChatGptPairCodex,
+  onAccountLogin,
 }: ProfileAccountHeaderProps) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [editingEnv, setEditingEnv] = useState(false);
   const [authUrlPending, setAuthUrlPending] = useState<string | null>(null);
+  const [cliLoginPending, setCliLoginPending] = useState<{ readonly message: string; readonly url: string | null } | null>(null);
   const [pairFeedback, setPairFeedback] = useState<{ readonly text: string; readonly needsConfirmation: boolean } | null>(null);
 
   useEffect(() => {
     setConfirmRemove(false);
     setEditingEnv(false);
     setAuthUrlPending(null);
+    setCliLoginPending(null);
     setPairFeedback(null);
   }, [account.instanceId]);
+
+  const startCliLogin = () => {
+    if (cliLoginPending !== null || !onAccountLogin) return;
+    setPairFeedback(null);
+    void onAccountLogin(account.kind, account.id).then((started) => {
+      if (!started) return;
+      setCliLoginPending({
+        message: started.message ?? t("settings.providers.signingIn"),
+        url: started.authorizationUrl,
+      });
+      if (started.openBrowser && started.authorizationUrl) {
+        openBrowserUrl(started.authorizationUrl);
+      }
+      void started.done
+        .then((res) => {
+          if (res && res.verified === false && res.reason) {
+            setPairFeedback({ text: res.reason, needsConfirmation: res.needsConfirmation === true });
+          } else if (res?.verified === true) {
+            setPairFeedback(null);
+          }
+        })
+        .finally(() => setCliLoginPending(null));
+    });
+  };
 
   const cliKind: UpdatableProvider = account.kind === "claude" ? "claude" : account.kind === "antigravity" ? "antigravity" : "codex";
   const check = versions?.[cliKind];
@@ -624,6 +660,14 @@ export function ProfileAccountHeader({
                   void onChatGptLogout?.(account.id);
                 }}
               />
+              {!account.codexVerified && onAccountLogin ? (
+                <Chip
+                  label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signInCodex")}
+                  disabled={cliLoginPending !== null}
+                  accent
+                  onPress={startCliLogin}
+                />
+              ) : null}
               <Chip
                 label={pairFeedback?.needsConfirmation ? t("settings.providers.confirmPairCodex") : t("settings.providers.pairCodex")}
                 accent
@@ -655,14 +699,24 @@ export function ProfileAccountHeader({
             />
           )
         ) : (
-          <Chip
-            label={busyUpdate ? t("settings.providers.updatingLabel") : t("settings.providers.updateLabel")}
-            disabled={busyUpdate}
-            accent
-            onPress={() => {
-              if (!busyUpdate) onUpdate(cliKind);
-            }}
-          />
+          <>
+            {onAccountLogin ? (
+              <Chip
+                label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signIn")}
+                disabled={cliLoginPending !== null}
+                accent
+                onPress={startCliLogin}
+              />
+            ) : null}
+            <Chip
+              label={busyUpdate ? t("settings.providers.updatingLabel") : t("settings.providers.updateLabel")}
+              disabled={busyUpdate}
+              accent
+              onPress={() => {
+                if (!busyUpdate) onUpdate(cliKind);
+              }}
+            />
+          </>
         )}
         <Chip label={t("settings.providers.editEnv")} onPress={() => setEditingEnv((open) => !open)} />
         <Chip
@@ -697,13 +751,19 @@ export function ProfileAccountHeader({
         <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
           {t("settings.providers.openAuthUrl", { url: authUrlPending })}
         </text>
+      ) : cliLoginPending ? (
+        <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+          {cliLoginPending.url
+            ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
+            : cliLoginPending.message}
+        </text>
       ) : account.kind === "chatgpt" && !account.codexVerified ? (
         <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
           {t("settings.providers.unpairedHint")}
         </text>
       ) : null}
       {pairFeedback?.text ? (
-        <text fg={COLOR.danger} bg={SURFACE.panel} wrapMode="word" selectable={false}>{pairFeedback.text}</text>
+        <text fg={pairFeedback.needsConfirmation ? COLOR.warn : COLOR.danger} bg={SURFACE.panel} wrapMode="word" selectable={false}>{pairFeedback.text}</text>
       ) : null}
       {confirmRemove ? (
         <text fg={COLOR.warn} bg={SURFACE.panel} wrapMode="word" selectable={false}>
@@ -748,6 +808,7 @@ export interface ProvidersOverviewPanelProps {
   readonly onChatGptLogin?: (accountId: string, label?: string) => Promise<{ readonly authorizationUrl: string; readonly done: Promise<void> } | null>;
   readonly onChatGptLogout?: (accountId: string) => Promise<void>;
   readonly onChatGptPairCodex?: (accountId: string, confirmWorkspace?: boolean) => Promise<{ readonly verified: boolean; readonly needsConfirmation: boolean; readonly reason: string | null } | null>;
+  readonly onAccountLogin?: (kind: AccountProviderKind, id: string) => Promise<AccountLoginStartView | null>;
 }
 
 export function ProvidersOverviewPanel({
@@ -776,12 +837,14 @@ export function ProvidersOverviewPanel({
   onChatGptLogin,
   onChatGptLogout,
   onChatGptPairCodex,
+  onAccountLogin,
 }: ProvidersOverviewPanelProps) {
   const [cursor, setCursor] = useState(0);
   const [detailCursor, setDetailCursor] = useState(0);
   const [editingField, setEditingField] = useState<DetailFieldId | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [authUrlPending, setAuthUrlPending] = useState<string | null>(null);
+  const [cliLoginPending, setCliLoginPending] = useState<{ readonly message: string; readonly url: string | null } | null>(null);
   const [pairFeedback, setPairFeedback] = useState<{ readonly text: string; readonly needsConfirmation: boolean } | null>(null);
   const [wizard, setWizard] = useState<
     | null
@@ -980,6 +1043,7 @@ export function ProvidersOverviewPanel({
                 {t("settings.providers.addId")}
               </text>
               <TextField
+                key={`wizard-id-${wizard.kind}`}
                 initial=""
                 placeholder={defaultIdPlaceholder()}
                 width={Math.max(20, width - 4)}
@@ -996,6 +1060,7 @@ export function ProvidersOverviewPanel({
                 {t("settings.providers.addLabel")}
               </text>
               <TextField
+                key={`wizard-label-${wizard.kind}-${wizard.id}`}
                 initial=""
                 placeholder={wizard.id}
                 fallback={wizard.id}
@@ -1006,10 +1071,11 @@ export function ProvidersOverviewPanel({
           ) : (
             <>
               <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
-                {t("settings.providers.addHome")}
+                {t("settings.providers.addHome", { path: defaultHomeHint(wizard.kind, wizard.id) })}
               </text>
               <TextField
-                initial=""
+                key={`wizard-home-${wizard.kind}-${wizard.id}`}
+                initial={defaultHomeHint(wizard.kind, wizard.id)}
                 placeholder={defaultHomeHint(wizard.kind, wizard.id)}
                 fallback={t("settings.default")}
                 width={Math.max(20, width - 4)}
@@ -1093,7 +1159,7 @@ export function ProvidersOverviewPanel({
           </OverflowText>
           {selected.kind === "chatgpt" ? (
             <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
-              <box style={{ flexDirection: "row", gap: 1 }} backgroundColor={SURFACE.panel}>
+              <box style={{ flexDirection: "row", flexWrap: "wrap", gap: 1 }} backgroundColor={SURFACE.panel}>
                 {selected.signedIn ? (
                   <Chip
                     label={t("settings.providers.signOut")}
@@ -1119,6 +1185,34 @@ export function ProvidersOverviewPanel({
                     }}
                   />
                 )}
+                {selected.signedIn && !selected.codexVerified && onAccountLogin ? (
+                  <Chip
+                    label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signInCodex")}
+                    disabled={cliLoginPending !== null}
+                    accent
+                    onPress={() => {
+                      if (cliLoginPending !== null) return;
+                      setPairFeedback(null);
+                      void onAccountLogin("chatgpt", selected.id).then((started) => {
+                        if (!started) return;
+                        setCliLoginPending({
+                          message: started.message ?? t("settings.providers.signingIn"),
+                          url: started.authorizationUrl,
+                        });
+                        if (started.openBrowser && started.authorizationUrl) openBrowserUrl(started.authorizationUrl);
+                        void started.done
+                          .then((res) => {
+                            if (res && res.verified === false && res.reason) {
+                              setPairFeedback({ text: res.reason, needsConfirmation: res.needsConfirmation === true });
+                            } else if (res?.verified === true) {
+                              setPairFeedback(null);
+                            }
+                          })
+                          .finally(() => setCliLoginPending(null));
+                      });
+                    }}
+                  />
+                ) : null}
                 {selected.signedIn ? (
                   <Chip
                     label={pairFeedback?.needsConfirmation ? t("settings.providers.confirmPairCodex") : t("settings.providers.pairCodex")}
@@ -1142,14 +1236,49 @@ export function ProvidersOverviewPanel({
                 <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
                   {t("settings.providers.openAuthUrl", { url: authUrlPending })}
                 </text>
+              ) : cliLoginPending ? (
+                <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+                  {cliLoginPending.url
+                    ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
+                    : cliLoginPending.message}
+                </text>
               ) : !selected.codexVerified ? (
                 <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
                   {t("settings.providers.unpairedHint")}
                 </text>
               ) : null}
               {pairFeedback?.text ? (
-                <text fg={COLOR.danger} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+                <text fg={pairFeedback.needsConfirmation ? COLOR.warn : COLOR.danger} bg={SURFACE.panel} wrapMode="word" selectable={false}>
                   {pairFeedback.text}
+                </text>
+              ) : null}
+            </box>
+          ) : onAccountLogin ? (
+            <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+              <box style={{ flexDirection: "row", gap: 1 }} backgroundColor={SURFACE.panel}>
+                <Chip
+                  label={cliLoginPending ? t("settings.providers.signingIn") : t("settings.providers.signIn")}
+                  disabled={cliLoginPending !== null}
+                  accent
+                  onPress={() => {
+                    if (cliLoginPending !== null) return;
+                    void onAccountLogin(selected.kind, selected.id).then((started) => {
+                      if (!started) return;
+                      setCliLoginPending({
+                        message: started.message ?? t("settings.providers.signingIn"),
+                        url: started.authorizationUrl,
+                      });
+                      if (started.openBrowser && started.authorizationUrl) openBrowserUrl(started.authorizationUrl);
+                      void started.done.finally(() => setCliLoginPending(null));
+                    });
+                  }}
+                />
+              </box>
+              {cliLoginPending ? (
+                <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+                  {cliLoginPending.url
+                    ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
+                    : cliLoginPending.message}
                 </text>
               ) : null}
             </box>

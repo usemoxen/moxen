@@ -1860,6 +1860,32 @@ impl ThreadSource for MockSource {
             error: false,
         });
     }
+    fn start_provider_account_login(&mut self, kind: &str, id: &str) {
+        let slug = id.trim().to_lowercase();
+        let target = format!("{kind}/{slug}");
+        if let Some(account) = self
+            .provider_accounts
+            .iter_mut()
+            .find(|a| a.instance_id == target)
+        {
+            if kind == "chatgpt" {
+                if account.codex_home_path.is_none() && slug != "default" {
+                    account.codex_home_path = Some(format!("~/.moxen/accounts/chatgpt/{slug}"));
+                }
+                account.codex_verified = true;
+            } else if account.home_path.is_none() && slug != "default" {
+                account.home_path = Some(format!("~/.moxen/accounts/{kind}/{slug}"));
+            }
+        }
+        self.settings_notice = Some(SettingsNotice {
+            text: if kind == "chatgpt" {
+                format!("Signed in and verified Codex companion for {target}.")
+            } else {
+                format!("Signed in {target}.")
+            },
+            error: false,
+        });
+    }
     fn apply_update(&mut self) {
         self.settings_notice = Some(SettingsNotice {
             text: "Updated to 0.3.0.".into(),

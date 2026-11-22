@@ -53,6 +53,7 @@ import {
   listEfforts,
   listModels,
   listProviderAccounts,
+  loginProviderAccountCli,
   listProviders,
   listSkills,
   parseAccountKind,
@@ -1921,6 +1922,33 @@ providerAccounts
     }),
   );
 
+providerAccounts
+  .command("login")
+  .description("Sign in a configured account's CLI inside its isolated profile folder (claude, antigravity, or chatgpt Codex companion).")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug")
+  .option("--home <path>", "Optional isolated profile folder override (defaults to Moxen's managed folder).")
+  .option("--no-open", "Print the login URL without opening a browser.")
+  .action((kind: string, id: string, options: { home?: string; open?: boolean }) =>
+    action(async () => {
+      const context = await commandContext();
+      const parsedKind = parseAccountKind(kind);
+      const result = await loginProviderAccountCli(context.config, {
+        kind: parsedKind,
+        id,
+        ...(options.home !== undefined ? { homePath: options.home } : {}),
+        noOpen: options.open === false || context.json,
+      });
+      const text =
+        parsedKind === "chatgpt"
+          ? result.verified
+            ? `Signed in and paired Codex companion for chatgpt/${id}${result.homePath ? ` (${result.homePath})` : ""}.`
+            : `${result.reason ?? "Signed in Codex companion, pending verification."}${result.needsConfirmation ? " Re-run `moxen providers chatgpt pair-codex --confirm-workspace` to confirm." : ""}`
+          : `Signed in ${parsedKind}/${id}${result.homePath ? ` (${result.homePath})` : ""}.`;
+      writeSuccess(result, context, text);
+    }),
+  );
+
 const chatgptCli = providers
   .command("chatgpt")
   .description("Sign in with ChatGPT (OAuth 2.0 + OIDC) and pair a verified Codex companion.");
@@ -1982,7 +2010,7 @@ chatgptCli
         });
         const text = result.verified
           ? `Paired verified Codex companion for chatgpt/${id}${result.codexWorkspaceName ? ` (${result.codexWorkspaceName})` : ""}.`
-          : (result.reason ?? "Could not verify Codex companion.");
+          : `${result.reason ?? "Could not verify Codex companion."}${result.needsConfirmation ? " Re-run with --confirm-workspace to confirm." : ""}`;
         writeSuccess(result, context, text);
       }),
   );

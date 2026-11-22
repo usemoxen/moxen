@@ -3579,6 +3579,10 @@ impl ThreadSource for ServerSource {
                 .dispatch("chatgpt.codex.pair", fields)
                 .map_err(|error| problem(&error, None))?;
             let verified = res.get("verified").and_then(Value::as_bool).unwrap_or(false);
+            let needs_confirmation = res
+                .get("needsConfirmation")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let reason = res
                 .get("reason")
                 .and_then(Value::as_str)
@@ -3590,8 +3594,96 @@ impl ThreadSource for ServerSource {
                     } else {
                         reason.to_string()
                     },
-                    error: !verified,
+                    error: !verified && !needs_confirmation,
                 });
+            });
+            read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
+    fn start_provider_account_login(&mut self, kind: &str, id: &str) {
+        let kind_owned = kind.to_string();
+        let id_owned = id.to_string();
+        let shared = self.shared.clone();
+        background(&self.shared, move |wire| {
+            let started = wire
+                .dispatch(
+                    "provider.account.login.start",
+                    json!({ "kind": kind_owned, "id": id_owned }),
+                )
+                .map_err(|error| problem(&error, None))?;
+            let session_id = started
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let auth_url = started
+                .get("authorizationUrl")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let open_browser = started
+                .get("openBrowser")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if open_browser && (auth_url.starts_with("https://") || auth_url.starts_with("http://"))
+            {
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&auth_url).spawn();
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("cmd")
+                    .args(["/c", "start", "", &auth_url])
+                    .spawn();
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let _ = std::process::Command::new("xdg-open").arg(&auth_url).spawn();
+            }
+            let waiting = started
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Complete sign-in in your browser…")
+                .to_string();
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: if auth_url.is_empty() {
+                        waiting.clone()
+                    } else {
+                        format!("{waiting} {auth_url}")
+                    },
+                    error: false,
+                });
+            });
+            let done = wire
+                .dispatch(
+                    "provider.account.login.complete",
+                    json!({ "sessionId": session_id }),
+                )
+                .map_err(|error| problem(&error, None))?;
+            let notice = if kind_owned == "chatgpt" {
+                let verified = done.get("verified").and_then(Value::as_bool).unwrap_or(false);
+                let needs_confirmation = done
+                    .get("needsConfirmation")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let reason = done
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Signed in Codex companion.");
+                SettingsNotice {
+                    text: if verified {
+                        format!("Signed in and verified Codex companion for chatgpt/{id_owned}.")
+                    } else {
+                        reason.to_string()
+                    },
+                    error: !verified && !needs_confirmation,
+                }
+            } else {
+                SettingsNotice {
+                    text: format!("Signed in {kind_owned}/{id_owned}."),
+                    error: false,
+                }
+            };
+            shared.update(|state| {
+                state.settings_notice = Some(notice);
             });
             read_provider_accounts_state(&shared);
             Ok(())

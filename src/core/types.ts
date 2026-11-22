@@ -932,6 +932,15 @@ export function accountInstanceId(kind: AccountProviderKind, accountId: string):
 }
 
 /**
+ * Portable tilde-prefixed Moxen-managed isolated directory for a provider account
+ * (`~/.moxen/accounts/<kind>/<id>`). Expanded via `expandHome()` on POSIX and Windows.
+ */
+export function managedAccountHomeDisplayPath(kind: AccountProviderKind, id: string): string {
+  const normalized = id.trim().toLowerCase() || "default";
+  return `~/.moxen/accounts/${kind}/${normalized}`;
+}
+
+/**
  * Resolve the independent provider configuration for an exact `instanceId`.
  *
  * - Multi-account profiles (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`)

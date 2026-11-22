@@ -885,6 +885,7 @@ pub trait ThreadSource {
     fn start_chatgpt_login(&mut self, _account_id: &str, _label: Option<&str>) {}
     fn logout_chatgpt(&mut self, _account_id: &str) {}
     fn pair_chatgpt_codex(&mut self, _account_id: &str, _confirm_workspace: bool) {}
+    fn start_provider_account_login(&mut self, _kind: &str, _id: &str) {}
     /// Downloads, tests and switches to the newest Moxen release.
     fn apply_update(&mut self) {}
     /// Goes back to the version the update replaced.

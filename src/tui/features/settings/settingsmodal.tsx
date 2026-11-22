@@ -917,6 +917,89 @@ export function SettingsModal({
                   onUpdateAll={handleUpdateAll}
                   onOpenSection={(section) => switchTab(section, null)}
                   onClose={() => { markModalDismissed(); onClose(); }}
+                  onChatGptLogin={async (accountId, label) => {
+                    if (!client) return null;
+                    setAccountError(null);
+                    try {
+                      const started = await client.dispatch({
+                        type: "chatgpt.login.start",
+                        accountId,
+                        ...(label ? { label } : {}),
+                      });
+                      const done = client
+                        .dispatch({ type: "chatgpt.login.complete", sessionId: started.sessionId })
+                        .then(() => reloadAccounts())
+                        .catch((cause: unknown) => {
+                          setAccountError(cause instanceof Error ? cause.message : String(cause));
+                        });
+                      return { authorizationUrl: started.authorizationUrl, done };
+                    } catch (cause) {
+                      setAccountError(cause instanceof Error ? cause.message : String(cause));
+                      return null;
+                    }
+                  }}
+                  onChatGptLogout={async (accountId) => {
+                    if (!client) return;
+                    setAccountSaving(true);
+                    setAccountError(null);
+                    try {
+                      await client.dispatch({ type: "chatgpt.logout", accountId });
+                      await reloadAccounts();
+                    } catch (cause) {
+                      setAccountError(cause instanceof Error ? cause.message : String(cause));
+                    } finally {
+                      setAccountSaving(false);
+                    }
+                  }}
+                  onChatGptPairCodex={async (accountId, confirmWorkspace) => {
+                    if (!client) return null;
+                    setAccountSaving(true);
+                    setAccountError(null);
+                    try {
+                      const res = await client.dispatch({
+                        type: "chatgpt.codex.pair",
+                        accountId,
+                        ...(confirmWorkspace === true ? { confirmWorkspace: true } : {}),
+                      });
+                      await reloadAccounts();
+                      return { verified: res.verified, needsConfirmation: res.needsConfirmation, reason: res.reason };
+                    } catch (cause) {
+                      setAccountError(cause instanceof Error ? cause.message : String(cause));
+                      return null;
+                    } finally {
+                      setAccountSaving(false);
+                    }
+                  }}
+                  onAccountLogin={async (kind, id) => {
+                    if (!client) return null;
+                    setAccountError(null);
+                    try {
+                      const started = await client.dispatch({ type: "provider.account.login.start", kind, id });
+                      const done = client
+                        .dispatch({ type: "provider.account.login.complete", sessionId: started.sessionId })
+                        .then(async (res) => {
+                          await reloadAccounts();
+                          return {
+                            ...(res.verified !== undefined ? { verified: res.verified } : {}),
+                            ...(res.needsConfirmation !== undefined ? { needsConfirmation: res.needsConfirmation } : {}),
+                            ...(res.reason !== undefined ? { reason: res.reason } : {}),
+                          };
+                        })
+                        .catch((cause: unknown) => {
+                          setAccountError(cause instanceof Error ? cause.message : String(cause));
+                        });
+                      return {
+                        authorizationUrl: started.authorizationUrl,
+                        openBrowser: started.openBrowser,
+                        message: started.message,
+                        homePath: started.homePath,
+                        done,
+                      };
+                    } catch (cause) {
+                      setAccountError(cause instanceof Error ? cause.message : String(cause));
+                      return null;
+                    }
+                  }}
                 />
               ) : handoffItem !== undefined && handoffItem.control.kind === "handoff" ? (
                 <HandoffModelsEditor
@@ -1139,6 +1222,36 @@ export function SettingsModal({
                           return null;
                         } finally {
                           setAccountSaving(false);
+                        }
+                      }}
+                      onAccountLogin={async (kind, id) => {
+                        if (!client) return null;
+                        setAccountError(null);
+                        try {
+                          const started = await client.dispatch({ type: "provider.account.login.start", kind, id });
+                          const done = client
+                            .dispatch({ type: "provider.account.login.complete", sessionId: started.sessionId })
+                            .then(async (res) => {
+                              await reloadAccounts();
+                              return {
+                                ...(res.verified !== undefined ? { verified: res.verified } : {}),
+                                ...(res.needsConfirmation !== undefined ? { needsConfirmation: res.needsConfirmation } : {}),
+                                ...(res.reason !== undefined ? { reason: res.reason } : {}),
+                              };
+                            })
+                            .catch((cause: unknown) => {
+                              setAccountError(cause instanceof Error ? cause.message : String(cause));
+                            });
+                          return {
+                            authorizationUrl: started.authorizationUrl,
+                            openBrowser: started.openBrowser,
+                            message: started.message,
+                            homePath: started.homePath,
+                            done,
+                          };
+                        } catch (cause) {
+                          setAccountError(cause instanceof Error ? cause.message : String(cause));
+                          return null;
                         }
                       }}
                     />

@@ -25,6 +25,14 @@ export interface FakeCodexScript {
   readonly historyTurns?: unknown[];
   /** Hold a response while server notifications continue to flow. */
   readonly beforeResponse?: (method: string) => Promise<void>;
+  /** Scripted `account/login/start` response + optional delayed `account/login/completed` notification. */
+  readonly loginStart?: {
+    readonly loginId: string;
+    readonly authUrl: string;
+    readonly completeAfterMs?: number;
+    readonly success?: boolean;
+    readonly error?: string | null;
+  };
 }
 
 export class FakeCodexServer {
@@ -51,6 +59,26 @@ export class FakeCodexServer {
         return { capabilities: {} };
       case "account/read":
         return this.script.account ?? { accountType: "chatgpt" };
+      case "account/login/start": {
+        const scripted = this.script.loginStart ?? {
+          loginId: "login_fake",
+          authUrl: "https://auth.openai.com/codex-login",
+          completeAfterMs: 10,
+          success: true,
+        };
+        if (scripted.completeAfterMs !== undefined) {
+          setTimeout(() => {
+            this.notify("account/login/completed", {
+              loginId: scripted.loginId,
+              success: scripted.success ?? true,
+              error: scripted.error ?? null,
+            });
+          }, scripted.completeAfterMs);
+        }
+        return { type: "chatgpt", loginId: scripted.loginId, authUrl: scripted.authUrl };
+      }
+      case "account/login/cancel":
+        return {};
       case "account/rateLimits/read":
         return (
           this.script.rateLimits ?? {

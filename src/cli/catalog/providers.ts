@@ -151,6 +151,39 @@ export async function removeProviderAccountCli(config: CliConfig, kind: AccountP
   return { removed: result.removed };
 }
 
+export async function loginProviderAccountCli(
+  config: CliConfig,
+  options: { kind: AccountProviderKind; id: string; homePath?: string; noOpen?: boolean },
+) {
+  const client = await cliClient(config);
+  const started = await client.dispatch({
+    type: "provider.account.login.start",
+    kind: options.kind,
+    id: options.id,
+    ...(options.homePath !== undefined ? { homePath: options.homePath } : {}),
+  });
+  if (started.authorizationUrl && started.openBrowser && options.noOpen !== true) {
+    openExternalUrl(started.authorizationUrl);
+  }
+  if (started.message) {
+    process.stderr.write(`${started.message}\n`);
+  }
+  if (started.authorizationUrl) {
+    process.stderr.write(`Authorization URL:\n${started.authorizationUrl}\n`);
+  }
+  const completed = await client.dispatch({
+    type: "provider.account.login.complete",
+    sessionId: started.sessionId,
+  });
+  return {
+    account: completed.account,
+    homePath: started.homePath,
+    ...(completed.verified !== undefined ? { verified: completed.verified } : {}),
+    ...(completed.needsConfirmation !== undefined ? { needsConfirmation: completed.needsConfirmation } : {}),
+    ...(completed.reason !== undefined ? { reason: completed.reason } : {}),
+  };
+}
+
 /** Open an HTTPS URL in the user's default browser without shell-joining strings. */
 export function openExternalUrl(url: string): boolean {
   try {

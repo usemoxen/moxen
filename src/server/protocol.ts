@@ -387,6 +387,12 @@ export type CommandBody =
   | { readonly type: "provider.account.remove"; readonly kind: AccountProviderKind; readonly id: string }
   /** Enable or disable a configured provider account without deleting it. */
   | { readonly type: "provider.account.toggle"; readonly kind: AccountProviderKind; readonly id: string; readonly enabled: boolean }
+  /** Start an in-app CLI login session for a configured provider account (`claude`, `antigravity`, or `chatgpt` Codex companion). */
+  | { readonly type: "provider.account.login.start"; readonly kind: AccountProviderKind; readonly id: string; readonly homePath?: string }
+  /** Wait for a pending provider account CLI login session to finish (and auto-pair Codex companion for `chatgpt`). */
+  | { readonly type: "provider.account.login.complete"; readonly sessionId: string; readonly timeoutMs?: number }
+  /** Cancel a pending provider account CLI login session. */
+  | { readonly type: "provider.account.login.cancel"; readonly sessionId: string }
   /** Start an OpenAI Sign in with ChatGPT OAuth 2.0 PKCE + OIDC login session behind the server boundary. */
   | { readonly type: "chatgpt.login.start"; readonly accountId: string; readonly label?: string }
   /** Wait for (or manually complete from a pasted redirect URL) a pending Sign in with ChatGPT login session. */
@@ -556,6 +562,23 @@ export interface CommandResults {
   "provider.account.save": { readonly account: ProviderAccountSummary; readonly created: boolean; readonly settings: SettingsSnapshot } & Accepted;
   "provider.account.remove": { readonly removed: boolean; readonly settings: SettingsSnapshot } & Accepted;
   "provider.account.toggle": { readonly account: ProviderAccountSummary; readonly settings: SettingsSnapshot } & Accepted;
+  "provider.account.login.start": {
+    readonly sessionId: string;
+    readonly kind: AccountProviderKind;
+    readonly id: string;
+    readonly homePath: string | null;
+    readonly authorizationUrl: string | null;
+    readonly openBrowser: boolean;
+    readonly message: string | null;
+  };
+  "provider.account.login.complete": {
+    readonly account: ProviderAccountSummary | null;
+    readonly verified?: boolean;
+    readonly needsConfirmation?: boolean;
+    readonly reason?: string | null;
+    readonly settings: SettingsSnapshot;
+  } & Accepted;
+  "provider.account.login.cancel": Accepted;
   "chatgpt.login.start": { readonly sessionId: string; readonly accountId: string; readonly authorizationUrl: string; readonly redirectUri: string };
   "chatgpt.login.complete": { readonly account: ProviderAccountSummary; readonly settings: SettingsSnapshot } & Accepted;
   "chatgpt.login.cancel": Accepted;
@@ -1692,6 +1715,27 @@ export function decodeCommand(value: unknown): Command {
         kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
         id: requireField(record.id, type, "id"),
         enabled: record.enabled,
+      };
+    case "provider.account.login.start":
+      return {
+        ...meta,
+        type,
+        kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
+        id: requireField(record.id, type, "id"),
+        ...optionalString(record, "homePath"),
+      };
+    case "provider.account.login.complete":
+      return {
+        ...meta,
+        type,
+        sessionId: requireField(record.sessionId, type, "sessionId"),
+        ...optionalNumber(record, "timeoutMs", type),
+      };
+    case "provider.account.login.cancel":
+      return {
+        ...meta,
+        type,
+        sessionId: requireField(record.sessionId, type, "sessionId"),
       };
     case "chatgpt.login.start":
       return {

@@ -11,9 +11,11 @@ import {
   CHATGPT_OAUTH_SCOPES,
   OPENAI_OIDC_ISSUER,
   resetChatGptOAuthCachesForTests,
+  saveChatGptAuthBundle,
   type KeychainAdapter,
   type OpenIdConfiguration,
 } from "../../core/providers/chatgpt/oauth.js";
+import { managedAccountHomeDisplayPath } from "../../core/types.js";
 import { CodexDriver } from "../../core/providers/codex/driver.js";
 import { FakeCodexTransport } from "../../core/providers/codex/tests/fakes.js";
 import { resetUsageLimitsForTests, usageLimitsSnapshot } from "../../core/usage/limits.js";
@@ -339,6 +341,72 @@ describe("Sign in with ChatGPT server flow, Codex companion verification, and st
       const avail = await conn.query({ type: "image-generation.availability", threadId });
       expect(avail.available).toBe(false);
       expect(avail.reason).toContain("Link a verified Codex companion");
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it("runs provider.account.login.start -> complete for ChatGPT Codex companion, assigns managed folder, and auto-pairs (MXN-470)", async () => {
+    const dir = makeTempDir("moxen-srv-acct-login-");
+    const secrets = makeMemoryKeychain();
+    await saveChatGptAuthBundle(
+      "work",
+      {
+        clientId: "oaiapp_work",
+        accessToken: "at_work",
+        refreshToken: "rt_work",
+        expiresAt: Date.now() + 3_600_000,
+        scope: CHATGPT_OAUTH_SCOPES.join(" "),
+        grantedAt: new Date().toISOString(),
+        identity: { userId: "usr_work_99", email: "work@example.test", emailVerified: true },
+      },
+      secrets,
+    );
+
+    const fakeCodex = new FakeCodexTransport({
+      account: {
+        requiresOpenaiAuth: true,
+        userId: "usr_work_99",
+        account: { type: "chatgpt", email: "work@example.test", planType: "pro", workspaceName: "Acme" },
+      },
+      rateLimits: {
+        accountId: "acct_acme",
+        rateLimits: {
+          limitId: "codex",
+          primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
+        },
+      },
+      loginStart: {
+        loginId: "login_1",
+        authUrl: "https://auth.openai.com/codex-login?x=1",
+        completeAfterMs: 15,
+        success: true,
+      },
+    });
+
+    const conn = new DirectConnection({
+      storeRoot: path.join(dir, "store"),
+      configPath: path.join(dir, "config.json"),
+      builtinMcpServers: null,
+      chatgptOAuth: { secrets },
+      providerAccountLoginDeps: {
+        codexTransport: fakeCodex,
+        ensureDir: () => {},
+      },
+    });
+
+    try {
+      await conn.dispatch({ type: "provider.account.save", kind: "chatgpt", id: "work", label: "Work" });
+      const started = await conn.dispatch({ type: "provider.account.login.start", kind: "chatgpt", id: "work" });
+      expect(started.homePath).toBe(managedAccountHomeDisplayPath("chatgpt", "work"));
+      expect(started.authorizationUrl).toBe("https://auth.openai.com/codex-login?x=1");
+      expect(started.openBrowser).toBe(true);
+
+      const completed = await conn.dispatch({ type: "provider.account.login.complete", sessionId: started.sessionId });
+      expect(completed.verified).toBe(true);
+      expect(completed.account?.codexVerified).toBe(true);
+      expect(completed.account?.codexHomePath).toBe("~/.moxen/accounts/chatgpt/work");
+      expect(usageLimitsSnapshot()["chatgpt/work"]?.windows[0]).toMatchObject({ usedPercent: 12 });
     } finally {
       await conn.close();
     }

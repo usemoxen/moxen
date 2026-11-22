@@ -9,11 +9,12 @@
  */
 import path from "node:path";
 
-import { expandHome } from "../config.js";
+import { appHomeDir, expandHome } from "../config.js";
 import { CliError } from "../errors.js";
 import { isSecretRef } from "../secrets.js";
 import {
   accountInstanceId,
+  managedAccountHomeDisplayPath,
   parseAccountInstanceId,
   type AccountProviderKind,
   type AntigravityAccountConfig,
@@ -35,6 +36,14 @@ import { makeClaudeEnv } from "./claude/config.js";
 import { antigravityAccountEnv, antigravityLaunchSpec } from "./antigravity/config.js";
 
 export const ACCOUNT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export { managedAccountHomeDisplayPath };
+
+/** Resolved absolute path of the Moxen-managed isolated directory for an account. */
+export function managedAccountHomePath(kind: AccountProviderKind, id: string, homeDir?: string): string {
+  const normalized = id.trim().toLowerCase() || "default";
+  return path.join(appHomeDir(homeDir), "accounts", kind, normalized);
+}
 
 /** Plaintext credential field names refused in config files. */
 const REJECTED_SECRET_FIELDS: ReadonlySet<string> = new Set([

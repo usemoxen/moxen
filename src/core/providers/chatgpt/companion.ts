@@ -149,7 +149,7 @@ export function verifyCodexCompanion(
       ...base,
       verified: false,
       needsConfirmation: true,
-      reason: `Email ${codexAccount.email} matches, but workspace ID could not be cross-checked automatically. Confirm pairing with Codex ${wsDesc} (pass confirmWorkspace: true).`,
+      reason: `Email ${codexAccount.email} matches, but workspace ID could not be cross-checked automatically. Confirm pairing with Codex ${wsDesc}.`,
     };
   }
 
@@ -163,7 +163,8 @@ export function verifyCodexCompanion(
 
 /** Read account and rate-limit metadata from a live `codex app-server` peer. */
 export async function probeCodexCompanion(peer: JsonRpcPeer): Promise<CodexCompanionProbeResult> {
-  const accountRaw = asRecord(asRecord(await peer.request(CODEX_METHODS.accountRead, {}, 10_000))?.account);
+  const accountResp = asRecord(await peer.request(CODEX_METHODS.accountRead, {}, 10_000));
+  const accountRaw = asRecord(accountResp?.account);
   const limitsRaw = asRecord(await peer.request(CODEX_METHODS.rateLimitsRead, {}, 10_000));
   const buckets = asRecord(limitsRaw?.rateLimitsByLimitId);
   const snapshot = asRecord(buckets?.codex) ?? asRecord(limitsRaw?.rateLimits);
@@ -173,7 +174,8 @@ export async function probeCodexCompanion(peer: JsonRpcPeer): Promise<CodexCompa
     email: asString(accountRaw?.email) ?? null,
     planType: asString(accountRaw?.planType) ?? null,
     workspaceName: asString(accountRaw?.workspaceName) ?? null,
-    userId: asString(accountRaw?.userId) ?? null,
+    // `GetAccountResponse` puts `userId` at the top level, alongside `account`.
+    userId: asString(accountResp?.userId) ?? asString(accountRaw?.userId) ?? null,
   };
   const accountId =
     asString(snapshot?.accountId) ??

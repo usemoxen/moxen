@@ -18,6 +18,8 @@ export const CODEX_METHODS = {
   turnInterrupt: "turn/interrupt",
   feedbackUpload: "feedback/upload",
   accountRead: "account/read",
+  accountLoginStart: "account/login/start",
+  accountLoginCancel: "account/login/cancel",
   modelList: "model/list",
   skillsList: "skills/list",
   rateLimitsRead: "account/rateLimits/read",
@@ -43,6 +45,7 @@ export const CODEX_METHODS = {
   tokenUsageUpdated: "thread/tokenUsage/updated",
   rateLimitsUpdated: "account/rateLimits/updated",
   accountUpdated: "account/updated",
+  accountLoginCompleted: "account/login/completed",
 } as const;
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
