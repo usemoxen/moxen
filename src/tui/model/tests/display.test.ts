@@ -257,6 +257,7 @@ describe("describeEffort", () => {
     expect(describeEffort("medium", false)).toBe("Balanced speed and depth");
     expect(describeEffort("medium", true)).toBe("Balanced speed and depth · default for this model");
     expect(describeEffort("HIGH", false)).toBe("Deeper reasoning for harder tasks");
+    expect(describeEffort("ultra", false)).toBe("Maximum reasoning with automatic task delegation");
   });
   it("has nothing to say about a level it does not know, except that it is the default", () => {
     expect(describeEffort("turbo", false)).toBeUndefined();

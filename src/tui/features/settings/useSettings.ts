@@ -58,6 +58,16 @@ export type HarnessRun = { readonly scope: RunScope } & (
 /** Which list a run belongs to: a harness profile and an MCP server can share a name, and neither's result is the other's. */
 export type RunScope = "harness" | "mcp";
 
+/** Preserve the full snapshot (including independent `accountSettings`) returned by any settings mutation. */
+export function snapshotFromMutation(result: SettingsSnapshot): SettingsSnapshot {
+  return {
+    path: result.path,
+    exists: result.exists,
+    settings: result.settings,
+    ...(result.accountSettings !== undefined ? { accountSettings: result.accountSettings } : {}),
+  };
+}
+
 export function useSettings(client: ClientApi, open: boolean): SettingsState {
   const [snapshot, setSnapshot] = useState<SettingsSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
@@ -100,7 +110,7 @@ export function useSettings(client: ClientApi, open: boolean): SettingsState {
         .dispatch({ type: "settings.set", key, value })
         .then((result) => {
           if (generation.current === mine) {
-            setSnapshot({ path: result.path, exists: result.exists, settings: result.settings });
+            setSnapshot(snapshotFromMutation(result));
             setError(null);
           }
           return true;
@@ -134,7 +144,7 @@ export function useSettings(client: ClientApi, open: boolean): SettingsState {
         .dispatch({ type: "settings.duplicate", key, id, newId })
         .then((result) => {
           if (generation.current !== mine) return;
-          setSnapshot({ path: result.path, exists: result.exists, settings: result.settings });
+          setSnapshot(snapshotFromMutation(result));
           setError(null);
         })
         .catch((cause: unknown) => {
@@ -222,7 +232,7 @@ export function useSettings(client: ClientApi, open: boolean): SettingsState {
         })
         .then(async (text) => {
           const result = await client.dispatch({ type: "harness.profile.import", text, onConflict: "rename" });
-          if (generation.current === mine) setSnapshot({ path: result.path, exists: result.exists, settings: result.settings });
+          if (generation.current === mine) setSnapshot(snapshotFromMutation(result));
           setNotice({ text: result.id === result.fileId ? t("settings.imported", { id: result.id }) : t("settings.importedRenamed", { id: result.id, taken: result.fileId }), error: false });
         })
         .catch((cause: unknown) => setNotice({ text: cause instanceof Error ? cause.message : String(cause), error: true }));

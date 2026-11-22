@@ -5,7 +5,7 @@ import type { UpdateCheck } from "../../../core/selfupdate/vocabulary.js";
 import { describeSettings, restartRequired, settingDescriptor, SETTINGS } from "../../../core/configschema.js";
 import { DEFAULT_CONFIG, normalizeConfig } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
-import { uiFromSnapshot } from "../../features/settings/useSettings.js";
+import { snapshotFromMutation, uiFromSnapshot } from "../../features/settings/useSettings.js";
 import { configuredDefaultModel, defaultLabel, modelOverrideEntries, nextToggleValue, handoffStops, handoffTokensLabel, moxenVersionLine, providerVersionLine, settingControl, settingValueLabel, updatableProviderOf, withModelOverride, type ProviderCheckView } from "../settings.js";
 import type { UpdateView } from "../update.js";
 
@@ -492,6 +492,15 @@ describe("uiFromSnapshot", () => {
     const config = normalizeConfig({ ui: { backdrop: "off", modelScenes: false, hideBinaryDiffs: false, defaultSidePanel: "git" } });
     const ui = uiFromSnapshot({ settings: describeSettings(config) } as never);
     expect(ui).toMatchObject({ backdrop: "off", modelScenes: false, hideBinaryDiffs: false, defaultSidePanel: "git" });
+  });
+});
+
+describe("snapshotFromMutation", () => {
+  it("preserves per-account settings so provider account tabs stay populated after saving a setting", () => {
+    const settings = describeSettings(DEFAULT_CONFIG);
+    const accountSettings = { "chatgpt/default": settings };
+    const next = snapshotFromMutation({ path: "/tmp/config.json", exists: true, settings, accountSettings });
+    expect(next.accountSettings).toBe(accountSettings);
   });
 });
 

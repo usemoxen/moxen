@@ -113,6 +113,7 @@ const EFFORT_HINTS: Readonly<Record<string, MessageKey>> = {
   high: "effort.high",
   xhigh: "effort.xhigh",
   max: "effort.max",
+  ultra: "effort.ultra",
 };
 
 /** The line under a reasoning level: what it means, and that it is the model's default when it is. */

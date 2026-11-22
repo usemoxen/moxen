@@ -42,8 +42,8 @@ export function nearestStop(layout: SliderLayout, x: number): number {
  * the names the providers use have their own, anything else is spread along
  * the same ramp by position. Hex values in the page's own palette family.
  */
-const EFFORT_RAMP = ["#7dd3fc", "#86efac", "#fde047", "#fb923c", "#f87171"] as const;
-const EFFORT_NAMED: Readonly<Record<string, number>> = { minimal: 0, low: 0, medium: 1, high: 2, xhigh: 3, max: 4 };
+const EFFORT_RAMP = ["#7dd3fc", "#86efac", "#fde047", "#fb923c", "#f87171", "#e879f9"] as const;
+const EFFORT_NAMED: Readonly<Record<string, number>> = { minimal: 0, low: 0, medium: 1, high: 2, xhigh: 3, max: 4, ultra: 5 };
 
 export function effortTones(ids: readonly string[]): string[] {
   return ids.map((id, at) => {

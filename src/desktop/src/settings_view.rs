@@ -1841,6 +1841,7 @@ fn catalog_picker_options(
                     "high" => Some(message("effort.high")),
                     "xhigh" => Some(message("effort.xhigh")),
                     "max" => Some(message("effort.max")),
+                    "ultra" => Some(message("effort.ultra")),
                     _ => None,
                 };
                 options.push(PickerOption {

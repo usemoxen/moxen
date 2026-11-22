@@ -1494,6 +1494,7 @@ export const es: Catalog = {
   "effort.high": "Razona más a fondo para tareas difíciles",
   "effort.xhigh": "Razonamiento largo: más lento y con más tokens",
   "effort.max": "Lo que más razona: lo más lento y lo que más tokens gasta",
+  "effort.ultra": "Máximo razonamiento con delegación automática de tareas",
   "effort.defaultOnly": "El esfuerzo por defecto de este modelo",
   "effort.defaultHint": "{hint} · por defecto en este modelo",
   "picker.defaultBadge": "por defecto",

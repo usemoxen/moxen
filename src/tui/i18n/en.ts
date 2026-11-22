@@ -1500,6 +1500,7 @@ export const en = {
   "effort.high": "Deeper reasoning for harder tasks",
   "effort.xhigh": "Extended reasoning, slower, more tokens",
   "effort.max": "Deepest reasoning, slowest, most tokens",
+  "effort.ultra": "Maximum reasoning with automatic task delegation",
   "effort.defaultOnly": "The default effort for this model",
   "effort.defaultHint": "{hint} · default for this model",
   "picker.defaultBadge": "default",
