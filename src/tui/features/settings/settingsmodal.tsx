@@ -1207,6 +1207,29 @@ export function SettingsModal({
                 </>
               ) : (
                 <>
+                  {activeAccount !== null || updatable === null ? null : (
+                    <ProviderUpdateCard
+                      provider={updatable}
+                      check={versions?.[updatable]}
+                      latest={latest === null ? undefined : { enabled: latest.enabled, latest: null, channel: null, ...latest[updatable] }}
+                      updating={updating.has(updatable)}
+                      width={paneWidth}
+                      onUpdate={() => onUpdate(updatable)}
+                    />
+                  )}
+                  {tab === "general" && moxenUpdate !== undefined ? (
+                    <MoxenUpdateCard
+                      line={moxenVersionLine(moxenUpdate.view)}
+                      width={paneWidth}
+                      onOpen={openUpdate}
+                    />
+                  ) : null}
+                  {tab === "memory" && client ? <MemoryRuntimePanel status={memoryStatus} saving={saving === "memoryEmbeddings"}
+                    onSetup={() => { void Promise.resolve(onSet("memory", "true")).then((ok) => { if (ok !== false) return onSet("memoryEmbeddings", "true"); }); }}
+                    onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }}
+                    onKeyword={() => { void Promise.resolve(onSet("memoryEmbeddings", "false")).then((ok) => { if (ok !== false) return onSet("memory", "true"); }); }}
+                    onManage={() => { setEditing(null); setPicking(null); setManaging(true); }} /> : null}
+                <scrollbox ref={scrollRef} style={{ flexGrow: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
                   {activeAccount === null ? null : (
                     <ProfileAccountHeader
                       account={activeAccount}
@@ -1347,29 +1370,6 @@ export function SettingsModal({
                       }}
                     />
                   )}
-                  {activeAccount !== null || updatable === null ? null : (
-                    <ProviderUpdateCard
-                      provider={updatable}
-                      check={versions?.[updatable]}
-                      latest={latest === null ? undefined : { enabled: latest.enabled, latest: null, channel: null, ...latest[updatable] }}
-                      updating={updating.has(updatable)}
-                      width={paneWidth}
-                      onUpdate={() => onUpdate(updatable)}
-                    />
-                  )}
-                  {tab === "general" && moxenUpdate !== undefined ? (
-                    <MoxenUpdateCard
-                      line={moxenVersionLine(moxenUpdate.view)}
-                      width={paneWidth}
-                      onOpen={openUpdate}
-                    />
-                  ) : null}
-                  {tab === "memory" && client ? <MemoryRuntimePanel status={memoryStatus} saving={saving === "memoryEmbeddings"}
-                    onSetup={() => { void Promise.resolve(onSet("memory", "true")).then((ok) => { if (ok !== false) return onSet("memoryEmbeddings", "true"); }); }}
-                    onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }}
-                    onKeyword={() => { void Promise.resolve(onSet("memoryEmbeddings", "false")).then((ok) => { if (ok !== false) return onSet("memory", "true"); }); }}
-                    onManage={() => { setEditing(null); setPicking(null); setManaging(true); }} /> : null}
-                <scrollbox ref={scrollRef} style={{ flexGrow: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
                   {items.map((item, itemIndex) => {
                     const group = item.descriptor.group;
                     const startsGroup = group !== undefined && group !== items[itemIndex - 1]?.descriptor.group;

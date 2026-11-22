@@ -21,6 +21,7 @@ import {
   type ProviderAccountSaveInput,
   type ProviderAccountSummary,
 } from "../../../core/types.js";
+import { useClipboard } from "../../hooks/useClipboard.js";
 import { useHover } from "../../hooks/useHover.js";
 import { t } from "../../i18n/index.js";
 import { providerVersionLine, type ProviderCheckView } from "../../model/settings.js";
@@ -660,9 +661,11 @@ export function ProfileAccountHeader({
   onChatGptPairCodex,
   onAccountLogin,
 }: ProfileAccountHeaderProps) {
+  const clipboard = useClipboard();
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [editingEnv, setEditingEnv] = useState(false);
   const [authUrlPending, setAuthUrlPending] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [cliLoginPending, setCliLoginPending] = useState<{
     readonly message: string;
     readonly url: string | null;
@@ -672,11 +675,22 @@ export function ProfileAccountHeader({
     readonly cancel?: AccountLoginStartView["cancel"];
   } | null>(null);
   const [pairFeedback, setPairFeedback] = useState<{ readonly text: string; readonly needsConfirmation: boolean } | null>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyLoginUrl = (url: string) => {
+    void clipboard.copyText(url).then((ok) => {
+      if (!ok) return;
+      setCopiedLink(true);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopiedLink(false), 2_000);
+    });
+  };
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
 
   useEffect(() => {
     setConfirmRemove(false);
     setEditingEnv(false);
     setAuthUrlPending(null);
+    setCopiedLink(false);
     setCliLoginPending(null);
     setPairFeedback(null);
   }, [account.instanceId]);
@@ -863,15 +877,24 @@ export function ProfileAccountHeader({
         </box>
       ) : null}
       {authUrlPending ? (
-        <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
-          {t("settings.providers.openAuthUrl", { url: authUrlPending })}
-        </text>
+        <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+          <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+            {t("settings.providers.openAuthPrompt")}
+          </text>
+          <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+            <Chip bracketed surface={SURFACE.panel} label={t("settings.providers.openBrowser")} accent onPress={() => openBrowserUrl(authUrlPending)} />
+            <Chip
+              bracketed
+              surface={SURFACE.panel}
+              label={copiedLink ? t("settings.providers.linkCopied") : t("settings.providers.copyLink")}
+              onPress={() => copyLoginUrl(authUrlPending)}
+            />
+          </box>
+        </box>
       ) : cliLoginPending ? (
         <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
           <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
-            {cliLoginPending.url
-              ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
-              : cliLoginPending.message}
+            {cliLoginPending.message}
           </text>
           {cliLoginPending.needsCodeInput && cliLoginPending.submitCode ? (
             <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
@@ -889,8 +912,19 @@ export function ProfileAccountHeader({
                     .finally(() => setCliLoginPending(null));
                 }}
               />
-              {cliLoginPending.cancel ? (
-                <box style={{ flexDirection: "row", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+              <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                {cliLoginPending.url ? (
+                  <>
+                    <Chip bracketed surface={SURFACE.panel} label={t("settings.providers.openBrowser")} accent onPress={() => openBrowserUrl(cliLoginPending.url!)} />
+                    <Chip
+                      bracketed
+                      surface={SURFACE.panel}
+                      label={copiedLink ? t("settings.providers.linkCopied") : t("settings.providers.copyLink")}
+                      onPress={() => copyLoginUrl(cliLoginPending.url!)}
+                    />
+                  </>
+                ) : null}
+                {cliLoginPending.cancel ? (
                   <Chip
                     bracketed
                     surface={SURFACE.panel}
@@ -901,8 +935,18 @@ export function ProfileAccountHeader({
                       void doCancel?.();
                     }}
                   />
-                </box>
-              ) : null}
+                ) : null}
+              </box>
+            </box>
+          ) : cliLoginPending.url ? (
+            <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+              <Chip bracketed surface={SURFACE.panel} label={t("settings.providers.openBrowser")} accent onPress={() => openBrowserUrl(cliLoginPending.url!)} />
+              <Chip
+                bracketed
+                surface={SURFACE.panel}
+                label={copiedLink ? t("settings.providers.linkCopied") : t("settings.providers.copyLink")}
+                onPress={() => copyLoginUrl(cliLoginPending.url!)}
+              />
             </box>
           ) : null}
         </box>
@@ -990,11 +1034,23 @@ export function ProvidersOverviewPanel({
   onChatGptPairCodex,
   onAccountLogin,
 }: ProvidersOverviewPanelProps) {
+  const clipboard = useClipboard();
   const [cursor, setCursor] = useState(0);
   const [detailCursor, setDetailCursor] = useState(0);
   const [editingField, setEditingField] = useState<DetailFieldId | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [authUrlPending, setAuthUrlPending] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyLoginUrl = (url: string) => {
+    void clipboard.copyText(url).then((ok) => {
+      if (!ok) return;
+      setCopiedLink(true);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopiedLink(false), 2_000);
+    });
+  };
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
   const [cliLoginPending, setCliLoginPending] = useState<{
     readonly message: string;
     readonly url: string | null;
@@ -1404,15 +1460,37 @@ export function ProvidersOverviewPanel({
                 ) : null}
               </box>
               {authUrlPending ? (
-                <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
-                  {t("settings.providers.openAuthUrl", { url: authUrlPending })}
-                </text>
+                <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                  <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+                    {t("settings.providers.openAuthPrompt")}
+                  </text>
+                  <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                    <Chip bracketed surface={SURFACE.panel} label={t("settings.providers.openBrowser")} accent onPress={() => openBrowserUrl(authUrlPending)} />
+                    <Chip
+                      bracketed
+                      surface={SURFACE.panel}
+                      label={copiedLink ? t("settings.providers.linkCopied") : t("settings.providers.copyLink")}
+                      onPress={() => copyLoginUrl(authUrlPending)}
+                    />
+                  </box>
+                </box>
               ) : cliLoginPending ? (
-                <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
-                  {cliLoginPending.url
-                    ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
-                    : cliLoginPending.message}
-                </text>
+                <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                  <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+                    {cliLoginPending.message}
+                  </text>
+                  {cliLoginPending.url ? (
+                    <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                      <Chip bracketed surface={SURFACE.panel} label={t("settings.providers.openBrowser")} accent onPress={() => openBrowserUrl(cliLoginPending.url!)} />
+                      <Chip
+                        bracketed
+                        surface={SURFACE.panel}
+                        label={copiedLink ? t("settings.providers.linkCopied") : t("settings.providers.copyLink")}
+                        onPress={() => copyLoginUrl(cliLoginPending.url!)}
+                      />
+                    </box>
+                  ) : null}
+                </box>
               ) : !selected.codexVerified ? (
                 <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
                   {t("settings.providers.unpairedHint")}
@@ -1455,9 +1533,7 @@ export function ProvidersOverviewPanel({
               {cliLoginPending ? (
                 <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
                   <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
-                    {cliLoginPending.url
-                      ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
-                      : cliLoginPending.message}
+                    {cliLoginPending.message}
                   </text>
                   {cliLoginPending.needsCodeInput && cliLoginPending.submitCode ? (
                     <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
@@ -1475,8 +1551,19 @@ export function ProvidersOverviewPanel({
                             .finally(() => setCliLoginPending(null));
                         }}
                       />
-                      {cliLoginPending.cancel ? (
-                        <box style={{ flexDirection: "row", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                      <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                        {cliLoginPending.url ? (
+                          <>
+                            <Chip bracketed surface={SURFACE.panel} label={t("settings.providers.openBrowser")} accent onPress={() => openBrowserUrl(cliLoginPending.url!)} />
+                            <Chip
+                              bracketed
+                              surface={SURFACE.panel}
+                              label={copiedLink ? t("settings.providers.linkCopied") : t("settings.providers.copyLink")}
+                              onPress={() => copyLoginUrl(cliLoginPending.url!)}
+                            />
+                          </>
+                        ) : null}
+                        {cliLoginPending.cancel ? (
                           <Chip
                             bracketed
                             surface={SURFACE.panel}
@@ -1487,8 +1574,18 @@ export function ProvidersOverviewPanel({
                               void doCancel?.();
                             }}
                           />
-                        </box>
-                      ) : null}
+                        ) : null}
+                      </box>
+                    </box>
+                  ) : cliLoginPending.url ? (
+                    <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                      <Chip bracketed surface={SURFACE.panel} label={t("settings.providers.openBrowser")} accent onPress={() => openBrowserUrl(cliLoginPending.url!)} />
+                      <Chip
+                        bracketed
+                        surface={SURFACE.panel}
+                        label={copiedLink ? t("settings.providers.linkCopied") : t("settings.providers.copyLink")}
+                        onPress={() => copyLoginUrl(cliLoginPending.url!)}
+                      />
                     </box>
                   ) : null}
                 </box>

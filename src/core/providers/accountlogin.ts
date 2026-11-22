@@ -248,7 +248,12 @@ async function startCliLoginSession(
       resolveDone({ kind: input.kind, accountId: normalizedId, homePath });
       return;
     }
-    const detail = combinedOutput.replace(ANSI_RE, "").trim().split(/\r?\n/u).filter(Boolean).slice(-3).join(" ").slice(0, 240);
+    const nonUrlLines = combinedOutput
+      .replace(ANSI_RE, "")
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !/^https:\/\/\S+$/iu.test(line));
+    const detail = nonUrlLines.slice(-3).join(" ").slice(0, 240);
     rejectDone(
       new CliError(
         "PROVIDER_LOGIN_FAILED",

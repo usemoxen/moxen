@@ -105,6 +105,7 @@ describe("in-app account login, managed profile folders, and Codex companion use
     expect(captured!.args).toEqual(["acp", "--login", "--gemini-dir", path.join(path.resolve(homeDir), ".gemini")]);
     expect(captured!.env.HOME).toBe(path.resolve(homeDir));
     expect(captured!.env.USERPROFILE).toBe(path.resolve(homeDir));
+    expect(captured!.env.SSH_CONNECTION).toBeTruthy();
     expect(session.authorizationUrl).toBe("https://accounts.google.com/o/oauth2/auth?client_id=agy");
     expect(session.openBrowser).toBe(true);
     expect(session.needsCodeInput).toBe(true);
@@ -119,6 +120,25 @@ describe("in-app account login, managed profile folders, and Codex companion use
     const wait = session.waitForCompletion(5_000);
     child.emit("close", 0);
     await expect(wait).resolves.toMatchObject({ kind: "antigravity", accountId: "work", homePath: homeDir });
+  });
+
+  it("omits raw OAuth URL lines from CLI login failure details", async () => {
+    const dir = makeTempDir("moxen-agy-fail-");
+    const child = makeFakeChild();
+    const spawnChild: LoginChildSpawner = () => {
+      setTimeout(() => {
+        child.stderr.write("Open this link in a browser:\n\n  https://accounts.google.com/o/oauth2/auth?client_id=very_long_url\n\nError: login cancelled\n");
+      }, 5);
+      return child;
+    };
+    const session = await startProviderAccountLoginSession(
+      { kind: "antigravity", accountId: "default", homePath: dir },
+      { spawnChild, baseEnv: { HOME: "/Users/original" }, platform: "darwin", urlWaitMs: 300 },
+    );
+    const wait = session.waitForCompletion(5_000);
+    child.emit("close", 1);
+    await expect(wait).rejects.toThrow(/login cancelled/i);
+    await expect(wait).rejects.not.toThrow(/https:\/\/accounts\.google\.com/);
   });
 
   it("reads top-level userId from GetAccountResponse and omits raw confirmWorkspace syntax from UI reason", async () => {

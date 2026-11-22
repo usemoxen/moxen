@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { updateProvider } from "../../update.js";
 import { FakeAcpTransport } from "../../acp/tests/fakes.js";
 import { antigravityProvider, disambiguateAntigravityModelName, forgetAntigravityCatalogCache } from "../catalog.js";
-import { ANTIGRAVITY_DEFAULT_MODEL_SLUG, antigravityLaunchSpec } from "../config.js";
+import { ANTIGRAVITY_DEFAULT_MODEL_SLUG, ANTIGRAVITY_FILE_STORAGE_SSH_MARKER, antigravityAccountEnv, antigravityLaunchSpec } from "../config.js";
 import {
   ANTIGRAVITY_USAGE_PROBE_TIMEOUT_MS,
   antigravityQuotaWindowForModel,
@@ -41,6 +41,25 @@ describe("Antigravity first-class provider", () => {
       name: "Antigravity",
       command: "/opt/bin/agy",
       args: ["acp", "--flag", "two words"],
+    });
+
+    const isolated = path.resolve("/tmp/moxen-agy-iso");
+    expect(antigravityAccountEnv(isolated, { HOME: "/Users/me", PATH: "/usr/bin" })).toMatchObject({
+      HOME: isolated,
+      USERPROFILE: isolated,
+      SSH_CONNECTION: ANTIGRAVITY_FILE_STORAGE_SSH_MARKER,
+    });
+    expect(antigravityAccountEnv(undefined, { HOME: "/Users/me" })).toEqual({ HOME: "/Users/me" });
+    expect(antigravityLaunchSpec(undefined, { id: "antigravity/work", homePath: isolated })).toEqual({
+      id: "antigravity/work",
+      name: "Antigravity",
+      command: "agy",
+      args: ["acp", "--gemini-dir", path.join(isolated, ".gemini")],
+      env: {
+        HOME: isolated,
+        USERPROFILE: isolated,
+        SSH_CONNECTION: ANTIGRAVITY_FILE_STORAGE_SSH_MARKER,
+      },
     });
   });
 
