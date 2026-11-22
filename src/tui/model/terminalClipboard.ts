@@ -282,10 +282,13 @@ export type PastedImage =
 
 /**
  * Full paste chain for Alt+V / Ctrl+V:
- * 1. terminal clipboard over 5522 (the only path that crosses SSH),
- * 2. host OS clipboard anywhere it can help (local sessions, or a genuinely
- *    remote-side image when the terminal stays silent),
- * 3. an error that names the actual next step for the session at hand.
+ * 1. Locally (`!remote`): read the host OS clipboard first (`NSPasteboard`,
+ *    Windows clipboard, Wayland/X11) — zero PTY traffic and immune to stdin
+ *    escape-sequence chunk timeouts under heavy CPU load. Fall back to OSC 5522
+ *    only if the host reader fails and the terminal speaks it.
+ * 2. Over SSH (`remote`): terminal clipboard over OSC 5522 first (the only path
+ *    that crosses SSH), then one host-clipboard attempt, then a session-aware
+ *    error naming the next step.
  */
 export async function readPastedImage(options?: {
   env?: NodeJS.ProcessEnv;
@@ -295,12 +298,22 @@ export async function readPastedImage(options?: {
   const env = options?.env ?? process.env;
   const remote = isSshSession(env);
   const terminal = options?.terminal ?? null;
+  const readHost = options?.hostReader ?? readClipboardImage;
+
+  if (!remote) {
+    const host = await readHost();
+    if (host.error === null || terminal === null) return host;
+    // Host clipboard couldn't read an image (e.g. missing Linux clipboard helper);
+    // give the terminal's OSC 5522 a chance before surfacing the host error.
+    const outcome = await queryTerminalClipboardImages({ ...terminal, env });
+    if (outcome.status === "read") return { bytes: outcome.bytes, mimeType: outcome.mimeType, error: null };
+    return host;
+  }
+
   if (terminal !== null) {
     const outcome = await queryTerminalClipboardImages({ ...terminal, env });
     if (outcome.status === "read") return { bytes: outcome.bytes, mimeType: outcome.mimeType, error: null };
-    // Locally the host clipboard is the same one, and may still hold an
-    // image in a type the terminal lists but this does not read (TIFF).
-    if (outcome.status === "no-image" && remote) {
+    if (outcome.status === "no-image") {
       return { bytes: null, mimeType: null, error: t("clip.noImage") };
     }
     if (outcome.status === "denied") {
@@ -319,15 +332,11 @@ export async function readPastedImage(options?: {
     if (outcome.status === "limit-exceeded") {
       return { bytes: null, mimeType: null, error: t("clip.tooBig") };
     }
-    // "unsupported", or "no-image" locally: on to the host clipboard below.
-  }
-  if (!remote) {
-    return (options?.hostReader ?? readClipboardImage)();
   }
   // Remote with a silent terminal: the host clipboard belongs to the remote
   // box, so it is worth exactly one attempt (an image copied over there);
   // a screenshot on the local machine can never arrive this way.
-  const host = await (options?.hostReader ?? readClipboardImage)();
+  const host = await readHost();
   if (host.error === null) return host;
   return {
     bytes: null,

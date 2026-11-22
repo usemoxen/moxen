@@ -48,5 +48,10 @@ export function useFileAttachments(
 
   const remove = (target: string) => setByThread((current) => ({ ...current, [key]: (current[key] ?? []).filter((item) => item.path !== target) }));
 
-  return { items, attach, remove, clear: (id: string) => write(id, []) };
+  const restore = useCallback((id: string, snapshot: readonly PathAttachment[]) => {
+    if (snapshot.length === 0) return;
+    setByThread((current) => ({ ...current, [id]: addPaths(snapshot, current[id] ?? []) }));
+  }, []);
+
+  return { items, attach, remove, clear: (id: string) => write(id, []), restore };
 }

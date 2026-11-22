@@ -58,13 +58,14 @@ export type HarnessRun = { readonly scope: RunScope } & (
 /** Which list a run belongs to: a harness profile and an MCP server can share a name, and neither's result is the other's. */
 export type RunScope = "harness" | "mcp";
 
-/** Preserve the full snapshot (including independent `accountSettings`) returned by any settings mutation. */
+/** Preserve the full snapshot (including `accountSettings` and `accounts`) returned by any settings mutation. */
 export function snapshotFromMutation(result: SettingsSnapshot): SettingsSnapshot {
   return {
     path: result.path,
     exists: result.exists,
     settings: result.settings,
     ...(result.accountSettings !== undefined ? { accountSettings: result.accountSettings } : {}),
+    ...(result.accounts !== undefined ? { accounts: result.accounts } : {}),
   };
 }
 

@@ -6,6 +6,7 @@ import { describeSettings, restartRequired, settingDescriptor, SETTINGS } from "
 import { DEFAULT_CONFIG, normalizeConfig } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
 import { snapshotFromMutation, uiFromSnapshot } from "../../features/settings/useSettings.js";
+import { pickOptionColumns } from "../../features/settings/settingsmodal.js";
 import { configuredDefaultModel, defaultLabel, modelOverrideEntries, nextToggleValue, handoffStops, handoffTokensLabel, moxenVersionLine, providerVersionLine, settingControl, settingValueLabel, updatableProviderOf, withModelOverride, type ProviderCheckView } from "../settings.js";
 import type { UpdateView } from "../update.js";
 
@@ -496,11 +497,37 @@ describe("uiFromSnapshot", () => {
 });
 
 describe("snapshotFromMutation", () => {
-  it("preserves per-account settings so provider account tabs stay populated after saving a setting", () => {
+  it("preserves per-account settings and accounts so provider tabs stay populated after saving a setting", () => {
     const settings = describeSettings(DEFAULT_CONFIG);
     const accountSettings = { "chatgpt/default": settings };
-    const next = snapshotFromMutation({ path: "/tmp/config.json", exists: true, settings, accountSettings });
+    const accounts = [{ kind: "claude" as const, id: "default", instanceId: "claude/default", label: "Default", enabled: true, env: {}, model: null, thinkingEffort: null, homePath: null, binaryPath: null, launchArgs: null, email: "a@example.com", workspaceName: null, planType: null, signedIn: true, codexHomePath: null, codexBinaryPath: null, codexLaunchArgs: null, codexVerified: false }];
+    const next = snapshotFromMutation({ path: "/tmp/config.json", exists: true, settings, accountSettings, accounts });
     expect(next.accountSettings).toBe(accountSettings);
+    expect(next.accounts).toBe(accounts);
+  });
+});
+
+describe("pickOptionColumns", () => {
+  it("ignores the Default fallback row's prose description so model rows stay right-aligned", () => {
+    const cols = pickOptionColumns(
+      [
+        { value: "", label: "Default", description: "claude-sonnet-5-5, from 'Model' on the Defaults tab" },
+        { value: "claude-opus-5-5", label: "Claude Opus 5.5", badge: "default", description: "low–max" },
+        { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", description: "low–max" },
+      ],
+      60,
+    );
+    expect(cols).toEqual({ badge: 7, detail: 7 });
+  });
+
+  it("clamps detail column width on narrow panes so labels never collide with badges", () => {
+    const cols = pickOptionColumns(
+      [
+        { value: "a", label: "Very Long Model Name Here", badge: "default", description: "very-long-effort-range-description" },
+      ],
+      45,
+    );
+    expect(cols).toEqual({ badge: 7, detail: 5 });
   });
 });
 

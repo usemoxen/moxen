@@ -868,22 +868,19 @@ export function App({
   };
 
   /**
-   * Reports a dispatched turn: toasts on acceptance, and on rejection the
-   * prompt it carried — text and images both — back in the draft. Chips and
-   * pending images are only cleared once the turn is accepted, so a rejection
-   * loses nothing.
+   * Reports a dispatched turn: toasts on acceptance, and on rejection puts the
+   * prompt it carried — text, images, and attached paths — back in the draft.
+   * Draft, pending images, and path chips are consumed when `send` fires so a
+   * follow-up message sent while this request is still in flight never re-sends
+   * them (nor does a late ACK wipe out images pasted into the next draft).
    */
   const delivered = (
     sent: ReturnType<typeof dispatchTurn>,
-    sourceId: string,
     restoreUnsent: () => void,
-    attachments: readonly ImageAttachmentUpload[],
     busyDelivery: "steer" | "queue",
     scheduledFor?: Date,
   ): void => {
     void sent.then((result) => {
-      filePaths.clear(sourceId);
-      writePending(sourceId, []);
       const continueAt = usageBanner.banner?.continueAt ?? null;
       if (scheduledFor === undefined && result.status === "queued" && !sessionRunningRef.current && continueAt !== null) {
         toasts.push("queued", "info", t("send.queuedAfterContinue", { at: clock(continueAt) }), COPY_TOAST_MS);
@@ -899,7 +896,6 @@ export function App({
     }).catch((cause: unknown) => {
       setError(String(cause).slice(0, 120));
       restoreUnsent();
-      restoreUnsentAttachments(sourceId, attachments);
     });
   };
 
@@ -942,11 +938,20 @@ export function App({
     const sourceId = selected.id;
     const parsed = extractMentions(trimmed);
     const attachedPaths = filePaths.items;
-    // Enter consumes the draft at once, so every Enter below is single-flight:
-    // a second Enter finds an empty draft. Anything typed while the send waits
-    // lands in a fresh draft and is kept after the restored text on a drop.
+    const pendingAttachments = pending;
+    // Enter consumes the draft, pending images, and attached paths at once, so
+    // every Enter below is single-flight: a follow-up send while this request
+    // is in flight finds an empty draft and empty attachments, and never sends
+    // the same images twice. Anything typed or pasted while the send waits is
+    // preserved beside the restored prompt on a drop.
     resetDraft(sourceId);
-    const restoreUnsent = () => restoreUnsentDraft(sourceId, trimmed);
+    writePending(sourceId, []);
+    filePaths.clear(sourceId);
+    const restoreUnsent = () => {
+      restoreUnsentDraft(sourceId, trimmed);
+      restoreUnsentAttachments(sourceId, pendingAttachments);
+      filePaths.restore(sourceId, attachedPaths);
+    };
     // A send started while the Shift+Tab switch is still reaching the server
     // waits for it, so the prompt runs in the mode the composer shows. A send
     // the gate drops disarms its one-off and restores its text instead of
@@ -954,12 +959,12 @@ export function App({
     // why, except a hung switch, which names itself here. A dropped scheduled
     // or queued send says its schedule went with it, so the retry is a choice.
     void interaction.gateSend(() => {
-      if (parsed.paths.length === 0 && pending.length === 0) {
-        delivered(dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue), sourceId, restoreUnsent, [], busyDelivery, scheduledFor);
+      if (parsed.paths.length === 0 && pendingAttachments.length === 0) {
+        delivered(dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue), restoreUnsent, busyDelivery, scheduledFor);
         return;
       }
       void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), (name, mimeType, bytes) =>
-        shrinkForAttach(name, mimeType, bytes, pending.length + parsed.paths.length > IMAGE_LIMITS.manyImages),
+        shrinkForAttach(name, mimeType, bytes, pendingAttachments.length + parsed.paths.length > IMAGE_LIMITS.manyImages),
       ).then((built) => {
         if (built.error !== null) {
           setError(built.error.slice(0, 120));
@@ -968,14 +973,14 @@ export function App({
         }
         // Pasted and @-mentioned together: the server refuses the same, but
         // here the text is restored and nothing is sent.
-        const imageError = imageSetError([...pending, ...built.attachments]);
+        const imageError = imageSetError([...pendingAttachments, ...built.attachments]);
         if (imageError !== null) {
           setError(t("send.cannot", { why: tx(imageError) }).slice(0, 160));
           restoreUnsent();
           return;
         }
-        const attachments = [...pending, ...built.attachments];
-        delivered(dispatchTurn(promptWithPaths(parsed.text, attachedPaths), attachments, busyDelivery, scheduledFor, queue), sourceId, restoreUnsent, attachments, busyDelivery, scheduledFor);
+        const attachments = [...pendingAttachments, ...built.attachments];
+        delivered(dispatchTurn(promptWithPaths(parsed.text, attachedPaths), attachments, busyDelivery, scheduledFor, queue), restoreUnsent, busyDelivery, scheduledFor);
       });
     }).then((result) => {
       if (result === "sent") return;

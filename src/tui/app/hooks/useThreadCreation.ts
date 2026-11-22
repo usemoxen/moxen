@@ -138,14 +138,17 @@ export function useThreadCreation(params: {
       setError(t("thread.pickProject"));
       return;
     }
-    // Enter consumes the draft at once (single-flight, like `send`); every
-    // failure below puts it back.
+    // Enter consumes the draft and pending images at once (single-flight, like
+    // `send`); every failure below puts both back.
+    const pendingAttachments = pending;
     resetDraft(draftKey);
+    writePending(draftKey, []);
     const parsed = extractMentions(trimmed);
     void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), prepareImage).then((built) => {
       if (built.error !== null) {
         setError(built.error.slice(0, 120));
         restoreUnsentDraft(draftKey, trimmed);
+        restoreUnsentAttachments(draftKey, pendingAttachments);
         return;
       }
       const threadId = crypto.randomUUID();
@@ -170,7 +173,7 @@ export function useThreadCreation(params: {
         ...(scratch ? {} : { branch: source?.branch ?? null }),
       } as const;
       const oneOff = takeOneOff();
-      const sentAttachments = [...pending, ...built.attachments];
+      const sentAttachments = [...pendingAttachments, ...built.attachments];
       const start = {
         type: "thread.turn.start",
         threadId,
@@ -185,6 +188,7 @@ export function useThreadCreation(params: {
         } catch (cause: unknown) {
           setError(String(cause).slice(0, 120));
           restoreUnsentDraft(draftKey, trimmed);
+          restoreUnsentAttachments(draftKey, pendingAttachments);
           return;
         }
         // Opt in before the first prompt: the server only asks a listening
@@ -197,7 +201,6 @@ export function useThreadCreation(params: {
         const started = client.dispatch(start);
         // Open the thread at once so a parked run-size question surfaces: the
         // start may wait for its answer before it settles.
-        writePending(draftKey, []);
         setCreating(false);
         setCreatingModelSelection(null);
         setCreatingRuntimeMode(null);
@@ -212,7 +215,7 @@ export function useThreadCreation(params: {
           // The composer now reads the new thread's key: put the prompt and
           // its images back there, not under the old draft.
           restoreUnsentDraft(threadId, trimmed);
-          restoreUnsentAttachments(threadId, sentAttachments);
+          restoreUnsentAttachments(threadId, pendingAttachments);
         } finally {
           releaseOptIn();
         }

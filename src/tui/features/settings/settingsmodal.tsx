@@ -238,7 +238,9 @@ export function SettingsModal({
   const paneWidth = Math.max(24, inner - TAB_WIDTH - 3);
   const [tab, setTab] = useState<SettingsTab>(initialSection);
   const memoryStatus = useMemoryRuntime(client, tab === "memory");
-  const [loadedAccounts, setLoadedAccounts] = useState<readonly ProviderAccountSummary[]>(initialAccounts ?? []);
+  const [loadedAccounts, setLoadedAccounts] = useState<readonly ProviderAccountSummary[]>(
+    initialAccounts ?? rawSnapshot?.accounts ?? [],
+  );
   const [usageByInstance, setUsageByInstance] = useState<Readonly<Record<string, ProviderUsageLimits>> | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [accountSaving, setAccountSaving] = useState(false);
@@ -251,14 +253,27 @@ export function SettingsModal({
   }, [initialAccounts]);
 
   useEffect(() => {
+    if (initialAccounts !== undefined || rawSnapshot?.accounts === undefined) return;
+    setLoadedAccounts((current) => (current.length === 0 ? rawSnapshot.accounts! : current));
+  }, [initialAccounts, rawSnapshot?.accounts]);
+
+  useEffect(() => {
     if (!client) return;
     let alive = true;
-    void client
-      .query({ type: "providers.accounts" })
-      .then((res) => {
-        if (alive) setLoadedAccounts(res.accounts);
-      })
-      .catch(() => undefined);
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const fetchAccounts = (attempt: number) => {
+      void client
+        .query({ type: "providers.accounts" })
+        .then((res) => {
+          if (alive) setLoadedAccounts(res.accounts);
+        })
+        .catch(() => {
+          if (alive && attempt < 2) {
+            retryTimer = setTimeout(() => fetchAccounts(attempt + 1), 1_500);
+          }
+        });
+    };
+    fetchAccounts(0);
     void client
       .query({ type: "usage.limits" })
       .then((res) => {
@@ -273,6 +288,7 @@ export function SettingsModal({
       .catch(() => undefined);
     return () => {
       alive = false;
+      if (retryTimer !== null) clearTimeout(retryTimer);
     };
   }, [client, rawSnapshot]);
 
@@ -437,9 +453,7 @@ export function SettingsModal({
     return all.filter((entry) => `${entry.label} ${entry.value} ${entry.group ?? ""} ${entry.description ?? ""}`.toLowerCase().includes(needle));
   }, [pickControl, query, sliding]);
   /** A list whose rows carry a tag lines the tag and the detail up in columns. */
-  const columns = pickOptions.some((entry) => entry.badge !== undefined)
-    ? { badge: Math.max(...pickOptions.map((entry) => entry.badge?.length ?? 0)), detail: Math.max(...pickOptions.map((entry) => entry.description?.length ?? 0)) }
-    : undefined;
+  const columns = pickOptionColumns(pickOptions, paneWidth);
 
   // Leaving a row abandons an edit in progress rather than carrying the
   // half-typed text onto the next setting.
@@ -1190,7 +1204,7 @@ export function SettingsModal({
                             label={option.label}
                             description={option.description}
                             badge={option.badge}
-                            columns={columns}
+                            columns={option.value === "" ? undefined : columns}
                             chosen={option.value === (pickItem.value === undefined ? "" : String(pickItem.value))}
                             active={optionIndex === picking.index}
                             width={paneWidth}
@@ -1671,6 +1685,24 @@ function SettingCard({
       {item.unavailable === undefined && (item.control.kind === "pick" || item.control.kind === "order") && item.control.warning !== undefined ? <text fg={COLOR.warn} bg={bg} wrapMode="word" selectable={false}>{item.control.warning}</text> : null}
     </box>
   );
+}
+
+/**
+ * Column widths for aligned badge + detail rows in a settings option list.
+ * Measures only non-empty option rows so the top `Default` fallback row's prose
+ * description never stretches every model row's detail column or crushes labels.
+ */
+export function pickOptionColumns(
+  options: readonly SettingOption[],
+  width: number,
+): { readonly badge: number; readonly detail: number } | undefined {
+  const rows = options.filter((entry) => entry.value !== "");
+  if (!rows.some((entry) => entry.badge !== undefined)) return undefined;
+  const badge = Math.max(...rows.map((entry) => entry.badge?.length ?? 0));
+  const rawDetail = Math.max(...rows.map((entry) => entry.description?.length ?? 0));
+  const maxLabel = Math.max(...rows.map((entry) => entry.label.length));
+  const detailRoom = Math.max(0, width - maxLabel - (badge + 2) - 6);
+  return { badge, detail: Math.min(rawDetail, detailRoom) };
 }
 
 /** The choices fit along a slider of this width (and are the kind a slider is for). */
