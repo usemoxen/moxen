@@ -26,10 +26,12 @@ export interface ChatGptCatalogDeps {
 
 export interface ChatGptModelInfo {
   readonly id: string;
+  readonly displayName?: string | undefined;
   readonly contextWindow: number;
   readonly maxOutput: number;
   readonly vision: boolean;
   readonly efforts: readonly string[];
+  readonly defaultEffort?: string | undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -50,8 +52,24 @@ export function isChatGptChatModel(id: string): boolean {
   return /^(?:gpt-|o[1-9]|chatgpt-)/i.test(trimmed);
 }
 
+function parseSupportedEfforts(raw: unknown): readonly string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: string[] = [];
+  for (const item of raw) {
+    const effort =
+      typeof item === "string"
+        ? item.trim()
+        : typeof asRecord(item)?.effort === "string"
+          ? (asRecord(item)!.effort as string).trim()
+          : "";
+    if (effort && !out.includes(effort)) out.push(effort);
+  }
+  return out;
+}
+
 export function inferChatGptModelMetadata(id: string, raw?: Record<string, unknown>): ChatGptModelInfo {
   const lower = id.toLowerCase();
+  const displayName = typeof raw?.display_name === "string" && raw.display_name.trim() ? raw.display_name.trim() : undefined;
   const contextWindow =
     positiveInt(raw?.context_window) ??
     positiveInt(raw?.context_length) ??
@@ -59,13 +77,24 @@ export function inferChatGptModelMetadata(id: string, raw?: Record<string, unkno
     (lower.startsWith("gpt-6") || lower.startsWith("gpt-5") ? 400_000 : 200_000);
   const maxOutput = positiveInt(raw?.max_output_tokens) ?? 32_768;
   const reasoningModel = /^(?:gpt-5|gpt-6|o[1-9])/.test(lower);
-  const vision = /^(?:gpt-4o|gpt-4\.1|gpt-5|gpt-6|o3|o4|chatgpt-4o)/.test(lower);
+  const parsedEfforts = parseSupportedEfforts(raw?.supported_reasoning_levels);
+  const efforts = parsedEfforts ?? (reasoningModel ? DEFAULT_EFFORTS : []);
+  const rawDefaultEffort =
+    typeof raw?.default_reasoning_level === "string" && raw.default_reasoning_level.trim()
+      ? raw.default_reasoning_level.trim()
+      : undefined;
+  const defaultEffort = rawDefaultEffort && efforts.includes(rawDefaultEffort) ? rawDefaultEffort : undefined;
+  const vision = Array.isArray(raw?.input_modalities)
+    ? raw.input_modalities.some((m) => typeof m === "string" && m.toLowerCase() === "image")
+    : /^(?:gpt-4o|gpt-4\.1|gpt-5|gpt-6|o3|o4|chatgpt-4o)/.test(lower);
   return {
     id,
+    ...(displayName !== undefined ? { displayName } : {}),
     contextWindow,
     maxOutput,
     vision,
-    efforts: reasoningModel ? DEFAULT_EFFORTS : [],
+    efforts,
+    ...(defaultEffort !== undefined ? { defaultEffort } : {}),
   };
 }
 
@@ -80,10 +109,18 @@ export function toChatGptHarnessModel(info: ChatGptModelInfo): HarnessModelConfi
 }
 
 export function toChatGptModelSummary(info: ChatGptModelInfo, isDefault: boolean): ModelSummary {
-  const label = info.id
-    .split("-")
-    .map((part) => (part === "gpt" ? "GPT" : part === "codex" ? "Codex" : part === "mini" ? "Mini" : part === "nano" ? "Nano" : part.charAt(0).toUpperCase() + part.slice(1)))
-    .join(" ");
+  const label =
+    info.displayName ??
+    info.id
+      .split("-")
+      .map((part) => (part === "gpt" ? "GPT" : part === "codex" ? "Codex" : part === "mini" ? "Mini" : part === "nano" ? "Nano" : part.charAt(0).toUpperCase() + part.slice(1)))
+      .join(" ");
+  const defaultEffort =
+    info.defaultEffort && info.efforts.includes(info.defaultEffort)
+      ? info.defaultEffort
+      : info.efforts.includes("medium")
+        ? "medium"
+        : info.efforts[0] ?? null;
   return {
     slug: info.id,
     name: label,
@@ -96,11 +133,11 @@ export function toChatGptModelSummary(info: ChatGptModelInfo, isDefault: boolean
             {
               id: "effort",
               label: "Effort",
-              currentValue: "medium",
+              currentValue: defaultEffort,
               choices: info.efforts.map((effort) => ({
                 id: effort,
                 label: effort === "xhigh" ? "Extra High" : effort.charAt(0).toUpperCase() + effort.slice(1),
-                isDefault: effort === "medium",
+                isDefault: effort === defaultEffort,
               })),
             },
           ]
@@ -127,17 +164,25 @@ export async function discoverChatGptModels(
     throw new Error(`OpenAI models discovery failed (HTTP ${response.status}).`);
   }
   const json = asRecord(await response.json().catch(() => null));
-  const data = Array.isArray(json?.data) ? json.data : [];
+  // ChatGPT OAuth tokens return `{ models: [{ slug, display_name, visibility, ... }] }`;
+  // standard OpenAI API responses return `{ data: [{ id, ... }] }`.
+  const rawList = Array.isArray(json?.models) ? json.models : Array.isArray(json?.data) ? json.data : [];
   const seen = new Set<string>();
-  const models: ChatGptModelInfo[] = [];
-  for (const entry of data) {
-    const rec = asRecord(entry);
-    const id = typeof rec?.id === "string" ? rec.id.trim() : "";
+  const collected: Array<{ readonly info: ChatGptModelInfo; readonly priority: number; readonly index: number }> = [];
+  for (let index = 0; index < rawList.length; index++) {
+    const rec = asRecord(rawList[index]);
+    if (!rec) continue;
+    if (typeof rec.visibility === "string" && rec.visibility.trim().toLowerCase() === "hide") continue;
+    if (rec.supported_in_api === false) continue;
+    const rawId = typeof rec.slug === "string" ? rec.slug : typeof rec.id === "string" ? rec.id : "";
+    const id = rawId.trim();
     if (!id || seen.has(id) || !isChatGptChatModel(id)) continue;
     seen.add(id);
-    models.push(inferChatGptModelMetadata(id, rec ?? undefined));
+    const priority = typeof rec.priority === "number" && Number.isFinite(rec.priority) ? rec.priority : Number.MAX_SAFE_INTEGER;
+    collected.push({ info: inferChatGptModelMetadata(id, rec), priority, index });
   }
-  return models;
+  collected.sort((a, b) => (a.priority !== b.priority ? a.priority - b.priority : a.index - b.index));
+  return collected.map((entry) => entry.info);
 }
 
 export function chatgptOAuthQuirks(): ModelQuirks {

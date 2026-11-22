@@ -150,6 +150,57 @@ describe("ChatGPT OAuth Responses transport & per-app cap errors (MXN-461)", () 
     expect(models[0]?.vision).toBe(true);
   });
 
+  it("parses ChatGPT OAuth `{ models: [{ slug, display_name, visibility, ... }] }` payloads", async () => {
+    const mockFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          models: [
+            {
+              slug: "gpt-6.2-astra",
+              display_name: "GPT-6.2-Astra",
+              visibility: "list",
+              supported_in_api: true,
+              context_window: 272_000,
+              input_modalities: ["text", "image"],
+              default_reasoning_level: "low",
+              supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "ultra" }],
+              priority: 2,
+            },
+            {
+              slug: "gpt-reserve",
+              display_name: "GPT-Reserve",
+              visibility: "hide",
+              supported_in_api: true,
+              priority: 0,
+            },
+            {
+              slug: "gpt-6.2-sol",
+              display_name: "GPT-6.2-Sol",
+              visibility: "list",
+              supported_in_api: true,
+              context_window: 500_000,
+              input_modalities: ["text", "image"],
+              default_reasoning_level: "low",
+              supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }, { effort: "max" }, { effort: "ultra" }],
+              priority: 1,
+            },
+          ],
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+
+    const models = await discoverChatGptModels("at_oauth_token", { fetch: mockFetch });
+    expect(models.map((m) => m.id)).toEqual(["gpt-6.2-sol", "gpt-6.2-astra"]);
+    expect(models[0]).toMatchObject({
+      id: "gpt-6.2-sol",
+      displayName: "GPT-6.2-Sol",
+      contextWindow: 500_000,
+      vision: true,
+      defaultEffort: "low",
+      efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    });
+  });
+
   it("runs zero-tool completeText on HarnessDriver for both chatgpt/<id> and harness/<id> and unlocks improvePrompt", async () => {
     const secrets = makeMemoryKeychain();
     await saveChatGptAuthBundle(
