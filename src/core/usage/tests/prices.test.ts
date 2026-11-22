@@ -69,6 +69,23 @@ describe("model prices", () => {
     expect(modelPriceFor({ providers: {} }, "chatgpt", "gpt-6.2-astra")).toEqual({ input: 8, cacheRead: 0.4, cacheWrite: 10, output: 40 });
   });
 
+  it("ships API-equivalent prices for Claude Fable 5.2, Opus 4.5, and tiered Haiku 5.5", () => {
+    expect(modelPriceFor({ providers: {} }, "claude", "claude-fable-5-2")).toEqual({ input: 8, cacheRead: 0.2, cacheWrite: 10, output: 40 });
+    expect(modelPriceFor({ providers: {} }, "claude", "claude-opus-4-5")).toEqual({ input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 });
+    const haiku = modelPriceFor({ providers: {} }, "claude", "claude-haiku-5-5")!;
+    expect(haiku).toEqual({
+      input: 0.1,
+      cacheRead: 0.01,
+      cacheWrite: 0.125,
+      output: 0.5,
+      tiers: [{ afterTokens: 100_000, input: 0.5, cacheRead: 0.05, cacheWrite: 0.625, output: 2.5 }],
+    });
+    const smallTurn = { input: 50_000, cacheRead: 40_000, cacheCreate: 0, output: 10_000, thinking: 0 };
+    expect(priceUsage(haiku, smallTurn)).toBeCloseTo((50_000 * 0.1 + 40_000 * 0.01 + 10_000 * 0.5) / 1e6, 9);
+    const largeTurn = { input: 60_000, cacheRead: 60_000, cacheCreate: 0, output: 10_000, thinking: 0 };
+    expect(priceUsage(haiku, largeTurn)).toBeCloseTo((60_000 * 0.5 + 60_000 * 0.05 + 10_000 * 2.5) / 1e6, 9);
+  });
+
   it("ships API-equivalent prices for Antigravity's Gemini and Claude models while leaving GPT-OSS unpriced", () => {
     expect(modelPriceFor({ providers: {} }, "antigravity", "gemini-4-neon")).toEqual({ input: 3, cacheRead: 0.15, output: 15 });
     expect(modelPriceFor({ providers: {} }, "antigravity", "gemini-4-argon")).toEqual({ input: 2, cacheRead: 0.1, output: 10 });
