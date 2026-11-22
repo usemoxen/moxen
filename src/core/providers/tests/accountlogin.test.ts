@@ -13,11 +13,13 @@ import { FakeCodexTransport } from "../codex/tests/fakes.js";
 
 function makeFakeChild() {
   const proc = new EventEmitter() as ChildProcess & {
+    stdin: PassThrough;
     stdout: PassThrough;
     stderr: PassThrough;
     killed: boolean;
     kill: (signal?: NodeJS.Signals) => boolean;
   };
+  proc.stdin = new PassThrough();
   proc.stdout = new PassThrough();
   proc.stderr = new PassThrough();
   proc.killed = false;
@@ -104,6 +106,15 @@ describe("in-app account login, managed profile folders, and Codex companion use
     expect(captured!.env.HOME).toBe(path.resolve(homeDir));
     expect(captured!.env.USERPROFILE).toBe(path.resolve(homeDir));
     expect(session.authorizationUrl).toBe("https://accounts.google.com/o/oauth2/auth?client_id=agy");
+    expect(session.openBrowser).toBe(true);
+    expect(session.needsCodeInput).toBe(true);
+
+    let receivedStdin = "";
+    child.stdin.on("data", (chunk: Buffer | string) => {
+      receivedStdin += chunk.toString();
+    });
+    await session.submitCode?.("4/0AUn6Hd_test_code");
+    expect(receivedStdin).toBe("4/0AUn6Hd_test_code\n");
 
     const wait = session.waitForCompletion(5_000);
     child.emit("close", 0);

@@ -504,6 +504,8 @@ export const es: Catalog = {
   "settings.providers.unpairedHint": "Sin vincular: inicia sesión o verifica un complemento Codex para ver ventanas de uso y generar imágenes.",
   "settings.providers.openAuthUrl": "Completa el inicio de sesión con ChatGPT en tu navegador: {url}",
   "settings.providers.openAccountAuth": "{message} {url}",
+  "settings.providers.pasteCodePlaceholder": "Pega el código de autorización del navegador y pulsa intro",
+  "settings.providers.cancelLogin": "Cancelar",
   "settings.providers.updateLabel": "Actualizar",
   "settings.providers.updateToLabel": "Actualizar a {version}",
   "settings.providers.updatingLabel": "Actualizando…",

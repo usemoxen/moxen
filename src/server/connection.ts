@@ -2050,6 +2050,7 @@ export class DirectConnection implements ClientApi {
           homePath: session.homePath,
           authorizationUrl: session.authorizationUrl,
           openBrowser: session.openBrowser,
+          needsCodeInput: session.needsCodeInput,
           message: session.message,
         };
       }
@@ -2059,6 +2060,9 @@ export class DirectConnection implements ClientApi {
           throw new CliError("PROVIDER_LOGIN_NOT_FOUND", `No pending provider login session "${command.sessionId}".`);
         }
         try {
+          if (command.code !== undefined) {
+            await entry.session.submitCode?.(command.code);
+          }
           const completion = await entry.session.waitForCompletion(command.timeoutMs);
           if (entry.kind === "chatgpt" && completion.probed) {
             const bundle = await loadChatGptAuthBundle(entry.id, this.chatgptOAuth?.secrets);

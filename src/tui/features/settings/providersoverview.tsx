@@ -602,8 +602,11 @@ function DetailFieldCard({
 export interface AccountLoginStartView {
   readonly authorizationUrl: string | null;
   readonly openBrowser: boolean;
+  readonly needsCodeInput?: boolean;
   readonly message: string | null;
   readonly homePath: string | null;
+  readonly submitCode?: (code: string) => Promise<{ readonly verified?: boolean; readonly needsConfirmation?: boolean; readonly reason?: string | null } | void>;
+  readonly cancel?: () => Promise<void>;
   readonly done: Promise<{ readonly verified?: boolean; readonly needsConfirmation?: boolean; readonly reason?: string | null } | void>;
 }
 
@@ -660,7 +663,14 @@ export function ProfileAccountHeader({
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [editingEnv, setEditingEnv] = useState(false);
   const [authUrlPending, setAuthUrlPending] = useState<string | null>(null);
-  const [cliLoginPending, setCliLoginPending] = useState<{ readonly message: string; readonly url: string | null } | null>(null);
+  const [cliLoginPending, setCliLoginPending] = useState<{
+    readonly message: string;
+    readonly url: string | null;
+    readonly needsCodeInput: boolean;
+    readonly submitting?: boolean;
+    readonly submitCode?: AccountLoginStartView["submitCode"];
+    readonly cancel?: AccountLoginStartView["cancel"];
+  } | null>(null);
   const [pairFeedback, setPairFeedback] = useState<{ readonly text: string; readonly needsConfirmation: boolean } | null>(null);
 
   useEffect(() => {
@@ -679,19 +689,24 @@ export function ProfileAccountHeader({
       setCliLoginPending({
         message: started.message ?? t("settings.providers.signingIn"),
         url: started.authorizationUrl,
+        needsCodeInput: started.needsCodeInput === true,
+        submitCode: started.submitCode,
+        cancel: started.cancel,
       });
       if (started.openBrowser && started.authorizationUrl) {
         openBrowserUrl(started.authorizationUrl);
       }
-      void started.done
-        .then((res) => {
-          if (res && res.verified === false && res.reason) {
-            setPairFeedback({ text: res.reason, needsConfirmation: res.needsConfirmation === true });
-          } else if (res?.verified === true) {
-            setPairFeedback(null);
-          }
-        })
-        .finally(() => setCliLoginPending(null));
+      if (started.needsCodeInput !== true) {
+        void started.done
+          .then((res) => {
+            if (res && res.verified === false && res.reason) {
+              setPairFeedback({ text: res.reason, needsConfirmation: res.needsConfirmation === true });
+            } else if (res?.verified === true) {
+              setPairFeedback(null);
+            }
+          })
+          .finally(() => setCliLoginPending(null));
+      }
     });
   };
 
@@ -852,11 +867,45 @@ export function ProfileAccountHeader({
           {t("settings.providers.openAuthUrl", { url: authUrlPending })}
         </text>
       ) : cliLoginPending ? (
-        <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
-          {cliLoginPending.url
-            ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
-            : cliLoginPending.message}
-        </text>
+        <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+          <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+            {cliLoginPending.url
+              ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
+              : cliLoginPending.message}
+          </text>
+          {cliLoginPending.needsCodeInput && cliLoginPending.submitCode ? (
+            <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+              <TextField
+                key="account-login-code"
+                initial=""
+                placeholder={t("settings.providers.pasteCodePlaceholder")}
+                width={Math.max(18, width - 6)}
+                onSubmit={(code) => {
+                  const trimmed = code.trim();
+                  if (!trimmed || cliLoginPending.submitting) return;
+                  setCliLoginPending((cur) => (cur ? { ...cur, submitting: true } : null));
+                  void cliLoginPending
+                    .submitCode?.(trimmed)
+                    .finally(() => setCliLoginPending(null));
+                }}
+              />
+              {cliLoginPending.cancel ? (
+                <box style={{ flexDirection: "row", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                  <Chip
+                    bracketed
+                    surface={SURFACE.panel}
+                    label={t("settings.providers.cancelLogin")}
+                    onPress={() => {
+                      const doCancel = cliLoginPending.cancel;
+                      setCliLoginPending(null);
+                      void doCancel?.();
+                    }}
+                  />
+                </box>
+              ) : null}
+            </box>
+          ) : null}
+        </box>
       ) : account.kind === "chatgpt" && !account.codexVerified ? (
         <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
           {t("settings.providers.unpairedHint")}
@@ -946,7 +995,14 @@ export function ProvidersOverviewPanel({
   const [editingField, setEditingField] = useState<DetailFieldId | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [authUrlPending, setAuthUrlPending] = useState<string | null>(null);
-  const [cliLoginPending, setCliLoginPending] = useState<{ readonly message: string; readonly url: string | null } | null>(null);
+  const [cliLoginPending, setCliLoginPending] = useState<{
+    readonly message: string;
+    readonly url: string | null;
+    readonly needsCodeInput: boolean;
+    readonly submitting?: boolean;
+    readonly submitCode?: AccountLoginStartView["submitCode"];
+    readonly cancel?: AccountLoginStartView["cancel"];
+  } | null>(null);
   const [pairFeedback, setPairFeedback] = useState<{ readonly text: string; readonly needsConfirmation: boolean } | null>(null);
   const [wizard, setWizard] = useState<
     | null
@@ -1306,17 +1362,22 @@ export function ProvidersOverviewPanel({
                         setCliLoginPending({
                           message: started.message ?? t("settings.providers.signingIn"),
                           url: started.authorizationUrl,
+                          needsCodeInput: started.needsCodeInput === true,
+                          submitCode: started.submitCode,
+                          cancel: started.cancel,
                         });
                         if (started.openBrowser && started.authorizationUrl) openBrowserUrl(started.authorizationUrl);
-                        void started.done
-                          .then((res) => {
-                            if (res && res.verified === false && res.reason) {
-                              setPairFeedback({ text: res.reason, needsConfirmation: res.needsConfirmation === true });
-                            } else if (res?.verified === true) {
-                              setPairFeedback(null);
-                            }
-                          })
-                          .finally(() => setCliLoginPending(null));
+                        if (started.needsCodeInput !== true) {
+                          void started.done
+                            .then((res) => {
+                              if (res && res.verified === false && res.reason) {
+                                setPairFeedback({ text: res.reason, needsConfirmation: res.needsConfirmation === true });
+                              } else if (res?.verified === true) {
+                                setPairFeedback(null);
+                              }
+                            })
+                            .finally(() => setCliLoginPending(null));
+                        }
                       });
                     }}
                   />
@@ -1379,19 +1440,58 @@ export function ProvidersOverviewPanel({
                       setCliLoginPending({
                         message: started.message ?? t("settings.providers.signingIn"),
                         url: started.authorizationUrl,
+                        needsCodeInput: started.needsCodeInput === true,
+                        submitCode: started.submitCode,
+                        cancel: started.cancel,
                       });
                       if (started.openBrowser && started.authorizationUrl) openBrowserUrl(started.authorizationUrl);
-                      void started.done.finally(() => setCliLoginPending(null));
+                      if (started.needsCodeInput !== true) {
+                        void started.done.finally(() => setCliLoginPending(null));
+                      }
                     });
                   }}
                 />
               </box>
               {cliLoginPending ? (
-                <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
-                  {cliLoginPending.url
-                    ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
-                    : cliLoginPending.message}
-                </text>
+                <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                  <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word" selectable={false}>
+                    {cliLoginPending.url
+                      ? t("settings.providers.openAccountAuth", { message: cliLoginPending.message, url: cliLoginPending.url })
+                      : cliLoginPending.message}
+                  </text>
+                  {cliLoginPending.needsCodeInput && cliLoginPending.submitCode ? (
+                    <box style={{ flexDirection: "column", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                      <TextField
+                        key="overview-account-login-code"
+                        initial=""
+                        placeholder={t("settings.providers.pasteCodePlaceholder")}
+                        width={Math.max(18, width - 6)}
+                        onSubmit={(code) => {
+                          const trimmed = code.trim();
+                          if (!trimmed || cliLoginPending.submitting) return;
+                          setCliLoginPending((cur) => (cur ? { ...cur, submitting: true } : null));
+                          void cliLoginPending
+                            .submitCode?.(trimmed)
+                            .finally(() => setCliLoginPending(null));
+                        }}
+                      />
+                      {cliLoginPending.cancel ? (
+                        <box style={{ flexDirection: "row", marginTop: 1 }} backgroundColor={SURFACE.panel}>
+                          <Chip
+                            bracketed
+                            surface={SURFACE.panel}
+                            label={t("settings.providers.cancelLogin")}
+                            onPress={() => {
+                              const doCancel = cliLoginPending.cancel;
+                              setCliLoginPending(null);
+                              void doCancel?.();
+                            }}
+                          />
+                        </box>
+                      ) : null}
+                    </box>
+                  ) : null}
+                </box>
               ) : null}
             </box>
           ) : null}

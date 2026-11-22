@@ -886,10 +886,22 @@ pub trait ThreadSource {
     fn logout_chatgpt(&mut self, _account_id: &str) {}
     fn pair_chatgpt_codex(&mut self, _account_id: &str, _confirm_workspace: bool) {}
     fn start_provider_account_login(&mut self, _kind: &str, _id: &str) {}
+    fn pending_account_login(&self) -> Option<PendingAccountLogin> {
+        None
+    }
+    fn submit_account_login_code(&mut self, _session_id: &str, _kind: &str, _id: &str, _code: &str) {}
+    fn cancel_account_login(&mut self, _session_id: &str) {}
     /// Downloads, tests and switches to the newest Moxen release.
     fn apply_update(&mut self) {}
     /// Goes back to the version the update replaced.
     fn rollback_update(&mut self) {}
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingAccountLogin {
+    pub kind: String,
+    pub id: String,
+    pub session_id: String,
 }
 
 pub struct SideAnswer {

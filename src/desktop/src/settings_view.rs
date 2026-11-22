@@ -78,6 +78,12 @@ pub enum SettingsForm {
     },
     /// Slug id for a newly added provider account.
     AddAccount { kind: String },
+    /// Pasted OAuth authorization code for an interactive CLI login (e.g. Antigravity).
+    AccountLoginCode {
+        session_id: String,
+        kind: String,
+        id: String,
+    },
 }
 
 impl SettingsForm {
@@ -98,6 +104,9 @@ impl SettingsForm {
             | Self::ModelPrice { title, .. }
             | Self::AccountField { title, .. } => title.clone(),
             Self::AddAccount { kind } => format!("Add {} account (slug id)", account_kind_name(kind)),
+            Self::AccountLoginCode { kind, id, .. } => {
+                format!("Paste {} authorization code ({kind}/{id})", account_kind_name(kind))
+            }
             Self::Duplicate { id, .. } => format!("Copy “{id}” under a new name"),
             Self::AddModel { .. } => "Name the model".into(),
             Self::Import => "Import a profile".into(),
@@ -601,6 +610,20 @@ impl Workspace {
                     }
                     self.source.save_provider_account(payload);
                     self.settings_account = Some(instance_id);
+                    self.settings_form = None;
+                }
+            }
+            SettingsForm::AccountLoginCode {
+                session_id,
+                kind,
+                id,
+            } => {
+                let code = text.trim();
+                if code.is_empty() {
+                    self.settings_error = Some("Paste the authorization code from your browser.".into());
+                } else {
+                    self.source
+                        .submit_account_login_code(&session_id, &kind, &id, code);
                     self.settings_form = None;
                 }
             }
@@ -4928,18 +4951,53 @@ fn provider_profile_tab(
     } else {
         let login_kind = account.kind.clone();
         let login_id = account.id.clone();
-        header_card = header_card.child(
-            div().flex().flex_wrap().gap(px(6.)).child(small_button(
-                ("profile-cli-login", 0),
-                "Sign in",
-                "Launch CLI login inside this profile's isolated folder",
-                cx.listener(move |this, _, _, cx| {
-                    this.source
-                        .start_provider_account_login(&login_kind, &login_id);
-                    cx.notify();
-                }),
-            )),
-        );
+        let pending = w
+            .source
+            .pending_account_login()
+            .filter(|p| p.kind == account.kind && p.id == account.id);
+        let mut bar = div().flex().flex_wrap().gap(px(6.)).child(small_button(
+            ("profile-cli-login", 0),
+            "Sign in",
+            "Launch CLI login inside this profile's isolated folder",
+            cx.listener(move |this, _, _, cx| {
+                this.source
+                    .start_provider_account_login(&login_kind, &login_id);
+                cx.notify();
+            }),
+        ));
+        if let Some(p) = pending {
+            let sid = p.session_id.clone();
+            let cancel_sid = p.session_id.clone();
+            let pk = p.kind.clone();
+            let pid = p.id.clone();
+            bar = bar
+                .child(small_button(
+                    ("profile-cli-paste-code", 0),
+                    "Paste authorization code",
+                    "Complete sign-in by pasting the code shown in your browser",
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_settings_form(
+                            SettingsForm::AccountLoginCode {
+                                session_id: sid.clone(),
+                                kind: pk.clone(),
+                                id: pid.clone(),
+                            },
+                            "",
+                            cx,
+                        );
+                    }),
+                ))
+                .child(small_button(
+                    ("profile-cli-cancel-login", 0),
+                    "Cancel",
+                    "Cancel the pending sign-in session",
+                    cx.listener(move |this, _, _, cx| {
+                        this.source.cancel_account_login(&cancel_sid);
+                        cx.notify();
+                    }),
+                ));
+        }
+        header_card = header_card.child(bar);
     }
 
     let limits_data = w.source.limits();
@@ -5379,18 +5437,53 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
         } else {
             let login_kind = account.kind.clone();
             let login_id = account.id.clone();
-            detail_col = detail_col.child(
-                div().flex().flex_wrap().gap(px(6.)).child(small_button(
-                    ("providers-cli-login", 0),
-                    "Sign in",
-                    "Launch CLI login inside this profile's isolated folder",
-                    cx.listener(move |this, _, _, cx| {
-                        this.source
-                            .start_provider_account_login(&login_kind, &login_id);
-                        cx.notify();
-                    }),
-                )),
-            );
+            let pending = w
+                .source
+                .pending_account_login()
+                .filter(|p| p.kind == account.kind && p.id == account.id);
+            let mut bar = div().flex().flex_wrap().gap(px(6.)).child(small_button(
+                ("providers-cli-login", 0),
+                "Sign in",
+                "Launch CLI login inside this profile's isolated folder",
+                cx.listener(move |this, _, _, cx| {
+                    this.source
+                        .start_provider_account_login(&login_kind, &login_id);
+                    cx.notify();
+                }),
+            ));
+            if let Some(p) = pending {
+                let sid = p.session_id.clone();
+                let cancel_sid = p.session_id.clone();
+                let pk = p.kind.clone();
+                let pid = p.id.clone();
+                bar = bar
+                    .child(small_button(
+                        ("providers-cli-paste-code", 0),
+                        "Paste authorization code",
+                        "Complete sign-in by pasting the code shown in your browser",
+                        cx.listener(move |this, _, _, cx| {
+                            this.open_settings_form(
+                                SettingsForm::AccountLoginCode {
+                                    session_id: sid.clone(),
+                                    kind: pk.clone(),
+                                    id: pid.clone(),
+                                },
+                                "",
+                                cx,
+                            );
+                        }),
+                    ))
+                    .child(small_button(
+                        ("providers-cli-cancel-login", 0),
+                        "Cancel",
+                        "Cancel the pending sign-in session",
+                        cx.listener(move |this, _, _, cx| {
+                            this.source.cancel_account_login(&cancel_sid);
+                            cx.notify();
+                        }),
+                    ));
+            }
+            detail_col = detail_col.child(bar);
         }
 
         let detail_limits_data = w.source.limits();

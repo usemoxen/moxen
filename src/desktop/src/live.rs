@@ -586,6 +586,8 @@ struct State {
     settings_read_id: u64,
     /// The last settings export or import, in a line.
     settings_notice: Option<SettingsNotice>,
+    /// Active interactive CLI login awaiting a pasted OAuth code (e.g. Antigravity).
+    pending_account_login: Option<crate::model::PendingAccountLogin>,
     /// The last harness or MCP test or probe, while it runs and after.
     harness_run: Option<HarnessRun>,
     /// The last model discovery answer.
@@ -3626,6 +3628,10 @@ impl ThreadSource for ServerSource {
                 .get("openBrowser")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let needs_code_input = started
+                .get("needsCodeInput")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if open_browser && (auth_url.starts_with("https://") || auth_url.starts_with("http://"))
             {
                 #[cfg(target_os = "macos")]
@@ -3651,7 +3657,17 @@ impl ThreadSource for ServerSource {
                     },
                     error: false,
                 });
+                if needs_code_input {
+                    state.pending_account_login = Some(crate::model::PendingAccountLogin {
+                        kind: kind_owned.clone(),
+                        id: id_owned.clone(),
+                        session_id: session_id.clone(),
+                    });
+                }
             });
+            if needs_code_input {
+                return Ok(());
+            }
             let done = wire
                 .dispatch(
                     "provider.account.login.complete",
@@ -3686,6 +3702,53 @@ impl ThreadSource for ServerSource {
                 state.settings_notice = Some(notice);
             });
             read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
+    fn pending_account_login(&self) -> Option<crate::model::PendingAccountLogin> {
+        self.shared
+            .state
+            .lock()
+            .expect("live state")
+            .pending_account_login
+            .clone()
+    }
+    fn submit_account_login_code(&mut self, session_id: &str, kind: &str, id: &str, code: &str) {
+        let session_owned = session_id.to_string();
+        let kind_owned = kind.to_string();
+        let id_owned = id.to_string();
+        let code_owned = code.trim().to_string();
+        let shared = self.shared.clone();
+        shared.update(|state| {
+            state.pending_account_login = None;
+        });
+        background(&self.shared, move |wire| {
+            wire.dispatch(
+                "provider.account.login.complete",
+                json!({ "sessionId": session_owned, "code": code_owned }),
+            )
+            .map_err(|error| problem(&error, None))?;
+            shared.update(|state| {
+                state.settings_notice = Some(SettingsNotice {
+                    text: format!("Signed in {kind_owned}/{id_owned}."),
+                    error: false,
+                });
+            });
+            read_provider_accounts_state(&shared);
+            Ok(())
+        });
+    }
+    fn cancel_account_login(&mut self, session_id: &str) {
+        let session_owned = session_id.to_string();
+        let shared = self.shared.clone();
+        shared.update(|state| {
+            state.pending_account_login = None;
+        });
+        background(&self.shared, move |wire| {
+            let _ = wire.dispatch(
+                "provider.account.login.cancel",
+                json!({ "sessionId": session_owned }),
+            );
             Ok(())
         });
     }

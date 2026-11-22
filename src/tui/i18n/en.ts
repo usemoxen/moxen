@@ -510,6 +510,8 @@ export const en = {
   "settings.providers.unpairedHint": "Unpaired: sign in or verify a Codex companion for live usage windows and image generation.",
   "settings.providers.openAuthUrl": "Complete Sign in with ChatGPT in your browser: {url}",
   "settings.providers.openAccountAuth": "{message} {url}",
+  "settings.providers.pasteCodePlaceholder": "Paste authorization code from browser and press enter",
+  "settings.providers.cancelLogin": "Cancel",
   "settings.providers.updateLabel": "Update",
   "settings.providers.updateToLabel": "Update to {version}",
   "settings.providers.updatingLabel": "Updating…",

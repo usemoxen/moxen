@@ -993,6 +993,41 @@ export function SettingsModal({
                     setAccountError(null);
                     try {
                       const started = await client.dispatch({ type: "provider.account.login.start", kind, id });
+                      if (started.needsCodeInput) {
+                        const submitCode = async (code: string) => {
+                          setAccountError(null);
+                          try {
+                            const res = await client.dispatch({
+                              type: "provider.account.login.complete",
+                              sessionId: started.sessionId,
+                              code,
+                            });
+                            await reloadAccounts();
+                            return {
+                              ...(res.verified !== undefined ? { verified: res.verified } : {}),
+                              ...(res.needsConfirmation !== undefined ? { needsConfirmation: res.needsConfirmation } : {}),
+                              ...(res.reason !== undefined ? { reason: res.reason } : {}),
+                            };
+                          } catch (cause) {
+                            setAccountError(cause instanceof Error ? cause.message : String(cause));
+                          }
+                        };
+                        const cancel = async () => {
+                          await client
+                            .dispatch({ type: "provider.account.login.cancel", sessionId: started.sessionId })
+                            .catch(() => undefined);
+                        };
+                        return {
+                          authorizationUrl: started.authorizationUrl,
+                          openBrowser: started.openBrowser,
+                          needsCodeInput: true,
+                          message: started.message,
+                          homePath: started.homePath,
+                          submitCode,
+                          cancel,
+                          done: Promise.resolve(),
+                        };
+                      }
                       const done = client
                         .dispatch({ type: "provider.account.login.complete", sessionId: started.sessionId })
                         .then(async (res) => {
@@ -1009,6 +1044,7 @@ export function SettingsModal({
                       return {
                         authorizationUrl: started.authorizationUrl,
                         openBrowser: started.openBrowser,
+                        needsCodeInput: false,
                         message: started.message,
                         homePath: started.homePath,
                         done,
@@ -1248,6 +1284,41 @@ export function SettingsModal({
                         setAccountError(null);
                         try {
                           const started = await client.dispatch({ type: "provider.account.login.start", kind, id });
+                          if (started.needsCodeInput) {
+                            const submitCode = async (code: string) => {
+                              setAccountError(null);
+                              try {
+                                const res = await client.dispatch({
+                                  type: "provider.account.login.complete",
+                                  sessionId: started.sessionId,
+                                  code,
+                                });
+                                await reloadAccounts();
+                                return {
+                                  ...(res.verified !== undefined ? { verified: res.verified } : {}),
+                                  ...(res.needsConfirmation !== undefined ? { needsConfirmation: res.needsConfirmation } : {}),
+                                  ...(res.reason !== undefined ? { reason: res.reason } : {}),
+                                };
+                              } catch (cause) {
+                                setAccountError(cause instanceof Error ? cause.message : String(cause));
+                              }
+                            };
+                            const cancel = async () => {
+                              await client
+                                .dispatch({ type: "provider.account.login.cancel", sessionId: started.sessionId })
+                                .catch(() => undefined);
+                            };
+                            return {
+                              authorizationUrl: started.authorizationUrl,
+                              openBrowser: started.openBrowser,
+                              needsCodeInput: true,
+                              message: started.message,
+                              homePath: started.homePath,
+                              submitCode,
+                              cancel,
+                              done: Promise.resolve(),
+                            };
+                          }
                           const done = client
                             .dispatch({ type: "provider.account.login.complete", sessionId: started.sessionId })
                             .then(async (res) => {
@@ -1264,6 +1335,7 @@ export function SettingsModal({
                           return {
                             authorizationUrl: started.authorizationUrl,
                             openBrowser: started.openBrowser,
+                            needsCodeInput: false,
                             message: started.message,
                             homePath: started.homePath,
                             done,

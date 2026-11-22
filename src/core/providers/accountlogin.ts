@@ -59,9 +59,13 @@ export interface ProviderAccountLoginSession {
   readonly accountId: string;
   readonly homePath: string | null;
   readonly authorizationUrl: string | null;
-  /** True when the client should open `authorizationUrl` in the system browser (Codex app-server does not open it). */
+  /** True when the client should open `authorizationUrl` in the system browser (Codex app-server and Antigravity do not open it). */
   readonly openBrowser: boolean;
+  /** True when the CLI waits for the user to paste an OAuth authorization code onto stdin (e.g. `agy acp --login`). */
+  readonly needsCodeInput: boolean;
   readonly message: string | null;
+  /** Feed a pasted authorization code or redirect URL to an interactive CLI login session (`stdin`). */
+  submitCode?(code: string): Promise<void>;
   waitForCompletion(timeoutMs?: number): Promise<ProviderAccountLoginCompletion>;
   cancel(): Promise<void>;
 }
@@ -99,7 +103,9 @@ function defaultSpawnChild(
   return spawn(command, [...args], {
     cwd: options.cwd,
     env: options.env,
-    stdio: ["ignore", "pipe", "pipe"],
+    // Keep stdin open as a pipe so interactive logins like `agy acp --login`
+    // do not immediately hit EOF and can receive the pasted OAuth code.
+    stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
 }
@@ -165,8 +171,8 @@ function buildCliLaunch(
     args: launched.args,
     env: launched.env ? { ...env, ...launched.env } : env,
     message: resolvedHome
-      ? `Complete Antigravity sign-in in your browser (saved to ${trimmedHome}).`
-      : "Complete Antigravity sign-in in your browser.",
+      ? `Sign in with Google in your browser (saved to ${trimmedHome}), then paste the authorization code below.`
+      : "Sign in with Google in your browser, then paste the authorization code below.",
   };
 }
 
@@ -282,6 +288,7 @@ async function startCliLoginSession(
     cancelled = true;
     if (!settled) {
       try {
+        child.stdin?.destroy();
         killProcessTree(child, "SIGTERM");
       } catch {
         // Already exited.
@@ -291,15 +298,35 @@ async function startCliLoginSession(
     }
   };
 
+  const isAntigravity = input.kind === "antigravity";
+  const needsCodeInput = isAntigravity || /paste the authorization code/iu.test(combinedOutput);
+
   return {
     sessionId,
     kind: input.kind,
     accountId: normalizedId,
     homePath,
     authorizationUrl: foundUrl,
-    // `claude auth login` and `agy acp --login` open the browser themselves and print the URL as fallback.
-    openBrowser: false,
+    // `agy acp --login` only prints the Google URL and waits for stdin; `claude auth login` opens the browser itself.
+    openBrowser: isAntigravity,
+    needsCodeInput,
     message: launch.message,
+    async submitCode(code: string): Promise<void> {
+      const trimmed = code.trim();
+      if (!trimmed) {
+        throw new CliError("INVALID_CONFIG", "Authorization code is required.");
+      }
+      if (settled) return;
+      if (!child.stdin || child.stdin.destroyed || !child.stdin.writable) {
+        throw new CliError("PROVIDER_LOGIN_FAILED", "Login process is no longer accepting input.");
+      }
+      await new Promise<void>((resolve, reject) => {
+        child.stdin!.write(`${trimmed}\n`, "utf8", (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    },
     async waitForCompletion(timeoutMs = DEFAULT_LOGIN_TIMEOUT_MS): Promise<ProviderAccountLoginCompletion> {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -454,6 +481,7 @@ async function startCodexCompanionLoginSession(
     authorizationUrl: authUrl,
     // Codex app-server returns `authUrl` and expects the client to open the browser.
     openBrowser: true,
+    needsCodeInput: false,
     message: homePath
       ? `Sign in to the Codex companion in your browser (saved to ${homePath}).`
       : "Sign in to the Codex companion in your browser.",

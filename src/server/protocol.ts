@@ -389,8 +389,8 @@ export type CommandBody =
   | { readonly type: "provider.account.toggle"; readonly kind: AccountProviderKind; readonly id: string; readonly enabled: boolean }
   /** Start an in-app CLI login session for a configured provider account (`claude`, `antigravity`, or `chatgpt` Codex companion). */
   | { readonly type: "provider.account.login.start"; readonly kind: AccountProviderKind; readonly id: string; readonly homePath?: string }
-  /** Wait for a pending provider account CLI login session to finish (and auto-pair Codex companion for `chatgpt`). */
-  | { readonly type: "provider.account.login.complete"; readonly sessionId: string; readonly timeoutMs?: number }
+  /** Wait for a pending provider account CLI login session to finish (optionally feeding a pasted OAuth code). */
+  | { readonly type: "provider.account.login.complete"; readonly sessionId: string; readonly code?: string; readonly timeoutMs?: number }
   /** Cancel a pending provider account CLI login session. */
   | { readonly type: "provider.account.login.cancel"; readonly sessionId: string }
   /** Start an OpenAI Sign in with ChatGPT OAuth 2.0 PKCE + OIDC login session behind the server boundary. */
@@ -569,6 +569,7 @@ export interface CommandResults {
     readonly homePath: string | null;
     readonly authorizationUrl: string | null;
     readonly openBrowser: boolean;
+    readonly needsCodeInput: boolean;
     readonly message: string | null;
   };
   "provider.account.login.complete": {
@@ -1729,6 +1730,7 @@ export function decodeCommand(value: unknown): Command {
         ...meta,
         type,
         sessionId: requireField(record.sessionId, type, "sessionId"),
+        ...optionalString(record, "code"),
         ...optionalNumber(record, "timeoutMs", type),
       };
     case "provider.account.login.cancel":

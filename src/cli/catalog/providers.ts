@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import path from "node:path";
 
 import { selectModel, selectProvider, type ProviderSummary } from "../../core/catalog/summary.js";
@@ -171,9 +172,19 @@ export async function loginProviderAccountCli(
   if (started.authorizationUrl) {
     process.stderr.write(`Authorization URL:\n${started.authorizationUrl}\n`);
   }
+  let code: string | undefined;
+  if (started.needsCodeInput) {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      code = (await rl.question("Paste authorization code (or callback URL) and press Enter: ")).trim();
+    } finally {
+      rl.close();
+    }
+  }
   const completed = await client.dispatch({
     type: "provider.account.login.complete",
     sessionId: started.sessionId,
+    ...(code !== undefined ? { code } : {}),
   });
   return {
     account: completed.account,
