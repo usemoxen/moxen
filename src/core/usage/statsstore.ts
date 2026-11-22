@@ -38,7 +38,7 @@ async function readInputs(store: ThreadStore, config?: Pick<CliConfig, "provider
   }
   // Turns that recorded no provider cost are priced at the current values:
   // the user's per-provider rows over Moxen's shipped list.
-  const priceFor: StatsOptions["priceFor"] = config === undefined ? undefined : (kind, model) => modelPriceFor(config, kind, model);
+  const priceFor: StatsOptions["priceFor"] = config === undefined ? undefined : (kind, model, instanceId) => modelPriceFor(config, kind, model, instanceId);
   return { inputs, options: { runningTotals, ...(priceFor === undefined ? {} : { priceFor }) } };
 }
 

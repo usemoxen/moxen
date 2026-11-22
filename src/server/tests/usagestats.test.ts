@@ -65,8 +65,8 @@ describe("usage.stats", () => {
       expect(stats.sessions).toBe(2);
       expect(stats.totals.input).toBe(180 + 30);
       expect(stats.byProvider.map((bucket) => [bucket.key, bucket.usage.input, bucket.costUsd])).toEqual([
-        ["claudeAgent", 180, 2],
-        ["opencode", 30, null],
+        ["claude", 180, 2],
+        ["opencode/opencode", 30, null],
       ]);
     } finally {
       await connection.close();

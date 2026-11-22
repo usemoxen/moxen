@@ -1148,7 +1148,7 @@ fn models(data: &StatsData) -> impl IntoElement {
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
-                                        .child(bucket.key.clone()),
+                                        .child(provider_display_name(&bucket.key).to_string()),
                                 )
                                 .child(
                                     div()
@@ -1165,6 +1165,18 @@ fn models(data: &StatsData) -> impl IntoElement {
                         }),
                 ),
         )
+}
+
+fn provider_display_name(key: &str) -> &str {
+    match key {
+        "claude" | "claudeAgent" => "Claude Code",
+        "codex" => "Codex",
+        "chatgpt" => "ChatGPT",
+        "antigravity" | "agy" => "Antigravity",
+        "opencode" | "opencode/opencode" => "OpenCode",
+        "opencode/opencode-go" => "OpenCode Go",
+        _ => key,
+    }
 }
 
 fn card_row(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {

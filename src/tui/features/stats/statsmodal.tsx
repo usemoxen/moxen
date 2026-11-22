@@ -34,6 +34,18 @@ const CHART_ROWS = 8;
 const LISTED_MODELS = 7;
 const LABEL_COLUMN = 6;
 
+const CANONICAL_PROVIDER_NAMES: Readonly<Record<string, string>> = {
+  claude: "Claude Code",
+  claudeAgent: "Claude Code",
+  codex: "Codex",
+  chatgpt: "ChatGPT",
+  antigravity: "Antigravity",
+  agy: "Antigravity",
+  opencode: "OpenCode",
+  "opencode/opencode": "OpenCode",
+  "opencode/opencode-go": "OpenCode Go",
+};
+
 const RANGE_LABEL = (): Record<StatsRange, string> => ({ all: t("stats.range.all"), "30d": t("stats.range.30d"), "7d": t("stats.range.7d") });
 const TAB_LABEL = (): Record<StatsTab, string> => ({ overview: t("stats.tab.overview"), models: t("stats.tab.models") });
 
@@ -292,7 +304,10 @@ export function StatsModal({
   const [tab, setTab] = useState<StatsTab>("overview");
   const [range, setRange] = useState<StatsRange>("all");
   const { stats, all, loading, error } = useUsageStats(client, true, range);
-  const providerNames = new Map((providers ?? []).map((provider) => [provider.instanceId, provider.displayName ?? provider.instanceId] as const));
+  const providerNames = new Map<string, string>(Object.entries(CANONICAL_PROVIDER_NAMES));
+  for (const provider of providers ?? []) {
+    if (provider.displayName) providerNames.set(provider.instanceId, provider.displayName);
+  }
   const inner = Math.max(20, width - 4);
 
   useKeyLayer((key) => {
