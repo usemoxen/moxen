@@ -723,17 +723,78 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     return mapped === null ? null : { ...mapped, costUsd: session.usage.costUsd };
   };
 
+  private standaloneUsageCache: { readonly fetchedAt: number; readonly windows: readonly RateLimitWindow[] } | null = null;
+  private standaloneUsageInFlight: Promise<readonly RateLimitWindow[]> | null = null;
+
   /**
-   * Explicit freshness ask: probe an already-open session, never start one.
-   * The probe publishes through the normal event path too; the returned
-   * windows let the caller record them without waiting for the pump.
+   * Explicit freshness ask: probe an already-open session when one exists;
+   * otherwise run a lightweight session-less `never`-prompt query (the same
+   * pattern as `skillInventory`: no prompt sent, no session written, 60s cache)
+   * so Settings and `usage_status` show live Claude quotas before the first turn.
    */
   readonly refreshUsage = async (): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
     const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
-    if (!session) return null;
-    const windows = await this.probeUsage(session);
+    if (session) {
+      const windows = await this.probeUsage(session);
+      return windows.length > 0 ? { key: this.usageKey, windows } : null;
+    }
+    const windows = await this.probeStandaloneUsage();
     return windows.length > 0 ? { key: this.usageKey, windows } : null;
   };
+
+  private async probeStandaloneUsage(): Promise<readonly RateLimitWindow[]> {
+    const now = Date.now();
+    if (this.standaloneUsageCache && now - this.standaloneUsageCache.fetchedAt < 60_000) {
+      return this.standaloneUsageCache.windows;
+    }
+    if (this.standaloneUsageInFlight) return await this.standaloneUsageInFlight;
+    const work = (async (): Promise<readonly RateLimitWindow[]> => {
+      const never: AsyncIterable<SDKUserMessage> = {
+        [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<SDKUserMessage>>(() => undefined) }),
+      };
+      const stringEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(makeClaudeEnv({ homePath: this.settings.homePath }, this.baseEnv))) {
+        if (typeof value === "string") stringEnv[key] = value;
+      }
+      const query = this.transport.query(never, {
+        cwd: process.cwd(),
+        permissionMode: "default",
+        env: stringEnv,
+        pathToClaudeCodeExecutable: resolveClaudeExecutable(this.settings.binaryPath, this.baseEnv),
+      });
+      try {
+        if (typeof query.usageExperimental !== "function") return [];
+        const response = (await Promise.race([
+          query.usageExperimental({ skipBehaviors: true }),
+          new Promise<never>((_, reject) => {
+            const timer = setTimeout(() => reject(new Error("usage probe timed out")), this.usageProbeTimeoutMs);
+            timer.unref?.();
+          }),
+        ])) as Parameters<typeof mapUsageProbe>[0];
+        const mapped = mapUsageProbe(response);
+        if (!mapped.available) return [];
+        const windows: RateLimitWindow[] = mapped.windows.map((window) => ({
+          id: window.id,
+          label: window.label,
+          resetsAt: window.resetsAt,
+          exhausted: window.usedPercent >= 100,
+          usedPercent: window.usedPercent,
+        }));
+        this.standaloneUsageCache = { fetchedAt: Date.now(), windows };
+        return windows;
+      } catch {
+        return [];
+      } finally {
+        query.close?.();
+      }
+    })();
+    this.standaloneUsageInFlight = work;
+    try {
+      return await work;
+    } finally {
+      if (this.standaloneUsageInFlight === work) this.standaloneUsageInFlight = null;
+    }
+  }
 
   /**
    * Claude Code's own `/context` breakdown: system prompt, tools, memory

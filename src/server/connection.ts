@@ -1099,8 +1099,29 @@ export class DirectConnection implements ClientApi {
    * never stops the rest. Drivers with nothing cheap to read sit the round out.
    */
   private async refreshUsageWindows(): Promise<Record<string, ProviderUsageLimits>> {
+    const config = await this.loadConfig();
+    this.lastProviders = config.providers;
+    const targets = new Set<TurnDriver>(this.ownedDrivers);
+    for (const account of config.providers?.claude?.accounts ?? []) {
+      if (account.enabled === false) continue;
+      if (!probeClaudeAccountAuth(account).signedIn) continue;
+      try {
+        targets.add(this.driverFor(`claude/${account.id.trim().toLowerCase()}`));
+      } catch {
+        // Unusable or unknown driver config: skip cleanly.
+      }
+    }
+    for (const account of config.providers?.antigravity?.accounts ?? []) {
+      if (account.enabled === false) continue;
+      if (!probeAntigravityAccountAuth(account).signedIn) continue;
+      try {
+        targets.add(this.driverFor(`antigravity/${account.id.trim().toLowerCase()}`));
+      } catch {
+        // Unusable or unknown driver config: skip cleanly.
+      }
+    }
     await Promise.allSettled(
-      [...this.ownedDrivers].map(async (driver) => {
+      [...targets].map(async (driver) => {
         // Records on landing, even past the deadline: the round answers from
         // the partial snapshot, and a late probe freshens the next call.
         const landed = (async () => await driver.refreshUsage?.())().then(
@@ -1120,7 +1141,7 @@ export class DirectConnection implements ClientApi {
       }),
     );
     // Also mirror live usage from verified Codex companions onto their `chatgpt/<id>` usage buckets.
-    const chatgptAccounts = this.lastProviders?.chatgpt?.accounts ?? [];
+    const chatgptAccounts = config.providers?.chatgpt?.accounts ?? [];
     await Promise.allSettled(
       chatgptAccounts
         .filter((account) => account.enabled !== false && account.codexVerified === true)

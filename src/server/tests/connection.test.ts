@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -1890,6 +1890,51 @@ describe("DirectConnection plan usage", () => {
       await connection.close();
     }
   }, 15_000);
+
+  it("refreshes configured authenticated Claude and Antigravity accounts even before any thread opens", async () => {
+    const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+    const claudeDriver = {
+      refreshUsage: async () => ({
+        key: "claude/default",
+        windows: [{ id: "session", label: "Session", resetsAt, exhausted: false, usedPercent: 18 }],
+      }),
+    } as unknown as TurnDriver;
+    const agyDriver = {
+      refreshUsage: async () => ({
+        key: "antigravity/default",
+        windows: [{ id: "gemini-5h", label: "Session – Gemini", resetsAt, exhausted: false, usedPercent: 82 }],
+      }),
+    } as unknown as TurnDriver;
+    const harness = await testHarness({
+      drivers: { claude: () => claudeDriver, antigravity: () => agyDriver },
+    });
+    const claudeHome = path.join(harness.root, "claude-default");
+    const agyHome = path.join(harness.root, "agy-default");
+    const configPath = path.join(harness.root, "config.json");
+    await mkdir(claudeHome, { recursive: true });
+    await writeFile(path.join(claudeHome, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "c@example.com" } }));
+    await mkdir(path.join(agyHome, ".gemini", "antigravity-cli", "cache"), { recursive: true });
+    await writeFile(path.join(agyHome, ".gemini", "antigravity-cli", "cache", "acp-auth-state.json"), JSON.stringify({ methodId: "oauth-personal" }));
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        providers: {
+          claude: { accounts: [{ id: "default", label: "Default", homePath: claudeHome }] },
+          antigravity: { accounts: [{ id: "default", label: "Default", homePath: agyHome }] },
+        },
+      }),
+    );
+
+    const connection = new DirectConnection({ storeRoot: harness.root, configPath, drivers: harness.drivers });
+    try {
+      const refreshed = await connection.query({ type: "usage.refresh" });
+      expect(refreshed.providers["claude/default"]?.windows).toEqual([{ id: "session", kind: "session", label: "Session", usedPercent: 18, resetsAt }]);
+      expect(refreshed.providers["antigravity/default"]?.windows).toEqual([{ id: "gemini-5h", kind: "session", label: "Session – Gemini", usedPercent: 82, resetsAt }]);
+    } finally {
+      resetUsageLimitsForTests();
+      await connection.close();
+    }
+  });
 });
 
 describe("DirectConnection settings", () => {

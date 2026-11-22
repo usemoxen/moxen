@@ -300,6 +300,10 @@ export function SettingsModal({
     ]);
     setLoadedAccounts(acctRes.accounts);
     if (limitsRes) setUsageByInstance(limitsRes.providers);
+    void client
+      .query({ type: "usage.refresh" })
+      .then((res) => setUsageByInstance(res.providers))
+      .catch(() => undefined);
   };
 
   const handleSaveAccount = async (input: ProviderAccountSaveInput): Promise<boolean> => {
