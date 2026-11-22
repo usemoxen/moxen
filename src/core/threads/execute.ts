@@ -21,6 +21,7 @@ import * as Stream from "effect/Stream";
 import type { SkillInventory } from "../catalog/summary.js";
 import type { BackgroundTaskSummary, RateLimitWindow } from "../providers/spi.js";
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
+import { chatgptHarnessConfigFor } from "./longthreads.js";
 import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
 import type { McpServerSpec } from "../mcp.js";
@@ -308,7 +309,7 @@ export function driverForInstance(
       ...(key !== "codex" ? { instanceId: key } : {}),
     });
   } else if (kind === "chatgpt") {
-    driver = factories.chatgpt?.() ?? factories.harness?.() ?? createChatGptHarnessDriver({ config: providers?.harness });
+    driver = factories.chatgpt?.() ?? factories.harness?.() ?? createChatGptHarnessDriver({ config: chatgptHarnessConfigFor(providers, instanceId) });
   } else if (kind === "opencode") {
     driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
   } else if (kind === "harness") {

@@ -16,9 +16,17 @@
  * while Claude Code's own compaction was switched off for it.
  */
 import { driverKindOfInstance, parseAccountInstanceId, resolveProfileProviderConfig } from "../types.js";
-import { harnessAskLine } from "../providers/harness/profiles.js";
+import { chatgptAskLine, harnessAskLine } from "../providers/harness/profiles.js";
 import { compactHardTokens, lineInput, lineText, lineTokens, parseLine, type ThresholdLine } from "./lines.js";
-import type { ClaudeAccountConfig, ClaudeProviderConfig, CliConfig, ProvidersConfig } from "../types.js";
+import type {
+  ChatGptAccountConfig,
+  ChatGptProviderConfig,
+  ClaudeAccountConfig,
+  ClaudeProviderConfig,
+  CliConfig,
+  HarnessProviderConfig,
+  ProvidersConfig,
+} from "../types.js";
 
 export type AutoHandoffMode = "off" | "ask" | "auto";
 
@@ -143,10 +151,13 @@ function ownConfigAndPrefix(
   if (instanceId !== undefined) {
     const parsed = parseAccountInstanceId(instanceId);
     if (parsed && parsed.kind === kind) {
-      return {
-        own: resolveProfileProviderConfig(config, instanceId) as Record<string, unknown> | undefined,
-        prefix: `providers.${parsed.kind}.accounts[${parsed.accountId}]`,
-      };
+      const account = resolveProfileProviderConfig(config, instanceId) as Record<string, unknown> | undefined;
+      if (account !== undefined) {
+        return {
+          own: account,
+          prefix: `providers.${parsed.kind}.accounts[${parsed.accountId}]`,
+        };
+      }
     }
   }
   return {
@@ -272,7 +283,7 @@ export function compactLineFor(config: LongThreadConfig, kind: LongThreadKind, m
   }
   const found = [...ownLine, ["longThreads.compactAt", textLine(config.longThreads?.compactAt)] as const].find(([, line]) => line !== undefined);
   if (found !== undefined) return { value: found[1]!, key: found[0] };
-  return kind === "harness" ? null : { value: DEFAULT_COMPACT_LINE, key: null };
+  return kind === "harness" || kind === "chatgpt" ? null : { value: DEFAULT_COMPACT_LINE, key: null };
 }
 
 /** What the server and a client act on for one thread. `compact` is null where Moxen does not compact it from outside. */
@@ -286,10 +297,14 @@ export function longThreadPolicy(config: LongThreadConfig, instanceId: string | 
   const handoff = { mode: handoffModeFor(config, kind, model, instanceId).value, line: handoffLineFor(config, kind, model, instanceId).value };
   if (kind === undefined) return { handoff, compact: null };
   const mode = compactionModeFor(config, kind, model, instanceId).value;
-  if (kind === "harness") {
+  if (kind === "harness" || kind === "chatgpt") {
     // On "auto" the Harness compacts inside its own loop. On "ask" its line is the loop's own threshold (profile, model, tab, window).
     if (mode !== "ask" || instanceId === undefined || model === undefined) return { handoff, compact: null };
-    const line = harnessAskLine(driverProviders(config)?.harness, instanceId, model);
+    const resolved = driverProviders(config);
+    const line =
+      kind === "harness"
+        ? harnessAskLine(resolved?.harness, instanceId, model)
+        : chatgptAskLine(chatgptHarnessConfigFor(resolved, instanceId), model);
     return { handoff, compact: line === null ? null : { mode: "ask", line } };
   }
   if (mode !== "ask" && mode !== "auto") return { handoff, compact: null };
@@ -297,6 +312,53 @@ export function longThreadPolicy(config: LongThreadConfig, instanceId: string | 
 }
 
 const harnessCompaction = (mode: CompactionMode): "ask" | "auto" | "off" => (mode === "off" ? "off" : mode === "ask" ? "ask" : "auto");
+
+function resolveChatGptDriverCompaction<T extends ChatGptProviderConfig | ChatGptAccountConfig>(
+  config: LongThreadConfig,
+  section: T | undefined,
+  instanceId?: string,
+): T {
+  const mode = harnessCompaction(compactionModeFor(config, "chatgpt", undefined, instanceId).value);
+  const line = compactLineFor(config, "chatgpt", undefined, instanceId);
+  const { compactAt: _compactAt, ...rest } = section ?? ({} as T);
+  return {
+    ...rest,
+    compaction: mode,
+    ...(line !== null ? { compactAt: lineText(line.value) } : {}),
+  } as T;
+}
+
+/**
+ * Build the `HarnessProviderConfig` for a `chatgpt/<id>` HarnessDriver: keeps
+ * shared Harness non-compaction fields (profiles for secret-env stripping,
+ * slots, web settings) while replacing every compaction setting with the
+ * ChatGPT account's own resolved settings.
+ */
+export function chatgptHarnessConfigFor(
+  providers: ProvidersConfig | undefined,
+  instanceId: string,
+): HarnessProviderConfig {
+  const {
+    compaction: _compaction,
+    compactAt: _compactAt,
+    compactAtModels: _compactAtModels,
+    compactionModels: _compactionModels,
+    autoCompact: _autoCompact,
+    autoCompactPercent: _autoCompactPercent,
+    autoCompactTokens: _autoCompactTokens,
+    keepRecentTokens: _keepRecentTokens,
+    ...sharedHarness
+  } = providers?.harness ?? {};
+  const resolved = (providers ? resolveProfileProviderConfig({ providers }, instanceId) : undefined) as ChatGptProviderConfig | ChatGptAccountConfig | undefined;
+  const own = resolved ?? providers?.chatgpt;
+  return {
+    ...sharedHarness,
+    ...(own?.compaction !== undefined ? { compaction: harnessCompaction(own.compaction) } : {}),
+    ...(own?.compactAt !== undefined ? { compactAt: own.compactAt } : {}),
+    ...(own?.compactAtModels !== undefined ? { compactAtModels: own.compactAtModels } : {}),
+    ...(own?.compactionModels !== undefined ? { compactionModels: own.compactionModels } : {}),
+  };
+}
 
 function resolveClaudeDriverCompaction<T extends ClaudeProviderConfig>(
   config: LongThreadConfig,
@@ -345,6 +407,10 @@ export function driverProviders(config: LongThreadConfig): ProvidersConfig | und
     resolveClaudeDriverCompaction(config, account, `claude/${account.id}`),
   );
   const claudeResolved = resolveClaudeDriverCompaction(config, providers?.claude);
+  const chatgptAccounts: ChatGptAccountConfig[] | undefined = providers?.chatgpt?.accounts?.map((account) =>
+    resolveChatGptDriverCompaction(config, account, `chatgpt/${account.id}`),
+  );
+  const chatgptResolved = resolveChatGptDriverCompaction(config, providers?.chatgpt);
   const { autoCompact: opencodeOwn, ...opencodeRest } = providers?.opencode ?? {};
   // OpenCode's own switch: on its own compaction, what its older key said (else OpenCode's config decides); otherwise off.
   const opencodeAuto = opencodeMode === "provider" ? (opencodeOwn === true ? true : undefined) : false;
@@ -354,6 +420,10 @@ export function driverProviders(config: LongThreadConfig): ProvidersConfig | und
     claude: {
       ...claudeResolved,
       ...(claudeAccounts ? { accounts: claudeAccounts } : {}),
+    },
+    chatgpt: {
+      ...chatgptResolved,
+      ...(chatgptAccounts ? { accounts: chatgptAccounts } : {}),
     },
     opencode: { ...opencodeRest, ...(opencodeAuto !== undefined ? { autoCompact: opencodeAuto } : {}) },
     harness: {

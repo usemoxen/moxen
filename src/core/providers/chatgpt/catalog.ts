@@ -5,7 +5,7 @@
 import type { ModelSummary } from "../../catalog/summary.js";
 import { parseAccountInstanceId, type HarnessModelConfig, type HarnessProfileConfig } from "../../types.js";
 import { HarnessDriver, type HarnessDriverOptions } from "../harness/driver.js";
-import { resolveHarnessTarget, type ResolvedHarnessTarget } from "../harness/profiles.js";
+import { chatgptDefaultContextWindow, resolveHarnessTarget, type ResolvedHarnessTarget } from "../harness/profiles.js";
 import { DEFAULT_QUIRKS, type ModelQuirks } from "../harness/quirks.js";
 import { ensureFreshChatGptToken, OPENAI_API_RESOURCE, type OAuthDeps } from "./oauth.js";
 
@@ -74,7 +74,7 @@ export function inferChatGptModelMetadata(id: string, raw?: Record<string, unkno
     positiveInt(raw?.context_window) ??
     positiveInt(raw?.context_length) ??
     positiveInt(raw?.max_model_len) ??
-    (lower.startsWith("gpt-6") || lower.startsWith("gpt-5") ? 400_000 : 200_000);
+    chatgptDefaultContextWindow(id);
   const maxOutput = positiveInt(raw?.max_output_tokens) ?? 32_768;
   const reasoningModel = /^(?:gpt-5|gpt-6|o[1-9])/.test(lower);
   const parsedEfforts = parseSupportedEfforts(raw?.supported_reasoning_levels);

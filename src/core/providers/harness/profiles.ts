@@ -360,6 +360,12 @@ export function readProfileApiKey(profile: HarnessProfileConfig, env: NodeJS.Pro
   return value !== undefined && value.trim() !== "" ? value.trim() : undefined;
 }
 
+/** Default context window inferred for a Sign in with ChatGPT model when the catalog entry isn't cached locally. */
+export function chatgptDefaultContextWindow(modelId: string): number {
+  const lower = modelId.trim().toLowerCase();
+  return lower.startsWith("gpt-6") || lower.startsWith("gpt-5") ? 400_000 : 200_000;
+}
+
 /**
  * Where a Harness thread on "ask" is offered compaction: the threshold its
  * loop would use (profile, model, tab, window), as tokens. Null when it does
@@ -376,5 +382,23 @@ export function harnessAskLine(config: HarnessProviderConfig | undefined, instan
   const settings = resolveCompactionSettings(config, target.profile, target.model.id);
   if (!settings.ask) return null;
   const tokens = autoCompactThreshold(target.model.contextWindow, settings);
+  return tokens === null ? null : { tokens };
+}
+
+/**
+ * Where a Sign in with ChatGPT thread on "ask" is offered compaction: the same
+ * loop threshold `HarnessDriver` uses for its synthesized ChatGPT target.
+ */
+export function chatgptAskLine(config: HarnessProviderConfig | undefined, modelId: string): { readonly tokens: number } | null {
+  const contextWindow = chatgptDefaultContextWindow(modelId);
+  const profile: HarnessProfileConfig = {
+    id: "chatgpt",
+    baseUrl: "https://api.openai.com/v1",
+    apiFormat: "responses",
+    models: [{ id: modelId, contextWindow }],
+  };
+  const settings = resolveCompactionSettings(config, profile, modelId);
+  if (!settings.ask) return null;
+  const tokens = autoCompactThreshold(contextWindow, settings);
   return tokens === null ? null : { tokens };
 }

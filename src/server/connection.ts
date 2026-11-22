@@ -87,7 +87,7 @@ import { MOXEN_MCP_INSTRUCTIONS } from "./mcp/stdio.js";
 import { callMoxenTool, moxenToolsFor, type MemoryAccess } from "./mcp/tools.js";
 import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
-import { driverProviders } from "../core/threads/longthreads.js";
+import { chatgptHarnessConfigFor, driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
 import { ensureStoredProject, listStoredProjects, removeStoredProject, renameStoredProject, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
@@ -1083,7 +1083,12 @@ export class DirectConnection implements ClientApi {
     const driver = driverForInstance(this.driversOwner, instanceId, this.factories, this.lastProviders);
     // The harness reads its profiles on every turn, so it is handed the config this operation saw.
     // Profiles are edited while the server runs; the harness driver reads its config on every use.
-    if (driver instanceof HarnessDriver) driver.setConfig(this.lastProviders?.harness, this.lastWeb);
+    if (driver instanceof HarnessDriver) {
+      const harnessConfig = driverKindOfInstance(instanceId) === "chatgpt"
+        ? chatgptHarnessConfigFor(this.lastProviders, instanceId)
+        : this.lastProviders?.harness;
+      driver.setConfig(harnessConfig, this.lastWeb);
+    }
     if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
     this.ownedDrivers.add(driver);
     return driver;
@@ -1100,7 +1105,7 @@ export class DirectConnection implements ClientApi {
    */
   private async refreshUsageWindows(): Promise<Record<string, ProviderUsageLimits>> {
     const config = await this.loadConfig();
-    this.lastProviders = config.providers;
+    this.lastProviders = driverProviders(config);
     const targets = new Set<TurnDriver>(this.ownedDrivers);
     for (const account of config.providers?.claude?.accounts ?? []) {
       if (account.enabled === false) continue;
