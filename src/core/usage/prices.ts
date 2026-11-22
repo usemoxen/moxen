@@ -35,7 +35,7 @@ export interface ModelPrice {
  * `bun run update:opencode-prices` never overwrites a hand-edited row.
  *
  * Sources:
- * - https://developers.openai.com/api/docs/pricing (2026-11-01)
+ * - https://developers.openai.com/api/docs/pricing (2026-11-19)
  * - https://platform.claude.com/docs/en/about-claude/pricing (2026-11-01)
  * - https://ai.google.dev/gemini-api/docs/pricing (2026-11-20)
  */
@@ -57,6 +57,8 @@ export const HAND_EDITED_MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
   "gemini-4-hydrogen": { input: 1.5, cacheRead: 0.075, output: 7.5 },
   // Introductory pricing through 2026-12-31 (standard $1.50/$7.50 from 2027-01-01).
   "gemini-3.8-flash": { input: 0.75, cacheRead: 0.075, output: 3.75 },
+  "gpt-6.2-sol": { input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 },
+  "gpt-6.2-astra": { input: 8, cacheRead: 0.4, cacheWrite: 10, output: 40 },
   "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
   "gpt-6.1-sol": { input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 },
   "gpt-6.1-terra": { input: 1, cacheRead: 0.05, cacheWrite: 1.25, output: 5 },

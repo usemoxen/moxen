@@ -64,6 +64,11 @@ describe("model prices", () => {
     expect(usageCost(price, usage, true)!.usd).toBeCloseTo(usageCost(price, usage)!.usd * 2, 9);
   });
 
+  it("ships API-equivalent prices for ChatGPT GPT-6.2 Sol and Astra", () => {
+    expect(modelPriceFor({ providers: {} }, "chatgpt", "gpt-6.2-sol")).toEqual({ input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 });
+    expect(modelPriceFor({ providers: {} }, "chatgpt", "gpt-6.2-astra")).toEqual({ input: 8, cacheRead: 0.4, cacheWrite: 10, output: 40 });
+  });
+
   it("ships API-equivalent prices for Antigravity's Gemini and Claude models while leaving GPT-OSS unpriced", () => {
     expect(modelPriceFor({ providers: {} }, "antigravity", "gemini-4-neon")).toEqual({ input: 3, cacheRead: 0.15, output: 15 });
     expect(modelPriceFor({ providers: {} }, "antigravity", "gemini-4-argon")).toEqual({ input: 2, cacheRead: 0.1, output: 10 });
