@@ -18,15 +18,21 @@ but never reaches upward into the server or a client
 | 3 | Codex | `codex app-server` over stdio JSON-RPC (tested on 0.166.0) | Inherited `codex login`; the CLI owns authentication |
 | 4 | Moxen Harness | Our own agent loop over an endpoint you configure (`providers.harness.profiles`): OpenAI Chat Completions, OpenAI Responses or Anthropic Messages | A key kept in the OS keychain, or read from the environment variable a profile names; never in the config file |
 | 5 | Antigravity | Official `agy` CLI unmodified (`agy acp`) over pinned ACP v1 (`protocolVersion: 1`) | Inherited `agy` login; Moxen never reads or stores credentials |
-| 6 | ACP | Agent Client Protocol v1 (`protocolVersion: 1`) over stdio JSON-RPC for profiles you configure (`providers.acp.agents`, from the ACP Registry or manually) | Inherited by each ACP CLI; Moxen never reads or stores credentials |
+| 6 | Mistral Vibe | Official `vibe-app-server` over stdio JSON-RPC 2.0 (tested on 3.1.4) | Inherited `vibe` login (OS keyring or `~/.vibe/.env`); Moxen never reads or stores credentials |
+| 7 | ACP | Agent Client Protocol v1 (`protocolVersion: 1`) over stdio JSON-RPC for profiles you configure (`providers.acp.agents`, from the ACP Registry or manually) | Inherited by each ACP CLI; Moxen never reads or stores credentials |
 
 Credentials live with the provider CLIs (OpenCode keeps them in its own
 SQLite, read only as provider type). This CLI never handles their tokens; the
 only keys Moxen holds are a harness profile's and a search key, in the OS
 keychain.
 
-GPT models can run through native Codex or OpenCode. Grok (SuperGrok) models
-run through OpenCode; there is no native Grok driver.
+GPT models can run through native Codex, OpenCode, or Sign in with ChatGPT
+via Moxen Harness. When a ChatGPT attachment or tool image exceeds OpenAI's
+30,000-patch limit at full resolution, Moxen asks OpenAI to resize it using
+high detail. The original image stays unchanged, and smaller images keep the
+model's default detail.
+
+Grok (SuperGrok) models run through OpenCode; there is no native Grok driver.
 
 Subscription windows are reported per account and shown per instance: Claude
 and Codex report for the whole driver, while OpenCode's `opencode-go` plan
@@ -130,13 +136,33 @@ negotiates any other protocol version is refused loudly
   available because ACP v1 and `agy` do not expose child session IDs or subagent
   history RPCs.
 - **ACP v1 protocol boundaries**: `AcpDriver` declares
-  `supportsConversationRollback: false` (no conversation rewind RPC), forks
+  `supportsConversationRollback: false` (no conversation rewind RPC), forwards
+  stdio and Streamable HTTP `mcpServers` on `session/new`, `session/resume`, and
+  `session/load` (treating Antigravity as HTTP-capable when `agy acp` omits
+  `mcpCapabilities` from `initialize`, routing Antigravity's external
+  non-`moxen` MCP servers through a compact per-session loopback lazy gateway
+  `moxen-mcp` with `search_tools` and `call_tool` so `agy`'s 20,000-token eager
+  schema budget never evicts tools while also honoring `disabledTools`,
+  restoring host `HOME`/`USERPROFILE` and clearing the synthetic
+  `SSH_CONNECTION` marker on direct stdio MCP children under isolated
+  Antigravity accounts, and falling back to Moxen's stdio server
+  for built-in tools on ACP agents without `mcpCapabilities.http`), forks
   sessions via `session/fork` automatically whenever an agent advertises
   `agentCapabilities.sessionCapabilities.fork` (failing cleanly with
   `FORK_UNSUPPORTED` when unadvertised, as in `agy acp` v1.5.13), and leaves
   operations without ACP v1 RPCs unadvertised (`sideQuestion` / `/btw`, prompt
   improver `completeText`, client-side session rename/title regeneration, and
   live mid-session MCP/tool updates).
+
+## Mistral Vibe
+
+Moxen drives **Mistral Vibe (`vibe`)** as an opt-in first-class provider (`providers.vibe.enabled: true`) over Mistral's official `vibe-app-server` stdio JSON-RPC 2.0 protocol (verified on `mistral-vibe` v3.1.4).
+
+- **Authentication & single-account scope**: Moxen inherits the `vibe` CLI's own login (OS keyring or `~/.vibe/.env`) and never reads, copies, or stores Mistral credentials. In line with Mistral's consumer terms, Mistral Vibe is configured as a single-account provider (no multi-account pooling or rotation). `initialize.clientInfo` identifies Moxen honestly (`name: "moxen"`, `entrypoint: "unknown"`), and per-session model/effort picks always pass `sessionOnly: true` so Moxen never mutates global `vibe` defaults.
+- **Discovery, diagnostics & updates**: Catalog discovery runs `initialize` → `setup/status` + `config/read` passively (no session started, cached under `<storeRoot>/cache/vibe-models.json`) to surface every unlocked model on your plan along with its `thinkingLevels` and context window size. `moxen doctor` probes `vibe` / `vibe-app-server`, Settings checks the latest `mistralai/mistral-vibe` GitHub Release, and `moxen update vibe` upgrades via `uv tool upgrade mistral-vibe`.
+- **Sessions, streaming & tools**: `VibeDriver` handles RFC 6902 JSON-Patch streaming (`history/entry/updated`, including `append` ops), interim assistant notes, reasoning updates, checklists (`todo`), image attachments, mid-turn steering (`turn/steer` with unconfirmed-steer recovery), native compaction (`session/compact` handoff), conversation rewind (`session/rewind` handoff), session forking (`session/fork`), tool-free `/btw` side questions (`session/fork` with `enabledTools: []`), context breakdown (`session/context/read`), background shell processes (`session/backgroundProcess/{output,stop}`), and session rename (`session/title/update`). Vibe's built-in `task` subagent tool is always disabled via `disabledTools` so delegation runs through Moxen's tracked threads.
+- **Permissions, worktree isolation & questions**: `callback/call` uses Vibe's two-phase flow (immediate `{ callbackId, accepted: true }` acknowledgement followed by `callback/result`). Moxen enforces worktree isolation on file writes and shell commands across every permission mode (never allowing `allow_session` / `allow_always` in isolated worktrees), gates shell commands with `assessCommandLine` in `auto` mode, and bridges `ask_user_question` callbacks to Moxen's interactive answer UI (declining cleanly on delegated threads).
+- **Plan usage**: `account/read` reports Mistral Vibe's monthly budget (`Monthly`, or `Monthly (PAYG)` when pay-as-you-go overage is enabled so 100% does not block continuation) and reset timestamp into `usage.limits` and the Context/Settings UI.
 
 ## Defaults
 

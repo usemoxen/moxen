@@ -411,4 +411,58 @@ describe("Sign in with ChatGPT server flow, Codex companion verification, and st
       await conn.close();
     }
   });
+
+  it("refreshes verified ChatGPT companion usage in usage.refresh even with no open Codex session", async () => {
+    const dir = makeTempDir("moxen-chatgpt-usage-refresh-");
+    const configPath = path.join(dir, "config.json");
+    const resetsAt = Math.floor(Date.now() / 1000) + 16_000;
+    const fakeCodex = new FakeCodexTransport({
+      rateLimits: {
+        rateLimitsByLimitId: {
+          codex: {
+            limitId: "codex",
+            planType: "plus",
+            primary: { usedPercent: 48, windowDurationMins: 300, resetsAt },
+            secondary: { usedPercent: 7, windowDurationMins: 10080, resetsAt: resetsAt + 500_000 },
+          },
+        },
+      },
+    });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        providers: {
+          chatgpt: {
+            accounts: [
+              {
+                id: "trial",
+                label: "Trial",
+                authRef: "keychain:chatgpt.account.trial",
+                codexHomePath: "~/.moxen/accounts/chatgpt/trial",
+                codexVerified: true,
+              },
+            ],
+          },
+        },
+      }),
+    );
+    const conn = new DirectConnection({
+      storeRoot: path.join(dir, "store"),
+      configPath,
+      builtinMcpServers: null,
+      drivers: {
+        codex: () => new CodexDriver({ transport: fakeCodex, instanceId: "codex/trial" }),
+      },
+    });
+    try {
+      const refreshed = await conn.query({ type: "usage.refresh" });
+      expect(refreshed.providers["chatgpt/trial"]?.windows).toMatchObject([
+        { id: "primary", kind: "session", label: "Session", usedPercent: 48 },
+        { id: "secondary", kind: "weekly", label: "Weekly", usedPercent: 7 },
+      ]);
+      expect(fakeCodex.sessions).toHaveLength(1);
+    } finally {
+      await conn.close();
+    }
+  });
 });

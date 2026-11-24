@@ -14,6 +14,7 @@ import path from "node:path";
 
 import { acpLaunchCommand } from "../providers/acp/transport.js";
 import { codexLaunchCommand } from "../providers/codex/transport.js";
+import { resolveVibeBinary } from "../providers/vibe/config.js";
 import { commandExists, runProcess } from "../infra/process.js";
 import { readStoredAuthTypes } from "../providers/opencode/catalog.js";
 import { CLAUDE_CODE_MIN_VERSION } from "../providers/claude/version.js";
@@ -45,6 +46,7 @@ export interface Diagnosis {
     readonly claude: ProviderCheck;
     readonly opencode: ProviderCheck;
     readonly antigravity?: ProviderCheck;
+    readonly vibe?: ProviderCheck;
   };
   readonly store: { readonly ok: boolean; readonly path: string };
   readonly auth: {
@@ -85,8 +87,8 @@ async function probeProvider(
  * configured with (`providers.<name>.binaryPath`), probed here too so the check
  * and the sessions look at the same binary; unset, the one on PATH.
  */
-export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, claudeBinaryPath?: string, codexBinaryPath?: string, antigravityBinaryPath?: string): Promise<Diagnosis> {
-  const [git, claude, opencode, codex, antigravity] = await Promise.all([
+export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, claudeBinaryPath?: string, codexBinaryPath?: string, antigravityBinaryPath?: string, vibeBinaryPath?: string): Promise<Diagnosis> {
+  const [git, claude, opencode, codex, antigravity, vibe] = await Promise.all([
     commandExists("git"),
     probeProvider(claudeBinaryPath ?? "claude", "inherit from `claude auth login`", CLAUDE_CODE_MIN_VERSION),
     probeProvider(
@@ -106,6 +108,17 @@ export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, c
         return await probeProvider(launch.command, "inherit from `agy` login", undefined, launch.args, launch.env);
       } catch { return { ok: false, installed: false, version: null, login: "inherit from `agy` login" }; }
     })(),
+    (async (): Promise<ProviderCheck> => {
+      const login = "inherit from `vibe` login";
+      const resolvedAppServer = resolveVibeBinary(vibeBinaryPath, process.env);
+      if (!resolvedAppServer.installed) return { ok: false, installed: false, version: null, login };
+      const vibeCli = resolveVibeBinary("vibe", process.env);
+      if (vibeCli.installed) {
+        const probed = await probeProvider(vibeCli.command, login);
+        if (probed.ok) return probed;
+      }
+      return { ok: true, installed: true, version: null, login };
+    })(),
   ]);
   const storeWritable = await access(path.dirname(storeRoot), constants.W_OK)
     .then(() => true)
@@ -117,7 +130,7 @@ export async function diagnose(storeRoot: string, opencodeBinaryPath?: string, c
   return {
     node: { ok: true, version: process.version },
     git: { ok: git },
-    providers: { claude, opencode, codex, antigravity },
+    providers: { claude, opencode, codex, antigravity, vibe },
     store: { ok: storeWritable, path: storeRoot },
     auth: { ok: authProviders.length > 0, path: path.join(dataDir, "opencode", "opencode.db"), providers: authProviders, types },
   };

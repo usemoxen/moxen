@@ -2026,6 +2026,7 @@ describe("DirectConnection settings", () => {
         opencode: { latest: null, channel: null },
         codex: { latest: null, channel: null },
         antigravity: { latest: null, channel: null },
+        vibe: { latest: null, channel: null },
       });
       expect(asked).toHaveLength(1);
     } finally {

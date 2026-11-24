@@ -80,8 +80,8 @@ export { LINE_PERCENT_MAX, LINE_PERCENT_MIN, LINE_TOKENS_MAX, LINE_TOKENS_MIN, c
 
 // -- what is in force, most specific first ------------------------------------
 
-export type LongThreadKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
-export const LONG_THREAD_KINDS: readonly LongThreadKind[] = ["claude", "codex", "chatgpt", "opencode", "harness", "acp", "antigravity"];
+export type LongThreadKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe";
+export const LONG_THREAD_KINDS: readonly LongThreadKind[] = ["claude", "codex", "chatgpt", "opencode", "harness", "acp", "antigravity", "vibe"];
 
 /**
  * Who compacts a long thread: the provider itself, Moxen asking first, Moxen
@@ -98,6 +98,7 @@ export const COMPACTION_MODES: Readonly<Record<LongThreadKind, readonly Compacti
   harness: ["ask", "auto", "off"],
   acp: ["provider", "ask", "auto", "off"],
   antigravity: ["provider", "ask", "auto", "off"],
+  vibe: ["provider", "ask", "auto", "off"],
 };
 /** What the global Compaction means on each provider: the Harness's own compaction is its automatic one. */
 const GLOBAL_COMPACTION_ON: Readonly<Record<LongThreadKind, (mode: CompactionMode) => CompactionMode>> = {
@@ -108,9 +109,10 @@ const GLOBAL_COMPACTION_ON: Readonly<Record<LongThreadKind, (mode: CompactionMod
   harness: (mode) => (mode === "provider" ? "auto" : mode),
   acp: (mode) => mode,
   antigravity: (mode) => mode,
+  vibe: (mode) => mode,
 };
 const isCompactionMode = (value: unknown): value is CompactionMode => value === "provider" || value === "ask" || value === "auto" || value === "off";
-export const DEFAULT_COMPACTION_MODE: Readonly<Record<LongThreadKind, CompactionMode>> = { codex: "provider", claude: "ask", chatgpt: "auto", opencode: "provider", harness: "auto", acp: "provider", antigravity: "provider" };
+export const DEFAULT_COMPACTION_MODE: Readonly<Record<LongThreadKind, CompactionMode>> = { codex: "provider", claude: "ask", chatgpt: "auto", opencode: "provider", harness: "auto", acp: "provider", antigravity: "provider", vibe: "provider" };
 
 export const DEFAULT_AUTO_COMPACT_PERCENT = 80;
 /** Where Moxen compacts when no tab sets a line; the Harness has its own rule by window size (`compactsettings.ts`). */
@@ -129,7 +131,7 @@ const isHandoffMode = (value: unknown): value is AutoHandoffMode => value === "o
 function kindOf(instanceId: string | undefined): LongThreadKind | undefined {
   if (instanceId === undefined) return undefined;
   const kind = driverKindOfInstance(instanceId);
-  return kind === "codex" || kind === "claude" || kind === "chatgpt" || kind === "opencode" || kind === "harness" || kind === "acp" || kind === "antigravity" ? kind : undefined;
+  return kind === "codex" || kind === "claude" || kind === "chatgpt" || kind === "opencode" || kind === "harness" || kind === "acp" || kind === "antigravity" || kind === "vibe" ? kind : undefined;
 }
 
 /** The first candidate that holds a value. Within one level the newer key comes first, so it wins over the older one beside it. */
@@ -283,7 +285,7 @@ export function compactLineFor(config: LongThreadConfig, kind: LongThreadKind, m
   }
   const found = [...ownLine, ["longThreads.compactAt", textLine(config.longThreads?.compactAt)] as const].find(([, line]) => line !== undefined);
   if (found !== undefined) return { value: found[1]!, key: found[0] };
-  return kind === "harness" || kind === "chatgpt" ? null : { value: DEFAULT_COMPACT_LINE, key: null };
+  return kind === "harness" ? null : { value: DEFAULT_COMPACT_LINE, key: null };
 }
 
 /** What the server and a client act on for one thread. `compact` is null where Moxen does not compact it from outside. */
@@ -304,7 +306,7 @@ export function longThreadPolicy(config: LongThreadConfig, instanceId: string | 
     const line =
       kind === "harness"
         ? harnessAskLine(resolved?.harness, instanceId, model)
-        : chatgptAskLine(chatgptHarnessConfigFor(resolved, instanceId), model);
+        : chatgptAskLine(chatgptHarnessConfigFor(resolved, instanceId), model, instanceId);
     return { handoff, compact: line === null ? null : { mode: "ask", line } };
   }
   if (mode !== "ask" && mode !== "auto") return { handoff, compact: null };
@@ -351,10 +353,11 @@ export function chatgptHarnessConfigFor(
   } = providers?.harness ?? {};
   const resolved = (providers ? resolveProfileProviderConfig({ providers }, instanceId) : undefined) as ChatGptProviderConfig | ChatGptAccountConfig | undefined;
   const own = resolved ?? providers?.chatgpt;
+  const compactAt = own?.compactAt ?? lineText(DEFAULT_COMPACT_LINE);
   return {
     ...sharedHarness,
     ...(own?.compaction !== undefined ? { compaction: harnessCompaction(own.compaction) } : {}),
-    ...(own?.compactAt !== undefined ? { compactAt: own.compactAt } : {}),
+    ...(compactAt !== undefined ? { compactAt } : {}),
     ...(own?.compactAtModels !== undefined ? { compactAtModels: own.compactAtModels } : {}),
     ...(own?.compactionModels !== undefined ? { compactionModels: own.compactionModels } : {}),
   };

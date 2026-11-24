@@ -2422,6 +2422,15 @@ export function App({
                   providerUpdates.update("codex");
                 },
               },
+              {
+                key: "update:vibe",
+                label: t("app.update_vibe"),
+                meta: "uv tool upgrade mistral-vibe", // i18n-exempt: executable command
+                onPick: () => {
+                  closePicker("chat");
+                  providerUpdates.update("vibe");
+                },
+              },
             ],
           },
           helpSection(),
@@ -2964,14 +2973,13 @@ export function App({
           >
             {/* Behind the empty state only, unmounted (zero cost) in
                 thread view: the selected model's scene when it has one
-                (`ui/scenes/`, a reading well dimmed under the composer),
-                else the faint control-plane texture — grid + drifting
-                status dots, zinc palette — easing between them as the
-                model changes. offsetX is the pane's raw terminal
-                origin (the builder mods it) and the field spans the whole
-                screen with the sidebar's — one lattice, one swarm.
-                Foreground column sits above at zIndex 1 with its own opaque
-                surfaces so text never seams. */}
+                (`ui/scenes/`, scoped to this pane with a reading well dimmed
+                under the composer), else the faint control-plane texture —
+                grid + drifting status dots, zinc palette, sharing the full
+                terminal field with the sidebar's lattice and swarm — easing
+                between them as the model changes. Foreground column sits
+                above at zIndex 1 with its own opaque surfaces so text never
+                seams. */}
             {ui?.backdrop === "off" ? null : (
               <SceneBackdrop
                 scene={creatingScene ?? "grid"}

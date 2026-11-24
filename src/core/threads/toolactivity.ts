@@ -461,6 +461,7 @@ function fromAcp(event: ToolRuntimeEvent, raw: Record<string, unknown>): NativeT
     endMs: asNumber(raw.endMs),
     files,
     patch: asString(raw.patch),
+    ...(raw.stopped === true ? { stopped: true } : {}),
     title: asString(raw.title),
     itemType: null,
   };
@@ -486,6 +487,7 @@ export function toolActivityRow(event: ToolRuntimeEvent): ToolActivityRow | null
       break;
     case "acp":
     case "antigravity":
+    case "vibe":
       native = fromAcp(event, raw);
       break;
     default:

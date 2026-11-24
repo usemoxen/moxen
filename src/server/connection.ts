@@ -43,6 +43,7 @@ import { managedAccountHomeDisplayPath, probeAntigravityAccountAuth, probeClaude
 import { startProviderAccountLoginSession, type ProviderAccountLoginDeps, type ProviderAccountLoginSession } from "../core/providers/accountlogin.js";
 import { migrateProviderProfiles } from "../core/providers/migrate.js";
 import { codexProvider } from "../core/providers/codex/catalog.js";
+import { hydrateChatGptModelsCache } from "../core/providers/chatgpt/catalog.js";
 import { probeCodexCompanion, verifyCodexCompanion, type CodexCompanionProbeResult } from "../core/providers/chatgpt/companion.js";
 import { startChatGptLoginSession, type ChatGptLoginSession } from "../core/providers/chatgpt/login.js";
 import { clearChatGptAuth, loadChatGptAuthBundle, type OAuthDeps } from "../core/providers/chatgpt/oauth.js";
@@ -110,6 +111,7 @@ import {
   inspectThread,
   interruptTurn,
   listThreads,
+  openTurn,
   readThread,
   settleThread,
   snoozeThread,
@@ -180,15 +182,16 @@ import { ranTurns, toThreadEnvelope } from "../core/threads/project.js";
 import { backfillNativeSubagents, subagentTranscript } from "../core/threads/subagents.js";
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
 import { isKnownTurnStatus } from "../core/threads/problems.js";
-import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
+import type { ContextBreakdown, ContextWindowUsage, ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { isCompactCommand } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
-import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, StoredTurn, TurnStatus } from "../core/threads/types.js";
+import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredActivity, StoredCheckpoint, StoredThread, StoredTurn, TurnStatus } from "../core/threads/types.js";
 import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
-import { driverKindOfInstance } from "../core/types.js";
+import { driverKindOfInstance, parseAccountInstanceId } from "../core/types.js";
 import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
+import { resolveContextCostUsd, threadCostUsd } from "../core/usage/prices.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
 import type { ClientApi } from "./api.js";
 import type { RemoteAccess } from "./transport/remoteaccess.js";
@@ -228,6 +231,10 @@ const PRUNE_INTERVAL_MS = 6 * 3_600_000;
  * the normal event path.
  */
 const USAGE_DRIVER_PROBE_TIMEOUT_MS = 6_000;
+/** Minimum gap between automatic post-turn companion usage probes for one ChatGPT account. */
+const CHATGPT_POST_TURN_USAGE_COOLDOWN_MS = 15_000;
+/** How old a verified ChatGPT account's recorded usage may be before background refresh re-probes its Codex companion. */
+const CHATGPT_STALE_USAGE_REFRESH_MS = 120_000;
 
 /**
  * Bound for every driver's `stopAll` inside `close()`: shutdown (SIGTERM,
@@ -434,6 +441,10 @@ export class DirectConnection implements ClientApi {
   private readonly claimToken = randomUUID();
   private readonly driversOwner = {};
   private readonly ownedDrivers = new Set<TurnDriver>();
+  private readonly driverInstanceIds = new WeakMap<TurnDriver, string>();
+  private readonly chatGptUsageInFlight = new Map<string, Promise<void>>();
+  private readonly chatGptUsageLastProbedAt = new Map<string, number>();
+  private lastChatGptStaleSweepAt = 0;
   private closed = false;
   private readonly researchResponders = new Map<string, number>();
   private readonly researchProposals = new Map<string, {
@@ -449,6 +460,7 @@ export class DirectConnection implements ClientApi {
     this.embeddingRuntime = new EmbeddingRuntime(this.storeRoot);
     this.semanticMemory = new SemanticMemory(this.embeddingRuntime);
     persistUsageLimits(this.storeRoot);
+    hydrateChatGptModelsCache(this.storeRoot);
     this.factories = options.drivers ?? {};
     this.harnessFetch = options.harnessFetch;
     this.chatgptOAuth = options.chatgptOAuth;
@@ -465,12 +477,14 @@ export class DirectConnection implements ClientApi {
         providers?.claude?.binaryPath ||
         "claude";
       return await buildDirectProviders({
+        storeRoot: this.storeRoot,
         harness: providers?.harness,
         ...(providers?.claude ? { claude: providers.claude } : {}),
         ...(providers?.chatgpt ? { chatgpt: providers.chatgpt } : {}),
         ...(providers?.codex ? { codex: providers.codex } : {}),
         ...(providers?.opencode ? { opencode: providers.opencode } : {}),
         ...(providers?.antigravity ? { antigravity: providers.antigravity } : {}),
+        ...(providers?.vibe ? { vibe: providers.vibe } : {}),
         ...(providers?.acp ? { acp: providers.acp } : {}),
         fetchClaudeModels: () => fetchLiveModels({ transport: new SdkTransport(), binaryPath: claudeBinary }),
       });
@@ -636,17 +650,20 @@ export class DirectConnection implements ClientApi {
     // providers over loopback HTTP served here — so a delegation always runs
     // in the process that owns its parent's session. Until the HTTP server
     // is up (or in a process that never starts it), the stdio child.
+    const stdioBase = { ...this.moxenStdioFor(threadId), alwaysLoad: true };
     const base = this.mcpHttp
       ? { name: MOXEN_MCP_SERVER_NAME, type: "http" as const, ...this.mcpHttp.specFor(threadId), alwaysLoad: true }
-      : { ...this.moxenStdioFor(threadId), alwaysLoad: true };
+      : stdioBase;
     // A delegated task asks for the tools without the delegation ones; the server holds to it as well.
     const flags = [
       ...(delegated ? [{ query: MOXEN_DELEGATED_QUERY, arg: MOXEN_DELEGATED_ARG }] : []),
       ...(webFetch ? [] : [{ query: MOXEN_NO_WEB_FETCH_QUERY, arg: MOXEN_NO_WEB_FETCH_ARG }]),
       ...(memory === "write" ? [] : [{ query: `${MOXEN_MEMORY_QUERY}=${memory}`, arg: `${MOXEN_MEMORY_ARG}${memory}` }]),
     ];
+    const stdioFallback =
+      flags.length === 0 ? stdioBase : { ...stdioBase, args: [...stdioBase.args, ...flags.map((flag) => flag.arg)] };
     const fallback =
-      flags.length === 0 ? base : base.type === "http" ? { ...base, url: `${base.url}?${flags.map((flag) => flag.query).join("&")}` } : { ...base, args: [...base.args, ...flags.map((flag) => flag.arg)] };
+      flags.length === 0 ? base : base.type === "http" ? { ...base, url: `${base.url}?${flags.map((flag) => flag.query).join("&")}` } : stdioFallback;
     // The same endpoint, also offering `todos`: for a provider with no checklist.
     const checklist =
       fallback.type === "http"
@@ -659,6 +676,7 @@ export class DirectConnection implements ClientApi {
       tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null, researchLead, researchMember: isResearchRunActive(researchRun) }),
       call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
       fallback,
+      ...(fallback.type === "http" ? { stdioFallback } : {}),
       checklist,
       // Delegation is what these tools are for: never behind a tool search.
       alwaysLoad: true,
@@ -1008,11 +1026,14 @@ export class DirectConnection implements ClientApi {
   startScheduling(): void {
     if (this.schedulingStarted || this.closed) return;
     this.schedulingStarted = true;
-    for (const driver of this.ownedDrivers) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
+    for (const driver of this.ownedDrivers) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.observeDriverEvent(driver, event)));
     const usageTick = async (): Promise<void> => {
       if (this.closed || this.usageTickRunning) return;
       this.usageTickRunning = true;
-      try { await this.usageProtection.tick(); }
+      try {
+        await this.usageProtection.tick();
+        void this.refreshStaleChatGptUsage().catch(() => undefined);
+      }
       catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         if (!this.usageFailures.has(message)) {
@@ -1089,9 +1110,104 @@ export class DirectConnection implements ClientApi {
         : this.lastProviders?.harness;
       driver.setConfig(harnessConfig, this.lastWeb);
     }
-    if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
+    this.driverInstanceIds.set(driver, instanceId);
+    if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.observeDriverEvent(driver, event)));
     this.ownedDrivers.add(driver);
     return driver;
+  }
+
+  private observeDriverEvent(driver: TurnDriver, event: ProviderRuntimeEvent): void {
+    this.usageProtection.observe(event);
+    if (event.type !== "turn.completed" && event.type !== "turn.failed" && event.type !== "turn.interrupted") return;
+    const instanceId = this.driverInstanceIds.get(driver);
+    const parsed = instanceId ? parseAccountInstanceId(instanceId) : null;
+    if (parsed?.kind === "chatgpt") {
+      void this.refreshChatGptCompanionUsage(parsed.accountId, {
+        force: true,
+        minIntervalMs: CHATGPT_POST_TURN_USAGE_COOLDOWN_MS,
+      }).catch(() => undefined);
+    }
+  }
+
+  private async refreshChatGptCompanionUsage(
+    accountId: string,
+    options: { readonly force?: boolean; readonly minIntervalMs?: number } = {},
+  ): Promise<void> {
+    if (this.closed) return;
+    const normalizedId = accountId.trim().toLowerCase();
+    if (!normalizedId) return;
+    const now = Date.now();
+    const lastProbed = this.chatGptUsageLastProbedAt.get(normalizedId);
+    if (options.minIntervalMs !== undefined && lastProbed !== undefined && now - lastProbed < options.minIntervalMs) {
+      return;
+    }
+    const existing = this.chatGptUsageInFlight.get(normalizedId);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const work = (async (): Promise<void> => {
+      try {
+        const config = await this.loadConfig();
+        if (this.closed) return;
+        this.lastProviders = driverProviders(config);
+        const account = config.providers?.chatgpt?.accounts?.find(
+          (entry) => entry.id.trim().toLowerCase() === normalizedId,
+        );
+        if (!account || account.enabled === false || account.codexVerified !== true) return;
+        this.chatGptUsageLastProbedAt.set(normalizedId, Date.now());
+        const companion = this.driverFor(`codex/${normalizedId}`);
+        if (this.probeCodexCompanionFn && companion instanceof CodexDriver) {
+          const probed = await this.probeCodexCompanionFn(companion, process.cwd()).catch(() => null);
+          if (!this.closed && probed && probed.rateLimits.windows.length > 0) {
+            recordUsageWindows(`chatgpt/${normalizedId}`, [...probed.rateLimits.windows]);
+          }
+          return;
+        }
+        const refreshed = await companion.refreshUsage?.({ force: options.force === true }).catch(() => null);
+        if (!this.closed && refreshed && (refreshed.windows.length > 0 || typeof refreshed.credits === "number")) {
+          recordUsageWindows(`chatgpt/${normalizedId}`, refreshed.windows, undefined, { credits: refreshed.credits });
+        }
+      } catch {
+        // Companion probe is best-effort; keep last recorded windows.
+      }
+    })();
+    this.chatGptUsageInFlight.set(normalizedId, work);
+    try {
+      await work;
+    } finally {
+      if (this.chatGptUsageInFlight.get(normalizedId) === work) {
+        this.chatGptUsageInFlight.delete(normalizedId);
+      }
+    }
+  }
+
+  private async refreshStaleChatGptUsage(now = Date.now()): Promise<void> {
+    if (this.closed || now - this.lastChatGptStaleSweepAt < 30_000) return;
+    this.lastChatGptStaleSweepAt = now;
+    const config = await this.loadConfig().catch(() => null);
+    if (!config || this.closed) return;
+    const accounts = (config.providers?.chatgpt?.accounts ?? []).filter(
+      (account) => account.enabled !== false && account.codexVerified === true,
+    );
+    if (accounts.length === 0) return;
+    const snapshot = usageLimitsSnapshot(now);
+    for (const account of accounts) {
+      const normalizedId = account.id.trim().toLowerCase();
+      const current = snapshot[`chatgpt/${normalizedId}`];
+      const checkedMs = current ? Date.parse(current.checkedAt) : Number.NaN;
+      const stale =
+        !current ||
+        !Number.isFinite(checkedMs) ||
+        now - checkedMs >= CHATGPT_STALE_USAGE_REFRESH_MS ||
+        current.windows.some((window) => window.resetsAt === null);
+      if (stale) {
+        void this.refreshChatGptCompanionUsage(normalizedId, {
+          force: true,
+          minIntervalMs: CHATGPT_STALE_USAGE_REFRESH_MS,
+        }).catch(() => undefined);
+      }
+    }
   }
 
   /**
@@ -1125,6 +1241,13 @@ export class DirectConnection implements ClientApi {
         // Unusable or unknown driver config: skip cleanly.
       }
     }
+    if (config.providers?.vibe?.enabled === true) {
+      try {
+        targets.add(this.driverFor("vibe"));
+      } catch {
+        // Unusable or unknown driver config: skip cleanly.
+      }
+    }
     await Promise.allSettled(
       [...targets].map(async (driver) => {
         // Records on landing, even past the deadline: the round answers from
@@ -1151,11 +1274,12 @@ export class DirectConnection implements ClientApi {
       chatgptAccounts
         .filter((account) => account.enabled !== false && account.codexVerified === true)
         .map(async (account) => {
-          const companion = this.driverFor(`codex/${account.id}`);
-          const refreshed = await companion.refreshUsage?.().catch(() => null);
-          if (refreshed && (refreshed.windows.length > 0 || typeof refreshed.credits === "number")) {
-            recordUsageWindows(`chatgpt/${account.id}`, refreshed.windows, undefined, { credits: refreshed.credits });
-          }
+          const landed = this.refreshChatGptCompanionUsage(account.id, { force: true });
+          const deadline = new Promise<null>((resolve) => {
+            const timer = setTimeout(() => resolve(null), USAGE_DRIVER_PROBE_TIMEOUT_MS);
+            timer.unref?.();
+          });
+          await Promise.race([landed, deadline]);
         }),
     );
     return usageLimitsSnapshot();
@@ -1470,7 +1594,37 @@ export class DirectConnection implements ClientApi {
       ...row,
       stoppable: row.running && (driver === "opencode" || driver === "harness"),
     }));
-    return { ...thread, turnThroughput: turnThroughput(read.turns), ...(subagentRows.length > 0 ? { subagentRows } : {}) };
+    const recorded = latestRecordedContextUsage(read.activities);
+    const contextUsage = recorded
+      ? await this.priceContext(read.thread, read.turns, recorded, await this.sessionDriver(threadId), true)
+      : undefined;
+    return {
+      ...thread,
+      turnThroughput: turnThroughput(read.turns),
+      ...(subagentRows.length > 0 ? { subagentRows } : {}),
+      ...(contextUsage ? { contextUsage } : {}),
+    };
+  }
+
+  private async priceContext<T extends ContextWindowUsage>(
+    thread: StoredThread,
+    turns: StoredTurn[],
+    reading: T,
+    driver: TurnDriver | null,
+    fromStoredActivity = false,
+  ): Promise<T> {
+    const config = await this.loadConfig();
+    const open = openTurn(turns);
+    const liveUsage = open ? driver?.liveTurnUsage?.(thread.id) ?? null : null;
+    const inFlight = open && liveUsage
+      ? { turnId: open.id, modelSelection: open.modelSelection ?? thread.modelSelection, usage: liveUsage }
+      : null;
+    const activeSelection = inFlight?.modelSelection ?? open?.modelSelection ?? thread.modelSelection;
+    const costUsd =
+      fromStoredActivity && driverKindOfInstance(activeSelection.instanceId) !== "claude"
+        ? (threadCostUsd(thread, turns, config, inFlight) ?? reading.costUsd ?? null)
+        : resolveContextCostUsd(thread, turns, config, reading.costUsd, inFlight);
+    return costUsd === null ? reading : { ...reading, costUsd };
   }
 
   /**
@@ -2923,7 +3077,7 @@ export class DirectConnection implements ClientApi {
       }
       case "doctor": {
         const providers = (await this.loadConfig()).providers;
-        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath, providers?.antigravity?.binaryPath);
+        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath, providers?.antigravity?.binaryPath, providers?.vibe?.binaryPath);
       }
       case "thread.background.list": {
         const driver = await this.sessionDriver(query.threadId);
@@ -2944,11 +3098,17 @@ export class DirectConnection implements ClientApi {
       case "thread.context": {
         const driver = await this.sessionDriver(query.threadId);
         if (!driver) return { live: false, breakdown: null };
-        const breakdown = driver.contextBreakdown ? await driver.contextBreakdown(query.threadId).catch(() => null) : null;
-        if (breakdown) return { live: true, breakdown };
-        // Totals only: the reading without categories.
-        const usage = driver.contextUsage ? await driver.contextUsage(query.threadId).catch(() => null) : null;
-        return { live: true, breakdown: usage ? { ...usage, categories: [], estimated: false } : null };
+        const rawBreakdown = driver.contextBreakdown ? await driver.contextBreakdown(query.threadId).catch(() => null) : null;
+        const rawUsage = rawBreakdown ? null : driver.contextUsage ? await driver.contextUsage(query.threadId).catch(() => null) : null;
+        const base: ContextBreakdown | null = rawBreakdown ?? (rawUsage ? { ...rawUsage, categories: [], estimated: false } : null);
+        if (!base) return { live: true, breakdown: null };
+        const store = await this.store();
+        const [thread, turns] = await Promise.all([
+          store.readThreadRecord(query.threadId).catch(() => null),
+          store.readTurns(query.threadId).catch(() => []),
+        ]);
+        const breakdown = thread ? await this.priceContext(thread, turns, base, driver, false) : base;
+        return { live: true, breakdown };
       }
       case "thread.subagent": {
         // OpenCode keeps each subagent as a child session only a driver holding the thread's session can read.
@@ -2973,6 +3133,7 @@ export class DirectConnection implements ClientApi {
             opencode: { latest: null, channel: null },
             codex: { latest: null, channel: null },
             antigravity: { latest: null, channel: null },
+            vibe: { latest: null, channel: null },
           };
         }
         return { enabled: true, ...(await this.readLatestVersions(config.providers?.claude?.binaryPath)) };
@@ -3216,6 +3377,27 @@ function withLiveUsage(providers: readonly ProviderSummary[]): ProviderSummary[]
     const limits = isMultiAccount ? live[key] : (live[key] ?? live[provider.driver]);
     return limits === undefined ? provider : { ...provider, usageLimits: limits };
   });
+}
+
+function latestRecordedContextUsage(activities: readonly StoredActivity[]): ContextWindowUsage | null {
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index]!;
+    if (activity.kind !== "context-window.updated") continue;
+    const payload = activity.payload;
+    if (!payload || typeof payload["usedTokens"] !== "number") continue;
+    return {
+      usedTokens: payload["usedTokens"],
+      maxTokens: typeof payload["maxTokens"] === "number" ? payload["maxTokens"] : null,
+      cachedInputTokens: typeof payload["cachedInputTokens"] === "number" ? payload["cachedInputTokens"] : null,
+      autoCompactThreshold: typeof payload["autoCompactThreshold"] === "number" ? payload["autoCompactThreshold"] : null,
+      compactsAutomatically: typeof payload["compactsAutomatically"] === "boolean" ? payload["compactsAutomatically"] : null,
+      ...(payload["estimated"] === true ? { estimated: true } : {}),
+      ...(typeof payload["costUsd"] === "number" && Number.isFinite(payload["costUsd"]) && payload["costUsd"] >= 0
+        ? { costUsd: payload["costUsd"] }
+        : {}),
+    };
+  }
+  return null;
 }
 
 /** A thread's latest context reading (`context-window.updated`), or null when its provider never reported one. */

@@ -1358,9 +1358,10 @@ threads stored before this read the same way; a total that drops (a resumed
 process starts counting again) counts as new spend. Where the provider reports a cost
 (`costUsd`: Claude's `total_cost_usd`, OpenCode's per-step `cost`) the turn
 records it too, an estimate and not a bill; without one the field is absent.
-A turn that recorded no cost keeps none on the ledger: Stats and usage
-protection price it at the model's current prices instead (below), and only a
-model with no price anywhere reads as unpriced.
+A turn that recorded no cost keeps none on the ledger: Stats, usage
+protection, and live thread context readings (`thread.context` and
+`context-window.updated`) price it at the model's current prices instead
+(below), and only a model with no price anywhere reads as unpriced.
 
 ### Stats
 

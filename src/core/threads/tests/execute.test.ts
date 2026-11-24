@@ -440,6 +440,43 @@ describe("context usage", () => {
     expect(row.summary).toBe("12000 / 200000 tokens in context");
   });
 
+  it("prices non-Claude context-window.updated readings from model prices without writing estimated cost onto StoredTurn.usage (MXN-412)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-context-price-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const modelSelection = { instanceId: "chatgpt/default", model: "gpt-6.2-sol" };
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "ChatGPT priced",
+      modelSelection,
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const reading = { usedTokens: 120_000, maxTokens: 400_000, cachedInputTokens: 100_000, autoCompactThreshold: null, compactsAutomatically: true };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      // gpt-6.2-sol: $2/M input, $0.10/M cacheRead, $10/M output -> 0.5*2 + 1.0*0.1 + 0.1*10 = $2.10
+      awaitTurn: async () => ({
+        status: "completed",
+        text: "done",
+        usage: { input: 500_000, cacheRead: 1_000_000, cacheCreate: 0, output: 100_000, thinking: 0 },
+        error: null,
+      }),
+      streamEvents: Stream.never,
+      contextUsage: async () => reading,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go", modelSelection, config: { providers: {} } });
+
+    const contextRow = (await store.readActivities(thread.id)).findLast((row) => row.kind === "context-window.updated");
+    expect(contextRow?.payload?.["costUsd"]).toBeCloseTo(2.1, 9);
+    // StoredTurn.usage keeps no Moxen-estimated costUsd so future price edits re-price cleanly.
+    const settled = (await store.readTurns(thread.id))[0]!;
+    expect(settled.usage?.costUsd).toBeUndefined();
+  });
+
   it("does not hold the turn hostage to a slow or failing reading", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-context-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));

@@ -49,14 +49,17 @@ export function profileSidebarLabel(account: Pick<ProviderAccountSummary, "kind"
   return `${SHORT_KIND_NAME[account.kind]} · ${account.label}`;
 }
 
-type AddableProviderKind = AccountProviderKind | "opencode";
+type AddableProviderKind = AccountProviderKind | "opencode" | "vibe";
 
 function addableKindName(kind: AddableProviderKind): string {
-  return kind === "opencode" ? "OpenCode" : KIND_NAME[kind];
+  if (kind === "opencode") return "OpenCode";
+  if (kind === "vibe") return "Mistral Vibe";
+  return KIND_NAME[kind];
 }
 
 function addableKindDescription(kind: AddableProviderKind): string {
   if (kind === "opencode") return t("settings.providers.kindDesc.opencode");
+  if (kind === "vibe") return t("settings.providers.kindDesc.vibe");
   return kindDescription(kind);
 }
 
@@ -64,6 +67,7 @@ function cliDisplayName(cli: UpdatableProvider): string {
   if (cli === "claude") return "Claude Code";
   if (cli === "opencode") return "OpenCode";
   if (cli === "antigravity") return "Antigravity";
+  if (cli === "vibe") return "Mistral Vibe";
   return t("settings.providers.codexCompanionName");
 }
 
@@ -428,6 +432,66 @@ function OpencodeOverviewRow({
   );
 }
 
+function VibeOverviewRow({
+  id,
+  version,
+  usage,
+  active,
+  width,
+  onOpen,
+  onDisable,
+}: {
+  id: string;
+  version: string | null;
+  usage: ProviderUsageLimits | null;
+  active: boolean;
+  width: number;
+  onOpen: () => void;
+  onDisable: () => void;
+}) {
+  const { hovered, handlers } = useHover();
+  const bg = active ? SURFACE.hover : hovered ? SURFACE.border : SURFACE.raised;
+  const toggleText = `${toggleLabel(true)}  ›`;
+  const titleText = `Mistral Vibe${version ? `  v${version}` : ""}`;
+  const leftWidth = Math.max(10, width - toggleText.length - 6);
+  const compact = compactPlanUsage(usage, formatResetShort);
+  const subWidth = Math.max(10, width - 5 - (compact ? compact.text.length + 2 : 0));
+  return (
+    <box
+      id={id}
+      style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 1, paddingRight: 1 }}
+      backgroundColor={bg}
+      onMouseDown={onOpen}
+      selectable={false}
+      {...handlers}
+    >
+      <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={bg}>
+        <box style={{ flexDirection: "row", flexShrink: 1 }} backgroundColor={bg}>
+          <text fg={active ? COLOR.accent : COLOR.faint} bg={bg} selectable={false}>
+            {active ? "▌ " : "  "}
+          </text>
+          <OverflowText fg={active ? COLOR.bright : COLOR.text} bg={bg} width={leftWidth} active={active || hovered} selectable={false}>
+            {titleText}
+          </OverflowText>
+        </box>
+        <box onMouseDown={onDisable} backgroundColor={bg}>
+          <text fg={COLOR.added} bg={bg} selectable={false}>
+            {toggleText}
+          </text>
+        </box>
+      </box>
+      <box style={{ flexDirection: "row", height: 1, paddingLeft: 2, justifyContent: "space-between" }} backgroundColor={bg}>
+        <OverflowText fg={COLOR.dim} bg={bg} width={subWidth} active={active || hovered} selectable={false}>
+          {t("settings.providers.vibeSubtitle")}
+        </OverflowText>
+        {compact ? (
+          <text fg={usageToneColor(compact.tone)} bg={bg} selectable={false}>{compact.text}</text>
+        ) : null}
+      </box>
+    </box>
+  );
+}
+
 function AddProviderRow({
   id,
   active,
@@ -647,6 +711,7 @@ export interface ProfileAccountHeaderProps {
     readonly claude: ProviderCheckView;
     readonly opencode: ProviderCheckView;
     readonly antigravity?: ProviderCheckView;
+    readonly vibe?: ProviderCheckView;
   } | null;
   readonly latest?: LatestVersions | null;
   readonly updating: ReadonlySet<UpdatableProvider>;
@@ -1017,6 +1082,9 @@ export interface ProvidersOverviewPanelProps {
   readonly opencodeEnabled?: boolean;
   readonly onToggleOpencode?: (enabled: boolean) => void;
   readonly onOpenOpencode?: () => void;
+  readonly vibeEnabled?: boolean;
+  readonly onToggleVibe?: (enabled: boolean) => void;
+  readonly onOpenVibe?: () => void;
   readonly selectedInstance: string | null;
   readonly onSelectAccount: (instanceId: string | null) => void;
   readonly providers: readonly ProviderSummary[] | null;
@@ -1026,6 +1094,7 @@ export interface ProvidersOverviewPanelProps {
     readonly claude: ProviderCheckView;
     readonly opencode: ProviderCheckView;
     readonly antigravity?: ProviderCheckView;
+    readonly vibe?: ProviderCheckView;
   } | null;
   readonly latest: LatestVersions | null;
   readonly updating: ReadonlySet<UpdatableProvider>;
@@ -1052,6 +1121,9 @@ export function ProvidersOverviewPanel({
   opencodeEnabled = false,
   onToggleOpencode,
   onOpenOpencode,
+  vibeEnabled = false,
+  onToggleVibe,
+  onOpenVibe,
   selectedInstance,
   onSelectAccount,
   providers,
@@ -1115,13 +1187,16 @@ export function ProvidersOverviewPanel({
     ? null
     : (accounts.find((entry) => entry.instanceId === selectedInstance) ?? null);
   const detailFields = selected ? fieldsForAccount(selected) : [];
-  const addableKinds: readonly AddableProviderKind[] = opencodeEnabled
-    ? ACCOUNT_PROVIDER_KINDS
-    : [...ACCOUNT_PROVIDER_KINDS, "opencode"];
+  const addableKinds: readonly AddableProviderKind[] = [
+    ...ACCOUNT_PROVIDER_KINDS,
+    ...(opencodeEnabled ? [] : (["opencode"] as const)),
+    ...(vibeEnabled ? [] : (["vibe"] as const)),
+  ];
 
-  // Unified focus stops on Overview: accounts -> optional OpenCode -> "+ Add provider" -> installed CLIs.
+  // Unified focus stops on Overview: accounts -> optional OpenCode -> optional Mistral Vibe -> "+ Add provider" -> installed CLIs.
   const opencodeStop = opencodeEnabled ? accounts.length : -1;
-  const configuredCount = accounts.length + (opencodeEnabled ? 1 : 0);
+  const vibeStop = vibeEnabled ? accounts.length + (opencodeEnabled ? 1 : 0) : -1;
+  const configuredCount = accounts.length + (opencodeEnabled ? 1 : 0) + (vibeEnabled ? 1 : 0);
   const addStop = configuredCount;
   const cliStart = configuredCount + 1;
   const totalStops = cliStart + UPDATABLE_PROVIDERS.length;
@@ -1134,12 +1209,14 @@ export function ProvidersOverviewPanel({
         ? `providers-account-${safeCursor}`
         : safeCursor === opencodeStop
           ? "providers-opencode-row"
-          : safeCursor === addStop
-            ? "providers-add-row"
-            : `providers-cli-${UPDATABLE_PROVIDERS[safeCursor - cliStart]}`;
+          : safeCursor === vibeStop
+            ? "providers-vibe-row"
+            : safeCursor === addStop
+              ? "providers-add-row"
+              : `providers-cli-${UPDATABLE_PROVIDERS[safeCursor - cliStart]}`;
     const timer = setTimeout(() => scrollRef.current?.scrollChildIntoView(targetId), 0);
     return () => clearTimeout(timer);
-  }, [safeCursor, accounts.length, opencodeStop, addStop, cliStart, selected, wizard]);
+  }, [safeCursor, accounts.length, opencodeStop, vibeStop, addStop, cliStart, selected, wizard]);
 
   useKeyLayer((key) => {
     if (key.defaultPrevented) return;
@@ -1167,6 +1244,10 @@ export function ProvidersOverviewPanel({
             setWizard(null);
             onToggleOpencode?.(true);
             onOpenOpencode?.();
+          } else if (picked === "vibe") {
+            setWizard(null);
+            onToggleVibe?.(true);
+            onOpenVibe?.();
           } else {
             setWizard({ step: "id", kind: picked });
           }
@@ -1224,6 +1305,8 @@ export function ProvidersOverviewPanel({
         }
       } else if (safeCursor === opencodeStop) {
         onOpenOpencode?.();
+      } else if (safeCursor === vibeStop) {
+        onOpenVibe?.();
       } else if (safeCursor === addStop) {
         setWizard({ step: "kind", kindIndex: 0 });
       } else {
@@ -1235,6 +1318,8 @@ export function ProvidersOverviewPanel({
       if (target) void onToggleAccount(target.kind, target.id, !target.enabled);
     } else if (key.name === "space" && safeCursor === opencodeStop) {
       onToggleOpencode?.(false);
+    } else if (key.name === "space" && safeCursor === vibeStop) {
+      onToggleVibe?.(false);
     } else if (key.name === "a" && !key.ctrl && !key.meta) {
       setWizard({ step: "kind", kindIndex: 0 });
     } else if (key.name === "u" && !key.shift && !key.ctrl && !key.meta && safeCursor >= cliStart) {
@@ -1274,6 +1359,10 @@ export function ProvidersOverviewPanel({
                           setWizard(null);
                           onToggleOpencode?.(true);
                           onOpenOpencode?.();
+                        } else if (kind === "vibe") {
+                          setWizard(null);
+                          onToggleVibe?.(true);
+                          onOpenVibe?.();
                         } else {
                           setWizard({ step: "id", kind });
                         }
@@ -1825,6 +1914,23 @@ export function ProvidersOverviewPanel({
                   onOpenOpencode?.();
                 }}
                 onDisable={() => onToggleOpencode?.(false)}
+              />
+            ) : null}
+            {vibeEnabled ? (
+              <VibeOverviewRow
+                id="providers-vibe-row"
+                version={versionNumber(versions?.vibe?.version ?? null)}
+                usage={providerUsageLimitsFor(usageByInstance, {
+                  instanceId: "vibe",
+                  usageLimits: providers?.find((entry) => entry.instanceId === "vibe")?.usageLimits ?? null,
+                })}
+                active={safeCursor === vibeStop}
+                width={width}
+                onOpen={() => {
+                  setCursor(vibeStop);
+                  onOpenVibe?.();
+                }}
+                onDisable={() => onToggleVibe?.(false)}
               />
             ) : null}
           </>

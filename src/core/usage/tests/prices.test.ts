@@ -7,9 +7,13 @@ import {
   HAND_EDITED_MODEL_PRICES,
   modelPriceFor,
   priceUsage,
+  resolveContextCostUsd,
+  threadCostUsd,
   usageCost,
   type ModelPrice,
 } from "../prices.js";
+import type { StoredTurn } from "../../threads/types.js";
+import type { ModelSelection } from "../../types.js";
 
 /** Explicit allowlist of OpenCode Go / Zen models that deliberately ship without a price row. */
 const DELIBERATELY_UNPRICED_OPENCODE_MODELS = new Set<string>([]);
@@ -96,6 +100,14 @@ describe("model prices", () => {
     expect(modelPriceFor({ providers: {} }, "antigravity", "gpt-oss-120b-medium")).toBeNull();
   });
 
+  it("ships API-equivalent prices for Mistral Vibe's native and Mistral-hosted models", () => {
+    expect(modelPriceFor({ providers: {} }, "vibe", "mistral-large-4-0")).toEqual({ input: 0.7, cacheRead: 0.07, output: 2.1 });
+    expect(modelPriceFor({ providers: {} }, "vibe", "mistral-medium-latest")).toEqual({ input: 1.5, cacheRead: 0.15, output: 7.5 });
+    expect(modelPriceFor({ providers: {} }, "vibe", "zai-glm-5-3")).toEqual({ input: 1.4, cacheRead: 0.14, output: 4.4 });
+    expect(modelPriceFor({ providers: {} }, "vibe", "zai-glm-5-3-flash")).toEqual({ input: 0.15, cacheRead: 0.03, output: 0.5 });
+    expect(modelPriceFor({ providers: {} }, "vibe", "deepseek-v4-1-flash-1017")).toEqual({ input: 0.3, cacheRead: 0.007, output: 1.2 });
+  });
+
   it("prices every OpenCode Go and OpenCode Zen model in the bundled catalog (or lists it as deliberately unpriced)", () => {
     const snap = modelsSnapshot as Record<string, { models?: Record<string, unknown> }>;
     const missing: string[] = [];
@@ -175,5 +187,78 @@ describe("model prices", () => {
     for (const [slug, row] of Object.entries(HAND_EDITED_MODEL_PRICES)) {
       expect(DEFAULT_MODEL_PRICES[slug]).toEqual(row);
     }
+  });
+});
+
+function storedTurn(
+  id: string,
+  selection: ModelSelection,
+  turnUsage: StoredTurn["usage"],
+  status: StoredTurn["status"] = "completed",
+): StoredTurn {
+  const when = "2026-11-22T00:00:00.000Z";
+  return {
+    id,
+    threadId: "th-1",
+    status,
+    delivery: "started",
+    messageId: `m-${id}`,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    modelSelection: selection,
+    parentTurnId: null,
+    error: null,
+    usage: turnUsage,
+    createdAt: when,
+    updatedAt: when,
+    completedAt: status === "completed" ? when : null,
+  };
+}
+
+describe("threadCostUsd and resolveContextCostUsd (MXN-412)", () => {
+  it("prices settled turns plus in-flight usage for ChatGPT, Antigravity, OpenCode, and Codex without double-counting", () => {
+    const chatgpt = { instanceId: "chatgpt/default", model: "gpt-6.2-sol" };
+    // gpt-6.2-sol: $2/M input, $0.10/M cacheRead, $10/M output
+    const t1 = storedTurn("t1", chatgpt, { input: 500_000, cacheRead: 0, cacheCreate: 0, output: 100_000, thinking: 0 }); // $2.00
+    const t2 = storedTurn("t2", chatgpt, null, "running");
+    const live = { input: 100_000, cacheRead: 500_000, cacheCreate: 0, output: 50_000, thinking: 0 }; // $0.20 + $0.05 + $0.50 = $0.75
+    expect(threadCostUsd({ modelSelection: chatgpt }, [t1, t2], { providers: {} }, { turnId: "t2", modelSelection: chatgpt, usage: live })).toBeCloseTo(2.75, 9);
+
+    // Once t2 settles with stored usage, passing stale in-flight usage for t2 never counts it twice.
+    const t2Done = storedTurn("t2", chatgpt, { input: 200_000, cacheRead: 500_000, cacheCreate: 0, output: 50_000, thinking: 0 }); // $0.95
+    expect(threadCostUsd({ modelSelection: chatgpt }, [t1, t2Done], { providers: {} }, { turnId: "t2", modelSelection: chatgpt, usage: live })).toBeCloseTo(2.95, 9);
+
+    // Antigravity (gemini-4-neon: $3/M in, $0.15/M cacheRead, $15/M out) + OpenCode Go (deepseek-v4.1-flash: $0.15/M in, $0.003/M cacheRead, $0.60/M out)
+    const agy = { instanceId: "antigravity/default", model: "gemini-4-neon" };
+    const oc = { instanceId: "opencode/opencode-go", model: "opencode-go/deepseek-v4.1-flash" };
+    const mixed = [
+      storedTurn("a1", agy, { input: 100_000, cacheRead: 200_000, cacheCreate: 0, output: 10_000, thinking: 0 }), // 0.30 + 0.03 + 0.15 = 0.48
+      storedTurn("o1", oc, { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 500_000, thinking: 0 }), // 0.15 + 0.30 = 0.45
+    ];
+    expect(threadCostUsd({ modelSelection: agy }, mixed, { providers: {} })).toBeCloseTo(0.93, 9);
+  });
+
+  it("handles Claude running totals, restarts, mixed providers, fast mode, free models, and unpriced models", () => {
+    const claude = { instanceId: "claude/default", model: "claude-opus-5-5" };
+    const t1 = storedTurn("c1", claude, { input: 100, cacheRead: 0, cacheCreate: 0, output: 50, thinking: 0, costUsd: 1.0 });
+    const t2 = storedTurn("c2", claude, { input: 200, cacheRead: 0, cacheCreate: 0, output: 100, thinking: 0, costUsd: 1.4 });
+    const t3 = storedTurn("c3", claude, null, "running");
+    // Restarted Claude process reporting $0.25 on t3 adds onto the prior $1.40 -> $1.65.
+    expect(resolveContextCostUsd({ modelSelection: claude }, [t1, t2, t3], { providers: {} }, 0.25)).toBeCloseTo(1.65, 9);
+    // Monotonic live Claude reading ($1.85) stays $1.85.
+    expect(resolveContextCostUsd({ modelSelection: claude }, [t1, t2, t3], { providers: {} }, 1.85)).toBeCloseTo(1.85, 9);
+
+    // Fast-lane doubles estimated cost; free OpenCode model prices as 0 (not null); unknown model stays null.
+    const fastCodex = { instanceId: "codex/default", model: "gpt-6.1-sol", options: [{ id: "serviceTier", value: "fast" }] };
+    const normalCodex = { instanceId: "codex/default", model: "gpt-6.1-sol" };
+    const u = { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 };
+    expect(threadCostUsd({ modelSelection: fastCodex }, [storedTurn("f1", fastCodex, u)], { providers: {} })).toBeCloseTo(4, 9);
+    expect(threadCostUsd({ modelSelection: normalCodex }, [storedTurn("n1", normalCodex, u)], { providers: {} })).toBeCloseTo(2, 9);
+
+    const freeOc = { instanceId: "opencode/opencode-go", model: "opencode-go/ox-alpha-free" };
+    expect(threadCostUsd({ modelSelection: freeOc }, [storedTurn("fr1", freeOc, u)], { providers: {} })).toBe(0);
+
+    const unknown = { instanceId: "antigravity/default", model: "gpt-oss-120b-medium" };
+    expect(threadCostUsd({ modelSelection: unknown }, [storedTurn("u1", unknown, u)], { providers: {} })).toBeNull();
   });
 });

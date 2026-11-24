@@ -4,7 +4,7 @@
  * Pure; running the updater is `providers/update.ts`.
  */
 
-export const UPDATABLE_PROVIDERS = ["claude", "opencode", "codex", "antigravity"] as const;
+export const UPDATABLE_PROVIDERS = ["claude", "opencode", "codex", "antigravity", "vibe"] as const;
 export type UpdatableProvider = (typeof UPDATABLE_PROVIDERS)[number];
 
 export interface ProviderUpdate {
@@ -26,7 +26,7 @@ export interface ProviderUpdateAllResult {
   readonly results: readonly ProviderUpdateAllItem[];
 }
 
-const LABELS: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity" };
+const LABELS: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity", vibe: "Mistral Vibe" };
 
 /** What to tell the user once an update ran: what changed, and what still runs the old build. */
 export function describeUpdate(update: ProviderUpdate): string {
@@ -131,6 +131,8 @@ export interface LatestVersions {
   readonly codex?: LatestVersion;
   /** Absent on older Moxen servers. */
   readonly antigravity?: LatestVersion;
+  /** Absent on older Moxen servers. */
+  readonly vibe?: LatestVersion;
 }
 
 /**

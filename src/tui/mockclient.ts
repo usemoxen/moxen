@@ -93,6 +93,20 @@ const providers = [
     ],
     skills: [],
   },
+  {
+    instanceId: "vibe",
+    driver: "vibe",
+    displayName: "Mistral Vibe",
+    enabled: true,
+    installed: true,
+    status: null,
+    auth: { status: "os_keyring" },
+    models: [
+      model("mistral-large-4-0", "Mistral Large 4", true, ["low", "medium", "high"]),
+      model("mistral-medium-latest", "Mistral Medium", false, ["low", "medium", "high"]),
+    ],
+    skills: [],
+  },
 ];
 
 // A few MCP servers so each provider's "MCP servers" checklist has something to show (github is limited to Claude Code on its own entry).

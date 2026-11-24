@@ -63,7 +63,7 @@ export interface ContextUsage {
   cachedInputTokens: number | null;
   compactsAutomatically: boolean | null;
   autoCompactThreshold: number | null;
-  /** Running session total in USD; Claude only, null when the driver never reports one. */
+  /** Running thread total in USD (provider-reported or priced from Moxen's model prices); null when unpriced. */
   costUsd: number | null;
 }
 

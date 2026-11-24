@@ -680,6 +680,37 @@ describe("codex driver compaction, rollback, models", () => {
     expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(false);
     expect(transport.sessions[0]!.client.closed).toBe(true);
   });
+
+  it("refreshes rate limits via a short-lived peer when no Codex session is open", async () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    const transport = new FakeCodexTransport({
+      rateLimits: {
+        rateLimitsByLimitId: {
+          codex: {
+            limitId: "codex",
+            planType: "plus",
+            primary: { usedPercent: 48, windowDurationMins: 300, resetsAt },
+            secondary: { usedPercent: 7, windowDurationMins: 10080, resetsAt: resetsAt + 86400 },
+          },
+        },
+      },
+    });
+    const driver = new CodexDriver({ transport, instanceId: "codex/trial" });
+    const first = await driver.refreshUsage();
+    expect(first?.key).toBe("codex/trial");
+    expect(first?.windows).toMatchObject([
+      { id: "primary", label: "Session", usedPercent: 48, exhausted: false },
+      { id: "secondary", label: "Weekly", usedPercent: 7, exhausted: false },
+    ]);
+    expect(transport.sessions).toHaveLength(1);
+    expect(transport.sessions[0]!.client.closed).toBe(true);
+
+    // Cached within 30s unless force: true is requested.
+    await driver.refreshUsage();
+    expect(transport.sessions).toHaveLength(1);
+    await driver.refreshUsage({ force: true });
+    expect(transport.sessions).toHaveLength(2);
+  });
 });
 
 describe("codex context usage", () => {

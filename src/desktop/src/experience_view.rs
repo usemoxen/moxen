@@ -964,6 +964,13 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         .and_then(|res| res.as_ref().ok())
         .and_then(|snap| snap.find("providers.opencode.enabled"))
         .is_some_and(|view| view.value == crate::settings::SettingValue::Flag(true));
+    let vibe_enabled = w
+        .source
+        .settings()
+        .as_deref()
+        .and_then(|res| res.as_ref().ok())
+        .and_then(|snap| snap.find("providers.vibe.enabled"))
+        .is_some_and(|view| view.value == crate::settings::SettingValue::Flag(true));
 
     let has_providers = matches!(catalog, CatalogState::Ready(ref cat) if !cat.providers.is_empty());
     let claude_added = accounts.iter().any(|a| a.kind == "claude")
@@ -975,6 +982,8 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "opencode"));
     let antigravity_added = accounts.iter().any(|a| a.kind == "antigravity")
         || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "antigravity"));
+    let vibe_added = vibe_enabled
+        || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "vibe"));
 
     let mut setup_row = |id: &'static str, label: String, added: bool, note: String, action: Box<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>| {
         let action = Arc::new(action);
@@ -1071,6 +1080,24 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
                         "label": "Default",
                     }));
                     w.experience_ui.provider = Some("antigravity/default".into());
+                    w.source.refresh_catalog();
+                    cx.notify();
+                }
+            }),
+        ))
+        .child(setup_row(
+            "guide-setup-vibe",
+            t("guide.enableVibe").into(),
+            vibe_added,
+            if vibe_added {
+                t("guide.providerEnabled").into()
+            } else {
+                guide_cli_status(diag_val, "vibe")
+            },
+            Box::new(move |w, _, cx| {
+                if !vibe_added {
+                    w.source.set_setting("providers.vibe.enabled", "true");
+                    w.experience_ui.provider = Some("vibe".into());
                     w.source.refresh_catalog();
                     cx.notify();
                 }
@@ -1473,6 +1500,7 @@ fn doctor(w: &Workspace) -> Div {
         ("opencode", "OpenCode"),
         ("codex", "Codex"),
         ("antigravity", "Antigravity"),
+        ("vibe", "Mistral Vibe"),
     ] {
         let provider = &diagnosis["providers"][id];
         if !provider.is_null() {

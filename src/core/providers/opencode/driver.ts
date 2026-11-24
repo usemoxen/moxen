@@ -1106,6 +1106,16 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     return session.context;
   };
 
+  readonly liveTurnUsage = (threadId: ThreadId): TokenUsageDelta | null => {
+    const session = this.sessions.get(threadId);
+    const open = session ? this.openTurn(session) : undefined;
+    if (!open) return null;
+    const usage = open.usage;
+    return usage.input + usage.cacheRead + usage.cacheCreate + usage.output + usage.thinking > 0 || usage.costUsd !== undefined
+      ? usage
+      : null;
+  };
+
   /** Re-read the session's context from its newest messages; the last reading stands when the server says nothing. */
   private async refreshContext(session: OpenCodeSession): Promise<void> {
     try {
@@ -1113,6 +1123,11 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       const messages = await connection.sessionMessages(session.nativeSessionId, { tail: IDLE_READ_ITEMS });
       const settings = await this.contextSettingsFor(session).catch(() => null);
       session.context = opencodeContextOf(messages, settings) ?? session.context;
+      const open = this.openTurn(session);
+      if (open) {
+        const usage = turnAssistantUsage(messages, [open.userMessageId, ...open.steerMessageIds]);
+        if (usage) open.usage = usage;
+      }
     } catch {
       // Advisory, like every context reading.
     }

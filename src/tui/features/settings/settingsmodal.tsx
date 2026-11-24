@@ -104,6 +104,7 @@ const SECTION_CATEGORY: Record<SettingsTab, string> = {
   "provider:chatgpt": "Providers",
   "provider:opencode": "Providers",
   "provider:antigravity": "Providers",
+  "provider:vibe": "Providers",
   "provider:acp": "ACP",
   "provider:harness": "Moxen Harness",
   mcp: "Integrations",
@@ -196,7 +197,7 @@ export function SettingsModal({
   onImport: (file: string) => void;
   notice: { readonly text: string; readonly error: boolean } | null;
   /** Each updatable provider's install, from the doctor query; null until it answers. */
-  versions: { readonly codex?: ProviderCheckView; readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView; readonly antigravity?: ProviderCheckView } | null;
+  versions: { readonly codex?: ProviderCheckView; readonly claude: ProviderCheckView; readonly opencode: ProviderCheckView; readonly antigravity?: ProviderCheckView; readonly vibe?: ProviderCheckView } | null;
   /** The newest release of each, from the registry; null until it answers. */
   latest: LatestVersions | null;
   /** The providers whose updater is running now. */
@@ -390,6 +391,7 @@ export function SettingsModal({
   const [pricesOpen, setPricesOpen] = useState<string | null>(null);
 
   const opencodeEnabled = snapshot?.settings.find((view) => view.descriptor.key === "providers.opencode.enabled")?.value === true;
+  const vibeEnabled = snapshot?.settings.find((view) => view.descriptor.key === "providers.vibe.enabled")?.value === true;
   const activeAccount = useMemo(
     () => (tab === "providers:profile" && selectedAccount !== null ? (loadedAccounts.find((entry) => entry.instanceId === selectedAccount) ?? null) : null),
     [tab, selectedAccount, loadedAccounts],
@@ -529,8 +531,9 @@ export function SettingsModal({
       if (pushedProviders) return;
       pushedProviders = true;
       out.push({ section: "providers:overview", group: null, label: t("settings.providers.overview"), prefix: "" });
+      const configured: SidebarEntry[] = [];
       for (const account of loadedAccounts) {
-        out.push({
+        configured.push({
           section: "providers:profile",
           group: null,
           label: profileSidebarLabel(account),
@@ -539,8 +542,13 @@ export function SettingsModal({
         });
       }
       if (opencodeEnabled) {
-        out.push({ section: "provider:opencode", group: null, label: tx(SECTION_LABEL["provider:opencode"]), prefix: "" });
+        configured.push({ section: "provider:opencode", group: null, label: tx(SECTION_LABEL["provider:opencode"]), prefix: "" });
       }
+      if (vibeEnabled) {
+        configured.push({ section: "provider:vibe", group: null, label: tx(SECTION_LABEL["provider:vibe"]), prefix: "" });
+      }
+      configured.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+      out.push(...configured);
     };
     for (const section of sections) {
       if (SECTION_CATEGORY[section] === "Providers") {
@@ -575,7 +583,7 @@ export function SettingsModal({
     }
     pushProvidersCategory();
     return out;
-  }, [sections, snapshot, focusedList, editorScreen.profile, editorScreen.model, loadedAccounts, opencodeEnabled, language]);
+  }, [sections, snapshot, focusedList, editorScreen.profile, editorScreen.model, loadedAccounts, opencodeEnabled, vibeEnabled, language]);
 
   /** Open an entry of a nested list in its editor, on one of its headings (the first when none is asked for). */
   const openEntry = (listKey: string, entryId: string, heading: string | null) => {
@@ -927,6 +935,11 @@ export function SettingsModal({
                     void onSet("providers.opencode.enabled", enabled ? "true" : "false");
                   }}
                   onOpenOpencode={() => switchTab("provider:opencode", null)}
+                  vibeEnabled={vibeEnabled}
+                  onToggleVibe={(enabled) => {
+                    void onSet("providers.vibe.enabled", enabled ? "true" : "false");
+                  }}
+                  onOpenVibe={() => switchTab("provider:vibe", null)}
                   selectedInstance={null}
                   onSelectAccount={(instanceId) => {
                     if (instanceId === null) {
@@ -1238,9 +1251,14 @@ export function SettingsModal({
                               instanceId: "opencode/opencode-go",
                               usageLimits: providers?.find((entry) => entry.instanceId === "opencode/opencode-go")?.usageLimits ?? null,
                             })
-                          : null
+                          : updatable === "vibe"
+                            ? providerUsageLimitsFor(usageByInstance, {
+                                instanceId: "vibe",
+                                usageLimits: providers?.find((entry) => entry.instanceId === "vibe")?.usageLimits ?? null,
+                              })
+                            : null
                       }
-                      usageHeading={updatable === "opencode" ? "OpenCode Go" : undefined}
+                      usageHeading={updatable === "opencode" ? "OpenCode Go" : updatable === "vibe" ? "Mistral Vibe" : undefined}
                       width={paneWidth}
                       onUpdate={() => onUpdate(updatable)}
                     />
@@ -1492,8 +1510,8 @@ function BackButton({ onBack }: { onBack: () => void }) {
   );
 }
 
-const PROVIDER_NAME: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity" };
-const PROVIDER_UPDATER: Record<UpdatableProvider, string> = { claude: "claude update", opencode: "opencode upgrade", codex: "codex update", antigravity: "agy update" };
+const PROVIDER_NAME: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity", vibe: "Mistral Vibe" };
+const PROVIDER_UPDATER: Record<UpdatableProvider, string> = { claude: "claude update", opencode: "opencode upgrade", codex: "codex update", antigravity: "agy update", vibe: "uv tool upgrade mistral-vibe" };
 
 /**
  * Where a provider's install stands, and the button that runs its own updater

@@ -607,8 +607,8 @@ program.command("doctor").description("Check provider binaries, auth, store, and
 
 program
   .command("update")
-  .description("Update Claude Code, OpenCode, Codex or Antigravity with its own updater, and report the version before and after.")
-  .argument("[provider]", "claude | opencode | codex | antigravity")
+  .description("Update Claude Code, OpenCode, Codex, Antigravity or Mistral Vibe with its own updater, and report the version before and after.")
+  .argument("[provider]", "claude | opencode | codex | antigravity | vibe")
   .option("--all", "Update all provider CLIs in parallel.")
   .action((provider: string | undefined, options: { all?: boolean }) =>
     action(async () => {
@@ -622,7 +622,7 @@ program
         return;
       }
       if (provider === undefined) {
-        throw new CliError("INVALID_THREAD_OPTION", "Specify a provider (claude, opencode, codex, antigravity) or --all.", { exitCode: 2 });
+        throw new CliError("INVALID_THREAD_OPTION", "Specify a provider (claude, opencode, codex, antigravity, vibe) or --all.", { exitCode: 2 });
       }
       const { update, text } = await updateCommand(context.config, parseUpdatable(provider));
       writeSuccess(update, context, text);
@@ -1735,7 +1735,7 @@ skills.command("providers")
   .description("Choose providers for a skill package; all means every provider.")
   .requiredOption("--source <source>", "Skill source: agents or claude.")
   .requiredOption("--folder <folder>", "Skill package folder name.")
-  .requiredOption("--providers <kinds>", "Comma-separated claude,codex,opencode,harness,acp,antigravity; all for every provider.")
+  .requiredOption("--providers <kinds>", "Comma-separated claude,codex,opencode,harness,acp,antigravity,vibe; all for every provider.")
   .option("--project <project-id>", "Registered project; omit for global skills.")
   .action((options: { source: string; folder: string; providers: string; project?: string }) => action(async () => {
     const context = await commandContext();
@@ -1755,7 +1755,7 @@ usage.command("status").description("Show forecasts and the durable recovery que
     ...result.queue.map((row, index) => `${index + 1}\t${row.threadId}\t${row.phase}\t${row.title}${row.error ? `\t${row.error}` : ""}`),
   ].join("\n") || "No usage forecasts or protected threads.");
 }));
-usage.command("wrap").description("Pause and wrap up every running thread on a provider account.").requiredOption("--provider <driver>", "The quota owner: claude, codex or antigravity.").action((options: { provider: string }) => action(async () => {
+usage.command("wrap").description("Pause and wrap up every running thread on a provider account.").requiredOption("--provider <driver>", "The quota owner: claude, codex, antigravity or vibe.").action((options: { provider: string }) => action(async () => {
   const context = await commandContext();
   const client = await cliClient(context.config);
   const result = await client.dispatch({ type: "usage.wrap", provider: options.provider });

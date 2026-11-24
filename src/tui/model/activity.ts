@@ -1041,6 +1041,7 @@ export function webToolSource(tool: string, provider?: string): string | null {
     if (kind === "codex") return "Codex";
     if (kind === "chatgpt") return "ChatGPT";
     if (kind === "antigravity") return "Antigravity";
+    if (kind === "vibe") return "Mistral Vibe";
     if (kind === "acp") return "ACP";
   }
   const bare = tool.trim().split(".").pop() ?? "";

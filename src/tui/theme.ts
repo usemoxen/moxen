@@ -201,6 +201,8 @@ const PROVIDER_COLOR_BY_KEYWORD: readonly [keyword: string, color: string][] = [
   ["claude", "#DE7356"],
   ["openai", "#74AA9C"],
   ["opencode", "#8B5CF6"],
+  ["vibe", "#FF7000"],
+  ["mistral", "#FF7000"],
 ];
 
 /**

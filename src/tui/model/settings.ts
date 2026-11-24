@@ -161,7 +161,7 @@ type ShippedPriceMap = Readonly<Record<string, { readonly input?: number; readon
  */
 export function modelPriceEntries(
   providers: readonly ProviderSummary[] | null,
-  kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | undefined,
+  kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined,
   values: ModelPriceSettingValues,
   shippedPrices: ShippedPriceMap | undefined,
 ): ModelPriceEntry[] {
@@ -294,7 +294,7 @@ export type ModelOverrideValues = Readonly<Record<ModelOverrideField, SettingVal
  * for it, then any model they name that the catalog does not, so a stale or
  * hand-written override can still be seen and cleared.
  */
-export function modelOverrideEntries(providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | undefined, values: ModelOverrideValues): ModelOverrideEntry[] {
+export function modelOverrideEntries(providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined, values: ModelOverrideValues): ModelOverrideEntry[] {
   const text = (field: ModelOverrideField) => (values[field] === undefined ? "" : String(values[field]));
   const sizes = { handoffAt: handoffModelsFromText(text("handoffAt")), compactAt: handoffModelsFromText(text("compactAt")) };
   const modes = { handoff: modesFromText(text("handoff")), compaction: modesFromText(text("compaction")) };
@@ -416,17 +416,17 @@ export function configuredDefaultModel(settings: readonly SettingView[], instanc
     const accountModel = valueOf(settings, `providers.${parsed.kind}.accounts[${parsed.accountId}].model`);
     if (accountModel !== undefined) return accountModel;
   }
-  const model = (kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity") => ({ model: valueOf(settings, `providers.${kind}.model`) });
+  const model = (kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe") => ({ model: valueOf(settings, `providers.${kind}.model`) });
   const provider = valueOf(settings, "provider");
   const global = valueOf(settings, "model");
   return configuredModel(
-    { ...(provider === undefined ? {} : { provider }), ...(global === undefined ? {} : { model: global }), providers: { codex: model("codex"), claude: model("claude"), chatgpt: model("chatgpt"), opencode: model("opencode"), harness: model("harness"), acp: model("acp"), antigravity: model("antigravity") } } as Pick<CliConfig, "provider" | "model" | "providers">,
+    { ...(provider === undefined ? {} : { provider }), ...(global === undefined ? {} : { model: global }), providers: { codex: model("codex"), claude: model("claude"), chatgpt: model("chatgpt"), opencode: model("opencode"), harness: model("harness"), acp: model("acp"), antigravity: model("antigravity"), vibe: model("vibe") } } as Pick<CliConfig, "provider" | "model" | "providers">,
     instanceId,
   );
 }
 
 /** Whose models a model setting picks from, for a warning: the provider of its page, else the global Provider. */
-function catalogName(settings: readonly SettingView[], providers: readonly ProviderSummary[], providerKind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | undefined): string {
+function catalogName(settings: readonly SettingView[], providers: readonly ProviderSummary[], providerKind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined): string {
   const aimed = valueOf(settings, "provider");
   const provider = providers.find((entry) => (providerKind !== undefined ? driverKindOfInstance(entry.instanceId) === providerKind : entry.instanceId === aimed));
   return provider?.displayName ?? provider?.instanceId ?? t("settings.theProvider");
@@ -438,9 +438,9 @@ function offered(providers: readonly ProviderSummary[]): readonly ProviderSummar
 }
 
 /** The provider an MCP access setting (`providers.<kind>.mcpExclude` or `providers.<kind>.accounts[<id>].mcpExclude`) belongs to. */
-function mcpAccessKind(key: string): "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | null {
-  const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)(?:\.accounts\[[^\]]+\])?\.mcpExclude$/.exec(key)?.[1];
-  return kind === "codex" || kind === "claude" || kind === "chatgpt" || kind === "opencode" || kind === "harness" || kind === "acp" || kind === "antigravity" ? kind : null;
+function mcpAccessKind(key: string): "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | null {
+  const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity|vibe)(?:\.accounts\[[^\]]+\])?\.mcpExclude$/.exec(key)?.[1];
+  return kind === "codex" || kind === "claude" || kind === "chatgpt" || kind === "opencode" || kind === "harness" || kind === "acp" || kind === "antigravity" || kind === "vibe" ? kind : null;
 }
 
 /** Every configured server with what keeps it from this provider besides the checklist, and the names switched off here. */
@@ -542,7 +542,7 @@ function isUnsupportedMode(
   providers: readonly ProviderSummary[] | null,
 ): boolean {
   if (!descriptor.key.endsWith("runtimeMode") || providers === null) return false;
-  const kindOfPage = descriptor.key.startsWith("providers.") ? (descriptor.key.split(".")[1] as "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity") : undefined;
+  const kindOfPage = descriptor.key.startsWith("providers.") ? (descriptor.key.split(".")[1] as "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe") : undefined;
   const providerId = valueOf(settings, "provider");
   const governed = offered(providers).filter((provider) =>
     kindOfPage !== undefined ? driverKindOfInstance(provider.instanceId) === kindOfPage : providerId === undefined || provider.instanceId === providerId,
@@ -707,6 +707,7 @@ export function updatableProviderOf(section: SettingSection): UpdatableProvider 
   if (section === "provider:claude") return "claude";
   if (section === "provider:opencode") return "opencode";
   if (section === "provider:antigravity") return "antigravity";
+  if (section === "provider:vibe") return "vibe";
   return null;
 }
 
@@ -806,7 +807,7 @@ export function moxenVersionLine(view: UpdateView): MoxenVersionLine {
 }
 
 /** The "Per model" row: every model with its four overrides, read from the four settings beside it, and what its Compaction can be. */
-function modelOverridesControl(descriptor: SettingDescriptor, value: SettingValue, settings: readonly SettingView[], providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | undefined): SettingControl {
+function modelOverridesControl(descriptor: SettingDescriptor, value: SettingValue, settings: readonly SettingView[], providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined): SettingControl {
   const prefix = descriptor.key.slice(0, descriptor.key.lastIndexOf(".") + 1);
   const read = (field: ModelOverrideField) => settings.find((view) => view.descriptor.key === `${prefix}${MODEL_OVERRIDE_KEY[field]}`)?.value;
   // The row's own key holds the hand-off sizes; the other three sit beside it.
@@ -830,7 +831,7 @@ function modelPricesControl(
   value: SettingValue,
   settings: readonly SettingView[],
   providers: readonly ProviderSummary[] | null,
-  kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | undefined,
+  kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined,
 ): SettingControl {
   const prefix = descriptor.key.slice(0, descriptor.key.lastIndexOf(".") + 1);
   const read = (field: ModelPriceField) => settings.find((view) => view.descriptor.key === `${prefix}${MODEL_PRICE_KEY[field]}`)?.value;

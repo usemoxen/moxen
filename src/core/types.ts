@@ -308,6 +308,12 @@ export interface AntigravityProviderConfig extends Omit<OpencodeProviderConfig, 
   accounts?: AntigravityAccountConfig[];
 }
 
+/** First-class Mistral Vibe (`vibe-app-server`) provider configuration (`providers.vibe.*`). */
+export interface VibeProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
+  vibeHome?: string;
+  launchArgs?: string;
+}
+
 /** One configured ACP profile entry (`providers.acp.agents[]`). */
 export interface AcpAgentConfig {
   readonly id: string;
@@ -335,6 +341,7 @@ export interface ProvidersConfig {
   opencode?: OpencodeProviderConfig;
   harness?: HarnessProviderConfig;
   antigravity?: AntigravityProviderConfig;
+  vibe?: VibeProviderConfig;
   acp?: AcpProviderConfig;
 }
 
@@ -899,12 +906,13 @@ export interface WorkspaceResolution {
   branch: string | null;
 }
 
-/** The provider driver an instance id routes to (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`, `opencode/<provider>`, `harness/<profile>`, `acp/<agent>`, plus legacy `claudeAgent`, `codex`, `antigravity`, `agy`), or null for an id no driver owns. */
-export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | null {
+/** The provider driver an instance id routes to (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`, `opencode/<provider>`, `harness/<profile>`, `acp/<agent>`, `vibe`, plus legacy `claudeAgent`, `codex`, `antigravity`, `agy`), or null for an id no driver owns. */
+export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | null {
   const key = instanceId.trim().toLowerCase();
   if (key === "codex" || key.startsWith("codex/")) return "codex";
   if (key === "chatgpt" || key.startsWith("chatgpt/")) return "chatgpt";
   if (key === "antigravity" || key === "agy" || key.startsWith("antigravity/")) return "antigravity";
+  if (key === "vibe" || key.startsWith("vibe/")) return "vibe";
   if (key === "opencode" || key.startsWith("opencode/")) return "opencode";
   if (key === "harness" || key.startsWith("harness/")) return "harness";
   if (key === "acp" || key.startsWith("acp/")) return "acp";
@@ -956,6 +964,7 @@ export function resolveProfileProviderConfig(
   | ClaudeProviderConfig
   | ChatGptProviderConfig
   | AntigravityProviderConfig
+  | VibeProviderConfig
   | CodexProviderConfig
   | ProvidersConfig["opencode"]
   | ProvidersConfig["harness"]
@@ -982,6 +991,7 @@ export function resolveProfileProviderConfig(
   if (raw === "harness" || raw.startsWith("harness/")) return config.providers?.harness;
   if (raw === "acp" || raw.startsWith("acp/")) return config.providers?.acp;
   if (raw === "codex" || raw.startsWith("codex/")) return config.providers?.codex;
+  if (raw === "vibe" || raw.startsWith("vibe/")) return config.providers?.vibe;
   if (raw === "claudeagent" || raw === "claude") {
     return config.providers?.claude?.accounts?.[0] ?? config.providers?.claude;
   }

@@ -21,9 +21,16 @@ import path from "node:path";
 import { acpProviders } from "../providers/acp/catalog.js";
 import { loadAcpRegistryCatalog, type LoadedAcpRegistry } from "../providers/acp/registry.js";
 import { accountDisplayName, probeClaudeAccountAuth } from "../providers/accounts.js";
-import { discoverChatGptModels, toChatGptModelSummary, type ChatGptModelInfo } from "../providers/chatgpt/catalog.js";
+import {
+  discoverChatGptModels,
+  hydrateChatGptModelsCache,
+  recordDiscoveredChatGptModels,
+  toChatGptModelSummary,
+  type ChatGptModelInfo,
+} from "../providers/chatgpt/catalog.js";
 import { ensureFreshChatGptToken } from "../providers/chatgpt/oauth.js";
 import { antigravityProviders } from "../providers/antigravity/catalog.js";
+import { vibeProvider } from "../providers/vibe/catalog.js";
 import { claudeCatalogModels, setLiveClaudeModels } from "../providers/claude/catalog.js";
 import { resolveLiveModels } from "../providers/claude/livemodels.js";
 import { binaryOnPath } from "../infra/process.js";
@@ -52,6 +59,7 @@ import {
   type CodexProviderConfig,
   type HarnessProviderConfig,
   type OpencodeProviderConfig,
+  type VibeProviderConfig,
 } from "../types.js";
 import type { EffortDescriptor, ModelSummary, ProviderSummary } from "./summary.js";
 
@@ -65,6 +73,8 @@ export interface DirectCatalogOptions {
   readonly antigravity?: AntigravityProviderConfig;
   readonly fetchAntigravityProvider?: () => Promise<ProviderSummary>;
   readonly fetchAntigravityProviders?: () => Promise<ProviderSummary[]>;
+  readonly vibe?: VibeProviderConfig | undefined;
+  readonly fetchVibeProvider?: () => Promise<ProviderSummary>;
   readonly acp?: AcpProviderConfig;
   readonly fetchAcpProviders?: () => Promise<ProviderSummary[]>;
   readonly acpRegistry?: () => Promise<LoadedAcpRegistry>;
@@ -326,6 +336,7 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
     };
   });
 
+  hydrateChatGptModelsCache(storeRoot);
   const chatgptList: ProviderSummary[] = await Promise.all(
     (options.chatgpt?.accounts ?? []).map(async (account): Promise<ProviderSummary> => {
       const instanceId = accountInstanceId("chatgpt", account.id);
@@ -347,6 +358,7 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
                   return await discoverChatGptModels(accessToken);
                 })()
           );
+          recordDiscoveredChatGptModels(account.id, discovered, storeRoot);
         } catch (cause) {
           status = cause instanceof Error ? cause.message : String(cause);
         }
@@ -400,6 +412,18 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
     ...provider,
     models: provider.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, provider.instanceId, model.slug) })),
   }));
+  const vibeEnabled = options.vibe?.enabled === true;
+  const vibeList: ProviderSummary[] = vibeEnabled
+    ? [
+        await (
+          options.fetchVibeProvider ??
+          (() => vibeProvider(options.vibe, env, options.workingDirectory ?? process.cwd(), undefined, { storeRoot }))
+        )(),
+      ].map((provider) => ({
+        ...provider,
+        models: provider.models.map((model) => ({ ...model, isHidden: isModelHidden(prefs, provider.instanceId, model.slug) })),
+      }))
+    : [];
   const acp = await (options.fetchAcpProviders ?? (async () => {
     const registry = options.acpRegistry
       ? await options.acpRegistry().catch((): LoadedAcpRegistry => ({ agents: [], source: "empty" }))
@@ -416,6 +440,7 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
     ...claudeList,
     ...chatgptList,
     ...mappedAntigravity,
+    ...vibeList,
     ...mappedAcp,
     ...harness,
     ...opencode,

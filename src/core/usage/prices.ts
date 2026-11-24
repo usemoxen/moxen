@@ -6,8 +6,8 @@
  * stays unpriced (null), never zero; a partial price values the fields it
  * names and counts the rest as zero.
  */
-import type { TurnUsage } from "../threads/types.js";
-import { resolveProfileProviderConfig, type CliConfig } from "../types.js";
+import type { StoredThread, StoredTurn, TurnUsage } from "../threads/types.js";
+import { driverKindOfInstance, resolveProfileProviderConfig, type CliConfig, type ModelSelection } from "../types.js";
 import generatedOpencodePrices from "./opencode-prices.generated.json" with { type: "json" };
 
 /** Context-size pricing tier: applies when prompt tokens (`input + cacheRead + cacheCreate`) exceed `afterTokens`. */
@@ -38,6 +38,7 @@ export interface ModelPrice {
  * - https://developers.openai.com/api/docs/pricing (2026-11-19)
  * - https://platform.claude.com/docs/en/about-claude/pricing (2026-11-22)
  * - https://ai.google.dev/gemini-api/docs/pricing (2026-11-20)
+ * - https://mistral.ai/pricing & mistral-vibe v3.1.4 vibe_schema.py (2026-11-24)
  */
 export const HAND_EDITED_MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
   "claude-opus-5": { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
@@ -79,6 +80,13 @@ export const HAND_EDITED_MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
   "gpt-5.5": { input: 5, cacheRead: 0.5, cacheWrite: 5, output: 30 },
   "gpt-5.4": { input: 2.5, cacheRead: 0.25, cacheWrite: 2.5, output: 15 },
   "gpt-5.3-codex": { input: 1.75, cacheRead: 0.175, cacheWrite: 1.75, output: 14 },
+  "mistral-large-4-0": { input: 0.7, cacheRead: 0.07, output: 2.1 },
+  "mistral-medium-latest": { input: 1.5, cacheRead: 0.15, output: 7.5 },
+  "mistral-vibe-cli-latest": { input: 1.5, cacheRead: 0.15, output: 7.5 },
+  "zai-glm-5-3": { input: 1.4, cacheRead: 0.14, output: 4.4 },
+  "zai-glm-5-3-flash": { input: 0.15, cacheRead: 0.03, output: 0.5 },
+  "zai-glm-5-3-flash-vibe-free": { input: 0, cacheRead: 0, output: 0 },
+  "deepseek-v4-1-flash-1017": { input: 0.3, cacheRead: 0.007, output: 1.2 },
 };
 
 /**
@@ -93,7 +101,7 @@ export const DEFAULT_MODEL_PRICES: Readonly<Record<string, ModelPrice>> = {
   ...HAND_EDITED_MODEL_PRICES,
 };
 
-export type ModelPriceKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
+export type ModelPriceKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe";
 
 /**
  * What a model costs on a provider kind: the user's rows for that kind,
@@ -180,4 +188,138 @@ export function usageCost(price: ModelPrice | null | undefined, usage: TurnUsage
   if (usage.costUsd !== undefined && Number.isFinite(usage.costUsd) && usage.costUsd >= 0) return { usd: usage.costUsd, source: "reported" };
   if (price === null || price === undefined) return null;
   return { usd: priceUsage(price, usage, fast), source: "estimated" };
+}
+
+/** Whether a model selection asks for fast-lane (2x) pricing. */
+export function isFastSelection(selection: Pick<ModelSelection, "options"> | null | undefined): boolean {
+  return (
+    selection?.options?.some(
+      (option) =>
+        (option.id === "fastMode" && option.value === true) ||
+        (option.id === "serviceTier" && option.value === "fast"),
+    ) ?? false
+  );
+}
+
+export interface InFlightTurnUsage {
+  readonly turnId?: string;
+  readonly modelSelection?: ModelSelection | null;
+  readonly usage: TurnUsage;
+}
+
+function gain(before: number, after: number): number {
+  return after >= before ? after - before : after;
+}
+
+function diffRunningUsage(before: TurnUsage | undefined, current: TurnUsage): TurnUsage {
+  if (!before) return current;
+  return {
+    input: gain(before.input, current.input),
+    cacheRead: gain(before.cacheRead, current.cacheRead),
+    cacheCreate: gain(before.cacheCreate, current.cacheCreate),
+    output: gain(before.output, current.output),
+    thinking: gain(before.thinking, current.thinking),
+    ...(current.costUsd === undefined ? {} : { costUsd: gain(before.costUsd ?? 0, current.costUsd) }),
+  };
+}
+
+/**
+ * Total cost in USD across a thread's turns — settled turns from the store plus
+ * any live in-flight turn usage not yet written — using the same rules as
+ * `computeUsageStats` (provider-reported costs win; Claude turns store running
+ * totals and count gains over the previous turn; unreported turns price at the
+ * user's per-provider rates over Moxen's shipped list). Null when no turn can
+ * be priced (never invents $0).
+ */
+export function threadCostUsd(
+  thread: Pick<StoredThread, "modelSelection">,
+  turns: ReadonlyArray<StoredTurn>,
+  config: Pick<CliConfig, "providers">,
+  inFlight?: InFlightTurnUsage | null,
+): number | null {
+  const previousClaude = new Map<string, TurnUsage>();
+  let total: number | null = null;
+  let inFlightConsumed = false;
+
+  const account = (selection: ModelSelection, usage: TurnUsage): void => {
+    const kind = driverKindOfInstance(selection.instanceId);
+    let spend = usage;
+    if (kind === "claude") {
+      spend = diffRunningUsage(previousClaude.get(selection.instanceId), usage);
+      previousClaude.set(selection.instanceId, usage);
+    }
+    const cost = usageCost(
+      modelPriceFor(config, kind, selection.model, selection.instanceId),
+      spend,
+      isFastSelection(selection),
+    );
+    if (cost !== null && Number.isFinite(cost.usd)) {
+      total = (total ?? 0) + cost.usd;
+    }
+  };
+
+  for (const turn of turns) {
+    if (turn.status === "queued") continue;
+    const matchesInFlight =
+      inFlight != null &&
+      !inFlightConsumed &&
+      (inFlight.turnId !== undefined ? turn.id === inFlight.turnId : turn.status === "running");
+    const selection =
+      (matchesInFlight ? inFlight.modelSelection : undefined) ??
+      turn.modelSelection ??
+      thread.modelSelection;
+    if (matchesInFlight) {
+      inFlightConsumed = true;
+      // A turn that already settled with its own stored usage keeps that truth
+      // instead of counting stale in-flight usage twice.
+      const effective = turn.status !== "running" && turn.usage !== null ? turn.usage : inFlight.usage;
+      account(selection, effective);
+      continue;
+    }
+    if (!turn.usage) continue;
+    account(selection, turn.usage);
+  }
+
+  if (inFlight != null && !inFlightConsumed) {
+    account(inFlight.modelSelection ?? thread.modelSelection, inFlight.usage);
+  }
+
+  return total;
+}
+
+/**
+ * Resolve the thread's total `costUsd` for a context reading or live breakdown:
+ * keeps a driver's own reported cost (Claude's live `total_cost_usd` or an ACP
+ * agent's `cost`), while still combining earlier turns across restarts or
+ * provider switches, and prices threads whose driver reports no cost using
+ * `threadCostUsd`.
+ */
+export function resolveContextCostUsd(
+  thread: Pick<StoredThread, "modelSelection">,
+  turns: ReadonlyArray<StoredTurn>,
+  config: Pick<CliConfig, "providers">,
+  reportedCostUsd: number | undefined,
+  inFlight?: InFlightTurnUsage | null,
+): number | null {
+  const hasReported = typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0;
+  if (hasReported) {
+    const open = turns.find((turn) => turn.status === "running");
+    const activeSelection = inFlight?.modelSelection ?? open?.modelSelection ?? thread.modelSelection;
+    if (driverKindOfInstance(activeSelection.instanceId) === "claude") {
+      const claudeInFlight: InFlightTurnUsage | null = open
+        ? {
+            turnId: open.id,
+            modelSelection: activeSelection,
+            usage: {
+              ...(inFlight?.usage ?? { input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 }),
+              costUsd: reportedCostUsd,
+            },
+          }
+        : inFlight ?? null;
+      const computed = threadCostUsd(thread, turns, config, claudeInFlight);
+      return computed === null ? reportedCostUsd : Math.max(computed, reportedCostUsd);
+    }
+    return reportedCostUsd;
+  }
+  return threadCostUsd(thread, turns, config, inFlight);
 }

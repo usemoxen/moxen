@@ -407,6 +407,8 @@ pub fn provider_color(driver: &str, instance: &str) -> &'static str {
         "provider-claude"
     } else if haystack.contains("opencode") {
         "provider-opencode"
+    } else if haystack.contains("vibe") || haystack.contains("mistral") {
+        "label-5"
     } else {
         "ink"
     }

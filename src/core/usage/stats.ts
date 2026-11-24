@@ -9,7 +9,7 @@
 import type { StoredMessage, StoredThread, StoredTurn, TurnUsage } from "../threads/types.js";
 import { driverKindOfInstance } from "../types.js";
 import { type UsageTotals, emptyUsageTotals, summarizeUsage } from "./usage.js";
-import { usageCost, type ModelPrice, type ModelPriceKind } from "./prices.js";
+import { isFastSelection, usageCost, type ModelPrice, type ModelPriceKind } from "./prices.js";
 
 export type StatsRange = "7d" | "30d" | "all";
 
@@ -104,6 +104,7 @@ export function statsProviderKey(instanceId: string): string {
   if (lower === "codex" || lower.startsWith("codex/")) return "codex";
   if (lower === "chatgpt" || lower.startsWith("chatgpt/")) return "chatgpt";
   if (lower === "antigravity" || lower === "agy" || lower.startsWith("antigravity/")) return "antigravity";
+  if (lower === "vibe" || lower.startsWith("vibe/")) return "vibe";
   if (lower === "opencode") return "opencode/opencode";
   return instanceId;
 }
@@ -188,11 +189,12 @@ function turnCost(
   instanceId: string,
   model: string,
   priceFor: StatsOptions["priceFor"],
+  fast = false,
 ): number | null {
   const usage = turn.usage;
   if (!usage) return null;
   if (typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) && usage.costUsd >= 0) return usage.costUsd;
-  const estimated = priceFor === undefined ? null : usageCost(priceFor(driverKindOfInstance(instanceId), model, instanceId), usage);
+  const estimated = priceFor === undefined ? null : usageCost(priceFor(driverKindOfInstance(instanceId), model, instanceId), usage, fast);
   return estimated?.usd ?? null;
 }
 
@@ -290,7 +292,7 @@ export function computeUsageStats(
       const model = statsModelKey(rawProvider, rawModel);
       sessions.add(thread.id);
       counted.push(turn);
-      costs.set(turn, turnCost(turn, rawProvider, rawModel, options.priceFor));
+      costs.set(turn, turnCost(turn, rawProvider, rawModel, options.priceFor, isFastSelection(turn.modelSelection ?? thread.modelSelection)));
       add(providers, provider, turn, thread.id);
       add(models, model, turn, thread.id);
       hours[time.getHours()] = (hours[time.getHours()] ?? 0) + 1;

@@ -24,6 +24,7 @@ import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { chatgptHarnessConfigFor } from "./longthreads.js";
 import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
+import { resolveContextCostUsd } from "../usage/prices.js";
 import type { McpServerSpec } from "../mcp.js";
 
 import { resolveAcpAgentsMap } from "../providers/acp/config.js";
@@ -35,6 +36,7 @@ import { ClaudeDriver } from "../providers/claude/driver.js";
 import { locateSkillsMod } from "../providers/claude/skillsmod.js";
 import { HarnessDriver } from "../providers/harness/driver.js";
 import { OpenCodeDriver } from "../providers/opencode/driver.js";
+import { VibeDriver } from "../providers/vibe/driver.js";
 import type {
   ContextBreakdown,
   ContextWindowUsage,
@@ -53,7 +55,7 @@ import type {
   UnconfirmedSteer,
 } from "../providers/spi.js";
 import { CliError } from "../errors.js";
-import { driverKindOfInstance, type InteractionMode, type ModelSelection, type ProvidersConfig, type RuntimeMode } from "../types.js";
+import { driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type ProvidersConfig, type RuntimeMode } from "../types.js";
 import {
   captureWorktree,
   diffCheckpointStat,
@@ -104,6 +106,7 @@ export interface TurnDriver extends ProviderSessionTitles {
   /** Optional only so a test double need not implement it; all four drivers do. */
   resumeCursor?(threadId: string): string | null;
   contextUsage?(threadId: string): Promise<ContextWindowUsage | null>;
+  liveTurnUsage?(threadId: string): TurnUsage | null;
   /**
    * A cheap, usage-free re-read of the provider's subscription windows for an
    * explicit freshness ask (usage.refresh, behind the usage_status tool):
@@ -113,7 +116,7 @@ export interface TurnDriver extends ProviderSessionTitles {
    * (the Harness, a non-Go OpenCode provider). Key is the usage-registry
    * entry the windows belong under (an account, or one OpenCode Go instance).
    */
-  refreshUsage?(): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow>; readonly credits?: number | null } | null>;
+  refreshUsage?(options?: { readonly force?: boolean }): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow>; readonly credits?: number | null } | null>;
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
   steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[], steerId?: string): Effect.Effect<void, CliError>;
@@ -219,6 +222,7 @@ export interface TurnDriverFactories {
   readonly harness?: () => TurnDriver;
   readonly acp?: () => TurnDriver;
   readonly antigravity?: () => TurnDriver;
+  readonly vibe?: () => TurnDriver;
 }
 
 const driverCache = new WeakMap<object, WeakMap<object, Map<string, TurnDriver>>>();
@@ -242,6 +246,7 @@ export function driverKey(instanceId: string): string {
   if (rawKey === "acp" || rawKey.startsWith("acp/")) return "acp";
   if (rawKey === "antigravity" || rawKey === "agy") return "antigravity";
   if (rawKey.startsWith("antigravity/")) return rawKey;
+  if (rawKey === "vibe" || rawKey.startsWith("vibe/")) return "vibe";
   if (rawKey === "claudeagent" || rawKey === "claude") return "claude";
   if (rawKey.startsWith("claude/")) return rawKey;
   if (rawKey === "codex" || rawKey.startsWith("codex/")) return rawKey;
@@ -323,6 +328,11 @@ export function driverForInstance(
       ...(resolved.accountId ? { instanceId: resolved.instanceId } : {}),
       env: resolved.env,
       agents: { [resolved.instanceId]: resolved.spec, antigravity: resolved.spec },
+    });
+  } else if (kind === "vibe") {
+    driver = factories.vibe?.() ?? new VibeDriver({
+      ...(providers?.vibe ? { settings: providers.vibe } : {}),
+      instanceId: "vibe",
     });
   }
   if (!driver) {
@@ -541,6 +551,8 @@ export interface ExecuteTurnArgs {
   /** Images sent with the prompt. */
   readonly images?: readonly ProviderImage[];
   readonly modelSelection?: ModelSelection;
+  /** Provider pricing config used to estimate `costUsd` on recorded context readings when the driver reports none. */
+  readonly config?: Pick<CliConfig, "providers">;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: InteractionMode;
   /** Worktree root for checkpoint capture; checkpoints skipped when empty. */
@@ -688,6 +700,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       ...(rules ? { afterAnswer: async () => rules.commit() } : {}),
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
+      ...(args.config ? { config: args.config } : {}),
       runtimeMode: thread.runtimeMode,
       interactionMode: next.interactionMode,
       workingDirectory: thread.env.path,
@@ -722,6 +735,7 @@ export async function ensureDriverSession(
   thread: StoredThread,
   options: {
     readonly modelSelection?: ModelSelection;
+    readonly config?: Pick<CliConfig, "providers">;
     readonly workingDirectory?: string;
     readonly mcpServers?: readonly McpServerSpec[];
     readonly disabledMcpTools?: readonly string[];
@@ -775,7 +789,7 @@ export async function ensureDriverSession(
   if (options.store) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
   await captureRuleBaseline(driver, thread.id, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), cwd);
-  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onUsageLimit);
+  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onUsageLimit, options.config);
 }
 
 const watching = new WeakMap<TurnDriver, Map<string, () => void>>();
@@ -859,6 +873,7 @@ export function watchDriverSession(
   afterSettle?: () => Promise<void>,
   idleTtlMs: number | null = null,
   onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void,
+  config?: Pick<CliConfig, "providers">,
 ): void {
   let byThread = watching.get(driver);
   if (!byThread) {
@@ -937,6 +952,7 @@ export function watchDriverSession(
             prompt: "",
             driverTurnId: event.turnId,
             ...(turn.modelSelection ? { modelSelection: turn.modelSelection } : {}),
+            ...(config ? { config } : {}),
             workingDirectory: cwd,
             ...(onUsageLimit ? { onUsageLimit } : {}),
             ...(afterSettle ? { afterSettle } : {}),
@@ -1507,14 +1523,19 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     if (liveReading) return;
     liveReading = true;
     lastLiveAt = Date.now();
-    void recordContextUsage(store, driver, threadId, storeTurnId, (usage) => {
-      // Cost moves on its own (a long tool run between requests does not
-      // grow the context, but the requests before it cost something).
-      const reading = `${usage.usedTokens}:${usage.costUsd ?? ""}`;
-      if (reading === lastLiveReading) return false;
-      lastLiveReading = reading;
-      return true;
-    }, args.onContextReading).finally(() => {
+    void recordContextUsage(store, driver, threadId, storeTurnId, {
+      shouldRecord: (usage) => {
+        // Cost moves on its own (a long tool run between requests does not
+        // grow the context, but the requests before it cost something).
+        const reading = `${usage.usedTokens}:${usage.costUsd ?? ""}`;
+        if (reading === lastLiveReading) return false;
+        lastLiveReading = reading;
+        return true;
+      },
+      ...(args.onContextReading ? { onRecorded: args.onContextReading } : {}),
+      ...(args.config ? { config: args.config } : {}),
+      ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+    }).finally(() => {
       liveReading = false;
     });
   };
@@ -1602,7 +1623,11 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     interrupted = outcome.status === "interrupted";
     // Delivered before the outcome is recorded: whoever sees the turn settle sees the delivery too.
     if (answered && !args.driverTurnId) await args.afterAnswer?.();
-    await recordContextUsage(store, driver, threadId, storeTurnId);
+    await recordContextUsage(store, driver, threadId, storeTurnId, {
+      ...(args.config ? { config: args.config } : {}),
+      ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+      inFlightUsage: outcome.usage,
+    });
     if (outcome.status === "failed") recordTools.noteFailure();
     if (outcome.status !== "completed" || !outcome.text) await recordTools.saveUnfinishedText();
     // Steers the provider never confirmed reach the conversation go out
@@ -1678,20 +1703,46 @@ async function recordContextUsage(
   driver: TurnDriver,
   threadId: string,
   turnId: string,
-  /** Live readings pass this to skip writing a row when nothing moved. */
-  shouldRecord: (usage: ContextWindowUsage) => boolean = () => true,
-  /** Told of each reading that was written. */
-  onRecorded?: (usage: ContextWindowUsage) => void,
+  options: {
+    /** Live readings pass this to skip writing a row when nothing moved. */
+    readonly shouldRecord?: (usage: ContextWindowUsage) => boolean;
+    /** Told of each reading that was written. */
+    readonly onRecorded?: (usage: ContextWindowUsage) => void;
+    readonly config?: Pick<CliConfig, "providers">;
+    readonly modelSelection?: ModelSelection;
+    /** Settled outcome usage when called right before `settleTurn`; falls back to `driver.liveTurnUsage`. */
+    readonly inFlightUsage?: TurnUsage | null;
+  } = {},
 ): Promise<void> {
   if (!driver.contextUsage) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const usage = await Promise.race([
+  const raw = await Promise.race([
     driver.contextUsage(threadId).catch(() => null),
     new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), CONTEXT_USAGE_TIMEOUT_MS);
     }),
   ]).finally(() => clearTimeout(timer));
-  if (usage === null || !shouldRecord(usage)) return;
+  if (raw === null) return;
+  let usage: ContextWindowUsage = raw;
+  const isClaude = options.modelSelection !== undefined && driverKindOfInstance(options.modelSelection.instanceId) === "claude";
+  if (usage.costUsd === undefined || isClaude) {
+    const [thread, turns] = await Promise.all([
+      store.readThreadRecord(threadId).catch(() => null),
+      store.readTurns(threadId).catch(() => []),
+    ]);
+    if (thread) {
+      const liveUsage = options.inFlightUsage ?? driver.liveTurnUsage?.(threadId) ?? null;
+      const costUsd = resolveContextCostUsd(
+        thread,
+        turns,
+        options.config ?? { providers: {} },
+        usage.costUsd,
+        liveUsage ? { turnId, modelSelection: options.modelSelection ?? null, usage: liveUsage } : null,
+      );
+      if (costUsd !== null) usage = { ...usage, costUsd };
+    }
+  }
+  if (options.shouldRecord && !options.shouldRecord(usage)) return;
   const summary =
     usage.maxTokens === null
       ? `${usage.usedTokens} tokens in context`
@@ -1707,7 +1758,7 @@ async function recordContextUsage(
       createdAt: store.nowIso(),
     })
     .catch(() => undefined);
-  onRecorded?.(usage);
+  options.onRecorded?.(usage);
 }
 
 /** How long a failed or aborted turn waits for its context reading and checkpoint before writing its outcome. */
@@ -1731,7 +1782,10 @@ async function recordPreOutcome(
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
     (async () => {
-      await recordContextUsage(store, driver, args.threadId, args.storeTurnId).catch(() => undefined);
+      await recordContextUsage(store, driver, args.threadId, args.storeTurnId, {
+        ...(args.config ? { config: args.config } : {}),
+        ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+      }).catch(() => undefined);
       await settleCheckpoints(store, args, cwd, pre).catch(() => undefined);
     })(),
     new Promise<void>((resolve) => {

@@ -17,6 +17,7 @@ import type { LatestVersion, LatestVersions } from "../catalog/update.js";
 const REGISTRY = "https://registry.npmjs.org";
 const PACKAGES = { claude: "@anthropic-ai/claude-code", opencode: "@opencode/cli", codex: "@openai/codex" } as const;
 export const ANTIGRAVITY_LATEST_RELEASE_URL = "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest";
+export const VIBE_LATEST_RELEASE_URL = "https://api.github.com/repos/mistralai/mistral-vibe/releases/latest";
 const TIMEOUT_MS = 5_000;
 const KEEP_MS = 10 * 60_000;
 
@@ -102,8 +103,10 @@ export async function latestVersions(options: { readonly claudeBinaryPath?: stri
     cached("codex", deps, async () => ({ latest: await tagVersion(PACKAGES.codex, "latest", deps), channel: null }));
   const antigravity = (): Promise<LatestVersion> =>
     cached("antigravity", deps, async () => ({ latest: await githubReleaseVersion(ANTIGRAVITY_LATEST_RELEASE_URL, deps), channel: null }));
-  const [claudeResult, opencodeResult, codexResult, antigravityResult] = await Promise.all([claude(), opencode(), codex(), antigravity()]);
-  return { claude: claudeResult, opencode: opencodeResult, codex: codexResult, antigravity: antigravityResult };
+  const vibe = (): Promise<LatestVersion> =>
+    cached("vibe", deps, async () => ({ latest: await githubReleaseVersion(VIBE_LATEST_RELEASE_URL, deps), channel: null }));
+  const [claudeResult, opencodeResult, codexResult, antigravityResult, vibeResult] = await Promise.all([claude(), opencode(), codex(), antigravity(), vibe()]);
+  return { claude: claudeResult, opencode: opencodeResult, codex: codexResult, antigravity: antigravityResult, vibe: vibeResult };
 }
 
 /** Forget what was kept (tests). */

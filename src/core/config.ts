@@ -47,6 +47,7 @@ import type {
   SpeedMode,
   ThreadEnvMode,
   UpdatesConfig,
+  VibeProviderConfig,
   RemoteConfig,
   LongThreadsConfig,
   UiConfig,
@@ -860,6 +861,12 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     if (cleaned || accounts || models || prices) {
       result.antigravity = { ...(cleaned ?? {}), ...(accounts ? { accounts } : {}), ...models, ...prices };
     }
+  });
+  if (input.vibe !== undefined) guarded(skipped, "providers.vibe", input.vibe, () => {
+    const vibe = normalizeSection<VibeProviderConfig>(input.vibe, "providers.vibe", ["enabled", "binaryPath", "vibeHome", "launchArgs", "runtimeMode", "model", "thinkingEffort", "compaction", "compactAt", "handoff", "handoffAt", "autoHandoff", "autoHandoffTokens", "autoHandoffPercent", "moxenTools", "orchestration", "memory", "moxenSkills", "instructions", "autoContinueAtUsageLimit", "sessionTtl", "webFetch", "todos", "mcpExclude", "disabledNativeTools", "webSearchOrder", "webFetchOrder"], skipped);
+    const models = handoffModelsOf(input.vibe, "providers.vibe", skipped);
+    const prices = modelPricesOf(input.vibe, "providers.vibe", skipped);
+    if (vibe || models || prices) result.vibe = { ...vibe, ...models, ...prices };
   });
   if (input.acp !== undefined) guarded(skipped, "providers.acp", input.acp, () => {
     const rawAcp = input.acp as Record<string, unknown>;

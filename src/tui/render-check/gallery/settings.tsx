@@ -58,7 +58,7 @@ const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
  * profile and MCP server gets pages, wizards and editors.
  */
 export const CONFIGURED_PAGES: readonly PageRef[] = [
-  ...["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Overview", "Claude · Personal", "ChatGPT · Personal", "Antigravity · Main", "OpenCode"].map(page),
+  ...["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Overview", "Antigravity · Main", "ChatGPT · Personal", "Claude · Personal", "Mistral Vibe", "OpenCode"].map(page),
   ref("Harness Defaults", "Defaults (Harness)", side("Defaults", 1)),
   page("Tools"),
   ref("Harness Long threads", "Long threads (Harness)", side("Long threads", 1)),
@@ -96,6 +96,7 @@ export const SETTINGS_PROVIDERS: ProviderSummary[] = [
   { instanceId: "codex", driver: "codex", displayName: "Codex", enabled: true, installed: true, status: null, authStatus: "chatgpt", models: models(["Codex model"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   { instanceId: "claudeAgent", driver: "claudeAgent", displayName: "Claude", enabled: true, installed: true, status: null, authStatus: null, models: models(["Claude Opus 5", "Claude Sonnet 5.5"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   { instanceId: "opencode", driver: "opencode", displayName: "OpenCode", enabled: true, installed: true, status: null, authStatus: null, models: models(["GPT-5.5", "Kimi K3"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
+  { instanceId: "vibe", driver: "vibe", displayName: "Mistral Vibe", enabled: true, installed: true, status: null, authStatus: "os_keyring", models: models(["Mistral Large 4", "Mistral Medium"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   {
     instanceId: "antigravity",
     driver: "antigravity",
@@ -181,6 +182,9 @@ export const CONFIGURED: CliConfig = (() => {
       opencode: {
         enabled: true,
       },
+      vibe: {
+        enabled: true,
+      },
       harness: {
         profiles: [
           { id: "local", label: "Local llama.cpp", apiFormat: "chat", baseUrl: "http://localhost:8080/v1", models: [{ id: "qwen3-coder", contextWindow: 131_072, vision: false }, { id: "gemma-4", contextWindow: 262_144, vision: true }] },
@@ -249,8 +253,9 @@ export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG)
           claude: { ok: true, installed: true, version: "2.1.293 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
           opencode: { ok: true, installed: true, version: "opencode v2.0.22", login: "inherit", minVersion: "2.0.0" },
           antigravity: { ok: true, installed: true, version: "1.5.13", login: "inherit" },
+          vibe: { ok: true, installed: true, version: "3.1.4", login: "inherit" },
         }}
-        latest={{ enabled: true, claude: { latest: "2.1.293", channel: "latest" }, opencode: { latest: "2.0.24", channel: null }, antigravity: { latest: "1.5.14", channel: null } }}
+        latest={{ enabled: true, claude: { latest: "2.1.293", channel: "latest" }, opencode: { latest: "2.0.24", channel: null }, antigravity: { latest: "1.5.14", channel: null }, vibe: { latest: "3.1.4", channel: null } }}
         updating={new Set()}
         onUpdate={noop}
         providers={SETTINGS_PROVIDERS}
@@ -327,6 +332,7 @@ function pageOf(descriptor: SettingDescriptor): string {
     "provider:claude": "Claude · Personal",
     "provider:opencode": "OpenCode",
     "provider:antigravity": "Antigravity · Main",
+    "provider:vibe": "Mistral Vibe",
     "provider:chatgpt": "ChatGPT · Personal",
     "provider:acp": "ACP agents",
     "provider:harness": "Model servers",
@@ -486,8 +492,9 @@ export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntrie
           opencode: { ok: true, installed: true, version: "opencode v2.3.2", login: "inherit", minVersion: "2.0.0" },
           codex: { ok: true, installed: true, version: "codex-cli 0.171.0", login: "inherit", minVersion: "0.164.0" },
           antigravity: { ok: true, installed: true, version: "agy 1.5.14", login: "inherit", minVersion: "1.0.0" },
+          vibe: { ok: true, installed: true, version: "3.1.4", login: "inherit" },
         }}
-        latest={{ enabled: true, claude: { latest: "2.1.330", channel: "latest" }, opencode: { latest: "2.3.2", channel: null }, codex: { latest: "0.171.0", channel: null }, antigravity: { latest: "1.5.14", channel: null } }}
+        latest={{ enabled: true, claude: { latest: "2.1.330", channel: "latest" }, opencode: { latest: "2.3.2", channel: null }, codex: { latest: "0.171.0", channel: null }, antigravity: { latest: "1.5.14", channel: null }, vibe: { latest: "3.1.4", channel: null } }}
         updating={new Set()}
         updatingAll={false}
         updateAllResults={null}
@@ -550,8 +557,9 @@ export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntrie
           opencode: { ok: true, installed: true, version: "opencode v2.3.2", login: "inherit", minVersion: "2.0.0" },
           codex: { ok: true, installed: true, version: "codex-cli 0.171.0", login: "inherit", minVersion: "0.164.0" },
           antigravity: { ok: true, installed: true, version: "agy 1.5.14", login: "inherit", minVersion: "1.0.0" },
+          vibe: { ok: true, installed: true, version: "3.1.4", login: "inherit" },
         }}
-        latest={{ enabled: true, claude: { latest: "2.1.330", channel: "latest" }, opencode: { latest: "2.3.2", channel: null }, codex: { latest: "0.171.0", channel: null }, antigravity: { latest: "1.5.14", channel: null } }}
+        latest={{ enabled: true, claude: { latest: "2.1.330", channel: "latest" }, opencode: { latest: "2.3.2", channel: null }, codex: { latest: "0.171.0", channel: null }, antigravity: { latest: "1.5.14", channel: null }, vibe: { latest: "3.1.4", channel: null } }}
         updating={new Set()}
         saving={false}
         error={null}

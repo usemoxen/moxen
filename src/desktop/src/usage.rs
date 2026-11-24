@@ -246,6 +246,9 @@ pub(crate) fn driver_kind(instance: &str) -> Option<&str> {
     if key == "antigravity" || key == "agy" || key.starts_with("antigravity/") {
         return Some("antigravity");
     }
+    if key == "vibe" || key.starts_with("vibe/") {
+        return Some("vibe");
+    }
     if key == "acp" || key.starts_with("acp/") {
         return Some("acp");
     }

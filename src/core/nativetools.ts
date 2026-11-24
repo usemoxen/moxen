@@ -16,7 +16,7 @@
  */
 import { CliError } from "./errors.js";
 
-export type NativeToolProvider = "claude" | "codex" | "opencode";
+export type NativeToolProvider = "claude" | "codex" | "opencode" | "vibe";
 
 export interface NativeTool {
   /** Claude: the tool's name, as `disallowedTools` takes it. OpenCode: the permission action. */
@@ -86,6 +86,19 @@ export const CODEX_NATIVE_TOOLS: readonly NativeTool[] = [
   { name: "goals", label: "Goals", group: "Agents", summary: "create_goal, get_goal and update_goal; long-running goals with their own completion audit.", codexControl: { key: "features.goals", off: false } },
 ];
 
+/** Built-in Mistral Vibe tools verified on `vibe-app-server` 3.1.4 (`task` subagent is always disabled; `todo` is owned by the To-do list toggle). */
+export const VIBE_NATIVE_TOOLS: readonly NativeTool[] = [
+  { name: "read_file", label: "Read", group: "Files", summary: "Reads files." },
+  { name: "write_file", label: "Write", group: "Files", summary: "Creates or overwrites files." },
+  { name: "edit", label: "Edit", group: "Files", summary: "Makes targeted edits to files." },
+  { name: "grep", label: "Grep", group: "Files", summary: "Searches file contents." },
+  { name: "bash", label: "Bash", group: "Commands", summary: "Runs shell commands." },
+  { name: "web_search", label: "Web search", group: "Web", summary: "Searches the web." },
+  { name: "web_fetch", label: "Web fetch", group: "Web", summary: "Fetches a URL." },
+  { name: "skill", label: "Skills", group: "Agents", summary: "Loads a skill." },
+  { name: "ask_user_question", label: "Ask a question", group: "Interaction", summary: "Asks you multiple-choice questions." },
+];
+
 export function codexDisabledToolConfig(names: readonly string[]): Record<string, boolean | string> {
   const config: Record<string, boolean | string> = {};
   for (const name of names) {
@@ -97,7 +110,13 @@ export function codexDisabledToolConfig(names: readonly string[]): Record<string
 }
 
 export function nativeToolsOf(provider: NativeToolProvider): readonly NativeTool[] {
-  return provider === "codex" ? CODEX_NATIVE_TOOLS : provider === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS;
+  return provider === "codex"
+    ? CODEX_NATIVE_TOOLS
+    : provider === "claude"
+      ? CLAUDE_NATIVE_TOOLS
+      : provider === "vibe"
+        ? VIBE_NATIVE_TOOLS
+        : OPENCODE_NATIVE_TOOLS;
 }
 
 /**

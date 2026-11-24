@@ -880,10 +880,13 @@ fn tabs(snapshot: &Snapshot, accounts: &[settings::ProviderAccountSummary]) -> V
     let opencode_enabled = snapshot
         .find("providers.opencode.enabled")
         .is_some_and(|view| view.value == SettingValue::Flag(true));
+    let vibe_enabled = snapshot
+        .find("providers.vibe.enabled")
+        .is_some_and(|view| view.value == SettingValue::Flag(true));
 
     for section in snapshot.sections() {
         // Static per-provider pages are replaced by Overview + dynamic independent profile tabs
-        // (plus single opt-in OpenCode when enabled). Standalone Codex is companion-only.
+        // (plus single opt-in OpenCode and Mistral Vibe when enabled). Standalone Codex is companion-only.
         if matches!(
             section,
             "provider:codex"
@@ -891,6 +894,7 @@ fn tabs(snapshot: &Snapshot, accounts: &[settings::ProviderAccountSummary]) -> V
                 | "provider:chatgpt"
                 | "provider:antigravity"
                 | "provider:opencode"
+                | "provider:vibe"
         ) {
             continue;
         }
@@ -954,7 +958,8 @@ fn tabs(snapshot: &Snapshot, accounts: &[settings::ProviderAccountSummary]) -> V
         .iter()
         .position(|tab| tab.category != "Moxen")
         .unwrap_or(tabs.len());
-    let mut provider_tabs = Vec::with_capacity(1 + accounts.len() + usize::from(opencode_enabled));
+    let mut provider_tabs =
+        Vec::with_capacity(1 + accounts.len() + usize::from(opencode_enabled) + usize::from(vibe_enabled));
     provider_tabs.push(SettingsTab {
         section: "providers:overview".to_owned(),
         group: None,
@@ -977,6 +982,15 @@ fn tabs(snapshot: &Snapshot, accounts: &[settings::ProviderAccountSummary]) -> V
             label: "OpenCode".to_owned(),
         });
     }
+    if vibe_enabled {
+        provider_tabs.push(SettingsTab {
+            section: "provider:vibe".to_owned(),
+            group: None,
+            category: "Providers",
+            label: "Mistral Vibe".to_owned(),
+        });
+    }
+    provider_tabs[1..].sort_by_key(|tab| tab.label.to_lowercase());
     tabs.splice(providers_at..providers_at, provider_tabs);
     tabs
 }
@@ -4469,6 +4483,7 @@ fn providers_line(providers: &[String]) -> String {
             "codex" => "Codex",
             "opencode" => "OpenCode",
             "antigravity" => "Antigravity",
+            "vibe" => "Mistral Vibe",
             "acp" => "ACP",
             "harness" => "Moxen Harness",
             other => other,
@@ -5044,6 +5059,13 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
         .and_then(|res| res.as_ref().ok())
         .and_then(|snap| snap.find("providers.opencode.enabled"))
         .is_some_and(|view| view.value == SettingValue::Flag(true));
+    let vibe_enabled = w
+        .source
+        .settings()
+        .as_deref()
+        .and_then(|res| res.as_ref().ok())
+        .and_then(|snap| snap.find("providers.vibe.enabled"))
+        .is_some_and(|view| view.value == SettingValue::Flag(true));
     let accounts: Vec<settings::ProviderAccountSummary> = match accounts_state.as_deref() {
         Some(Ok(list)) => list.clone(),
         _ => vec![],
@@ -5272,6 +5294,27 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                     );
                     if next {
                         this.select_settings_section("provider:opencode", None);
+                    }
+                    cx.notify();
+                }),
+            ))
+            .child(small_button(
+                ("providers-vibe-toggle", 0),
+                if vibe_enabled {
+                    "Disable Mistral Vibe"
+                } else {
+                    "+ Enable Mistral Vibe"
+                },
+                "Opt in to or disable the single Mistral Vibe provider",
+                cx.listener(move |this, _, _, cx| {
+                    let next = !vibe_enabled;
+                    this.write_setting(
+                        "providers.vibe.enabled",
+                        if next { "true" } else { "false" },
+                        cx,
+                    );
+                    if next {
+                        this.select_settings_section("provider:vibe", None);
                     }
                     cx.notify();
                 }),
@@ -5633,6 +5676,7 @@ fn provider_row(
         "codex" => "Codex",
         "opencode" => "OpenCode",
         "antigravity" => "Antigravity",
+        "vibe" => "Mistral Vibe",
         "acp" => "ACP",
         _ => provider.id.as_str(),
     };
@@ -5670,7 +5714,8 @@ fn provider_index(id: &str) -> usize {
         "codex" => 1,
         "opencode" => 2,
         "antigravity" => 3,
-        _ => 4,
+        "vibe" => 4,
+        _ => 5,
     }
 }
 
@@ -5693,27 +5738,71 @@ mod tests {
         assert_eq!(empty_provider_tabs, vec!["providers:overview"]);
 
         // Once profiles are configured, each appears as a top-level independent page under Providers.
-        let accounts = vec![settings::ProviderAccountSummary {
-            kind: "chatgpt".into(),
-            id: "work".into(),
-            instance_id: "chatgpt/work".into(),
-            label: "Work".into(),
-            enabled: true,
-            home_path: None,
-            binary_path: None,
-            launch_args: None,
-            model: None,
-            thinking_effort: None,
-            env: Default::default(),
-            email: Some("dev@example.test".into()),
-            plan_type: Some("plus".into()),
-            workspace_name: None,
-            signed_in: Some(true),
-            codex_home_path: None,
-            codex_binary_path: None,
-            codex_launch_args: None,
-            codex_verified: false,
-        }];
+        let accounts = vec![
+            settings::ProviderAccountSummary {
+                kind: "claude".into(),
+                id: "personal".into(),
+                instance_id: "claude/personal".into(),
+                label: "Personal".into(),
+                enabled: true,
+                home_path: None,
+                binary_path: None,
+                launch_args: None,
+                model: None,
+                thinking_effort: None,
+                env: Default::default(),
+                email: None,
+                plan_type: None,
+                workspace_name: None,
+                signed_in: Some(true),
+                codex_home_path: None,
+                codex_binary_path: None,
+                codex_launch_args: None,
+                codex_verified: false,
+            },
+            settings::ProviderAccountSummary {
+                kind: "chatgpt".into(),
+                id: "work".into(),
+                instance_id: "chatgpt/work".into(),
+                label: "Work".into(),
+                enabled: true,
+                home_path: None,
+                binary_path: None,
+                launch_args: None,
+                model: None,
+                thinking_effort: None,
+                env: Default::default(),
+                email: Some("dev@example.test".into()),
+                plan_type: Some("plus".into()),
+                workspace_name: None,
+                signed_in: Some(true),
+                codex_home_path: None,
+                codex_binary_path: None,
+                codex_launch_args: None,
+                codex_verified: false,
+            },
+            settings::ProviderAccountSummary {
+                kind: "antigravity".into(),
+                id: "default".into(),
+                instance_id: "antigravity/default".into(),
+                label: "Default".into(),
+                enabled: true,
+                home_path: None,
+                binary_path: None,
+                launch_args: None,
+                model: None,
+                thinking_effort: None,
+                env: Default::default(),
+                email: None,
+                plan_type: None,
+                workspace_name: None,
+                signed_in: Some(true),
+                codex_home_path: None,
+                codex_binary_path: None,
+                codex_launch_args: None,
+                codex_verified: false,
+            },
+        ];
         let populated: Vec<_> = super::tabs(&snapshot, &accounts)
             .into_iter()
             .filter(|tab| tab.category == "Providers")
@@ -5723,7 +5812,9 @@ mod tests {
             populated,
             vec![
                 ("providers:overview".to_string(), "Overview".to_string()),
+                ("providers:profile".to_string(), "Antigravity · Default".to_string()),
                 ("providers:profile".to_string(), "ChatGPT · Work".to_string()),
+                ("providers:profile".to_string(), "Claude · Personal".to_string()),
             ]
         );
     }

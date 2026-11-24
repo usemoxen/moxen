@@ -93,7 +93,7 @@ import type { UsageCard } from "../core/usage/statsstore.js";
 import type { UsageProtectionSnapshot } from "../core/usage/protection.js";
 import { parseQueuePolicy, type QueuePolicy, type WorkQueueEntry } from "../core/threads/queue.js";
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
-import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
+import type { BackgroundTaskSummary, ContextBreakdown, ContextWindowUsage } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
 import { RESEARCH_SIZE_MESSAGE, isValidResearchSize } from "../core/threads/researchvocab.js";
 import type { ResearchMessage, ResearchRole, ResearchPlan, ResearchModels, ResearchSize, StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
@@ -971,6 +971,7 @@ export type ShellFrame =
 
 export type ThreadDetail = ThreadEnvelope & {
   readonly subagentRows?: readonly (NativeSubagentRow & { readonly stoppable: boolean })[];
+  readonly contextUsage?: ContextWindowUsage;
 };
 
 export type ThreadFrame =

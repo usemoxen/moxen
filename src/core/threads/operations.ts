@@ -358,8 +358,8 @@ async function sessionSetup(
   });
   // Servers switched off, or not offered to this provider, drop out; tools switched off are hidden by the driver.
   const { servers: mcpServers, disabledTools: disabledMcpTools } = kind === null ? { servers: merged, disabledTools: [] } : routeMcpServers(merged, kind, providerConfig?.mcpExclude);
-  // Only Claude Code and OpenCode ship tools to switch off or tips to give; the Harness has its own.
-  const nativeKind = kind === "codex" || kind === "claude" || kind === "opencode" ? kind : null;
+  // Providers that ship built-in tools to switch off or web-tool order guidance; the Harness has its own.
+  const nativeKind = kind === "codex" || kind === "claude" || kind === "opencode" || kind === "vibe" ? kind : null;
   const nativeConfig = nativeKind === null ? undefined : (providerConfig as { readonly disabledNativeTools?: string; readonly webSearchOrder?: string; readonly webFetchOrder?: string } | undefined);
   // Global, then this provider's, then the project's (a Harness profile's own come after, in its driver).
   const user = [ctx.config.instructions, providerConfig?.instructions, fromProject].filter((entry): entry is string => Boolean(entry?.trim()));
@@ -497,7 +497,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // same provider conversation with the request-scoped submission tool.
       if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
       setup = await sessionSetup(ctx, turnThread, selection.instanceId);
-      await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId), ...usageLimitHook(ctx, threadId, selection.instanceId) });
+      await ensureDriverSession(driver, turnThread, { modelSelection: selection, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, threadId), ...usageLimitHook(ctx, threadId, selection.instanceId) });
       await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
       // Config or rule files changed while the session sat idle: a live session
       // takes them now, like a fresh send does — never a reason to fail the resume.
@@ -526,6 +526,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       interactionMode: turn.interactionMode,
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
+      config: ctx.config,
       workingDirectory: thread.env.path,
       ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
       ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
@@ -1191,6 +1192,7 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string, o
         opencode: "OpenCode",
         harness: "Moxen Harness",
         antigravity: "Antigravity",
+        vibe: "Mistral Vibe",
         acp: "ACP",
       } as Record<string, string>)[driverKey(snapshot.instanceId)] ?? snapshot.instanceId;
     await ctx.store.appendLedger(threadId, "activity", {
@@ -2281,7 +2283,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   let startFailure: unknown = null;
   try {
     setup = await sessionSetup(ctx, turnThread, turnModel.instanceId);
-    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id), ...usageLimitHook(ctx, sent.thread.id, turnModel.instanceId) });
+    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id), ...usageLimitHook(ctx, sent.thread.id, turnModel.instanceId) });
   } catch (cause) {
     startFailure = cause;
   }
@@ -2356,6 +2358,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       // Always the turn's own model, so a live session switches when the
       // thread's model changed since it started.
       modelSelection: turnModel,
+      config: ctx.config,
       runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
@@ -2539,6 +2542,7 @@ export async function revertThread(
     }
     await ensureDriverSession(driver, thread, {
       modelSelection: entry.selection,
+      config: ctx.config,
       ...sessionStart(await sessionSetup(ctx, thread, entry.instanceId)),
       ...longThreadHook(ctx, threadId),
       ...usageLimitHook(ctx, threadId, entry.instanceId),

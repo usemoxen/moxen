@@ -15,7 +15,7 @@ import type { WorktreeIsolation } from "../threads/isolation.js";
 import type { InteractionMode, ModelSelection, RuntimeMode } from "../types.js";
 
 /** Provider surfaces we own. */
-export type ProviderDriverKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
+export type ProviderDriverKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe";
 
 export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = [
   "claude",
@@ -25,6 +25,7 @@ export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = [
   "harness",
   "acp",
   "antigravity",
+  "vibe",
 ];
 
 export function isProviderDriverKind(value: unknown): value is ProviderDriverKind {
@@ -109,9 +110,10 @@ export interface ContextWindowUsage {
   /** True when `usedTokens` is moxen's own count rather than one the provider reported. Absent means reported. */
   readonly estimated?: boolean;
   /**
-   * Running session total in USD, from the provider's own accounting
-   * (Claude: the SDK's `total_cost_usd`) — an estimate, not a bill.
-   * Absent when the provider reports no cost figure.
+   * Running thread total in USD — from the provider's own accounting where
+   * reported (Claude: the SDK's `total_cost_usd`, ACP `cost`), or estimated
+   * from Moxen's model prices when the provider reports none. Always an
+   * estimate, not a bill; absent when no turn can be priced.
    */
   readonly costUsd?: number;
 }
@@ -589,6 +591,13 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
    * indicator shows. Omitted by drivers whose provider reports nothing.
    */
   readonly contextUsage?: (threadId: ThreadId) => Promise<ContextWindowUsage | null>;
+
+  /**
+   * Tokens the currently running turn has spent so far, before it settles into
+   * the thread store. Null when no turn is running or the driver has not
+   * observed any usage for it yet.
+   */
+  readonly liveTurnUsage?: (threadId: ThreadId) => TokenUsageDelta | null;
 
   /**
    * Hand the running turn more input without interrupting it: the model

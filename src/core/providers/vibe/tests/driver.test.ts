@@ -1,0 +1,481 @@
+import path from "node:path";
+
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
+import { describe, expect, it } from "vitest";
+
+import { JsonRpcPeer, type SpawnedProcess } from "../../stdio.js";
+import type { ProviderRuntimeEvent } from "../../spi.js";
+import { applyVibeJsonPatch, VIBE_METHODS } from "../protocol.js";
+import type { VibeTransport } from "../transport.js";
+import { VibeDriver } from "../driver.js";
+import { vibeProvider, forgetVibeCatalogCache } from "../catalog.js";
+import { vibeWindowsOf, rewriteVibeLimitError } from "../usage.js";
+
+interface RecordedRpc {
+  readonly id?: string | number;
+  readonly method: string;
+  readonly params?: unknown;
+}
+
+class FakeVibeServer {
+  readonly received: RecordedRpc[] = [];
+  private dataHandlers = new Set<(chunk: string) => void>();
+  private exitHandlers = new Set<(code: number | null) => void>();
+  private responseWaiters = new Map<string | number, (msg: Record<string, unknown>) => void>();
+  private nextServerReqId = 1000;
+  private handlers = new Map<string, (params: unknown) => unknown | Promise<unknown>>();
+  closed = false;
+
+  on(method: string, handler: (params: unknown) => unknown | Promise<unknown>): void {
+    this.handlers.set(method, handler);
+  }
+
+  sendNotification(method: string, params: unknown): void {
+    this.emitLine(JSON.stringify({ jsonrpc: "2.0", method, params }));
+  }
+
+  async sendRequest(method: string, params: unknown): Promise<Record<string, unknown>> {
+    const id = `srv-${this.nextServerReqId++}`;
+    return await new Promise<Record<string, unknown>>((resolve) => {
+      this.responseWaiters.set(id, resolve);
+      this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+    });
+  }
+
+  private emitLine(line: string): void {
+    for (const h of [...this.dataHandlers]) h(`${line}\n`);
+  }
+
+  createPeer(): JsonRpcPeer {
+    const proc: SpawnedProcess = {
+      pid: 4242,
+      writeLine: (line: string) => {
+        const msg = JSON.parse(line) as Record<string, unknown>;
+        if (typeof msg["method"] === "string") {
+          const method = msg["method"];
+          const id = msg["id"] as string | number | undefined;
+          const params = msg["params"];
+          this.received.push({ ...(id !== undefined ? { id } : {}), method, params });
+          if (id === undefined) return;
+          const handler = this.handlers.get(method);
+          if (!handler) {
+            this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unhandled: ${method}` } }));
+            return;
+          }
+          Promise.resolve(handler(params)).then(
+            (result) => this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, result })),
+            (err) => {
+              const message = err instanceof Error ? err.message : String(err);
+              this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }));
+            },
+          );
+        } else if (msg["id"] !== undefined) {
+          const waiter = this.responseWaiters.get(msg["id"] as string | number);
+          if (waiter) {
+            this.responseWaiters.delete(msg["id"] as string | number);
+            waiter(msg);
+          }
+        }
+      },
+      onData: (handler) => {
+        this.dataHandlers.add(handler);
+        return () => this.dataHandlers.delete(handler);
+      },
+      onExit: (handler) => {
+        this.exitHandlers.add(handler);
+        return () => this.exitHandlers.delete(handler);
+      },
+      kill: () => {
+        if (this.closed) return;
+        this.closed = true;
+        for (const h of [...this.exitHandlers]) h(0);
+      },
+    };
+    return new JsonRpcPeer(proc, { forceKillAfterMs: 0 });
+  }
+}
+
+function setupDefaultServer(server: FakeVibeServer, sessionId = "vibe-sess-1"): void {
+  server.on(VIBE_METHODS.initialize, () => ({
+    serverInfo: { name: "vibe-app-server", version: "3.1.4" },
+    processId: 4242,
+    platformCredentials: false,
+  }));
+  server.on(VIBE_METHODS.setupStatus, () => ({
+    hasApiKey: true,
+    activeCredentialSource: "os_keyring",
+    activeModel: "mistral-large-4-0",
+    supportsBrowserSignIn: true,
+  }));
+  server.on(VIBE_METHODS.configRead, () => ({
+    config: {
+      activeModel: {
+        name: "mistral-large-4-0",
+        alias: "mistral-large-4-0",
+        displayName: "Mistral Large 4",
+        thinking: "high",
+        thinkingLevels: ["low", "medium", "high"],
+        maxContextLength: 1048576,
+        autoCompactThreshold: 400000,
+        supportsImages: true,
+        requires: null,
+      },
+      models: [
+        {
+          name: "mistral-large-4-0",
+          alias: "mistral-large-4-0",
+          displayName: "Mistral Large 4",
+          thinking: "high",
+          thinkingLevels: ["low", "medium", "high"],
+          maxContextLength: 1048576,
+          autoCompactThreshold: 400000,
+          supportsImages: true,
+          requires: null,
+        },
+        {
+          name: "locked-model",
+          alias: "locked-model",
+          displayName: "Locked Model",
+          thinking: "high",
+          thinkingLevels: ["high"],
+          maxContextLength: 128000,
+          supportsImages: false,
+          requires: "team",
+        },
+      ],
+    },
+  }));
+  server.on(VIBE_METHODS.sessionStart, () => ({
+    state: {
+      session: { id: sessionId, title: null, status: { type: "idle" } },
+      history: [],
+      backgroundProcesses: [],
+    },
+  }));
+  server.on(VIBE_METHODS.accountRead, () => ({
+    account: {
+      status: "ready",
+      plan: { kind: "chat", name: "INDIVIDUAL", title: "Pro" },
+      budget: {
+        usagePercentage: 12.5,
+        resetAt: "2026-12-01T00:00:00Z",
+        paygEnabled: false,
+      },
+    },
+  }));
+  server.on(VIBE_METHODS.sessionStop, () => ({ closed: true }));
+}
+
+function makeTransport(servers: FakeVibeServer[]): VibeTransport {
+  let index = 0;
+  return {
+    startPeer: () => {
+      const server = servers[Math.min(index++, servers.length - 1)]!;
+      return server.createPeer();
+    },
+  };
+}
+
+describe("vibe protocol JSON-Patch & usage helpers", () => {
+  it("applies append, replace, add, and remove patch ops without mutating input", () => {
+    const doc = {
+      id: "e1",
+      content: [{ type: "text", text: "Hello" }],
+      extra: "old",
+    };
+    const next = applyVibeJsonPatch(doc, [
+      { op: "append", path: "/content/0/text", value: " world" },
+      { op: "remove", path: "/extra" },
+      { op: "add", path: "/generationStatus", value: "completed" },
+    ]) as Record<string, unknown>;
+    expect((doc.content[0] as { text: string }).text).toBe("Hello");
+    expect(((next["content"] as Array<{ text: string }>)[0]!).text).toBe("Hello world");
+    expect(next["extra"]).toBeUndefined();
+    expect(next["generationStatus"]).toBe("completed");
+  });
+
+  it("maps monthly budget windows and PAYG flag cleanly", () => {
+    const regular = vibeWindowsOf({
+      status: "ready",
+      planKind: "chat",
+      planName: "INDIVIDUAL",
+      planTitle: "Pro",
+      budget: { usagePercentage: 100, resetAt: "2026-12-01T00:00:00Z", paygEnabled: false },
+    });
+    expect(regular).toEqual([
+      { id: "monthly", label: "Monthly", resetsAt: "2026-12-01T00:00:00Z", exhausted: true, usedPercent: 100 },
+    ]);
+
+    const payg = vibeWindowsOf({
+      status: "ready",
+      planKind: "chat",
+      planName: "INDIVIDUAL",
+      planTitle: "Pro",
+      budget: { usagePercentage: 100, resetAt: "2026-12-01T00:00:00Z", paygEnabled: true },
+    });
+    expect(payg[0]?.exhausted).toBe(false);
+    expect(payg[0]?.label).toBe("Monthly (PAYG)");
+
+    expect(rewriteVibeLimitError("usage limit reached", null)).toBe("Mistral Vibe usage limit exceeded.");
+  });
+});
+
+describe("VibeDriver contract", () => {
+  it("handshakes honestly, disables native task subagent, streams patches/tools/reasoning, and reports monthly usage", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    server.on(VIBE_METHODS.turnStart, () => {
+      setTimeout(() => {
+        server.sendNotification(VIBE_METHODS.turnStarted, {
+          turn: { id: "t-srv-1", inputEntryId: "entry-user-1", status: "in_progress" },
+        });
+        server.sendNotification(VIBE_METHODS.historyEntryAdded, {
+          entry: { id: "r-1", type: "reasoning", text: "Thinking", generationStatus: "generating" },
+        });
+        server.sendNotification(VIBE_METHODS.historyEntryUpdated, {
+          entryId: "r-1",
+          patch: [
+            { op: "append", path: "/text", value: " harder" },
+            { op: "replace", path: "/generationStatus", value: "completed" },
+          ],
+        });
+        server.sendNotification(VIBE_METHODS.historyEntryAdded, {
+          entry: { id: "m-note", type: "message", role: "assistant", content: [{ type: "text", text: "Checking file" }], generationStatus: "completed" },
+        });
+        server.sendNotification(VIBE_METHODS.historyEntryAdded, {
+          entry: {
+            id: "eff-1",
+            type: "effect",
+            toolCallId: "tc-1",
+            title: "Edit foo.ts",
+            detail: { kind: "file_edit", toolName: "edit", input: { filePath: "foo.ts", oldString: "a", newString: "b" } },
+            state: { status: "completed", outputText: "ok", durationMs: 12 },
+          },
+        });
+        server.sendNotification(VIBE_METHODS.historyEntryAdded, {
+          entry: { id: "m-final", type: "message", role: "assistant", content: [{ type: "text", text: "Done" }], generationStatus: "generating" },
+        });
+        server.sendNotification(VIBE_METHODS.historyEntryUpdated, {
+          entryId: "m-final",
+          patch: [
+            { op: "append", path: "/content/0/text", value: "!" },
+            { op: "replace", path: "/generationStatus", value: "completed" },
+          ],
+        });
+        server.sendNotification(VIBE_METHODS.statsUpdated, {
+          contextWindow: 1048576,
+          stats: {
+            sessionPromptTokens: 1200,
+            sessionCompletionTokens: 200,
+            sessionCachedTokens: 400,
+            lastTurnPromptTokens: 1200,
+            lastTurnCompletionTokens: 200,
+            lastTurnCachedTokens: 400,
+            contextTokens: 1400,
+          },
+        });
+        server.sendNotification(VIBE_METHODS.turnCompleted, {
+          turn: { id: "t-srv-1", status: "completed" },
+        });
+      }, 10);
+      return { turn: { id: "t-srv-1", inputEntryId: "entry-user-1", status: "in_progress" } };
+    });
+
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
+
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-1",
+      workingDirectory: "/tmp/repo",
+      modelSelection: { instanceId: "vibe", model: "mistral-large-4-0", options: [{ id: "effort", value: "high" }] },
+      instructions: "Follow Moxen rules.",
+      mcpServers: [{ name: "moxen", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+    }));
+
+    const initCall = server.received.find((r) => r.method === VIBE_METHODS.initialize);
+    expect((initCall?.params as Record<string, unknown>)["clientInfo"]).toMatchObject({
+      name: "moxen",
+      entrypoint: "unknown",
+    });
+
+    const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const startParams = startCall?.params as Record<string, unknown>;
+    expect(startParams["sessionOnly"]).toBe(true);
+    expect(startParams["model"]).toBe("mistral-large-4-0");
+    expect(startParams["reasoningEffort"]).toBe("high");
+    const agentCfg = startParams["agentConfig"] as Record<string, unknown>;
+    expect(agentCfg["disabledTools"]).toContain("task");
+    expect(agentCfg["instructions"]).toBe("Follow Moxen rules.");
+    expect(agentCfg["mcpServers"]).toEqual([
+      { transport: "streamable-http", name: "moxen", url: "http://127.0.0.1:9999/mcp" },
+    ]);
+
+    const { turnId } = await Effect.runPromise(driver.sendTurn({ threadId: "th-1", prompt: "Fix foo" }));
+    const outcome = await driver.awaitTurn("th-1", turnId);
+    expect(outcome.status).toBe("completed");
+    expect(outcome.text).toBe("Done!");
+    expect(outcome.usage).toEqual({ input: 800, cacheRead: 400, cacheCreate: 0, output: 200, thinking: 0 });
+    expect(driver.resumeCursor("th-1")).toBe("vibe-sess-1");
+
+    expect(events.some((e) => e.type === "assistant.note" && e.text === "Checking file")).toBe(true);
+    expect(events.some((e) => e.type === "tool.execute.completed" && e.tool === "Edit")).toBe(true);
+    expect(events.some((e) => e.type === "reasoning.updated" && e.status === "completed" && e.text === "Thinking harder")).toBe(true);
+    expect(events.some((e) => e.type === "rate-limits.updated" && e.windows[0]?.usedPercent === 12.5)).toBe(true);
+
+    await Effect.runPromise(driver.stopSession("th-1"));
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  });
+
+  it("enforces worktree isolation on approval callbacks even in full-access and blocks session-wide approvals", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const callbackResults: unknown[] = [];
+    server.on(VIBE_METHODS.callbackResult, (params) => {
+      callbackResults.push(params);
+      return { accepted: true };
+    });
+
+    const wtRoot = path.resolve("/tmp/moxen-wt");
+    const mainRoot = path.resolve("/tmp/moxen-main");
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-iso",
+      workingDirectory: wtRoot,
+      runtimeMode: "full-access",
+      isolation: { worktreeRoot: wtRoot, protectedRoots: [mainRoot] },
+    }));
+
+    // Attempted write into protected main checkout must be denied immediately.
+    const ack1 = await server.sendRequest(VIBE_METHODS.callbackCall, {
+      callback: {
+        callbackId: "cb-escape",
+        detail: {
+          kind: "approval",
+          effect: { kind: "file_write", toolName: "write_file", input: { filePath: path.join(mainRoot, "evil.ts"), content: "x" } },
+        },
+      },
+    });
+    expect(ack1["result"]).toEqual({ callbackId: "cb-escape", accepted: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(callbackResults[0]).toMatchObject({
+      result: { callbackId: "cb-escape", output: { type: "approval", decision: { type: "deny" } } },
+    });
+
+    // Write inside the worktree under full-access is auto-approved with single-use `approve` (never session-wide).
+    await server.sendRequest(VIBE_METHODS.callbackCall, {
+      callback: {
+        callbackId: "cb-safe",
+        detail: {
+          kind: "approval",
+          effect: { kind: "file_write", toolName: "write_file", input: { filePath: path.join(wtRoot, "ok.ts"), content: "x" } },
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(callbackResults[1]).toMatchObject({
+      result: { callbackId: "cb-safe", output: { type: "approval", decision: { type: "approve" } } },
+    });
+
+    await Effect.runPromise(driver.stopSession("th-iso"));
+  });
+
+  it("supports mid-turn steering, native compaction handoff, rewind handoff, and tool-free /btw fork", async () => {
+    const server = new FakeVibeServer();
+    const btwServer = new FakeVibeServer();
+    setupDefaultServer(server, "vibe-s1");
+    setupDefaultServer(btwServer, "vibe-btw-fork");
+
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } }));
+    server.on(VIBE_METHODS.turnSteer, () => ({ accepted: true }));
+    server.on(VIBE_METHODS.sessionCompact, () => ({
+      summary: "Compacted summary",
+      state: { session: { id: "vibe-s2", title: "My Thread" }, history: [] },
+    }));
+    server.on(VIBE_METHODS.sessionRewind, () => ({
+      message: "Rewound",
+      restoreErrors: [],
+      restoredPaths: [],
+      state: { session: { id: "vibe-s3", title: "My Thread" }, history: [] },
+    }));
+
+    btwServer.on(VIBE_METHODS.sessionFork, () => ({
+      sourceSessionId: "vibe-s3",
+      state: { session: { id: "vibe-btw-fork" }, history: [] },
+    }));
+    btwServer.on(VIBE_METHODS.turnStart, () => {
+      setTimeout(() => {
+        btwServer.sendNotification(VIBE_METHODS.historyEntryAdded, {
+          entry: { id: "btw-a1", type: "message", role: "assistant", content: [{ type: "text", text: "Side answer" }], generationStatus: "completed" },
+        });
+        btwServer.sendNotification(VIBE_METHODS.turnCompleted, {
+          turn: { id: "btw-t1", status: "completed" },
+        });
+      }, 10);
+      return { turn: { id: "btw-t1", status: "in_progress" } };
+    });
+
+    const driver = new VibeDriver({ transport: makeTransport([server, btwServer]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-2", workingDirectory: "/tmp/repo" }));
+    const { turnId } = await Effect.runPromise(driver.sendTurn({ threadId: "th-2", prompt: "First" }));
+    await Effect.runPromise(driver.steerTurn("th-2", "Also check tests", undefined, "steer-1"));
+    // Unconfirmed before turn_steer message arrives -> returned by takeUnconfirmedSteers
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+    await driver.awaitTurn("th-2", turnId);
+    expect(driver.takeUnconfirmedSteers("th-2")).toHaveLength(1);
+
+    // Compact adopts handed-off session id `vibe-s2`
+    await Effect.runPromise(driver.compaction.type === "native" ? driver.compaction.start("th-2") : Effect.void);
+    expect(driver.resumeCursor("th-2")).toBe("vibe-s2");
+
+    // Rollback calls session/rewind with restoreFiles: false and adopts `vibe-s3`
+    const snap = await Effect.runPromise(driver.rollbackThread("th-2", 1));
+    expect(snap.turns).toHaveLength(0);
+    expect(driver.resumeCursor("th-2")).toBe("vibe-s3");
+    const rewindReq = server.received.find((r) => r.method === VIBE_METHODS.sessionRewind);
+    expect(rewindReq?.params).toMatchObject({ restoreFiles: false, entryId: "u1" });
+
+    // /btw uses session/fork with enabledTools: []
+    const side = await driver.sideQuestion({
+      cursor: "vibe-s3",
+      workingDirectory: "/tmp/repo",
+      question: "What did we decide?",
+    });
+    expect(side).toEqual({ text: "Side answer", withContext: true });
+    const forkReq = btwServer.received.find((r) => r.method === VIBE_METHODS.sessionFork);
+    expect((forkReq?.params as Record<string, unknown>)["agentConfig"]).toMatchObject({ enabledTools: [] });
+
+    await Effect.runPromise(driver.stopSession("th-2"));
+  });
+
+  it("discovers unlocked models via passive catalog query without starting a session", async () => {
+    forgetVibeCatalogCache();
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const summary = await vibeProvider(undefined, process.env, "/tmp/repo", makeTransport([server]));
+    expect(summary.enabled).toBe(true);
+    expect(summary.authStatus).toBe("os_keyring");
+    expect(summary.models.map((m) => m.slug)).toEqual(["mistral-large-4-0"]);
+    expect(summary.models[0]?.efforts[0]?.choices.map((c) => c.id)).toEqual(["low", "medium", "high"]);
+    // Never opened a session during catalog discovery.
+    expect(server.received.some((r) => r.method === VIBE_METHODS.sessionStart)).toBe(false);
+  });
+
+  it("reads monthly budget via refreshUsage even before any session is open, and stops its probe session", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const driver = new VibeDriver({ transport: makeTransport([server]), instanceId: "vibe" });
+
+    const refreshed = await driver.refreshUsage();
+    expect(refreshed).toEqual({
+      key: "vibe",
+      windows: [
+        { id: "monthly", label: "Monthly", resetsAt: "2026-12-01T00:00:00Z", exhausted: false, usedPercent: 12.5 },
+      ],
+    });
+    expect(server.received.some((r) => r.method === VIBE_METHODS.accountRead)).toBe(true);
+    expect(server.received.some((r) => r.method === VIBE_METHODS.sessionStop)).toBe(true);
+  });
+});

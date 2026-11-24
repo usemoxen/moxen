@@ -9,7 +9,7 @@ import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/qu
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive, usageWindowMatchesModel, usageWindowsForModel } from "./limits.js";
 import { UsageForecaster, type UsageForecast } from "./forecast.js";
-import { modelPriceFor, usageCost } from "./prices.js";
+import { isFastSelection, modelPriceFor, usageCost } from "./prices.js";
 
 const wrapUpPrompt = (reason: string, resume: string) => `${reason} Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. ${resume} Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.`;
 export const WRAP_UP_PROMPT = wrapUpPrompt("The provider's shared usage allowance is nearly exhausted.", "You will resume in this same conversation automatically.");
@@ -153,8 +153,7 @@ export class UsageProtection {
       const selection = turn.modelSelection ?? row.thread.modelSelection;
       const provider = usageKeyForInstance(selection.instanceId);
       if (!provider) continue;
-      const fast = selection.options?.some((option) =>
-        (option.id === "fastMode" && option.value === true) || (option.id === "serviceTier" && option.value === "fast")) ?? false;
+      const fast = isFastSelection(selection);
       const reported = turn.usage?.costUsd;
       const key = `${row.thread.id}:${turn.id}`;
       let cost = 0;
@@ -452,7 +451,7 @@ export class UsageProtection {
         const turn = openTurn(turns);
         if (!turn) continue;
         const selection = turn.modelSelection ?? thread.modelSelection;
-        const fast = selection.options?.some((option) => (option.id === "fastMode" && option.value === true) || (option.id === "serviceTier" && option.value === "fast")) ?? false;
+        const fast = isFastSelection(selection);
         const context = this.contexts.get(thread.id);
         const providerTurns = turns.filter((turn) => usageKeyForInstance((turn.modelSelection ?? selection).instanceId) === provider);
         let inFlight = 0;

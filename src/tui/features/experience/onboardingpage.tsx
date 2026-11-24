@@ -286,6 +286,20 @@ export function OnboardingPage({
       setSettingUpProvider(false);
     }
   };
+  const quickEnableVibe = async () => {
+    if (disabled) return;
+    setSettingUpProvider(true);
+    setLocalError(null);
+    try {
+      await settings.set("providers.vibe.enabled", "true");
+      setProviderId("vibe");
+      onRefresh();
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSettingUpProvider(false);
+    }
+  };
   const quickSignInChatGpt = async () => {
     if (disabled || chatGptAuthUrl !== null) return;
     setLocalError(null);
@@ -312,6 +326,7 @@ export function OnboardingPage({
   const chatGptAdded = chatGptAccount !== undefined || entries.some((entry) => entry.driver === "chatgpt" && entry.enabled);
   const opencodeAdded = value("providers.opencode.enabled") === true || entries.some((entry) => entry.driver === "opencode");
   const antigravityAdded = accounts.some((entry) => entry.kind === "antigravity") || entries.some((entry) => entry.driver === "antigravity");
+  const vibeAdded = value("providers.vibe.enabled") === true || entries.some((entry) => entry.driver === "vibe");
 
   // A function: building it registers focus controls, so only the step that shows it may.
   const stepTwo = () => <>
@@ -364,6 +379,12 @@ export function OnboardingPage({
         chosen: antigravityAdded,
         tone: COLOR.added,
         detail: antigravityAdded ? t("guide.providerAdded") : cliSetupDetail(doctor?.providers?.antigravity),
+        width: inner,
+      })}
+      {button(t("guide.enableVibe"), () => { if (!vibeAdded) void quickEnableVibe(); }, {
+        chosen: vibeAdded,
+        tone: COLOR.added,
+        detail: vibeAdded ? t("guide.providerEnabled") : cliSetupDetail(doctor?.providers?.vibe),
         width: inner,
       })}
       {button(t("guide.addModelServer"), () => openList("providers.harness.profiles"), { detail: t("guide.addModelServerBody"), width: inner })}

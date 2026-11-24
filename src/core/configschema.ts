@@ -22,7 +22,7 @@
 import { readListScalar, resolveListKey, type ListDescriptor, type ListTarget } from "./configlist.js";
 import { CliError } from "./errors.js";
 import { webOrderEntries, webOrderUnavailable, type WebOrderEntry, type WebRole } from "./webservers.js";
-import { CODEX_NATIVE_TOOLS, CLAUDE_NATIVE_TOOLS, DEFAULT_DISABLED_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
+import { CODEX_NATIVE_TOOLS, CLAUDE_NATIVE_TOOLS, DEFAULT_DISABLED_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, VIBE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
 import { formatHandoffModels, formatModeModels } from "./handoffmodels.js";
 import { DEFAULT_MODEL_PRICES, type ModelPrice } from "./usage/prices.js";
 import { numberLabel } from "./configformat.js";
@@ -73,6 +73,7 @@ export const SETTING_SECTIONS = [
   "provider:opencode",
   "provider:codex",
   "provider:antigravity",
+  "provider:vibe",
   "provider:chatgpt",
   "provider:acp",
   "provider:harness",
@@ -96,6 +97,7 @@ export const SECTION_LABEL: Record<SettingSection, string> = {
   "provider:chatgpt": "ChatGPT",
   "provider:opencode": "OpenCode",
   "provider:antigravity": "Antigravity",
+  "provider:vibe": "Mistral Vibe",
   "provider:acp": "ACP",
   "provider:harness": "Moxen Harness",
   mcp: "MCP servers",
@@ -137,11 +139,11 @@ export type SettingKind =
       /** With `source` native-tools: the provider's own tools this setting can switch off (`core/nativetools.ts`). */
       readonly tools?: readonly NativeTool[];
       /** With `source` model or effort: offer only this provider's models (the setting belongs to its page). */
-      readonly providerKind?: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
+      readonly providerKind?: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe";
       /** With `source` model: whose value names the provider instance this setting's models belong to, instead of the global Provider. */
       readonly providerKey?: string;
       /** With `source` provider or model: offer only providers with these drivers. */
-      readonly providerKinds?: readonly ("claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity")[];
+      readonly providerKinds?: readonly ("claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe")[];
     }
   /**
    * `unit` is appended when the value is shown ("20" -> "20s"). `presets`
@@ -374,6 +376,11 @@ const COMPACTION_TEXT: Readonly<Record<LongThreadKind, { readonly own: string; r
     description:
       "Who compacts a thread as it fills. Antigravity: the CLI handles its own context. Moxen can compact at the chosen line, asking first or automatically. Off disables automatic compaction.",
   },
+  vibe: {
+    own: "Mistral Vibe",
+    description:
+      "Who compacts a thread as it fills. Mistral Vibe: the app server handles its own context. Moxen can compact at the chosen line, asking first or automatically. Off disables automatic compaction.",
+  },
 };
 
 const COMPACTION_CHOICE_LABEL: Readonly<Record<Exclude<CompactionMode, "provider">, string>> = { ask: "Moxen asks", auto: "Moxen does it", off: "Off" };
@@ -381,14 +388,14 @@ const COMPACTION_CHOICE_LABEL: Readonly<Record<Exclude<CompactionMode, "provider
 /** The sentence every Long threads group ends on, so the two lines are never read apart. */
 const LINES_INTERACT = "Handing off is offered first when its line is lower than compaction's; past both, the lower one acts first.";
 
-const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity", string>> = { codex: "Codex", claude: "Claude Code", chatgpt: "ChatGPT", opencode: "OpenCode", harness: "Moxen Harness", acp: "ACP", antigravity: "Antigravity" };
+const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe", string>> = { codex: "Codex", claude: "Claude Code", chatgpt: "ChatGPT", opencode: "OpenCode", harness: "Moxen Harness", acp: "ACP", antigravity: "Antigravity", vibe: "Mistral Vibe" };
 
 /**
  * One Tools group per provider, from one template so the three tabs cannot drift: Moxen's own tools
  * and skills, MCP reach, the to-do list, and (Claude Code, OpenCode) the web orders and the
  * provider's own tools to switch off.
  */
-function toolSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
+function toolSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   const base = { section, group: "Tools", appliesAt: "next-session" } as const;
@@ -473,14 +480,14 @@ function toolSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harne
       label: "Built-in tools off",
       description: kind === "codex" ? "Codex tools and tool families to switch off. Supported switches remove tools from the model; an always-on entry explains the native restriction." : `${name}'s own tools to switch off: each is taken out of the model's list.`,
       ...(kind === "opencode" ? { appliesAt: "provider-restart" as const } : {}),
-      kind: { type: "string", placeholder: "none switched off", source: "native-tools", tools: kind === "codex" ? CODEX_NATIVE_TOOLS : kind === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS },
+      kind: { type: "string", placeholder: "none switched off", source: "native-tools", tools: kind === "codex" ? CODEX_NATIVE_TOOLS : kind === "claude" ? CLAUDE_NATIVE_TOOLS : kind === "vibe" ? VIBE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS },
       defaultValue: DEFAULT_DISABLED_NATIVE_TOOLS[kind],
     },
   ];
 }
 
 /** A provider's switch for the skills Moxen used to ship (MXN-138): kept so older configs still load, and does nothing. */
-function moxenSkillsSetting(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor {
+function moxenSkillsSetting(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe"): SettingDescriptor {
   return {
     key: `providers.${kind}.moxenSkills`,
     label: "Moxen's skills",
@@ -498,7 +505,7 @@ function moxenSkillsSetting(kind: "claude" | "codex" | "chatgpt" | "opencode" | 
  * One Sessions group per provider, the global Sessions settings narrowed to it: instructions that only this
  * provider's threads get, and whether a usage limit is waited out. Unset, each follows the global one.
  */
-function sessionSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
+function sessionSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   return [
@@ -515,7 +522,7 @@ function sessionSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "ha
     {
       key: `providers.${kind}.sessionTtl`,
       label: "Idle session lifetime",
-      description: `How long ${kind === "opencode" || kind === "acp" || kind === "antigravity" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", chatgpt: "Sessions run through Moxen Harness against OpenAI Responses.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back.", acp: "Each is an ACP agent process.", antigravity: "Each is an `agy acp` process." }[kind]}`,
+      description: `How long ${kind === "opencode" || kind === "acp" || kind === "antigravity" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", chatgpt: "Sessions run through Moxen Harness against OpenAI Responses.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back.", acp: "Each is an ACP agent process.", antigravity: "Each is an `agy acp` process.", vibe: "Each is a `vibe-app-server` process." }[kind]}`,
       section,
       group: "Sessions",
       kind: { type: "duration", presets: DURATION_PRESETS, ends: { low: "Shorter", high: "Longer" } },
@@ -633,18 +640,19 @@ function perModelSettings(kind: LongThreadKind): SettingDescriptor[] {
   ];
 }
 
-const PRICE_EXAMPLE: Readonly<Record<"claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity", string>> = {
+const PRICE_EXAMPLE: Readonly<Record<"claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe", string>> = {
   claude: "claude-opus-5=5",
   codex: "gpt-6.1-sol=2",
   chatgpt: "gpt-6.1-sol=2",
   opencode: "opencode-go/muse-spark-1.3-contributor=2",
   harness: "qwen3.8-flash-next=0.5",
   antigravity: "gemini-4-neon=2",
+  vibe: "mistral-large-4-0=0.5",
   acp: "claude-sonnet=3",
 };
 
 /** One Model prices group per provider, from one template so the provider tabs cannot drift: one per-model editor backed by the four underlying price maps. */
-function priceSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity"): SettingDescriptor[] {
+function priceSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const example = PRICE_EXAMPLE[kind];
   const section = `provider:${kind}` as const;
@@ -1642,6 +1650,73 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     defaultValue: field === "binaryPath" ? "agy" : undefined,
     appliesAt: "server-restart",
   })),
+  // -- Mistral Vibe ----------------------------------------------------------
+  {
+    key: "providers.vibe.enabled",
+    label: "Enable Mistral Vibe",
+    description: "Add Mistral Vibe as a provider in Moxen.",
+    section: "provider:vibe",
+    group: "Setup",
+    hidden: true,
+    kind: { type: "boolean" },
+    defaultValue: false,
+  },
+  {
+    key: "providers.vibe.runtimeMode",
+    label: "Permissions",
+    description: "How much a new Mistral Vibe thread may do without asking.",
+    section: "provider:vibe",
+    group: "Defaults",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("approval-required", "Supervised", "Ask before every edit and command."),
+        choice("auto-accept-edits", "Auto-accept edits", "Reads and edits go through; commands still ask."),
+        choice("auto", "Auto", "Moxen's command safety rules judge each call."),
+        choice("full-access", "Full access", "No prompts at all."),
+      ],
+    },
+    defaultValue: undefined,
+    fallback: { key: "runtimeMode" },
+  },
+  {
+    key: "providers.vibe.model",
+    label: "Model",
+    description: "The model a new Mistral Vibe thread starts with, when neither the request nor the project names one.",
+    section: "provider:vibe",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "model", providerKind: "vibe" },
+    defaultValue: undefined,
+    fallback: { resolver: "providerModel" },
+  },
+  {
+    key: "providers.vibe.thinkingEffort",
+    label: "Effort",
+    description: "The reasoning effort a new Mistral Vibe thread starts at, for models that take one.",
+    section: "provider:vibe",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "effort", providerKind: "vibe" },
+    defaultValue: undefined,
+    fallback: { key: "thinkingEffort" },
+  },
+  ...toolSettings("vibe"),
+  ...sessionSettings("vibe"),
+  ...longThreadSettings("vibe"),
+  ...priceSettings("vibe"),
+  ...(["binaryPath", "vibeHome", "launchArgs"] as const).map((field): SettingDescriptor => ({
+    key: `providers.vibe.${field}`,
+    label: { binaryPath: "Vibe executable", vibeHome: "Vibe home directory", launchArgs: "Launch arguments" }[field],
+    description: {
+      binaryPath: "The `vibe-app-server` binary to spawn.",
+      vibeHome: "Directory passed as `VIBE_HOME` for Vibe's configuration and session logs.",
+      launchArgs: "Extra arguments passed to `vibe-app-server`.",
+    }[field],
+    section: "provider:vibe",
+    group: "Setup",
+    kind: { type: "string", ...(field === "binaryPath" ? { placeholder: "vibe-app-server" } : {}) },
+    defaultValue: field === "binaryPath" ? "vibe-app-server" : undefined,
+    appliesAt: "server-restart",
+  })),
   // -- ACP -------------------------------------------------------------------
   {
     key: "providers.acp.runtimeMode",
@@ -1973,7 +2048,7 @@ function orderDefaults(settings: readonly SettingDescriptor[]): readonly Setting
 
 function orderProviderGroups(settings: readonly SettingDescriptor[]): readonly SettingDescriptor[] {
   const out = [...settings];
-  for (const section of ["provider:codex", "provider:claude", "provider:chatgpt", "provider:opencode", "provider:antigravity", "provider:acp", "provider:harness"] as const) {
+  for (const section of ["provider:codex", "provider:claude", "provider:chatgpt", "provider:opencode", "provider:antigravity", "provider:vibe", "provider:acp", "provider:harness"] as const) {
     const slots = out.flatMap((entry, at) => (entry.section === section ? [at] : []));
     const rank = (entry: SettingDescriptor): number => {
       const at = entry.group === undefined ? -1 : PROVIDER_GROUP_ORDER.indexOf(entry.group);
@@ -2386,7 +2461,7 @@ function settingPlace(from: SettingDescriptor, to: SettingDescriptor): string {
 
 /** The provider a Long threads row is on; undefined for the global one. */
 const longThreadKindOf = (descriptor: SettingDescriptor): LongThreadKind | undefined =>
-  /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
+  /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity|vibe)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
 
 /** What a long-thread rule found, said on `descriptor`'s page: the value as that page writes it, and where it is set (nothing for the built-in default). */
 function sourcedEffective(descriptor: SettingDescriptor, value: string, key: string | null): SettingEffective {
@@ -2398,7 +2473,7 @@ function sourcedEffective(descriptor: SettingDescriptor, value: string, key: str
 const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, descriptor: SettingDescriptor) => SettingEffective | undefined>> = {
   /** A provider's delegation tools or web_fetch, unset: the older all-at-once `moxenTools` (`moxenToolsOf`), else on. */
   moxenTools(config, descriptor) {
-    const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | undefined;
+    const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity|vibe)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined;
     const legacy = kind === undefined ? undefined : config.providers?.[kind]?.moxenTools;
     return legacy === false ? { value: false, label: "Off", origin: `from providers.${kind}.moxenTools in the config file` } : { value: true, label: "On" };
   },
@@ -2427,7 +2502,7 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
   },
   /** A provider tab's Model, unset: the global Model when the global Provider is this one (`configuredModel`); else the provider's catalog default, which the picker names itself. */
   providerModel(config, descriptor) {
-    const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity)\.model$/.exec(descriptor.key)?.[1];
+    const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity|vibe)\.model$/.exec(descriptor.key)?.[1];
     const global = BY_KEY.get("model")!;
     const aimed = kind !== undefined && config.provider !== undefined && driverKindOfInstance(config.provider) === kind;
     if (aimed && config.model !== undefined && config.model.trim() !== "") return { value: config.model, label: config.model, origin: settingPlace(descriptor, global) };
@@ -2458,7 +2533,7 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
     const found = compactLineFor(config, kind);
     if (found !== null) return sourcedEffective(descriptor, lineText(found.value), found.key);
     if (mode === "off") return undefined;
-    if (kind === "harness" || kind === "chatgpt") return { value: undefined, label: "70% of the window (60% under 128K)" };
+    if (kind === "harness") return { value: undefined, label: "70% of the window (60% under 128K)" };
     const buffer = kind === "opencode" ? config.providers?.opencode?.compactBuffer : undefined;
     const label =
       kind === "codex"
@@ -2467,7 +2542,9 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
           ? "Claude Code's own, tuned per model"
           : kind === "antigravity"
             ? "Antigravity's own"
-            : kind === "acp"
+            : kind === "vibe"
+              ? "Mistral Vibe's own"
+              : kind === "acp"
               ? "The ACP agent's own"
               : buffer !== undefined
                 ? `OpenCode's own, ${numberLabel(buffer, true)} before the limit`
@@ -2517,9 +2594,9 @@ function settingUnavailable(config: CliConfig, descriptor: SettingDescriptor): s
 }
 
 /** A web order's provider and role, from its key. */
-function webOrderOf(descriptor: SettingDescriptor): { provider: "claude" | "codex" | "opencode"; role: WebRole } | null {
-  const match = /^providers\.(claude|codex|opencode)\.web(Search|Fetch)Order$/.exec(descriptor.key);
-  return match === null ? null : { provider: match[1] as "claude" | "codex" | "opencode", role: match[2] === "Search" ? "search" : "fetch" };
+function webOrderOf(descriptor: SettingDescriptor): { provider: "claude" | "codex" | "opencode" | "vibe"; role: WebRole } | null {
+  const match = /^providers\.(claude|codex|opencode|vibe)\.web(Search|Fetch)Order$/.exec(descriptor.key);
+  return match === null ? null : { provider: match[1] as "claude" | "codex" | "opencode" | "vibe", role: match[2] === "Search" ? "search" : "fetch" };
 }
 
 export function describeSettings(config: CliConfig): readonly SettingView[] {

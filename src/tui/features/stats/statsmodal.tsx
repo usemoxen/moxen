@@ -41,6 +41,7 @@ const CANONICAL_PROVIDER_NAMES: Readonly<Record<string, string>> = {
   chatgpt: "ChatGPT",
   antigravity: "Antigravity",
   agy: "Antigravity",
+  vibe: "Mistral Vibe",
   opencode: "OpenCode",
   "opencode/opencode": "OpenCode",
   "opencode/opencode-go": "OpenCode Go",

@@ -1173,6 +1173,7 @@ fn provider_display_name(key: &str) -> &str {
         "codex" => "Codex",
         "chatgpt" => "ChatGPT",
         "antigravity" | "agy" => "Antigravity",
+        "vibe" => "Mistral Vibe",
         "opencode" | "opencode/opencode" => "OpenCode",
         "opencode/opencode-go" => "OpenCode Go",
         _ => key,

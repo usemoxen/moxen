@@ -31,6 +31,7 @@ const COMMANDS: Record<UpdatableProvider, { readonly binary: string; readonly ar
   claude: { binary: "claude", args: ["update"], label: "Claude Code" },
   opencode: { binary: "opencode", args: ["upgrade"], label: "OpenCode" },
   antigravity: { binary: "agy", args: ["update"], label: "Antigravity" },
+  vibe: { binary: "uv", args: ["tool", "upgrade", "mistral-vibe"], label: "Mistral Vibe" },
 };
 
 /** A package-manager install can take a while; the tool prints progress and exits when done. */
@@ -65,7 +66,8 @@ function tail(text: string): string {
 
 export async function updateProvider(provider: UpdatableProvider, deps: UpdateDeps = {}): Promise<ProviderUpdate> {
   const { args, label } = COMMANDS[provider];
-  const binary = deps.binaryPath?.trim() || COMMANDS[provider].binary;
+  const binary = provider === "vibe" ? COMMANDS[provider].binary : (deps.binaryPath?.trim() || COMMANDS[provider].binary);
+  const versionBinary = provider === "vibe" ? "vibe" : binary;
   const env = deps.env ?? process.env;
   const run: NonNullable<UpdateDeps["run"]> = deps.run ?? ((binary, argv, env) => {
     const launch =
@@ -76,7 +78,7 @@ export async function updateProvider(provider: UpdatableProvider, deps: UpdateDe
           : { command: binary, args: argv };
     return defaultRun(launch.command, launch.args, env);
   });
-  const before = await versionOf(binary, env, run);
+  const before = await versionOf(versionBinary, env, run);
   let result: { stdout: string; stderr: string; exitCode: number };
   try {
     result = await run(binary, args, env);
@@ -91,7 +93,7 @@ export async function updateProvider(provider: UpdatableProvider, deps: UpdateDe
       details: { provider, binary, exitCode: result.exitCode, before },
     });
   }
-  const after = await versionOf(binary, env, run);
+  const after = await versionOf(versionBinary, env, run);
   return { provider, before, after, updated: before !== null && after !== null && before !== after, output };
 }
 
