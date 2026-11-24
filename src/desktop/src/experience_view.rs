@@ -9,6 +9,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use serde_json::{Value, json};
+use std::rc::Rc;
 use std::sync::Arc;
 
 const STEPS: [(&str, &str); 6] = [
@@ -934,8 +935,14 @@ fn memory_mode(w: &Workspace) -> Memory {
     Memory::Plain
 }
 
+/// What a setup row's button does.
+type GuideAction = Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
+
 fn guide_cli_status(diagnosis: Option<&Value>, key: &str) -> String {
-    let Some(entry) = diagnosis.and_then(|d| d.get("providers")).and_then(|p| p.get(key)) else {
+    let Some(entry) = diagnosis
+        .and_then(|d| d.get("providers"))
+        .and_then(|p| p.get(key))
+    else {
         return t("guide.cliNotInstalledHint").into();
     };
     if entry.get("installed").and_then(Value::as_bool) != Some(true) {
@@ -953,10 +960,11 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
     let catalog = w.source.catalog();
     let diagnosis = w.source.diagnosis();
     let diag_val = diagnosis.as_deref().and_then(|res| res.as_ref().ok());
-    let accounts: Vec<crate::settings::ProviderAccountSummary> = match w.source.provider_accounts().as_deref() {
-        Some(Ok(list)) => list.clone(),
-        _ => vec![],
-    };
+    let accounts: Vec<crate::settings::ProviderAccountSummary> =
+        match w.source.provider_accounts().as_deref() {
+            Some(Ok(list)) => list.clone(),
+            _ => vec![],
+        };
     let opencode_enabled = w
         .source
         .settings()
@@ -972,10 +980,13 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
         .and_then(|snap| snap.find("providers.vibe.enabled"))
         .is_some_and(|view| view.value == crate::settings::SettingValue::Flag(true));
 
-    let has_providers = matches!(catalog, CatalogState::Ready(ref cat) if !cat.providers.is_empty());
+    let has_providers =
+        matches!(catalog, CatalogState::Ready(ref cat) if !cat.providers.is_empty());
     let claude_added = accounts.iter().any(|a| a.kind == "claude")
         || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "claudeAgent"));
-    let chatgpt_account = accounts.iter().find(|a| a.kind == "chatgpt" && a.signed_in == Some(true));
+    let chatgpt_account = accounts
+        .iter()
+        .find(|a| a.kind == "chatgpt" && a.signed_in == Some(true));
     let chatgpt_added = chatgpt_account.is_some()
         || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "chatgpt" && p.enabled));
     let opencode_added = opencode_enabled
@@ -985,19 +996,14 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
     let vibe_added = vibe_enabled
         || matches!(catalog, CatalogState::Ready(ref cat) if cat.providers.iter().any(|p| p.driver == "vibe"));
 
-    let mut setup_row = |id: &'static str, label: String, added: bool, note: String, action: Box<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>| {
-        let action = Arc::new(action);
-        let run = action.clone();
-        row()
-            .child(guide_button(
-                id,
-                label,
-                added,
-                cx,
-                move |w, window, cx| run(w, window, cx),
-            ))
-            .child(detail(note).flex_1().min_w_0().whitespace_normal())
-    };
+    let mut setup_row =
+        |id: &'static str, label: String, added: bool, note: String, action: GuideAction| {
+            row()
+                .child(guide_button(id, label, added, cx, move |w, window, cx| {
+                    action(w, window, cx)
+                }))
+                .child(detail(note).flex_1().min_w_0().whitespace_normal())
+        };
 
     let setup_card = column()
         .p(px(12.))
@@ -1014,7 +1020,7 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             } else {
                 guide_cli_status(diag_val, "claude")
             },
-            Box::new(move |w, _, cx| {
+            Rc::new(move |w, _, cx| {
                 if !claude_added {
                     w.source.save_provider_account(json!({
                         "kind": "claude",
@@ -1038,7 +1044,7 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             } else {
                 t("guide.chatGptDetail").into()
             },
-            Box::new(move |w, _, cx| {
+            Rc::new(move |w, _, cx| {
                 if !chatgpt_added {
                     w.source.start_chatgpt_login("default", Some("Default"));
                     w.experience_ui.provider = Some("chatgpt/default".into());
@@ -1055,7 +1061,7 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             } else {
                 guide_cli_status(diag_val, "opencode")
             },
-            Box::new(move |w, _, cx| {
+            Rc::new(move |w, _, cx| {
                 if !opencode_added {
                     w.source.set_setting("providers.opencode.enabled", "true");
                     w.source.refresh_catalog();
@@ -1072,7 +1078,7 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             } else {
                 guide_cli_status(diag_val, "antigravity")
             },
-            Box::new(move |w, _, cx| {
+            Rc::new(move |w, _, cx| {
                 if !antigravity_added {
                     w.source.save_provider_account(json!({
                         "kind": "antigravity",
@@ -1094,7 +1100,7 @@ fn model_choices(w: &Workspace, cx: &mut Context<Workspace>) -> Div {
             } else {
                 guide_cli_status(diag_val, "vibe")
             },
-            Box::new(move |w, _, cx| {
+            Rc::new(move |w, _, cx| {
                 if !vibe_added {
                     w.source.set_setting("providers.vibe.enabled", "true");
                     w.experience_ui.provider = Some("vibe".into());

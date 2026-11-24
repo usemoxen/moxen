@@ -439,14 +439,14 @@ pub fn compact_usage_summary(
     let limits = limits?;
     let gauges = plan_gauges(Some(limits));
     if gauges.is_empty() {
-        return limits
-            .credits
-            .map(|credits| (format!("{} cr", format_count(credits.round() as i64)), "ink-2"));
+        return limits.credits.map(|credits| {
+            (
+                format!("{} cr", format_count(credits.round() as i64)),
+                "ink-2",
+            )
+        });
     }
-    let max_pct = gauges
-        .iter()
-        .map(|g| g.percent)
-        .fold(0.0_f64, f64::max);
+    let max_pct = gauges.iter().map(|g| g.percent).fold(0.0_f64, f64::max);
     let tone = if max_pct >= 90. {
         "broken"
     } else if max_pct >= 70. {
@@ -551,7 +551,11 @@ pub fn compact_usage_rows(limits: Option<&ProviderLimits>, now: i64) -> Option<D
                 .font_family(theme::MONO)
                 .text_size(px(11.5))
                 .child(div().text_color(color("ink-2")).child("Credits"))
-                .child(div().text_color(color("ink")).child(format_count(credits.round() as i64))),
+                .child(
+                    div()
+                        .text_color(color("ink"))
+                        .child(format_count(credits.round() as i64)),
+                ),
         );
     }
     Some(out)

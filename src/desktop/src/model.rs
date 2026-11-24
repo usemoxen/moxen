@@ -876,7 +876,9 @@ pub trait ThreadSource {
     fn update_all_providers(&mut self) {}
     /// Reads configured multi-account provider logins (`providers.accounts`).
     fn read_provider_accounts(&mut self) {}
-    fn provider_accounts(&self) -> Option<Arc<Result<Vec<crate::settings::ProviderAccountSummary>, String>>> {
+    fn provider_accounts(
+        &self,
+    ) -> Option<Arc<Result<Vec<crate::settings::ProviderAccountSummary>, String>>> {
         None
     }
     fn save_provider_account(&mut self, _payload: serde_json::Value) {}
@@ -889,7 +891,14 @@ pub trait ThreadSource {
     fn pending_account_login(&self) -> Option<PendingAccountLogin> {
         None
     }
-    fn submit_account_login_code(&mut self, _session_id: &str, _kind: &str, _id: &str, _code: &str) {}
+    fn submit_account_login_code(
+        &mut self,
+        _session_id: &str,
+        _kind: &str,
+        _id: &str,
+        _code: &str,
+    ) {
+    }
     fn cancel_account_login(&mut self, _session_id: &str) {}
     /// Downloads, tests and switches to the newest Moxen release.
     fn apply_update(&mut self) {}
