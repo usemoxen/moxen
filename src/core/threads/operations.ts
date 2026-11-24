@@ -64,7 +64,7 @@ import type {
   WorkspaceResolution,
 } from "../types.js";
 import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
-import { driverKindOfInstance } from "../types.js";
+import { antigravityDelegationAllowed, driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
@@ -457,7 +457,7 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
   // twice. They queue behind the promoted turn's run when there is one, and
   // run after it; with nothing promoted the first copy is run here, or the
   // copies would sit running with no runner and never heal in-process.
-  const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id).catch(() => [] as string[]);
+  const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id, ctx.config).catch(() => [] as string[]);
   if (result.promoted && ctx.store.claimRun(result.promoted.id)) {
     await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
     return true;
@@ -895,7 +895,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
         prompt: `Prepare a concise handoff for the unfinished task: goal, completed work, changed files, checks/failures, next steps, outstanding requests and important images. Do not perform more task work. Deliver the summary ONLY through the Moxen submit_handoff tool with requestId ${handoff.requestId}. After the tool acknowledges it, finish with no extra prose (or just Done). If you cannot call that tool, stop; Moxen will use its stored handoff.`,
         origin: "handoff-summary", usageControl: true,
         queue: { ...parseQueuePolicy({ conditions: [], order: turn.queue!.order - 0.5, sequential: false }), requestId: `summary:${handoff.requestId}`, summaryFor: turnId },
-      });
+      }, ctx.config);
       handoff = { ...handoff, summaryTurnId: sent.turn.id };
       await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));
       return;
@@ -1004,7 +1004,7 @@ export async function scheduleUsageContinue(
     scheduledFor: at,
     scheduleReason: "usage-reset",
     continueAttempt: attempt,
-  });
+  }, ctx.config);
   armScheduledTurn(threadId, sent.turn.id, at);
   // A delegated task runs out of usage: its parent hears now, with the
   // expected resume time, and still gets the normal report when the task
@@ -1180,6 +1180,24 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string, o
   const action = planLongThreadAction(ctx.config, snapshot);
   if (action === null) return null;
   if (action.kind === "handoff") {
+    // An automatic hand-off is a prompt the user did not write: held while
+    // Antigravity delegation is off. The work stays in this thread; a notice
+    // says why, once until something else lands in the ledger.
+    if (antigravityAutoPromptsHeld(ctx.config, snapshot.instanceId)) {
+      const activities = await ctx.store.readActivities(threadId);
+      const last = activities.at(-1);
+      if (!(last?.kind === "notice" && last.payload?.held === "antigravity-delegation")) {
+        await ctx.store.appendLedger(threadId, "activity", {
+          id: ctx.store.newId(), threadId, turnId: null,
+          kind: "notice",
+          summary: "Hand-off held: Antigravity delegation and automatic prompts are off",
+          payload: { notice: "other", held: "antigravity-delegation", detail: "Turn on providers.antigravity.allowDelegation to let Moxen hand off automatically, or continue the thread yourself." },
+          createdAt: ctx.store.nowIso(),
+        });
+        ctx.store.emit(threadId, "activity");
+      }
+      return null;
+    }
     await continueThread(ctx, { threadId, automatic: true });
     return action;
   }
@@ -1584,6 +1602,11 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   const { store } = ctx;
   const source = await store.readThreadRecord(request.threadId);
   if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${request.threadId}.`, { exitCode: 2 });
+  // An agent continuing its own thread onto Antigravity starts delegated
+  // work there: refused while the setting is off, before a destination is
+  // reserved. The user's own Continue action and queued handoffs are not
+  // this path (their first turn is held by admission when automatic).
+  if (request.byAgent === true) requireAntigravityDelegation(ctx.config, (request.modelSelection ?? source.modelSelection).instanceId);
   const title = continuedTitle(source.title);
   // Review never stays on a thread: a continued review child, or a carried
   // one-off review turn, starts the new thread in Build instead.
@@ -2241,7 +2264,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const { threadId: _threadId, driverPrompt, onEvent, ...send } = input;
   const resolvedQueue = input.queue ? resolveQueueResetConditions(input.queue, turnSelection) : undefined;
   const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(resolvedQueue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : resolvedQueue;
-  const sent = await sendTurn(store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) });
+  const sent = await sendTurn(store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) }, ctx.config);
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
@@ -3114,6 +3137,26 @@ export async function handover(ctx: OperationContext, request: HandoverRequest):
 
 const DELEGATE_DEFAULT_TIMEOUT_MS = 600_000;
 
+/**
+ * Whether Moxen must hold automatic prompts on this instance: Antigravity
+ * with `providers.antigravity.allowDelegation` off (the default). Google's
+ * consumer sign-in covers only prompts the user types themselves, so a
+ * delegated task or an automatic turn is refused or held, never started.
+ */
+function antigravityAutoPromptsHeld(config: CliConfig, instanceId: string): boolean {
+  return driverKindOfInstance(instanceId) === "antigravity" && !antigravityDelegationAllowed(config);
+}
+
+/** Refuse starting delegated work on Antigravity while the setting is off, before anything is created. */
+function requireAntigravityDelegation(config: CliConfig, instanceId: string): void {
+  if (!antigravityAutoPromptsHeld(config, instanceId)) return;
+  throw new CliError(
+    "ANTIGRAVITY_DELEGATION_OFF",
+    "Delegation and automatic prompts are off for Antigravity: Google does not support them on consumer plans and may suspend the account. Turn on providers.antigravity.allowDelegation to allow them.",
+    { exitCode: 4, details: { instanceId, setting: "providers.antigravity.allowDelegation" } },
+  );
+}
+
 export interface DelegateRequest extends ModelRequest {
   /** A size explicitly supplied by the user, never copied from a model proposal. */
   readonly research?: ResearchPlan;
@@ -3335,6 +3378,10 @@ async function parentMustWaitForUsage(ctx: OperationContext, parent: StoredThrea
   if (parentNotificationsHeld(parent)) return true;
   const turns = await ctx.store.readTurns(parent.id).catch(() => [] as StoredTurn[]);
   const selection = openTurn(turns)?.modelSelection ?? parent.modelSelection;
+  // An Antigravity parent with delegation off takes no automatic prompt:
+  // the notice waits in the batch for the user's next message (or the
+  // setting turning on), exactly as a usage-held parent's does.
+  if (antigravityAutoPromptsHeld(ctx.config, selection.instanceId)) return true;
   return providerExhausted(usageKeyForInstance(selection.instanceId), Date.now(), selection.model);
 }
 
@@ -3386,7 +3433,11 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
       // An archived or deleted parent can never receive again: drop the
       // batch at once instead of keeping what no flush could deliver.
       const receivable = held.archivedAt == null && held.deletedAt == null;
-      if (receivable && (parentNotificationsHeld(held) || (!running && spent))) {
+      // A running turn is the user's own (the flush rides their send): the
+      // notice goes out with it. Idle, an Antigravity parent with delegation
+      // off keeps the batch for the next message or the setting turning on.
+      const antigravityHeld = !running && antigravityAutoPromptsHeld(ctx.config, activeSelection.instanceId);
+      if (receivable && (parentNotificationsHeld(held) || antigravityHeld || (!running && spent))) {
         // Still held, or spent with no live turn to steer into: stay durable
         // in the batch file instead of starting a turn into the same wall —
         // startTurn resolves even when the session fails, and the batch would
@@ -3995,6 +4046,10 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const project = await projectById(ctx.storeRoot, parent.projectId);
   const base = parent.modelSelection ?? project?.defaultModelSelection ?? defaultModelSelection();
   const modelSelection = followUpSelection(base, ctx.config, request, task) ?? base;
+  // Refused before anything is created — no thread, no worktree, no fork —
+  // on every path that starts a task here: single, batch entry, research
+  // role, review and fork alike.
+  requireAntigravityDelegation(ctx.config, modelSelection.instanceId);
   const research = options.fullResearchRun ? resolveResearchPlan(modelSelection, ctx.config, {
     size, ...(options.researchModels ? { models: options.researchModels } : {}),
   }) : null;
@@ -4920,6 +4975,9 @@ export async function sendTaskMessage(
   const message = rawMessage.trim();
   if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
   const { row, target } = await requireTaskControl(ctx, parentThreadId, rawTaskId, "task_send");
+  // An agent's message (or wake) starts a turn on the task: delegated work
+  // on Antigravity, refused while the setting is off.
+  requireAntigravityDelegation(ctx.config, target.modelSelection.instanceId);
   if (target.env.mode === "worktree" && target.env.path.trim() !== "" && !existsSync(target.env.path)) {
     throw new CliError(
       "TASK_WORKTREE_REMOVED",

@@ -340,7 +340,7 @@ export class UsageProtection {
         { type: "usage", provider: pause.provider, window: "all", minimum: 0 },
         ...(pause.resetsAt ? [{ type: "at", at: new Date(Date.parse(pause.resetsAt) + QUEUE_RESET_GRACE_MS).toISOString() }] : [{ type: "reset", provider: pause.provider, window: windows.some((w) => w.kind === "session") ? "session" : windows.some((w) => w.kind === "weekly") ? "weekly" : "all", resetsAt: null }]),
       ], order: pause.order, sequential: ctx.config.usageRecovery === "sequential", continuation: pause.handoff ? "stored" : "same-thread" }, { model }), automatic: true, requestId: `usage:${pause.order}` },
-    }).catch((cause: unknown) => {
+    }, ctx.config).catch((cause: unknown) => {
       if (cause instanceof CliError && cause.code === "USAGE_PROTECTION_OVERRIDDEN") return null;
       throw cause;
     });

@@ -942,7 +942,7 @@ export function watchDriverSession(
       chain = chain.then(async () => {
         const captured = capturedWakeUp;
         capturedWakeUp = false;
-        const turn = await claimBackgroundTurn(store, driver, threadId, event.turnId, captured, event.wakeUpPrompt).catch(() => null);
+        const turn = await claimBackgroundTurn(store, driver, threadId, event.turnId, captured, event.wakeUpPrompt, config).catch(() => null);
         if (turn !== null) {
           void executeTurn({
             store,
@@ -966,7 +966,7 @@ export function watchDriverSession(
         const thread = await store.readThreadRecord(threadId);
         if (!thread?.usagePause || thread.usagePause.phase === "resuming" || thread.archivedAt || thread.deletedAt) return;
         await sendTurn(store, threadId, { prompt: event.prompt, origin: "background-notification", delivery: "queue", wakeSettled: false,
-          queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: event.requestId } });
+          queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: event.requestId } }, config);
         capturedWakeUp = true;
       }).catch(() => undefined); // Uncaptured: a refused turn still queues its own fallback.
       return;
@@ -1094,6 +1094,7 @@ async function claimBackgroundTurn(
   driverTurnId: string,
   capturedWakeUp = false,
   wakeUpPrompt?: string,
+  config?: Pick<CliConfig, "providers">,
 ): Promise<StoredTurn | null> {
   try {
     const thread = await store.readThreadRecord(threadId);
@@ -1113,7 +1114,7 @@ async function claimBackgroundTurn(
           prompt: `A provider-native background turn was paused by thread protection. Resume its pending notification in this conversation.\n${wakeUpPrompt ?? JSON.stringify({ turnId: driverTurnId })}`,
           origin: "background-notification", delivery: "queue",
           queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: `native-turn:${driverTurnId}` },
-        }).catch(() => undefined);
+        }, config).catch(() => undefined);
       }
       await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       if (driver.stopSession) await Effect.runPromise(driver.stopSession(threadId)).catch(() => undefined);
@@ -1132,7 +1133,7 @@ async function claimBackgroundTurn(
           prompt: `A provider-native background turn arrived while another turn was running. Resume its pending notification in this conversation.\n${wakeUpPrompt ?? JSON.stringify({ turnId: driverTurnId })}`,
           origin: "background-notification", delivery: "queue",
           queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: `native-turn:${driverTurnId}` },
-        }).catch(() => undefined);
+        }, config).catch(() => undefined);
       }
       return null;
     }
@@ -1633,7 +1634,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     // Steers the provider never confirmed reach the conversation go out
     // again first, as queued turns of their own: still running, they are
     // promoted by the settle below and the next runner takes them at once.
-    await redeliverSteers(store, driver, threadId, storeTurnId);
+    await redeliverSteers(store, driver, threadId, storeTurnId, args.config);
     await settleTurn(store, args, outcome, cwd, pre);
     completedWithText = outcome.status === "completed" && !!outcome.text;
   } catch (cause) {
@@ -1644,7 +1645,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       // before the outcome, so whoever sees the turn stop sees both — but
       // bounded, so a hung checkpoint cannot hold the outcome (MXN-290 review).
       await recordPreOutcome(store, driver, args, cwd, pre);
-      const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
+      const copies = await redeliverSteers(store, driver, threadId, storeTurnId, args.config);
       const interruption = await interruptTurn(store, threadId, storeTurnId).catch(() => null);
       // Already terminal: the interrupt promoted nothing, so run the copies' promotion here.
       if (interruption === null || interruption.interrupted === false) await runStrandedRedelivery(args, copies);
@@ -1653,7 +1654,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     const message = cause instanceof Error ? cause.message : String(cause);
     recordTools.noteFailure();
     await recordPreOutcome(store, driver, args, cwd, pre);
-    const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
+    const copies = await redeliverSteers(store, driver, threadId, storeTurnId, args.config);
     let settled = false;
     try {
       await failTurn(store, threadId, storeTurnId, { error: message.slice(0, 500) });
@@ -1801,7 +1802,7 @@ async function recordPreOutcome(
  * a throwing one must never rewrite the turn's outcome, so failures are
  * swallowed — the ledger still holds the steer for orphan recovery.
  */
-async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId: string, storeTurnId: string): Promise<string[]> {
+async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId: string, storeTurnId: string, config?: Pick<CliConfig, "providers">): Promise<string[]> {
   let pending: ReadonlyArray<UnconfirmedSteer> = [];
   try {
     pending = driver.takeUnconfirmedSteers?.(threadId) ?? [];
@@ -1814,6 +1815,7 @@ async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId:
     threadId,
     storeTurnId,
     pending.map((steer) => ({ messageId: steer.id, text: steer.text, images: steer.images })),
+    config,
   ).catch(() => []);
 }
 

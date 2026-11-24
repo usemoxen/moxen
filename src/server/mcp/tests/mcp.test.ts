@@ -272,6 +272,29 @@ describe("moxen MCP server", () => {
     }
   });
 
+  it("refuses an Antigravity batch entry while delegation is off, and starts the rest", async () => {
+    const { harness, connection, parentThreadId } = await setup();
+    try {
+      const result = await callMoxenTool(connection, parentThreadId, "delegate", {
+        tasks: [
+          { task: "On Antigravity", title: "agy entry", provider: "antigravity", model: "gemini-4-neon" },
+          { task: "On the parent's provider", title: "plain entry" },
+        ],
+      });
+      expect(result.isError).toBe(false);
+      const batch = JSON.parse(result.text) as { tasks: Array<Record<string, unknown>> };
+      expect(batch.tasks).toHaveLength(2);
+      // The refused entry carries the setting's error and no task: nothing was created for it.
+      expect(batch.tasks[0]).toMatchObject({ title: "agy entry", error: expect.stringContaining("ANTIGRAVITY_DELEGATION_OFF") });
+      expect(batch.tasks[0]).not.toHaveProperty("taskId");
+      expect(typeof batch.tasks[1]!["taskId"]).toBe("string");
+      const store = await openThreadStore(harness.root);
+      expect(await store.readDelegations()).toHaveLength(1);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("returns each original task when a batch delegate is retried with the same idempotency key", async () => {
     const { harness, connection, parentThreadId } = await setup();
     try {

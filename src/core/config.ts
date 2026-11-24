@@ -853,7 +853,9 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
       skipped,
     );
     const accounts = normalizeAccountProfiles(rawAccounts, "providers.antigravity.accounts", antigravityFields, skipped);
-    const antigravity = normalizeSection<AntigravityProviderConfig>(input.antigravity, "providers.antigravity", antigravityFields, skipped);
+    // allowDelegation is the one provider-level key for every account: it is
+    // not a per-profile field, so the account list above does not take it.
+    const antigravity = normalizeSection<AntigravityProviderConfig>(input.antigravity, "providers.antigravity", [...antigravityFields, "allowDelegation"], skipped);
     if (antigravity) delete (antigravity as unknown as Record<string, unknown>).accounts;
     const cleaned = antigravity && Object.keys(antigravity).length > 0 ? antigravity : undefined;
     const models = handoffModelsOf(input.antigravity, "providers.antigravity", skipped);

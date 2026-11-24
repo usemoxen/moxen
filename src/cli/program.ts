@@ -710,8 +710,13 @@ configCommand
       const context = await commandContext();
       await (await cliClient(context.config)).dispatch({ type: "settings.set", key, value });
       const { path: file, config } = await serverConfig(context);
+      // Turning Antigravity delegation on is the user's choice against
+      // Google's consumer terms: say plainly what it risks.
+      const antigravityWarning = key === "providers.antigravity.allowDelegation" && config.providers?.antigravity?.allowDelegation === true
+        ? "\nWarning: Google does not support delegation or automatic prompts on Antigravity consumer plans and may suspend the account."
+        : "";
       // A secret is never echoed back.
-      writeSuccess({ path: file, config }, context, secretKeyName(key) !== null ? `Saved ${key} to the OS keychain.` : `Saved ${key}=${value}.`);
+      writeSuccess({ path: file, config }, context, secretKeyName(key) !== null ? `Saved ${key} to the OS keychain.` : `Saved ${key}=${value}.${antigravityWarning}`);
     }),
   );
 

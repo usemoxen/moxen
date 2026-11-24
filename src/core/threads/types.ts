@@ -246,6 +246,13 @@ export interface StoredTurn {
   readonly scheduleReason?: "user" | "usage-reset" | "usage-hold" | null;
   /** For an automatic continue after a usage limit: which attempt in a row (1-based). */
   readonly continueAttempt?: number;
+  /**
+   * The prompt's origin, as on its message: absent for the user's own sends.
+   * Recorded on the turn so admission can tell an automatic turn from a user
+   * turn without reading the message ledger. Absent on turns written before
+   * it existed.
+   */
+  readonly origin?: MessageOrigin;
   readonly error: string | null;
   /**
    * The turn was the first the provider's conversation was given and it ended with no output (a usage limit).

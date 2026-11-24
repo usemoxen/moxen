@@ -2042,6 +2042,12 @@ export class DirectConnection implements ClientApi {
               throw cause;
             }
           }
+          if (command.key === "providers.antigravity.allowDelegation" && next.providers?.antigravity?.allowDelegation === true) {
+            // Turning it on releases what the off default held: task notices
+            // go out now, and an admission pass starts the held wake-ups.
+            void this.context().then((ctx) => recoverTaskNotifications(ctx)).catch(() => undefined);
+            void this.usageProtection.tick().catch(() => undefined);
+          }
           return { ...(await this.settingsSnapshot()), accepted: true };
         });
       }

@@ -18,7 +18,7 @@ import { knowledgeInput, KNOWLEDGE_LIMITS } from "../../core/knowledge/input.js"
 import { untrustedContext } from "../../core/untrusted.js";
 import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
-import type { HarnessProviderConfig, WebConfig } from "../../core/types.js";
+import { antigravityDelegationAllowed, driverKindOfInstance, type HarnessProviderConfig, type WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
@@ -1576,15 +1576,23 @@ async function statusTool(
  */
 async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
   const only = argString(args, "provider");
-  const { providers } = await api.query({ type: "providers.list" });
+  const [{ providers }, { config }] = await Promise.all([
+    api.query({ type: "providers.list" }),
+    api.query({ type: "config.read" }),
+  ]);
+  const antigravityAllowed = antigravityDelegationAllowed(config);
   const rows = providers
     .filter((provider) => provider.enabled && provider.installed)
     .filter((provider) => only === undefined || provider.instanceId === only)
     .map((provider) => {
       const visible = provider.models.filter((model) => !model.isHidden);
+      // Antigravity with delegation off is not a delegation target: the row
+      // stays (its models still inform the user's own threads) but says so.
+      const delegationOff = !antigravityAllowed && driverKindOfInstance(provider.instanceId) === "antigravity";
       return {
         provider: provider.instanceId,
         name: provider.displayName ?? provider.instanceId,
+        ...(delegationOff ? { note: "Not available for delegation: providers.antigravity.allowDelegation is off. Google does not support delegation or automatic prompts on consumer plans and may suspend the account; delegating here is refused until the user turns the setting on." } : {}),
         ...(provider.usageLimits ? { usageLimits: provider.usageLimits } : {}),
         models: visible.slice(0, MAX_MODELS_PER_PROVIDER).map((model) => {
           const efforts = model.efforts.find((descriptor) => descriptor.id === "effort")?.choices.map((choice) => choice.id) ?? [];

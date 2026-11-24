@@ -305,6 +305,13 @@ export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundl
 /** First-class Antigravity CLI (`agy`) provider configuration (`providers.antigravity.*`). */
 export interface AntigravityProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
   launchArgs?: string;
+  /**
+   * Whether other threads may delegate to Antigravity and Moxen may start
+   * automatic prompts on its threads. Off by default: Google's consumer
+   * sign-in covers only prompts the user types themselves. One key for
+   * every account (`antigravity`, `antigravity/<id>`, legacy `agy`).
+   */
+  allowDelegation?: boolean;
   accounts?: AntigravityAccountConfig[];
 }
 
@@ -918,6 +925,17 @@ export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "
   if (key === "acp" || key.startsWith("acp/")) return "acp";
   if (key === "claudeagent" || key === "claude" || key.startsWith("claude/")) return "claude";
   return null;
+}
+
+/**
+ * Whether Antigravity delegation and automatic prompts are allowed
+ * (`providers.antigravity.allowDelegation`, off by default). Google does not
+ * support them on consumer plans, so the default makes Moxen refuse them.
+ * The one provider-level key governs every Antigravity account; resolve the
+ * instance's kind with `driverKindOfInstance` before asking this.
+ */
+export function antigravityDelegationAllowed(config: Pick<CliConfig, "providers">): boolean {
+  return config.providers?.antigravity?.allowDelegation === true;
 }
 
 /** Parse an account-addressed instance id (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`), or null for legacy/non-account ids. */

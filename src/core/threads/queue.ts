@@ -1,5 +1,5 @@
 import { CliError } from "../errors.js";
-import type { CliConfig } from "../types.js";
+import { antigravityDelegationAllowed, driverKindOfInstance, type CliConfig } from "../types.js";
 import { usageKeyForInstance, usageSignal, usageWindowsForModel } from "../usage/limits.js";
 import type { StoredThread, StoredTurn } from "./types.js";
 
@@ -164,6 +164,22 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   const model = selection.model;
   if (policy?.automatic || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") blocked.push(...automaticUsageBlock(provider, config, now, model));
   else if (providerExhausted(provider, now, model)) blocked.push(`${provider}: usage exhausted`);
+  // Antigravity with delegation off starts no automatic prompt on its own:
+  // the entry waits for the user's next message (a user turn starting after
+  // it was queued releases it, as ending a usage hold does) or for the
+  // setting turning on. Task notices are held in their batch file upstream
+  // and ride the user's send, so they are not this path.
+  const automaticTurn = policy?.automatic === true || policy?.wakeUp === true
+    || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold"
+    || (turn.origin !== undefined && turn.origin !== "task-notification");
+  if (automaticTurn && driverKindOfInstance(selection.instanceId) === "antigravity" && !antigravityDelegationAllowed(config)) {
+    const userResumed = row.turns.some((other) => other.id !== turn.id && other.origin === undefined
+      && other.queue?.automatic !== true && other.queue?.wakeUp !== true
+      && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"
+      && (other.status === "running" || other.status === "completed")
+      && Date.parse(other.startedAt ?? other.createdAt) >= Date.parse(turn.createdAt));
+    if (!userResumed) blocked.push("Antigravity delegation is off: turn on providers.antigravity.allowDelegation");
+  }
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {
     if (condition.type === "at") { if (Date.parse(condition.at) > now) blocked.push(`Waiting until ${condition.at}`); }
     else if (condition.type === "usage") {
