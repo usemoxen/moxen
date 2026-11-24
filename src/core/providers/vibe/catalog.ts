@@ -11,6 +11,8 @@ import type { VibeProviderConfig } from "../../types.js";
 import {
   normalizeVibeSettings,
   resolveVibeBinary,
+  vibeDriveRelativePathError,
+  vibeLauncherStatus,
   VIBE_DEFAULT_MODEL_SLUG,
 } from "./config.js";
 import { VibeDriver } from "./driver.js";
@@ -117,6 +119,12 @@ export async function vibeProvider(
     usageLimits: null,
     skills: [],
   };
+  // Validate the launcher path before the installed short-circuit so a
+  // drive-relative path gets an actionable status, not a bare "not installed".
+  const driveRelative = vibeDriveRelativePathError(settings.binaryPath);
+  if (driveRelative) {
+    return { ...base, installed: false, status: vibeLauncherStatus(driveRelative) };
+  }
   if (!installed) return base;
 
   const now = options.now ?? Date.now;
@@ -177,11 +185,13 @@ export async function vibeProvider(
         models: effectiveModels,
       };
     });
-  } catch {
-    // Provider errors can contain credentials. Never leak raw diagnostics.
+  } catch (cause) {
+    // Provider errors can contain credentials. Never leak raw diagnostics;
+    // only the sanitized launcher statuses are safe to surface.
     return {
       ...base,
-      status: "Could not query Mistral Vibe; check `vibe` login and the configured executable.",
+      status: vibeLauncherStatus(cause)
+        ?? "Could not query Mistral Vibe; check `vibe` login and the configured executable.",
     };
   }
 }

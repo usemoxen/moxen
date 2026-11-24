@@ -73,6 +73,19 @@ describe("vibe transport launch", () => {
     expect((error as CliError).code).toBe("VIBE_INVALID_BINARY_PATH");
   });
 
+  it("rejects a bare drive qualifier as drive-relative", () => {
+    const { spawner } = capturingSpawner();
+    const transport = new SpawnVibeTransport();
+    let error: unknown;
+    try {
+      transport.startPeer(winOptions({ spawner, settings: { binaryPath: "C:", vibeHome: "", launchArgs: "" } }));
+    } catch (cause) {
+      error = cause;
+    }
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).code).toBe("VIBE_INVALID_BINARY_PATH");
+  });
+
   it("unwraps a recognized Windows shim to the real executable and spawns it without a shell", () => {
     const { spawner, spawned } = capturingSpawner();
     const transport = new SpawnVibeTransport();

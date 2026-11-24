@@ -8,6 +8,7 @@ import { JsonRpcPeer, nodeProcessSpawner, type ProcessSpawner } from "../stdio.j
 import {
   resolveVibeBinary,
   vibeAppServerArgs,
+  vibeDriveRelativePathError,
   vibeProcessEnv,
   type VibeSettings,
 } from "./config.js";
@@ -33,16 +34,8 @@ export class SpawnVibeTransport implements VibeTransport {
     const baseEnv = options.env ?? process.env;
     const platform = options.platform ?? process.platform;
     const configured = options.settings.binaryPath;
-    // A drive-relative path (`C:tool.cmd`) is neither absolute nor a bare
-    // command name; reject it rather than resolve it against PATH or a
-    // per-drive current directory the child would not share.
-    if (platform === "win32" && /^[A-Za-z]:[^\\/]/.test(configured)) {
-      throw new CliError(
-        "VIBE_INVALID_BINARY_PATH",
-        `Mistral Vibe executable path "${configured}" is drive-relative. Use an absolute path (such as C:\\Tools\\vibe-app-server.exe) or a bare command name on PATH.`,
-        { details: { binaryPath: configured } },
-      );
-    }
+    const driveRelative = vibeDriveRelativePathError(configured, platform);
+    if (driveRelative) throw driveRelative;
     const resolved = resolveVibeBinary(configured, baseEnv, {
       ...(options.platform !== undefined ? { platform: options.platform } : {}),
       ...(options.isFile ? { isFile: options.isFile } : {}),

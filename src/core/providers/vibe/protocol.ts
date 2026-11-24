@@ -7,8 +7,6 @@
  * `vibe-app-server` probes). Every payload is read defensively to tolerate
  * additive fields across Vibe updates.
  */
-import { createHash } from "node:crypto";
-
 import { createTwoFilesPatch } from "diff";
 
 import type { ModelSummary } from "../../catalog/summary.js";
@@ -272,56 +270,115 @@ function vibeMcpIdentifier(value: string): string {
   return /^[0-9]/.test(normalized) ? `_${normalized}` : normalized;
 }
 
+export interface VibeMcpExclusionPlan {
+  /** Servers not to offer this session because an exclusion cannot be scoped. */
+  readonly dropServers: ReadonlySet<string>;
+  /** Exact anchored `disabledTools` patterns for the unambiguous exclusions. */
+  readonly patterns: string[];
+  /** Sanitized notes explaining each dropped server. */
+  readonly notes: string[];
+}
+
 /**
- * Map Moxen's per-tool MCP exclusions (`mcp__<server>__<tool>`) onto Vibe's
+ * Plan Moxen's per-tool MCP exclusions (`mcp__<server>__<tool>`) against Vibe's
  * `disabledTools` filter. Verified against `mistral-vibe` v3.1.4 (unified
- * harness, the required default runtime): a tool is published under the
- * display name built from the normalized server alias and the remote tool
- * name (`_display_names`), and `disabledTools` entries are case-insensitive
- * fnmatch globs or `re:` regex full matches against that name
- * (`MCPToolFilter`). A disabled tool is left out of both the published tool
- * list and the route table, so it can neither be listed nor invoked.
+ * harness): a tool is published under the display name built from the
+ * normalized server alias and the remote tool name (`_display_names`), and
+ * `disabledTools` entries are case-insensitive fnmatch globs or `re:` regex
+ * full matches against that name (`MCPToolFilter`). A disabled tool is left
+ * out of both the published tool list and the route table.
  *
- * The published name is either the normalized `<alias>_<tool>` base, or — when
- * another identity claims the same base — that base plus this identity's own
- * `_<sha256(alias "\0" tool) hex>` collision suffix (a prefix of the digest,
- * length 8–64). The pattern matches the base and exactly those own-digest
- * forms, never an arbitrary hex suffix, so a sibling tool such as
- * `demo_write_file` or `demo_write_deadbeef`, and a different server's
- * colliding tool (a different digest), stay available.
+ * Moxen knows the offered server list and the excluded tool names, NOT each
+ * server's full tool list, so it cannot compute Vibe's collision suffixes in
+ * general. It therefore matches only the exact anchored base name (no
+ * speculative hex suffix, which would hide a literal digest-named sibling such
+ * as `write_ba51f2af`), and fails closed — by not offering the server, with a
+ * note — whenever an exclusion is ambiguous from the names it does know:
+ *  - two offered servers whose normalized aliases case-fold together publish
+ *    indistinguishable names (e.g. `foo-bar`/`foo_bar`, `Demo`/`demo`);
+ *  - an exclusion whose flattened `mcp__<server>__` prefix matches more than
+ *    one offered server (e.g. `demo` and `demo__x`);
+ *  - two excluded tools on one server that differ only by case, which Vibe's
+ *    case-insensitive match cannot separate.
  *
- * Limit: two offered servers whose aliases normalize identically (e.g. `demo`
- * and `_demo_`) produce the same digest for the same tool, so their published
- * names are indistinguishable and an exclusion of one necessarily covers the
- * other. Exclusions for a server that is not offered need no pattern: its
- * tools cannot run anyway.
+ * Limit: a case-fold sibling or a collision suffix involving a tool Moxen was
+ * not told about cannot be detected; the exact base pattern may then co-hide a
+ * case-fold sibling (Vibe matches case-insensitively) or miss a suffixed target.
+ * Such servers are dropped only when the ambiguity is visible in the known
+ * names. Exclusions for a server that is not offered need no pattern.
  */
-export function vibeDisabledMcpToolPatterns(
-  servers: readonly McpServerSpec[] | undefined,
-  disabled: readonly string[] | undefined,
-): string[] {
-  if (!servers || servers.length === 0 || !disabled || disabled.length === 0) return [];
+export function vibeMcpExclusionPlan(
+  servers: readonly McpServerSpec[],
+  disabled: readonly string[],
+): VibeMcpExclusionPlan {
+  const dropServers = new Set<string>();
+  const notes: string[] = [];
+  if (servers.length === 0) return { dropServers, patterns: [], notes };
+
+  const byAliasKey = new Map<string, string[]>();
+  for (const server of servers) {
+    const key = vibeMcpIdentifier(vibeMcpServerAlias(server.name)).toLowerCase();
+    const names = byAliasKey.get(key) ?? [];
+    names.push(server.name);
+    byAliasKey.set(key, names);
+  }
+  for (const names of byAliasKey.values()) {
+    if (names.length > 1) {
+      for (const name of names) dropServers.add(name);
+      notes.push(`MCP servers ${names.join(", ")} publish indistinguishable tool names; none is offered to this session.`);
+    }
+  }
+
+  for (const name of disabled) {
+    const matched = servers.filter((server) => name.startsWith(`mcp__${server.name}__`));
+    if (matched.length > 1) {
+      for (const server of matched) dropServers.add(server.name);
+      notes.push(`MCP exclusion "${name}" matches more than one server (${matched.map((s) => s.name).join(", ")}); those servers are not offered to this session.`);
+    }
+  }
+
+  const toolsByServer = new Map<string, Map<string, Set<string>>>();
+  for (const name of disabled) {
+    for (const server of servers) {
+      const prefix = `mcp__${server.name}__`;
+      if (!name.startsWith(prefix)) continue;
+      const tool = name.slice(prefix.length);
+      if (tool.length === 0) continue;
+      let byFold = toolsByServer.get(server.name);
+      if (!byFold) {
+        byFold = new Map();
+        toolsByServer.set(server.name, byFold);
+      }
+      const fold = tool.toLowerCase();
+      const variants = byFold.get(fold) ?? new Set<string>();
+      variants.add(tool);
+      byFold.set(fold, variants);
+    }
+  }
+  for (const [serverName, byFold] of toolsByServer) {
+    for (const variants of byFold.values()) {
+      if (variants.size > 1) {
+        dropServers.add(serverName);
+        notes.push(`MCP server "${serverName}" has excluded tools that differ only by case (${[...variants].join(", ")}); Vibe cannot exclude them separately, so the server is not offered to this session.`);
+        break;
+      }
+    }
+  }
+
   const patterns = new Set<string>();
   for (const server of servers) {
-    const prefix = `mcp__${server.name}__`;
+    if (dropServers.has(server.name)) continue;
     const alias = vibeMcpServerAlias(server.name);
+    const prefix = `mcp__${server.name}__`;
     for (const name of disabled) {
       if (!name.startsWith(prefix)) continue;
       const tool = name.slice(prefix.length);
       if (tool.length === 0) continue;
       const base = vibeMcpIdentifier(`${alias}_${tool}`);
-      const digest = createHash("sha256").update(`${alias}\0${tool}`, "utf8").digest("hex");
-      // Optional own-digest suffix: `_` + digest[:8] + an optional prefix of
-      // digest[8:], i.e. digest[:n] for any n in 8..64 (nested optionals).
-      let tail = "";
-      for (let i = digest.length - 1; i >= 8; i -= 1) {
-        tail = `(?:${digest[i]}${tail})?`;
-      }
-      const escaped = base.replace(/[^A-Za-z0-9_]/g, "\\$&");
-      patterns.add(`re:${escaped}(?:_${digest.slice(0, 8)}${tail})?`);
+      patterns.add(`re:${base.replace(/[^A-Za-z0-9_]/g, "\\$&")}`);
     }
   }
-  return [...patterns];
+  return { dropServers, patterns: [...patterns], notes };
 }
 
 /** Build `TurnStartParams.message` / `TurnSteerParams.message` content blocks. */
