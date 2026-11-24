@@ -68,6 +68,38 @@ describe("stdio JSON-RPC peer", () => {
     serverPeer.close();
   });
 
+  it("idle timeout restarts only on valid JSON-RPC messages and still honors a hard deadline (LOCAL-009)", async () => {
+    const { client, server } = createLinkedPair();
+    const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });
+    const serverPeer = new JsonRpcPeer(server, { forceKillAfterMs: 0 });
+    // The server takes requests but never answers them.
+    serverPeer.onRequest(() => new Promise(() => {}));
+
+    // Malformed / non-JSON-RPC lines are not attributable to the session: they never restart the idle timer.
+    const garbage = setInterval(() => server.writeLine("agy: warning -- some non-JSON log line"), 20);
+    const outcome = await Promise.race([
+      clientPeer.request("hung", {}, 80, { idle: true }).then(
+        () => "answered",
+        (error: unknown) => (error as { code: string }).code,
+      ),
+      sleep(400).then(() => "still-pending"),
+    ]);
+    clearInterval(garbage);
+    expect(outcome).toBe("PEER_REQUEST_TIMEOUT");
+
+    // Valid session traffic restarts the idle timer, but the hard deadline still fires.
+    const ticks = setInterval(() => serverPeer.notify("session/update", { n: 1 }), 30);
+    const startedAt = Date.now();
+    await expect(clientPeer.request("long", {}, 80, { idle: true, deadlineMs: 250 })).rejects.toMatchObject({
+      code: "PEER_REQUEST_TIMEOUT",
+    });
+    clearInterval(ticks);
+    // It outlived several 80ms idle windows thanks to the traffic, then died at the deadline.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(240);
+    clientPeer.close();
+    serverPeer.close();
+  });
+
   it("times out and closes cleanly", async () => {
     const { client, server } = createLinkedPair();
     const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });

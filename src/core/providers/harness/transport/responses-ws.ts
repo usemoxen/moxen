@@ -11,6 +11,13 @@
  * Any upgrade failure disables WebSocket for that session and falls back
  * transparently to HTTP SSE; disconnects, 60-minute connection limits, token
  * rotations, compactions, and `previous_response_not_found` recover cleanly.
+ *
+ * One socket carries at most one in-flight `response.create`: a stream that
+ * ends without consuming a terminal response frame (the consumer abandoned
+ * it, the connection dropped, or it is being retried) closes and resets the
+ * socket in its `finally`, so a late frame from the abandoned request can
+ * never be delivered as the next turn's output, and the continuation chain
+ * restarts from a full input on a fresh socket.
  */
 import { responsesUrl } from "../profiles.js";
 import { buildResponsesInput, type ResponsesItem } from "../normalize-responses.js";
@@ -260,6 +267,8 @@ export class ResponsesWsSession {
   private readonly now: () => number;
 
   private socket: ResponsesSocket | null = null;
+  /** The socket a request is currently in flight on, if any; one per stream. */
+  private inFlightSocket: ResponsesSocket | null = null;
   private connectedUrl: string | null = null;
   private connectedApiKey: string | undefined = undefined;
   private connectedAt = 0;
@@ -433,7 +442,14 @@ export class ResponsesWsSession {
     let retriedFullChain = false;
 
     for (;;) {
-      const { socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal);
+      let { socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal);
+      if (this.inFlightSocket !== null) {
+        // A previous request never reached a terminal frame, so this stream is
+        // still busy: one socket carries at most one in-flight response.create,
+        // so drop it and send the new request on a fresh socket.
+        this.resetSocket();
+        ({ socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal));
+      }
       const delta = reused ? this.continuationDelta(transcript, configKey) : null;
       let payload: Record<string, unknown>;
       let usedContinuation = false;
@@ -487,6 +503,8 @@ export class ResponsesWsSession {
       socket.addEventListener("error", onError);
       socket.addEventListener("close", onClose);
       request.signal?.addEventListener("abort", onAbort, { once: true });
+      this.inFlightSocket = socket;
+      let terminalConsumed = false;
 
       try {
         try {
@@ -563,6 +581,10 @@ export class ResponsesWsSession {
           }
         }
 
+        // The while loop only falls through on a terminal response frame; every
+        // break (retry, error, abort) leaves terminalConsumed false.
+        terminalConsumed = reducer.finish !== null;
+
         if (retryReason !== null) continue;
 
         if (reducer.completed && reducer.responseId !== null) {
@@ -576,10 +598,18 @@ export class ResponsesWsSession {
         yield { type: "finish", reason: reducer.finish! };
         return;
       } finally {
+        if (this.inFlightSocket === socket) this.inFlightSocket = null;
         socket.removeEventListener("message", onMessage);
         socket.removeEventListener("error", onError);
         socket.removeEventListener("close", onClose);
         request.signal?.removeEventListener("abort", onAbort);
+        // Unless a terminal response frame was consumed (the request completed
+        // normally), close and reset the socket: leaving it open would let a
+        // late frame from this request be delivered as the next turn's output
+        // and would allow a second in-flight request on one stream. Resetting
+        // also clears the previous_response_id chain, so the next request on
+        // the fresh socket sends the full input again.
+        if (!terminalConsumed && this.socket === socket) this.resetSocket();
       }
     }
   }

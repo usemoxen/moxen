@@ -141,7 +141,9 @@ negotiates any other protocol version is refused loudly
   `session/load` (treating Antigravity as HTTP-capable when `agy acp` omits
   `mcpCapabilities` from `initialize`, routing Antigravity's external
   non-`moxen` MCP servers through a compact per-session loopback lazy gateway
-  `moxen-mcp` with `search_tools` and `call_tool` so `agy`'s 20,000-token eager
+  `moxen-mcp` (loopback-only HTTP that validates `Origin` and `Host` as MCP
+  Streamable HTTP requires, plus a per-session bearer token) with
+  `search_tools` and `call_tool` so `agy`'s 20,000-token eager
   schema budget never evicts tools while also honoring `disabledTools`,
   restoring host `HOME`/`USERPROFILE` and clearing the synthetic
   `SSH_CONNECTION` marker on direct stdio MCP children under isolated

@@ -1,3 +1,5 @@
+import { request as httpRequest } from "node:http";
+
 import { describe, expect, it } from "vitest";
 
 import type { McpServerSpec } from "../../../mcp.js";
@@ -166,5 +168,49 @@ describe("AcpLazyMcpGateway", () => {
 
     expect(clients.get("linear")?.closed).toBe(true);
     expect(clients.get("exa")?.closed).toBe(true);
+  });
+
+  it("rejects a foreign Origin with 403 and accepts only the expected loopback Host authority, while Origin-less requests still work (LOCAL-009)", async () => {
+    const gateway = await AcpLazyMcpGateway.start({
+      specs: [{ name: "exa", type: "http", url: "https://mcp.exa.ai/mcp", headers: {} }],
+      cwd: process.cwd(),
+      connect: async () => {
+        throw new Error("no upstream needed");
+      },
+    });
+    const { hostname, port } = new URL(gateway.spec.url);
+    const ping = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+    const raw = (headers: Record<string, string>): Promise<number> =>
+      new Promise((resolve, reject) => {
+        const req = httpRequest(
+          { hostname: "127.0.0.1", port: Number(port), path: "/mcp", method: "POST", headers: { "Content-Type": "application/json", ...headers } },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve(res.statusCode ?? 0));
+          },
+        );
+        req.on("error", reject);
+        req.end(ping);
+      });
+
+    try {
+      const bearer = gateway.spec.headers as Record<string, string>;
+      // A foreign Origin (DNS rebinding) gets 403 as MCP Streamable HTTP requires, even with a valid bearer.
+      expect(await raw({ ...bearer, origin: "https://evil.example" })).toBe(403);
+      expect(await raw({ ...bearer, origin: "null" })).toBe(403);
+      // Loopback but a foreign port is not this gateway's origin.
+      expect(await raw({ ...bearer, origin: "http://127.0.0.1:1" })).toBe(403);
+      // The gateway's own loopback Origin is allowed.
+      expect(await raw({ ...bearer, origin: `http://${hostname}:${port}` })).toBe(200);
+      // Requests without an Origin (non-browser MCP clients like agy) still work.
+      expect(await raw({ ...bearer })).toBe(200);
+      // The Host authority must be the expected loopback one.
+      expect(await raw({ ...bearer, host: "evil.example" })).toBe(403);
+      expect(await raw({ ...bearer, host: `127.0.0.1:${Number(port) + 1}` })).toBe(403);
+      // The bearer check still applies.
+      expect(await raw({ origin: `http://${hostname}:${port}` })).toBe(401);
+    } finally {
+      await gateway.close();
+    }
   });
 });

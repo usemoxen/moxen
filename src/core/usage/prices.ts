@@ -289,10 +289,13 @@ export function threadCostUsd(
 
 /**
  * Resolve the thread's total `costUsd` for a context reading or live breakdown:
- * keeps a driver's own reported cost (Claude's live `total_cost_usd` or an ACP
- * agent's `cost`), while still combining earlier turns across restarts or
- * provider switches, and prices threads whose driver reports no cost using
- * `threadCostUsd`.
+ * keeps a driver's own reported cost while still combining earlier turns across
+ * restarts or provider switches, and prices threads whose driver reports no
+ * cost using `threadCostUsd`. The reading's reported cost means different
+ * things per provider: Claude reports a running session total, while an ACP
+ * agent reports the latest turn's cost — so for ACP the reading is counted as
+ * the open turn's cost on top of the settled turns, exactly once (a turn that
+ * already settled keeps its stored usage, never both).
  */
 export function resolveContextCostUsd(
   thread: Pick<StoredThread, "modelSelection">,
@@ -305,8 +308,13 @@ export function resolveContextCostUsd(
   if (hasReported) {
     const open = turns.find((turn) => turn.status === "running");
     const activeSelection = inFlight?.modelSelection ?? open?.modelSelection ?? thread.modelSelection;
-    if (driverKindOfInstance(activeSelection.instanceId) === "claude") {
-      const claudeInFlight: InFlightTurnUsage | null = open
+    const kind = driverKindOfInstance(activeSelection.instanceId);
+    if (kind === "claude" || kind === "acp" || kind === "antigravity") {
+      // Feed the reading in as the open turn's reported cost, so `threadCostUsd`
+      // combines it with the settled turns exactly once. For Claude the reading is
+      // a running session total; for ACP it is just the latest turn's cost, and the
+      // combined total is what the ledger already shows.
+      const reportedInFlight: InFlightTurnUsage | null = open
         ? {
             turnId: open.id,
             modelSelection: activeSelection,
@@ -316,7 +324,7 @@ export function resolveContextCostUsd(
             },
           }
         : inFlight ?? null;
-      const computed = threadCostUsd(thread, turns, config, claudeInFlight);
+      const computed = threadCostUsd(thread, turns, config, reportedInFlight);
       return computed === null ? reportedCostUsd : Math.max(computed, reportedCostUsd);
     }
     return reportedCostUsd;

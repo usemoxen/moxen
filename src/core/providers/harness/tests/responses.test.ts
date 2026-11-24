@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { buildResponsesInput } from "../normalize-responses.js";
 import { DEFAULT_QUIRKS, type ModelQuirks } from "../quirks.js";
@@ -443,8 +443,15 @@ describe("ResponsesWsSession persistent WebSocket mode", () => {
       }),
     );
     expect(recovered).toContainEqual({ type: "text.delta", text: "recovered" });
-    expect(sockets).toHaveLength(2);
+    // Each failed attempt ended without a terminal frame, so its socket was closed and
+    // reset in the iterator's finally: the retries reconnect on fresh sockets (LOCAL-009),
+    // while the request that completed terminally keeps its socket open for continuation.
+    expect(sockets).toHaveLength(3);
+    expect(sockets[0]!.closed).toBe(true);
+    expect(sockets[1]!.closed).toBe(true);
+    expect(sockets[2]!.closed).toBe(false);
     wsSession.close();
+    expect(sockets[2]!.closed).toBe(true);
   });
 
   it("falls back seamlessly to HTTP SSE when the WebSocket handshake fails", async () => {
@@ -485,5 +492,107 @@ describe("ResponsesWsSession persistent WebSocket mode", () => {
     expect(second).toContainEqual({ type: "text.delta", text: "via-http" });
     expect(wsAttempts).toBe(1);
     expect(httpCalls).toBe(2);
+  });
+
+  it("closes and resets the socket when the consumer abandons the stream before a terminal frame, so a late frame cannot leak into the next turn (LOCAL-009)", async () => {
+    const sockets: FakeResponsesSocket[] = [];
+    let sent = 0;
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket((_payload, self) => {
+          sent += 1;
+          queueMicrotask(() => {
+            if (sent === 1) {
+              // Turn 1 stalls after one delta: no terminal frame ever arrives.
+              self.sendEvent({ type: "response.output_text.delta", delta: "turn-1 partial" });
+            } else {
+              self.sendEvent({ type: "response.output_text.delta", delta: "turn-2 reply" });
+              self.sendEvent({ type: "response.completed", response: { id: "resp_2", usage: { input_tokens: 10, output_tokens: 2 } } });
+            }
+          });
+        });
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    const transcript: TranscriptMessage[] = [{ role: "user", content: "one" }];
+    const req = () =>
+      request(() => { throw new Error("HTTP fallback should not run"); }, {
+        model: "gpt-6.2-sol",
+        transcript,
+        quirks: wsQuirks(),
+        responsesSession: wsSession,
+      });
+
+    // The loop's repeat guard breaks out of the for-await before any terminal frame.
+    const abandoned: ModelEvent[] = [];
+    for await (const event of streamResponses(req())) {
+      abandoned.push(event);
+      break;
+    }
+    expect(abandoned).toEqual([{ type: "text.delta", text: "turn-1 partial" }]);
+    expect(sockets[0]!.closed).toBe(true);
+
+    // Turn 2 starts while the server is still streaming turn 1 on the old socket.
+    const secondPromise = collect(req());
+    await vi.waitFor(() => expect(sockets[sockets.length - 1]!.sent.length).toBeGreaterThanOrEqual(1));
+    const turn2Socket = sockets[sockets.length - 1]!;
+    expect(turn2Socket).not.toBe(sockets[0]);
+    sockets[0]!.sendEvent({ type: "response.output_text.delta", delta: "turn-1 late frame" });
+    sockets[0]!.sendEvent({ type: "response.completed", response: { id: "resp_1" } });
+    const second = await secondPromise;
+    expect(second).toContainEqual({ type: "text.delta", text: "turn-2 reply" });
+    expect(second.some((event) => event.type === "text.delta" && event.text === "turn-1 late frame")).toBe(false);
+    // The reset dropped the continuation chain: turn 2 sends a full body without previous_response_id.
+    expect(turn2Socket.sent[0]).not.toHaveProperty("previous_response_id");
+    wsSession.close();
+  });
+
+  it("never sends a second request on a stream that still has one in flight (LOCAL-009)", async () => {
+    const sockets: FakeResponsesSocket[] = [];
+    const stalled = new Set<FakeResponsesSocket>();
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket((_payload, self) => {
+          queueMicrotask(() => {
+            if (stalled.has(self)) {
+              // The first request on this socket stalls mid-reply and never completes.
+              self.sendEvent({ type: "response.output_text.delta", delta: "first partial" });
+            } else {
+              self.sendEvent({ type: "response.completed", response: { id: "resp_done", usage: { input_tokens: 1, output_tokens: 1 } } });
+            }
+          });
+        });
+        sockets.push(socket);
+        if (sockets.length === 1) stalled.add(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    const transcript: TranscriptMessage[] = [{ role: "user", content: "one" }];
+    const req = () =>
+      request(() => { throw new Error("HTTP fallback should not run"); }, {
+        model: "gpt-6.2-sol",
+        transcript,
+        quirks: wsQuirks(),
+        responsesSession: wsSession,
+      });
+
+    // The first stream starts, stalls mid-reply, and its iterator stays open (not abandoned).
+    const firstIterator = streamResponses(req())[Symbol.asyncIterator]();
+    const firstEvent = await firstIterator.next();
+    expect(firstEvent.value).toEqual({ type: "text.delta", text: "first partial" });
+
+    // A second stream on the same session must not reuse the busy socket.
+    const secondPromise = collect(req());
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    expect(sockets[0]!.closed).toBe(true);
+    const second = await secondPromise;
+    expect(second.at(-1)).toEqual({ type: "finish", reason: "stop" });
+    await firstIterator.return(undefined);
+    wsSession.close();
   });
 });

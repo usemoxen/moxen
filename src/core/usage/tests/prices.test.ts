@@ -261,4 +261,23 @@ describe("threadCostUsd and resolveContextCostUsd (MXN-412)", () => {
     const unknown = { instanceId: "antigravity/default", model: "gpt-oss-120b-medium" };
     expect(threadCostUsd({ modelSelection: unknown }, [storedTurn("u1", unknown, u)], { providers: {} })).toBeNull();
   });
+
+  it("keeps a per-turn ACP reported cost apart from settled turns and combines it exactly once (LOCAL-009)", () => {
+    const agy = { instanceId: "antigravity/default", model: "gemini-4-neon" };
+    const u = { input: 10, cacheRead: 0, cacheCreate: 0, output: 5, thinking: 0 };
+    const t1 = storedTurn("a1", agy, { ...u, costUsd: 0.25 });
+    const t2 = storedTurn("a2", agy, null, "running");
+    const live = { ...u };
+    // The live reading reports the latest turn's $0.25, not a thread total: live must read $0.50 like the ledger.
+    expect(
+      resolveContextCostUsd({ modelSelection: agy }, [t1, t2], { providers: {} }, 0.25, { turnId: "a2", modelSelection: agy, usage: live }),
+    ).toBeCloseTo(0.5, 9);
+    // While the turn settles (stored usage appears), the same reported cost is not counted twice.
+    const t2Done = storedTurn("a2", agy, { ...u, costUsd: 0.25 });
+    expect(
+      resolveContextCostUsd({ modelSelection: agy }, [t1, t2Done], { providers: {} }, 0.25, { turnId: "a2", modelSelection: agy, usage: live }),
+    ).toBeCloseTo(0.5, 9);
+    // After it settles, with no open turn, the settled total still wins over the per-turn reading.
+    expect(resolveContextCostUsd({ modelSelection: agy }, [t1, t2Done], { providers: {} }, 0.25)).toBeCloseTo(0.5, 9);
+  });
 });

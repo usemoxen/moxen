@@ -126,8 +126,10 @@ export interface AcpDriverOptions {
   readonly hostEnv?: NodeJS.ProcessEnv;
   readonly transport?: AcpTransport;
   readonly initializeTimeoutMs?: number;
-  /** Idle limit (ms) for `session/prompt`: restarts on any agent traffic. */
+  /** Idle limit (ms) for `session/prompt`: restarts on attributable agent messages. */
   readonly promptTimeoutMs?: number;
+  /** Hard deadline (ms) for `session/prompt` that agent activity never extends. */
+  readonly promptDeadlineMs?: number;
   /** Idle settle delay (ms) for out-of-turn reactive wakeup turns (`origin: "background"`). */
   readonly backgroundTurnIdleMs?: number;
   /** Shorter settle grace (ms) after a `usage_update` following assistant text in a background turn. */
@@ -324,8 +326,15 @@ interface AcpSession {
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 15_000;
-// Idle limit: restarts on any traffic from the agent, so long active turns are not cut off.
+// Idle limit for `session/prompt`: restarts only on valid JSON-RPC messages from the
+// agent (its session updates), so a hung agent that only prints log lines still times
+// out, and a healthy long turn — which streams updates far more often than every 30
+// minutes — is never cut off while it works.
 const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
+// Hard cap on one `session/prompt` even while the agent keeps sending updates: bounds
+// an agent that streams forever without ever answering. 24h, because no healthy turn
+// runs a full day on a single prompt; the idle window above already catches silence.
+const DEFAULT_PROMPT_DEADLINE_MS = 24 * 60 * 60 * 1000;
 // Out-of-turn wakeup turns have no explicit ACP end-of-turn signal: wait long enough
 // across thinking/streaming/post-tool LLM pauses so replies do not split mid-turn.
 const DEFAULT_BACKGROUND_TURN_IDLE_MS = 10_000;
@@ -654,6 +663,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly transport: AcpTransport;
   private readonly initializeTimeoutMs: number;
   private readonly promptTimeoutMs: number;
+  private readonly promptDeadlineMs: number;
   private readonly backgroundTurnIdleMs: number;
   private readonly backgroundTurnPostUsageIdleMs: number;
   private readonly cancelDrainTimeoutMs: number;
@@ -687,6 +697,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SpawnAcpTransport();
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
     this.promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
+    this.promptDeadlineMs = options.promptDeadlineMs ?? DEFAULT_PROMPT_DEADLINE_MS;
     this.backgroundTurnIdleMs = options.backgroundTurnIdleMs ?? DEFAULT_BACKGROUND_TURN_IDLE_MS;
     this.backgroundTurnPostUsageIdleMs =
       options.backgroundTurnPostUsageIdleMs ??
@@ -1467,7 +1478,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
               prompt: promptBlocks,
             },
             this.promptTimeoutMs,
-        { idle: true },
+            { idle: true, deadlineMs: this.promptDeadlineMs },
           )
           .then(
             (result) => this.handlePromptSuccess(session, turn, inFlight, result, carriedInstructions),
@@ -1653,7 +1664,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           prompt: promptBlocks,
         },
         this.promptTimeoutMs,
-        { idle: true },
+        { idle: true, deadlineMs: this.promptDeadlineMs },
       );
       const settled = req.then(
         (result) => {
@@ -2441,7 +2452,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           prompt: [{ type: "text", text: ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER }],
         },
         this.promptTimeoutMs,
-        { idle: true },
+        { idle: true, deadlineMs: this.promptDeadlineMs },
       )
       .then(
         () => {
