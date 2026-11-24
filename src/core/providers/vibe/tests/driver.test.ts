@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -7,6 +8,8 @@ import * as Stream from "effect/Stream";
 import { describe, expect, it } from "vitest";
 
 import { CliError } from "../../../errors.js";
+import type { McpServerSpec } from "../../../mcp.js";
+import { subscribeDriverThread, subscribeDriverUsage } from "../../../threads/execute.js";
 import { JsonRpcPeer, type SpawnedProcess } from "../../stdio.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
 import { applyVibeJsonPatch, VIBE_METHODS } from "../protocol.js";
@@ -508,7 +511,9 @@ describe("VibeDriver review regressions", () => {
     await Effect.runPromise(driver.startSession({
       threadId: "th-mcp",
       workingDirectory: "/tmp/repo",
-      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      // The tool list is known (in-process), so the exclusion resolves to the
+      // exact published display name and the server stays offered.
+      mcpServers: [inProcessServer("demo", ["write", "read"])],
       disabledMcpTools: ["mcp__demo__write"],
     }));
 
@@ -518,7 +523,7 @@ describe("VibeDriver review regressions", () => {
     expect(disabled).toContain("task");
     // Vibe (unified harness, v3.1.4) publishes MCP tools as `<server>_<tool>`
     // and filters disabledTools against that display name. Moxen matches the
-    // exact base name only — no speculative hex suffix — so a literal
+    // exact published name only — no speculative hex suffix — so a literal
     // digest-named sibling (`demo_write_ba51f2af`, `demo_write_deadbeef`) and
     // `demo_write_file` stay available.
     expect(vibeDisabledMatches(disabled, "demo_write")).toBe(true);
@@ -637,7 +642,7 @@ describe("VibeDriver round-2 regressions", () => {
       const policy = (params as Record<string, unknown>)["approvalPolicy"];
       if (policy === "auto-approve") {
         await upgradeGate; // hold the upgrade ack until the downgrade is queued
-        return { accepted: true };
+        return { status: "applied", runtime: { approvalPolicy: policy } };
       }
       throw new Error("downgrade refused");
     });
@@ -665,7 +670,7 @@ describe("VibeDriver round-2 regressions", () => {
     await Effect.runPromise(driver.startSession({
       threadId: "th-alias",
       workingDirectory: "/tmp/repo",
-      mcpServers: [{ name: "-demo_", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      mcpServers: [inProcessServer("-demo_", ["write"])],
       disabledMcpTools: ["mcp__-demo___write"],
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
@@ -675,7 +680,7 @@ describe("VibeDriver round-2 regressions", () => {
     await Effect.runPromise(driver.stopSession("th-alias"));
   });
 
-  it("keeps distinct-alias servers offered and excludes only the targeted tool", async () => {
+  it("withholds only the server holding an exclusion whose tool list Moxen cannot know", async () => {
     const server = new FakeVibeServer();
     setupDefaultServer(server);
     const driver = new VibeDriver({ transport: makeTransport([server]) });
@@ -690,9 +695,11 @@ describe("VibeDriver round-2 regressions", () => {
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    expect((agentCfg["mcpServers"] as unknown[]).length).toBe(2);
+    // `alpha` holds the excluded tool and Moxen cannot know its tool list, so
+    // alpha alone is withheld; `beta` keeps its offer untouched.
+    expect((agentCfg["mcpServers"] as unknown[]).map((s) => (s as { name: string }).name)).toEqual(["beta"]);
     const disabled = agentCfg["disabledTools"] as string[];
-    expect(vibeDisabledMatches(disabled, "alpha_write")).toBe(true);
+    expect(vibeDisabledMatches(disabled, "alpha_write")).toBe(false);
     expect(vibeDisabledMatches(disabled, "beta_write")).toBe(false);
     await Effect.runPromise(driver.stopSession("th-collide"));
   });
@@ -704,7 +711,7 @@ describe("VibeDriver round-2 regressions", () => {
     await Effect.runPromise(driver.startSession({
       threadId: "th-astral",
       workingDirectory: "/tmp/repo",
-      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      mcpServers: [inProcessServer("demo", ["w\u{1F600}rite"])],
       disabledMcpTools: ["mcp__demo__w\u{1F600}rite"],
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
@@ -966,7 +973,7 @@ describe("VibeDriver round-3 regressions", () => {
     await Effect.runPromise(driver.startSession({
       threadId: "th-exact",
       workingDirectory: "/tmp/repo",
-      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      mcpServers: [inProcessServer("demo", ["write", "write_ba51f2af"])],
       disabledMcpTools: ["mcp__demo__write"],
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
@@ -979,6 +986,7 @@ describe("VibeDriver round-3 regressions", () => {
   it("drops a server whose excluded tools case-fold together rather than hiding one", async () => {
     const server = new FakeVibeServer();
     setupDefaultServer(server);
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } }));
     const driver = new VibeDriver({ transport: makeTransport([server]) });
     const events: ProviderRuntimeEvent[] = [];
     const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
@@ -993,6 +1001,9 @@ describe("VibeDriver round-3 regressions", () => {
     expect(agentCfg["mcpServers"]).toBeUndefined();
     const disabled = agentCfg["disabledTools"] as string[];
     expect(vibeDisabledMatches(disabled, "Demo_READ")).toBe(false);
+    // The withheld-server notice rides the first send, so a turn subscriber
+    // that attached after session/start still sees it.
+    await Effect.runPromise(driver.sendTurn({ threadId: "th-casefold", prompt: "go" }));
     expect(events.some((e) => e.type === "session.notice" && e.notice === "mcp")).toBe(true);
     await Effect.runPromise(driver.stopSession("th-casefold"));
     await Effect.runPromise(Fiber.interrupt(fiber));
@@ -1017,7 +1028,7 @@ describe("VibeDriver round-3 regressions", () => {
     await Effect.runPromise(driver.stopSession("th-flat"));
   });
 
-  it("drops servers whose normalized aliases collide instead of widening the pattern", async () => {
+  it("withholds the server an alias-colliding exclusion names and leaves Vibe's disambiguation alone for the rest", async () => {
     const server = new FakeVibeServer();
     setupDefaultServer(server);
     const driver = new VibeDriver({ transport: makeTransport([server]) });
@@ -1032,10 +1043,363 @@ describe("VibeDriver round-3 regressions", () => {
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    expect(agentCfg["mcpServers"]).toBeUndefined();
+    // `foo-bar` holds the excluded tool and cannot be scoped: only it is
+    // withheld. `foo_bar` carries no exclusion, so Vibe's own digest
+    // disambiguation of its tool names is left untouched.
+    expect((agentCfg["mcpServers"] as unknown[]).map((s) => (s as { name: string }).name)).toEqual(["foo_bar"]);
     const disabled = agentCfg["disabledTools"] as string[];
     expect(vibeDisabledMatches(disabled, "foo_bar_write_f4180191")).toBe(false);
     await Effect.runPromise(driver.stopSession("th-aliascollide"));
+  });
+});
+
+/**
+ * A faithful JS port of Vibe 3.1.4's `_display_names` (`_mcp_naming.py`):
+ * candidate = `_normalize_identifier(f"{server}_{tool}")`; a raw candidate
+ * that is already an identifier and has one owner keeps the raw form, a
+ * unique candidate takes the normalized form, and every owner of a shared
+ * candidate gets `_<sha256(server + "\\0" + tool)[:8]>` appended (lengthened
+ * on further collision). Read from `mistral-vibe==3.1.4`, read-only.
+ */
+function vibeDisplayNames(servers: ReadonlyArray<{ name: string; tools: readonly string[] }>): Map<string, string> {
+  const normalize = (value: string): string => {
+    let out = [...value].map((ch) => (/[A-Za-z0-9_$]/.test(ch) ? ch : "_")).join("") || "_";
+    if (/^[0-9]/.test(out)) out = `_${out}`;
+    return out;
+  };
+  const isIdentifier = (value: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value);
+  const identities: Array<{ readonly server: string; readonly tool: string }> = [];
+  for (const server of servers) {
+    for (const tool of server.tools) identities.push({ server: server.name, tool });
+  }
+  const owners = new Map<string, number>();
+  for (const { server, tool } of identities) {
+    const candidate = normalize(`${server}_${tool}`);
+    owners.set(candidate, (owners.get(candidate) ?? 0) + 1);
+  }
+  const sorted = [...identities].sort((a, b) => {
+    if (a.server !== b.server) return a.server < b.server ? -1 : 1;
+    if (a.tool !== b.tool) return a.tool < b.tool ? -1 : 1;
+    return 0;
+  });
+  const used = new Set<string>();
+  const result = new Map<string, string>();
+  for (const { server, tool } of sorted) {
+    const key = `${server}\u0000${tool}`;
+    const base = `${server}_${tool}`;
+    const candidate = normalize(base);
+    if (isIdentifier(base) && owners.get(candidate) === 1) {
+      result.set(key, base);
+      used.add(base);
+    } else if (owners.get(candidate) === 1 && !used.has(candidate)) {
+      result.set(key, candidate);
+      used.add(candidate);
+    } else {
+      const digest = createHash("sha256").update(`${server}\u0000${tool}`, "utf8").digest("hex");
+      for (let length = 8; ; length += 1) {
+        const name = `${candidate}_${digest.slice(0, length)}`;
+        if (!used.has(name)) {
+          result.set(key, name);
+          used.add(name);
+          break;
+        }
+      }
+    }
+  }
+  return result;
+}
+
+/** An in-process server spec: Vibe gets its `fallback` endpoint, Moxen knows its tool list. */
+function inProcessServer(name: string, tools: readonly string[]): McpServerSpec {
+  return {
+    name,
+    type: "in-process",
+    tools: tools.map((tool) => ({ name: tool, description: tool, inputSchema: { type: "object", properties: {} } })),
+    call: async () => ({ text: "", isError: false }),
+    fallback: { name, type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} },
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+describe("VibeDriver round-4 regressions", () => {
+  /** A session whose server tracks the live approval policy and records the policy every turn/start ran under. */
+  function policyServer(holdUpgrade?: { register: (release: () => void) => void }): {
+    readonly server: FakeVibeServer;
+    readonly startPolicies: string[];
+  } {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const startPolicies: string[] = [];
+    let currentPolicy = "ask";
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, async (params) => {
+      const policy = (params as Record<string, unknown>)["approvalPolicy"] as string;
+      if (policy === "auto-approve" && holdUpgrade !== undefined) {
+        await new Promise<void>((resolve) => { holdUpgrade.register(resolve); });
+      }
+      // The live adapter applies the approval change before anything is parked.
+      currentPolicy = policy;
+      return { runtime: { approvalPolicy: policy }, status: "applied" };
+    });
+    server.on(VIBE_METHODS.turnStart, () => {
+      startPolicies.push(currentPolicy);
+      return { turn: { id: `t${startPolicies.length}`, inputEntryId: `u${startPolicies.length}`, status: "in_progress" } };
+    });
+    return { server, startPolicies };
+  }
+
+  it("starts a queued full-access turn only under a newer narrowed selection once its upgrade ack lands", async () => {
+    let releaseUpgrade: () => void = () => {};
+    const { server, startPolicies } = policyServer({ register: (release) => { releaseUpgrade = release; } });
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-supersede", workingDirectory: "/tmp/repo", runtimeMode: "approval-required" }));
+
+    const sending = Effect.runPromise(driver.sendTurn({ threadId: "th-supersede", prompt: "Heavy", runtimeMode: "full-access" }));
+    await sleep(30); // the upgrade write is in flight and parked on the gate
+    driver.setRuntimeMode("th-supersede", "approval-required"); // newer, narrower selection
+    releaseUpgrade();
+
+    await sending; // accepted, but never under auto-approve: the recheck re-writes to the narrower policy
+    expect(startPolicies).toEqual(["ask"]);
+    await Effect.runPromise(driver.stopSession("th-supersede"));
+  });
+
+  it("does not let a queued mode-less send start under a wide policy the newer selection overtook", async () => {
+    let releaseUpgrade: () => void = () => {};
+    const { server, startPolicies } = policyServer({ register: (release) => { releaseUpgrade = release; } });
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-narrow", workingDirectory: "/tmp/repo", runtimeMode: "approval-required" }));
+
+    driver.setRuntimeMode("th-narrow", "full-access"); // wide setter queued, ack parked
+    await sleep(20);
+    const sending = Effect.runPromise(driver.sendTurn({ threadId: "th-narrow", prompt: "Queued" })); // mode-less, captures full-access
+    await sleep(20);
+    driver.setRuntimeMode("th-narrow", "approval-required"); // narrow setter overtakes it
+    releaseUpgrade();
+
+    await sending;
+    expect(startPolicies).toEqual(["ask"]);
+    await Effect.runPromise(driver.stopSession("th-narrow"));
+  });
+
+  it("re-establishes the policy with a fresh write after a pending response instead of trusting the cached ack", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    let currentPolicy = "ask";
+    // Vibe 3.1.4 applies the live approval change BEFORE parking the rest of
+    // the configuration, then answers `pending`: the previous approval policy
+    // is NOT still in effect, so the session's cached acknowledgement goes.
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, (params) => {
+      const policy = (params as Record<string, unknown>)["approvalPolicy"] as string;
+      currentPolicy = policy;
+      if (policy === "auto-approve") return { runtime: { approvalPolicy: policy }, status: "pending" };
+      return { runtime: { approvalPolicy: policy }, status: "applied" };
+    });
+    const startPolicies: string[] = [];
+    server.on(VIBE_METHODS.turnStart, () => {
+      startPolicies.push(currentPolicy);
+      return { turn: { id: `t${startPolicies.length}`, inputEntryId: `u${startPolicies.length}`, status: "in_progress" } };
+    });
+
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-pending2", workingDirectory: "/tmp/repo", runtimeMode: "approval-required" }));
+
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: "th-pending2", prompt: "First" }));
+    driver.setRuntimeMode("th-pending2", "full-access"); // applied live on the server, answered `pending`
+    await sleep(20);
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+    await driver.awaitTurn("th-pending2", first.turnId);
+
+    // The next turn must not take the stale `ask` shortcut: the write goes
+    // out again and the turn only starts under the freshly acknowledged ask.
+    await Effect.runPromise(driver.sendTurn({ threadId: "th-pending2", prompt: "Second", runtimeMode: "approval-required" }));
+    expect(startPolicies).toEqual(["ask", "ask"]);
+    const writes = server.received.filter((r) => r.method === VIBE_METHODS.sessionApprovalPolicyUpdate);
+    expect(writes.length).toBeGreaterThanOrEqual(2);
+    await Effect.runPromise(driver.stopSession("th-pending2"));
+  });
+
+  it("withholds a server whose excluded tool Moxen cannot prove un-suffixed on Vibe (real name collision)", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-collide-tool",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      // A real server offering both spellings: Vibe digest-suffixes BOTH
+      // display names, and no unsuffixed pattern can match either. Moxen
+      // cannot see the sibling, so the server itself must be withheld.
+      disabledMcpTools: ["mcp__demo__write-file"],
+    }));
+    const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    expect(agentCfg["mcpServers"]).toBeUndefined();
+    await Effect.runPromise(driver.stopSession("th-collide-tool"));
+  });
+
+  it("enforces an exclusion whose display name is digest-suffixed when the tool list is known", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-collide-known",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [inProcessServer("demo", ["write-file", "write_file", "read"])],
+      disabledMcpTools: ["mcp__demo__write-file"],
+    }));
+    const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    expect((agentCfg["mcpServers"] as unknown[]).length).toBe(1);
+    const disabled = agentCfg["disabledTools"] as string[];
+    const names = vibeDisplayNames([{ name: "demo", tools: ["write-file", "write_file", "read"] }]);
+    const target = names.get("demo\u0000write-file")!;
+    const sibling = names.get("demo\u0000write_file")!;
+    expect(target).toMatch(/^[A-Za-z0-9_$]+_[0-9a-f]{8,}$/); // digest-suffixed, like Vibe publishes it
+    expect(target).not.toBe(sibling); // both suffixed, differently
+    expect(vibeDisabledMatches(disabled, target)).toBe(true);
+    expect(vibeDisabledMatches(disabled, sibling)).toBe(false);
+    expect(vibeDisabledMatches(disabled, "demo_read")).toBe(false);
+    await Effect.runPromise(driver.stopSession("th-collide-known"));
+  });
+
+  it("withholds a known-tool-list server whose exclusion would co-hide a case-fold sibling", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-case-sibling",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [inProcessServer("demo", ["write", "WRITE", "read"])],
+      disabledMcpTools: ["mcp__demo__write"],
+    }));
+    const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    // `re:demo_write` matches `demo_WRITE` case-insensitively; WRITE is not
+    // excluded, so the whole server is withheld rather than over-hidden.
+    expect(agentCfg["mcpServers"]).toBeUndefined();
+    expect((agentCfg["disabledTools"] as string[]).some((p) => p.startsWith("re:demo_write"))).toBe(false);
+    await Effect.runPromise(driver.stopSession("th-case-sibling"));
+  });
+
+  it("forwards alias-colliding servers untouched when no exclusion targets them", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-aliasclean",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [
+        { name: "foo-bar", type: "http", url: "http://127.0.0.1:9998/mcp", headers: {} },
+        { name: "foo_bar", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} },
+      ],
+    }));
+    const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    expect((agentCfg["mcpServers"] as unknown[]).map((s) => (s as { name: string }).name)).toEqual(["foo-bar", "foo_bar"]);
+    await Effect.runPromise(driver.stopSession("th-aliasclean"));
+  });
+
+  it("delivers startup MCP-offer notices to a turn subscriber that attaches after session startup", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } }));
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+
+    // The real send path: a global usage subscriber exists from before the
+    // session starts; the turn's thread subscriber attaches only when the
+    // turn runner wires it, AFTER session/start — `execute.ts` order.
+    const globalEvents: ProviderRuntimeEvent[] = [];
+    const unsubscribeGlobal = subscribeDriverUsage(driver, (event) => { globalEvents.push(event); });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-noticelate",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      disabledMcpTools: ["mcp__demo__write-file"],
+    }));
+    const threadEvents: ProviderRuntimeEvent[] = [];
+    const unsubscribeThread = subscribeDriverThread(driver, "th-noticelate", (event) => { threadEvents.push(event); });
+
+    await Effect.runPromise(driver.sendTurn({ threadId: "th-noticelate", prompt: "go" }));
+    expect(globalEvents.some((e) => e.type === "session.notice" && e.notice === "mcp" && e.title === "MCP servers not offered")).toBe(true);
+    expect(threadEvents.some((e) => e.type === "session.notice" && e.notice === "mcp" && e.title === "MCP servers not offered")).toBe(true);
+
+    unsubscribeGlobal();
+    unsubscribeThread();
+    await Effect.runPromise(driver.stopSession("th-noticelate"));
+  });
+
+  it("keeps an accepted turn running when its deferred interrupt fails", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    let releaseStart!: (value: unknown) => void;
+    server.on(VIBE_METHODS.turnStart, () => new Promise((resolve) => { releaseStart = resolve; }));
+    server.on(VIBE_METHODS.turnInterrupt, () => {
+      throw new Error("interrupt refused");
+    });
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
+    await Effect.runPromise(driver.startSession({ threadId: "th-deferint", workingDirectory: "/tmp/repo" }));
+
+    const sending = Effect.runPromise(driver.sendTurn({ threadId: "th-deferint", prompt: "Work" }));
+    await sleep(20); // turn/start in flight
+    await Effect.runPromise(driver.interruptTurn("th-deferint")); // recorded while the id is still binding
+    releaseStart({ turn: { id: "t-accepted", inputEntryId: "u1", status: "in_progress" } });
+
+    // The server ACCEPTED the turn: its start must not be misreported as failed.
+    const sent = await sending;
+    expect(sent.turnId).toBeTruthy();
+    expect(server.closed).toBe(false);
+    expect(await Effect.runPromise(driver.hasSession("th-deferint"))).toBe(true);
+    expect(events.some((e) => e.type === "session.notice" && e.notice === "interrupt-failed")).toBe(true);
+
+    // Completion tracking still works: the server settles the turn normally.
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t-accepted", status: "completed" } });
+    expect((await driver.awaitTurn("th-deferint", sent.turnId)).status).toBe("completed");
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    await Effect.runPromise(driver.stopSession("th-deferint"));
+  });
+
+  it("routes an earlier turn's completion by server turn id even when a later send is queued", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    let releaseUpgrade!: () => void;
+    const upgradeGate = new Promise<void>((resolve) => { releaseUpgrade = resolve; });
+    let turns = 0;
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, async (params) => {
+      const policy = (params as Record<string, unknown>)["approvalPolicy"] as string;
+      if (policy === "auto-approve") await upgradeGate;
+      return { runtime: { approvalPolicy: policy }, status: "applied" };
+    });
+    server.on(VIBE_METHODS.turnStart, () => {
+      turns += 1;
+      return { turn: { id: turns === 1 ? "tA" : "tB", inputEntryId: `u${turns}`, status: "in_progress" } };
+    });
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-strand", workingDirectory: "/tmp/repo", runtimeMode: "approval-required" }));
+
+    const a = await Effect.runPromise(driver.sendTurn({ threadId: "th-strand", prompt: "A" }));
+    const awaitingA = driver.awaitTurn("th-strand", a.turnId);
+    // Queue B: its policy write parks on the gate, so B stays queued.
+    const sendingB = Effect.runPromise(driver.sendTurn({ threadId: "th-strand", prompt: "B", runtimeMode: "full-access" }));
+    await sleep(30);
+    // A completes while B is still queued behind its policy write.
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "tA", status: "completed" } });
+
+    // The buffered completion must not be discarded when B binds: A settles.
+    const outcomeA = await Promise.race([
+      awaitingA,
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 300)),
+    ]);
+    expect(outcomeA).toMatchObject({ status: "completed" });
+    releaseUpgrade();
+    const b = await sendingB;
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "tB", status: "completed" } });
+    expect((await driver.awaitTurn("th-strand", b.turnId)).status).toBe("completed");
+    await Effect.runPromise(driver.stopSession("th-strand"));
   });
 });
 
