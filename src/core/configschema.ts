@@ -1707,7 +1707,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     key: `providers.vibe.${field}`,
     label: { binaryPath: "Vibe executable", vibeHome: "Vibe home directory", launchArgs: "Launch arguments" }[field],
     description: {
-      binaryPath: "The `vibe-app-server` binary to spawn.",
+      binaryPath: "The `vibe-app-server` binary to spawn. A relative path resolves against the Moxen server's working directory.",
       vibeHome: "Directory passed as `VIBE_HOME` for Vibe's configuration and session logs.",
       launchArgs: "Extra arguments passed to `vibe-app-server`.",
     }[field],

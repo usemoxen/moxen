@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import { describe, expect, it } from "vitest";
@@ -477,5 +478,148 @@ describe("VibeDriver contract", () => {
     });
     expect(server.received.some((r) => r.method === VIBE_METHODS.accountRead)).toBe(true);
     expect(server.received.some((r) => r.method === VIBE_METHODS.sessionStop)).toBe(true);
+  });
+});
+
+/** Match a Vibe `disabledTools` entry the way Vibe does: `re:` regex full
+ * match or case-insensitive fnmatch glob, against the published tool name. */
+function vibeDisabledMatches(patterns: readonly string[], name: string): boolean {
+  const lowered = name.toLowerCase();
+  return patterns.some((raw) => {
+    const pattern = raw.trim();
+    if (pattern.startsWith("re:")) {
+      return new RegExp(`^(?:${pattern.slice(3)})$`, "i").test(name);
+    }
+    const glob = pattern
+      .toLowerCase()
+      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, ".*")
+      .replace(/\?/g, ".");
+    return new RegExp(`^${glob}$`).test(lowered);
+  });
+}
+
+describe("VibeDriver review regressions", () => {
+  it("hides individually excluded MCP tools through Vibe's published-name disabledTools filter", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-mcp",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      disabledMcpTools: ["mcp__demo__write"],
+    }));
+
+    const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    const disabled = agentCfg["disabledTools"] as string[];
+    expect(disabled).toContain("task");
+    // Vibe (unified harness, v3.1.4) publishes MCP tools as `<server>_<tool>`
+    // and filters disabledTools against that display name; a name collision
+    // appends `_<sha256 hex>` — the exclusion must cover that form too, but
+    // must not swallow sibling tools such as `demo_write_file`.
+    expect(vibeDisabledMatches(disabled, "demo_write")).toBe(true);
+    expect(vibeDisabledMatches(disabled, "demo_write_deadbeef")).toBe(true);
+    expect(vibeDisabledMatches(disabled, "demo_write_file")).toBe(false);
+    expect(vibeDisabledMatches(disabled, "demo_read")).toBe(false);
+
+    await Effect.runPromise(driver.stopSession("th-mcp"));
+  });
+
+  it("settles an open turn and its waiters as interrupted when the session stops", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t-open", inputEntryId: "u1", status: "in_progress" } }));
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-stop", workingDirectory: "/tmp/repo" }));
+    const { turnId } = await Effect.runPromise(driver.sendTurn({ threadId: "th-stop", prompt: "Work" }));
+    const waiting = driver.awaitTurn("th-stop", turnId);
+    await Effect.runPromise(driver.stopSession("th-stop"));
+    const outcome = await Promise.race([
+      waiting,
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 300)),
+    ]);
+    expect(outcome).toMatchObject({ status: "interrupted" });
+  });
+
+  it("does not complete the current turn from a stale or early turn/completed, and confirms steers by client message id", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    let starts = 0;
+    server.on(VIBE_METHODS.turnStart, async () => {
+      starts += 1;
+      if (starts === 1) return { turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } };
+      // A stale completion for t1 lands before the client can know t2's id.
+      server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return { turn: { id: "t2", inputEntryId: "u2", status: "in_progress" } };
+    });
+    server.on(VIBE_METHODS.turnSteer, () => ({ accepted: true }));
+
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-corr", workingDirectory: "/tmp/repo" }));
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: "th-corr", prompt: "First" }));
+    await Effect.runPromise(driver.steerTurn("th-corr", "first", undefined, "steer-A"));
+    await Effect.runPromise(driver.steerTurn("th-corr", "second", undefined, "steer-B"));
+    // The server echoes steer B under its client message id, with rewritten
+    // text: only B may be confirmed, never the first unconfirmed steer.
+    server.sendNotification(VIBE_METHODS.historyEntryAdded, {
+      entry: { id: "steer-B", type: "message", role: "user", source: "turn_steer", content: [{ type: "text", text: "rewritten by server" }] },
+    });
+    expect(driver.takeUnconfirmedSteers("th-corr").map((s) => s.id)).toEqual(["steer-A"]);
+
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+    expect((await driver.awaitTurn("th-corr", first.turnId)).status).toBe("completed");
+
+    // The stale t1 completion above arrived while t2's start was in flight;
+    // it must not settle t2.
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: "th-corr", prompt: "Second" }));
+    const early = await Promise.race([
+      driver.awaitTurn("th-corr", second.turnId),
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 200)),
+    ]);
+    expect(early).toBe("hung");
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t2", status: "completed" } });
+    expect((await driver.awaitTurn("th-corr", second.turnId)).status).toBe("completed");
+
+    await Effect.runPromise(driver.stopSession("th-corr"));
+  });
+
+  it("settles a timed-out turn start locally and closes the peer that may be running an unidentifiable turn", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    server.on(VIBE_METHODS.turnStart, () => new Promise(() => {})); // never answers
+    const driver = new VibeDriver({ transport: makeTransport([server]), requestTimeoutMs: 60 });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
+    await Effect.runPromise(driver.startSession({ threadId: "th-to", workingDirectory: "/tmp/repo" }));
+
+    const result = await Effect.runPromiseExit(driver.sendTurn({ threadId: "th-to", prompt: "Work" }));
+    expect(Exit.isFailure(result)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(events.some((e) => e.type === "turn.failed")).toBe(true);
+    expect(server.closed).toBe(true);
+    expect(await Effect.runPromise(driver.hasSession("th-to"))).toBe(false);
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  });
+
+  it("refuses to start a turn under a policy downgrade the server never acknowledged", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, () => {
+      throw new Error("policy update refused");
+    });
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", status: "in_progress" } }));
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-mode", workingDirectory: "/tmp/repo", runtimeMode: "full-access" }));
+
+    driver.setRuntimeMode("th-mode", "approval-required");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const result = await Effect.runPromiseExit(driver.sendTurn({ threadId: "th-mode", prompt: "Work", runtimeMode: "approval-required" }));
+    expect(Exit.isFailure(result)).toBe(true);
+    expect(server.received.some((r) => r.method === VIBE_METHODS.turnStart)).toBe(false);
+
+    await Effect.runPromise(driver.stopSession("th-mode"));
   });
 });

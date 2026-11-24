@@ -247,6 +247,48 @@ export function vibeMcpServersOf(servers: readonly McpServerSpec[] | undefined):
   return out;
 }
 
+/**
+ * Vibe's normalized MCP display name for a server/tool pair: every character
+ * outside `[A-Za-z0-9_$]` becomes `_`, and a leading digit gains a `_` prefix
+ * (`mistralai_vibe_local_harness/vibe/_mcp_naming.py`, v3.1.4).
+ */
+function vibeMcpDisplayName(server: string, tool: string): string {
+  const normalized = `${server}_${tool}`.replace(/[^A-Za-z0-9_$]/g, "_");
+  return /^[0-9]/.test(normalized) ? `_${normalized}` : normalized;
+}
+
+/**
+ * Map Moxen's per-tool MCP exclusions (`mcp__<server>__<tool>`) onto Vibe's
+ * `disabledTools` filter. Verified against `mistral-vibe` v3.1.4 (unified
+ * harness, the required default runtime): MCP tools are published under the
+ * display name `<server>_<tool>`, and `disabledTools` entries are
+ * case-insensitive fnmatch globs or `re:` regex full matches against that
+ * name (`MCPToolFilter` in `vibe/_mcp_models.py`). A disabled tool is left
+ * out of both the published tool list and the route table, so it can neither
+ * be listed nor invoked. A name collision appends `_<sha256 hex>` (8–64
+ * chars) to the display name; the `re:` form covers the plain name and every
+ * collision-suffix form without touching sibling tools. Exclusions for a
+ * server that is not offered need no pattern: its tools cannot run anyway.
+ */
+export function vibeDisabledMcpToolPatterns(
+  servers: readonly McpServerSpec[] | undefined,
+  disabled: readonly string[] | undefined,
+): string[] {
+  if (!servers || servers.length === 0 || !disabled || disabled.length === 0) return [];
+  const patterns = new Set<string>();
+  for (const server of servers) {
+    const prefix = `mcp__${server.name}__`;
+    for (const name of disabled) {
+      if (!name.startsWith(prefix)) continue;
+      const tool = name.slice(prefix.length);
+      if (tool.length === 0) continue;
+      const base = vibeMcpDisplayName(server.name, tool).replace(/[^A-Za-z0-9_]/g, "\\$&");
+      patterns.add(`re:${base}(_[0-9a-f]{8,64})?`);
+    }
+  }
+  return [...patterns];
+}
+
 /** Build `TurnStartParams.message` / `TurnSteerParams.message` content blocks. */
 export function buildVibeMessageBlocks(
   prompt: string,

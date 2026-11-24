@@ -16,6 +16,12 @@
  *   the user's global `vibe` CLI default.
  * - Vibe's native `task` subagent tool is always disabled (`disabledTools`) so
  *   delegation runs through Moxen's tracked `delegate` threads.
+ * - Per-tool MCP exclusions ride the same `disabledTools` filter as patterns
+ *   over Vibe's published `<server>_<tool>` names (`vibeDisabledMcpToolPatterns`),
+ *   which removes the tool from both listing and invocation.
+ * - `turn/completed` is correlated by session and server turn id; an event
+ *   that arrives before the turn is identified is buffered, never applied
+ *   blindly to the open turn.
  */
 import { randomUUID } from "node:crypto";
 import os from "node:os";
@@ -90,6 +96,7 @@ import {
   VIBE_ALWAYS_DISABLED_TOOLS,
   VIBE_METHODS,
   vibeApprovalPolicyForRuntimeMode,
+  vibeDisabledMcpToolPatterns,
   vibeMcpServersOf,
 } from "./protocol.js";
 import { SpawnVibeTransport, type VibeTransport } from "./transport.js";
@@ -193,6 +200,10 @@ interface VibeSession {
   readonly parkedApprovals: Map<ApprovalRequestId, ParkedVibeApproval>;
   readonly parkedInputs: Map<ApprovalRequestId, ParkedVibeUserInput>;
   readonly pendingSteers: PendingSteer[];
+  /** A policy update not yet acknowledged; local mode only follows the ack. */
+  pendingPolicy: { readonly mode: RuntimeMode; readonly promise: Promise<void> } | null;
+  /** turn/completed events that arrived before the open turn was identified. */
+  readonly pendingCompletions: Map<string, Record<string, unknown>>;
   readonly usage: VibeUsageAccumulator;
   backgroundProcesses: Map<string, BackgroundTaskSummary>;
   lastWindows: RateLimitWindow[];
@@ -253,6 +264,9 @@ function mergeDisabledTools(input: ProviderSessionStartInput): string[] {
   for (const raw of input.disabledNativeTools ?? []) {
     const name = raw.trim();
     if (name.length > 0) disabled.add(name);
+  }
+  for (const pattern of vibeDisabledMcpToolPatterns(input.mcpServers, input.disabledMcpTools)) {
+    disabled.add(pattern);
   }
   return [...disabled];
 }
@@ -471,6 +485,8 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             parkedApprovals: new Map(),
             parkedInputs: new Map(),
             pendingSteers: [],
+            pendingPolicy: null,
+            pendingCompletions: new Map(),
             usage: new VibeUsageAccumulator(),
             backgroundProcesses: new Map(),
             lastWindows: [],
@@ -892,18 +908,38 @@ export class VibeDriver implements ProviderAdapter<CliError> {
       }
       case VIBE_METHODS.turnStarted: {
         const turnMeta = asRecord(rec["turn"]);
+        const sid = asNonEmptyString(turnMeta?.["id"]);
+        if (!sid || !this.notificationMatchesSession(session, rec)) break;
         const running = this.runningTurn(session);
-        if (running && turnMeta) {
-          const sid = asNonEmptyString(turnMeta["id"]);
-          if (sid) running.serverTurnId = sid;
-          const inputId = asNonEmptyString(turnMeta["inputEntryId"]);
+        if (running && running.serverTurnId === null) {
+          running.serverTurnId = sid;
+          const inputId = asNonEmptyString(turnMeta!["inputEntryId"]);
           if (inputId) running.inputEntryId = inputId;
+          this.drainBufferedCompletion(session, running);
         }
         break;
       }
       case VIBE_METHODS.turnCompleted: {
         const turnMeta = asRecord(rec["turn"]);
-        if (turnMeta) this.onTurnCompleted(session, turnMeta);
+        if (!turnMeta || !this.notificationMatchesSession(session, rec)) break;
+        const running = this.runningTurn(session);
+        if (!running) break;
+        const sid = asNonEmptyString(turnMeta["id"]);
+        if (running.serverTurnId === null) {
+          // The start response has not identified the turn yet: hold the
+          // event until it has, then apply it only if it names this turn.
+          if (sid) {
+            session.pendingCompletions.set(sid, turnMeta);
+            if (session.pendingCompletions.size > 16) {
+              const oldest = session.pendingCompletions.keys().next().value;
+              if (oldest !== undefined) session.pendingCompletions.delete(oldest);
+            }
+          }
+          break;
+        }
+        // A stale or foreign completion must never settle the open turn.
+        if (sid !== running.serverTurnId) break;
+        this.onTurnCompleted(session, turnMeta);
         break;
       }
       case VIBE_METHODS.statsUpdated: {
@@ -956,8 +992,11 @@ export class VibeDriver implements ProviderAdapter<CliError> {
         const source = asNonEmptyString(entry["source"]);
         const text = extractVibeMessageText(entry);
         if (source === "turn_steer") {
-          const match = session.pendingSteers.find((s) => !s.confirmed && s.text === text)
-            ?? session.pendingSteers.find((s) => !s.confirmed);
+          // Vibe echoes the steer under its `clientUserMessageId` as the entry
+          // id (verified on v3.1.4); exact text is the fallback for a server
+          // that does not. Never confirm an unrelated steer blindly.
+          const match = session.pendingSteers.find((s) => !s.confirmed && s.id === id)
+            ?? session.pendingSteers.find((s) => !s.confirmed && s.text === text);
           if (match) match.confirmed = true;
         } else if (!turn.inputEntryId) {
           turn.inputEntryId = id;
@@ -1129,6 +1168,19 @@ export class VibeDriver implements ProviderAdapter<CliError> {
         });
       }
     }
+  }
+
+  /** Notifications carry `sessionId`; a stale one from a handed-off session is ignored. */
+  private notificationMatchesSession(session: VibeSession, rec: Record<string, unknown>): boolean {
+    const sid = asNonEmptyString(rec["sessionId"]);
+    return sid === null || sid === session.vibeSessionId;
+  }
+
+  /** Apply a completion buffered before the turn was identified, if it names this turn. */
+  private drainBufferedCompletion(session: VibeSession, turn: VibeTranscriptTurn): void {
+    const buffered = turn.serverTurnId ? session.pendingCompletions.get(turn.serverTurnId) : undefined;
+    session.pendingCompletions.clear();
+    if (buffered && turn.status === "running") this.onTurnCompleted(session, buffered);
   }
 
   private onTurnCompleted(session: VibeSession, turnMeta: Record<string, unknown>): void {
@@ -1321,101 +1373,123 @@ export class VibeDriver implements ProviderAdapter<CliError> {
         };
         session.transcript.push(turn);
         session.pendingSteers.length = 0;
+        session.pendingCompletions.clear();
 
-        // Native `/compact` inside a turn.
-        if (isCompactCommand(input.prompt)) {
-          try {
-            const compacted = asRecord(
-              await session.peer.request(
-                VIBE_METHODS.sessionCompact,
-                { sessionId: session.vibeSessionId, extraInstructions: "" },
-                120_000,
-              ),
-            );
-            this.adoptSessionState(session, asRecord(compacted?.["state"]));
-            session.usage.resetBaseline();
-            const summary = asNonEmptyString(compacted?.["summary"]) ?? "Compacted conversation history.";
-            this.publish({
-              type: "session.notice",
-              provider: this.provider,
-              threadId: session.threadId,
-              turnId,
-              notice: "compacted",
-              title: "Compacted conversation history",
-              detail: summary,
-            });
-            const usage = session.usage.take(turnId);
-            settleAndPublishTurn({
-              open: turn,
-              waiters: session.waiters,
-              status: "completed",
-              apply: (openTurn) => {
-                openTurn.status = "completed";
-                openTurn.text = summary;
-                openTurn.usage = usage;
-                return { status: "completed" as const, text: summary, usage, error: null };
-              },
-              publish: (event) => this.publish(event),
-              event: (id) => terminalTurnEvent(this.provider, session.threadId, id, "completed", { summary }),
-            });
-            return { threadId: session.threadId, turnId };
-          } catch (cause) {
-            const msg = cause instanceof Error ? cause.message : String(cause);
-            this.failTurn(session, turn, msg);
-            return { threadId: session.threadId, turnId };
+        try {
+          // Native `/compact` inside a turn.
+          if (isCompactCommand(input.prompt)) {
+            try {
+              const compacted = asRecord(
+                await session.peer.request(
+                  VIBE_METHODS.sessionCompact,
+                  { sessionId: session.vibeSessionId, extraInstructions: "" },
+                  120_000,
+                ),
+              );
+              this.adoptSessionState(session, asRecord(compacted?.["state"]));
+              session.usage.resetBaseline();
+              const summary = asNonEmptyString(compacted?.["summary"]) ?? "Compacted conversation history.";
+              this.publish({
+                type: "session.notice",
+                provider: this.provider,
+                threadId: session.threadId,
+                turnId,
+                notice: "compacted",
+                title: "Compacted conversation history",
+                detail: summary,
+              });
+              const usage = session.usage.take(turnId);
+              settleAndPublishTurn({
+                open: turn,
+                waiters: session.waiters,
+                status: "completed",
+                apply: (openTurn) => {
+                  openTurn.status = "completed";
+                  openTurn.text = summary;
+                  openTurn.usage = usage;
+                  return { status: "completed" as const, text: summary, usage, error: null };
+                },
+                publish: (event) => this.publish(event),
+                event: (id) => terminalTurnEvent(this.provider, session.threadId, id, "completed", { summary }),
+              });
+              return { threadId: session.threadId, turnId };
+            } catch (cause) {
+              const msg = cause instanceof Error ? cause.message : String(cause);
+              this.failTurn(session, turn, msg);
+              return { threadId: session.threadId, turnId };
+            }
           }
-        }
 
-        // Apply mid-session model/effort switch with `sessionOnly: true`.
-        const nextModel = resolveVibeModel(input.modelSelection?.model);
-        const nextEffort = extractEffortOption(input.modelSelection);
-        if ((nextModel && nextModel !== session.model) || (nextEffort && nextEffort !== session.effort)) {
-          await session.peer.request(
-            VIBE_METHODS.configModelWrite,
-            {
-              sessionId: session.vibeSessionId,
-              ...(nextModel ? { modelAlias: nextModel } : {}),
-              ...(nextEffort ? { reasoningEffort: nextEffort } : {}),
-              sessionOnly: true,
-            },
-            this.requestTimeoutMs,
-          );
-          if (nextModel) session.model = nextModel;
-          if (nextEffort) session.effort = nextEffort;
-        }
-
-        // Apply mid-session runtimeMode change.
-        if (input.runtimeMode && input.runtimeMode !== session.runtimeMode) {
-          session.runtimeMode = input.runtimeMode;
-          if (!session.isolation) {
+          // Apply mid-session model/effort switch with `sessionOnly: true`.
+          const nextModel = resolveVibeModel(input.modelSelection?.model);
+          const nextEffort = extractEffortOption(input.modelSelection);
+          if ((nextModel && nextModel !== session.model) || (nextEffort && nextEffort !== session.effort)) {
             await session.peer.request(
-              VIBE_METHODS.sessionApprovalPolicyUpdate,
+              VIBE_METHODS.configModelWrite,
               {
                 sessionId: session.vibeSessionId,
-                approvalPolicy: vibeApprovalPolicyForRuntimeMode(input.runtimeMode),
+                ...(nextModel ? { modelAlias: nextModel } : {}),
+                ...(nextEffort ? { reasoningEffort: nextEffort } : {}),
+                sessionOnly: true,
               },
               this.requestTimeoutMs,
             );
+            if (nextModel) session.model = nextModel;
+            if (nextEffort) session.effort = nextEffort;
           }
+
+          // A mode change only takes effect once the server acknowledges the
+          // matching approval policy; a turn never starts under a policy the
+          // server refused or has not confirmed.
+          const targetMode = input.runtimeMode ?? session.pendingPolicy?.mode ?? session.runtimeMode;
+          await this.ensureRuntimeMode(session, targetMode);
+
+          let startResult: Record<string, unknown> | null;
+          try {
+            startResult = asRecord(
+              await session.peer.request(
+                VIBE_METHODS.turnStart,
+                {
+                  sessionId: session.vibeSessionId,
+                  message: buildVibeMessageBlocks(input.prompt, input.images),
+                },
+                this.requestTimeoutMs,
+              ),
+            );
+          } catch (cause) {
+            if (cause instanceof CliError && cause.code === "PEER_REQUEST_TIMEOUT") {
+              // The server may have begun a turn we can neither name nor
+              // interrupt: close the peer rather than leave it running.
+              this.invalidateSession(session);
+              throw new CliError(
+                "VIBE_TURN_START_FAILED",
+                "Mistral Vibe turn start timed out; the session was closed because the server may still be running a turn Moxen cannot identify.",
+                { cause },
+              );
+            }
+            throw cause;
+          }
+          const serverTurn = asRecord(startResult?.["turn"]);
+          const serverTurnId = asNonEmptyString(serverTurn?.["id"]);
+          if (!serverTurnId) {
+            this.invalidateSession(session);
+            throw new CliError(
+              "VIBE_TURN_START_FAILED",
+              "vibe-app-server returned no turn id; the session was closed because the turn cannot be identified or interrupted.",
+            );
+          }
+          turn.serverTurnId = serverTurnId;
+          const inputEntryId = asNonEmptyString(serverTurn?.["inputEntryId"]);
+          if (inputEntryId) turn.inputEntryId = inputEntryId;
+          this.drainBufferedCompletion(session, turn);
+
+          return { threadId: session.threadId, turnId };
+        } catch (cause) {
+          // A startup failure must never leave a running transcript row (and
+          // its parked waiters) behind.
+          this.failTurn(session, turn, cause instanceof Error ? cause.message : String(cause));
+          throw cause;
         }
-
-        const startResult = asRecord(
-          await session.peer.request(
-            VIBE_METHODS.turnStart,
-            {
-              sessionId: session.vibeSessionId,
-              message: buildVibeMessageBlocks(input.prompt, input.images),
-            },
-            this.requestTimeoutMs,
-          ),
-        );
-        const serverTurn = asRecord(startResult?.["turn"]);
-        const serverTurnId = asNonEmptyString(serverTurn?.["id"]);
-        if (serverTurnId) turn.serverTurnId = serverTurnId;
-        const inputEntryId = asNonEmptyString(serverTurn?.["inputEntryId"]);
-        if (inputEntryId) turn.inputEntryId = inputEntryId;
-
-        return { threadId: session.threadId, turnId };
       },
       catch: (cause) => toCliError("VIBE_TURN_START_FAILED", "Could not start Mistral Vibe turn", cause),
     });
@@ -1442,7 +1516,9 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             sessionId: session.vibeSessionId,
             expectedTurnId: running.serverTurnId,
             message: buildVibeMessageBlocks(text, images),
-            ...(steerId ? { clientUserMessageId: steerId } : {}),
+            // Vibe echoes this id as the steer entry's id, so the
+            // acknowledgement can be scoped to this exact message.
+            clientUserMessageId: id,
           },
           this.requestTimeoutMs,
         );
@@ -1463,20 +1539,69 @@ export class VibeDriver implements ProviderAdapter<CliError> {
   setRuntimeMode = (threadId: ThreadId, mode: RuntimeMode): void => {
     const session = this.sessions.get(threadId);
     if (!session || session.closed) return;
-    session.runtimeMode = mode;
-    if (!session.isolation) {
-      void session.peer
-        .request(
-          VIBE_METHODS.sessionApprovalPolicyUpdate,
-          {
-            sessionId: session.vibeSessionId,
-            approvalPolicy: vibeApprovalPolicyForRuntimeMode(mode),
-          },
-          this.requestTimeoutMs,
-        )
-        .catch(() => {});
+    if (session.isolation) {
+      session.runtimeMode = mode;
+      return;
     }
+    if (mode === session.runtimeMode && !session.pendingPolicy) return;
+    // The error is kept in pendingPolicy, not swallowed: the next turn start
+    // retries the update and refuses to run until the server acknowledges it.
+    void this.applyRuntimeMode(session, mode).catch(() => undefined);
   };
+
+  /**
+   * Bring the session to `mode`, waiting for any in-flight policy update
+   * first. The local mode only ever follows a server acknowledgement, so a
+   * downgrade the server refused can never let a turn run under the old
+   * wider policy: the retry below throws and the turn start fails instead.
+   */
+  private async ensureRuntimeMode(session: VibeSession, mode: RuntimeMode): Promise<void> {
+    const pending = session.pendingPolicy;
+    if (pending) {
+      await pending.promise.catch(() => undefined);
+      if (session.pendingPolicy === pending && mode === session.runtimeMode) {
+        // The pending change failed and is no longer asked for.
+        session.pendingPolicy = null;
+        return;
+      }
+    }
+    if (session.runtimeMode !== mode) await this.applyRuntimeMode(session, mode);
+  }
+
+  private applyRuntimeMode(session: VibeSession, mode: RuntimeMode): Promise<void> {
+    if (session.isolation) {
+      // Isolated sessions always run `ask`; the mode only gates Moxen's own
+      // auto-approval, so no server acknowledgement is needed.
+      session.runtimeMode = mode;
+      return Promise.resolve();
+    }
+    const promise = session.peer
+      .request(
+        VIBE_METHODS.sessionApprovalPolicyUpdate,
+        {
+          sessionId: session.vibeSessionId,
+          approvalPolicy: vibeApprovalPolicyForRuntimeMode(mode),
+        },
+        this.requestTimeoutMs,
+      )
+      .then(() => {
+        // A superseded update must not roll the local mode back.
+        if (session.pendingPolicy?.promise !== promise) return;
+        session.runtimeMode = mode;
+        session.pendingPolicy = null;
+      });
+    session.pendingPolicy = { mode, promise };
+    return promise;
+  }
+
+  /** Close a session whose server state can no longer be trusted or identified. */
+  private invalidateSession(session: VibeSession): void {
+    if (session.closed) return;
+    session.closed = true;
+    this.sessions.delete(session.threadId);
+    this.clearParkedCallbacks(session);
+    session.peer.close();
+  }
 
   awaitTurn = (threadId: ThreadId, turnId: TurnId, signal?: AbortSignal): Promise<VibeTurnOutcome> => {
     const session = this.sessions.get(threadId);
@@ -2024,6 +2149,24 @@ export class VibeDriver implements ProviderAdapter<CliError> {
       try: async () => {
         const session = this.sessions.get(threadId);
         if (!session) return;
+        // Settle the open turn and its waiters before closing: a waiter
+        // parked on awaitTurn must never hang on a session that is going away.
+        const running = this.runningTurn(session);
+        if (running) {
+          const usage = session.usage.take(running.id);
+          settleAndPublishTurn({
+            open: running,
+            waiters: session.waiters,
+            status: "interrupted",
+            apply: (turn) => {
+              turn.status = "interrupted";
+              turn.usage = usage;
+              return { status: "interrupted" as const, text: turn.text, usage, error: null };
+            },
+            publish: (event) => this.publish(event),
+            event: (turnId) => terminalTurnEvent(this.provider, session.threadId, turnId, "interrupted"),
+          });
+        }
         session.closed = true;
         this.sessions.delete(threadId);
         this.clearParkedCallbacks(session);
