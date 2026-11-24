@@ -1565,10 +1565,22 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   let answered = false;
   // Stopped by an interrupt: the provider may well have read the prompt, so its handle stays.
   let interrupted = false;
+  // Final observed usage of an interrupted run (LOCAL-009): captured at the
+  // abort signal, before the driver's interrupt settles its turn and the open
+  // turn's live usage is gone. Persisted by both interruption paths so spend
+  // the ledger can still retain is never lost.
+  let finalObservedUsage: TurnUsage | null = null;
+  const captureFinalObservedUsage = (): void => {
+    if (finalObservedUsage === null) finalObservedUsage = driver.liveTurnUsage?.(threadId) ?? null;
+  };
   store.trackRunning(storeTurnId, () => controller.abort());
   const liveContext = setInterval(readLive, LIVE_CONTEXT_MS);
   liveContext.unref?.();
   const onAbort = (): void => {
+    // The executor's abort listener registers before the driver's waiters, so
+    // this runs before `interruptTurn` settles the driver turn: the last
+    // observed live usage is still readable here.
+    captureFinalObservedUsage();
     // Detached, as before — but a failed interrupt is reported instead of
     // dropped: `runFork` leaves nobody to hear it.
     void Effect.runPromise(driver.interruptTurn(threadId)).catch((cause) => {
@@ -1612,6 +1624,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       // unless a newer turn has since taken the thread: its run is not ours.
       const turns = await store.readTurns(threadId);
       if (!turns.some((turn) => turn.id !== storeTurnId && turn.status === "running")) {
+        captureFinalObservedUsage();
         await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       }
     }
@@ -1640,12 +1653,20 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     await recordTools.saveUnfinishedText();
     if (cause instanceof CliError && cause.code === "TURN_ABORTED") {
       interrupted = true;
+      // The abort bypassed the normal outcome path: keep the final observed
+      // usage (captured at the abort, before the driver interrupt settles it)
+      // on the stored turn so interrupted spend stays in the ledger
+      // (LOCAL-009).
+      const observed = finalObservedUsage ?? driver.liveTurnUsage?.(threadId) ?? null;
       // As in `settleTurn`: the checkpoint and the context reading land
       // before the outcome, so whoever sees the turn stop sees both — but
       // bounded, so a hung checkpoint cannot hold the outcome (MXN-290 review).
       await recordPreOutcome(store, driver, args, cwd, pre);
       const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
       const interruption = await interruptTurn(store, threadId, storeTurnId).catch(() => null);
+      if (observed !== null) {
+        await store.updateTurn(threadId, storeTurnId, { usage: observed }).catch(() => undefined);
+      }
       // Already terminal: the interrupt promoted nothing, so run the copies' promotion here.
       if (interruption === null || interruption.interrupted === false) await runStrandedRedelivery(args, copies);
       return;
@@ -1859,6 +1880,13 @@ async function settleTurn(
     const live = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
     const reason = live?.status === "running" ? "Moxen or the provider stopped this run before it finished." : undefined;
     await interruptTurn(store, threadId, storeTurnId, undefined, reason ? { reason } : {}).catch(() => undefined);
+    // The driver's final observed usage (spend it booked for the interrupted
+    // turn) must reach the stored turn too: the ledger sums stored turn usage,
+    // so dropping it here would make a later priced turn erase this spend
+    // (LOCAL-009).
+    if (outcome.usage) {
+      await store.updateTurn(threadId, storeTurnId, { usage: outcome.usage }).catch(() => undefined);
+    }
   } else {
     await failTurn(store, threadId, storeTurnId, {
       error: outcome.error ?? "Turn failed.",

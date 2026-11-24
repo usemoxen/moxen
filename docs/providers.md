@@ -85,11 +85,16 @@ negotiates any other protocol version is refused loudly
   sends best-effort `session/close` on session teardown, adopts provider titles
   from `session_info_update` (`sessionTitle`), and refreshes cached agent
   profiles live when `providers.acp.agents` changes. For Antigravity, Moxen
-  wires mid-turn steering (`steerTurn` via concurrent `session/prompt`; a steer
-  refused before its acknowledgement window is handed back to the caller —
-  settling the turn from the stored main result if it removed the last pending
-  prompt — while any failure after acknowledgment fails the turn and sends
-  `session/cancel` exactly like a main prompt failure) and
+  wires mid-turn steering (`steerTurn` via concurrent `session/prompt`; the
+  main prompt's terminal outcome — success or error, with its usage and
+  carried instructions — is held while a sibling steer is pending and
+  reconciled by the last sibling to exit, whatever the order. A steer refused
+  before its acknowledgement window is handed back to the caller and the turn
+  keeps running on the main prompt, while any failure after acknowledgment
+  fails the turn and sends `session/cancel` exactly like a main prompt failure,
+  abandoning the surviving prompts so the next send drains them — bounded, so
+  a silent agent cannot hold the drain forever — and their trailing output
+  never leaks into the next turn) and
   `/compact` compaction (`session.notice: "compacted"`), merges local
   `.claude/skills` / `.agents/skills` with live `available_commands_update` in
   `skillInventory`, and computes estimated `contextBreakdown` from the live
@@ -107,13 +112,18 @@ negotiates any other protocol version is refused loudly
   own models across every client.
 - **Context, token & plan usage**: `AcpDriver` consumes ACP `usage_update`
   notifications for live context-window readings (`contextUsage`; its `cost` is
-  the session's cumulative cost per ACP v1, tracked against a per-session
-  baseline so only the unaccounted delta is added on top of settled turns; the
-  baseline is a high-water mark that never decreases — 0 for a new session,
-  unknown until the first pre-turn reading on a resumed session, in which case
-  no delta is reported — and at settle the turn's cost is the prompt result's
-  per-turn cost, or the measured cumulative delta when the result carries none,
-  so observed spend is persisted exactly once) and
+  the session's cumulative cost per ACP v1. Each turn keeps the high-water mark
+  of the readings observed while it was open — a cached reading from a previous
+  turn is never evidence about this turn's spend — and a reading with no turn
+  open is reconciled out-of-turn: it establishes an unknown baseline (a resumed
+  session's counter origin; post-resume prompt-result costs never do) and any
+  growth above a known baseline is absorbed to no turn, never charged to an
+  arbitrary one. At settle, the turn's cost is the in-turn counter delta — the
+  spec-defined cumulative counter wins over the prompt result's vendor-specific
+  cost field — or the result cost when the counter was silent in-turn; a
+  baseline stays unknown until an out-of-turn reading, and no delta is reported
+  then. The accounted baseline advances only by spend actually booked, so the
+  booked turns total the counter's movement) and
   per-turn `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
   Moxen also probes `agy --print /usage --output-format json` and
   `agy --print /credits --output-format json` (zero-turn local slash commands,

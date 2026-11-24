@@ -256,6 +256,47 @@ export interface ResponsesWsSessionOptions {
   readonly now?: (() => number) | undefined;
 }
 
+/** Stream iterator as returned by `ResponsesWsSession.stream`: `return()` frees a waiting owner at once. */
+export interface ResponsesWsStream extends AsyncIterableIterator<ModelEvent> {
+  next(...args: [] | [undefined]): Promise<IteratorResult<ModelEvent, unknown>>;
+  return?(value?: unknown): Promise<IteratorResult<ModelEvent, unknown>>;
+  throw?(error?: unknown): Promise<IteratorResult<ModelEvent, unknown>>;
+}
+
+/**
+ * Iterator wrapper around one owned stream (LOCAL-009). `next()`/`throw()`
+ * delegate to the underlying generator; `return()` first actively interrupts
+ * the pending read (a generator's own `return()` is queued behind an
+ * unresolved `next()`, so it cannot free an owner waiting on a silent
+ * endpoint) and then finishes the generator. A stream that is still queued
+ * (not the owner) relies on the caller's abort contract or the next ownership
+ * handoff instead.
+ */
+class ResponsesWsStreamHandle implements ResponsesWsStream {
+  constructor(
+    private readonly session: ResponsesWsSession,
+    private readonly inner: AsyncGenerator<ModelEvent>,
+    private readonly owner: object,
+  ) {}
+
+  [Symbol.asyncIterator](): ResponsesWsStream {
+    return this;
+  }
+
+  next(...args: [] | [undefined]): Promise<IteratorResult<ModelEvent, unknown>> {
+    return this.inner.next(...args);
+  }
+
+  throw(error?: unknown): Promise<IteratorResult<ModelEvent, unknown>> {
+    return this.inner.throw(error);
+  }
+
+  async return(value?: unknown): Promise<IteratorResult<ModelEvent, unknown>> {
+    this.session.interruptOwnedRead(this.owner);
+    return await this.inner.return(value);
+  }
+}
+
 /**
  * Per-session persistent WebSocket connection to OpenAI's Responses API.
  * Owns one open socket and tracks the last completed `response.id` + transcript
@@ -274,6 +315,17 @@ export class ResponsesWsSession {
   private readonly streamWaiters: Array<{ wake: () => void }> = [];
   /** Socket currently mid-handshake; closed by close()/owner-abort so it can never send after shutdown. */
   private connectingSocket: ResponsesSocket | null = null;
+  /**
+   * Rejects the owned stream's pending frame read, so an abandoned owner's
+   * `return()` can interrupt a read that may never complete (LOCAL-009).
+   */
+  private readCancel: (() => void) | null = null;
+  /**
+   * Owner whose stream is being actively cancelled (a consumer `return()`),
+   * marked BEFORE any socket is closed so close handlers classify the
+   * shutdown as cancellation, not a transport failure (LOCAL-009).
+   */
+  private abandoning: object | null = null;
   private connectedUrl: string | null = null;
   private connectedApiKey: string | undefined = undefined;
   private connectedAt = 0;
@@ -369,6 +421,21 @@ export class ResponsesWsSession {
       throw new ResponsesWsUpgradeError(cause instanceof Error ? cause.message : String(cause));
     }
 
+    // The factory itself may have run synchronously — a custom factory that
+    // called close() (or observed the abort signal) before returning a socket
+    // that never opens: recheck and close the returned socket right away,
+    // without installing a handshake, so it cannot sit until the connect
+    // timeout and the failure is classified as the cancellation it is
+    // (LOCAL-009).
+    if (this.closed || signal?.aborted) {
+      try {
+        socket.close();
+      } catch {
+        // Best-effort.
+      }
+      throw abortError();
+    }
+
     // Track the connecting socket so close() and owner-abort can shut it down
     // even before the handshake continuation runs.
     this.connectingSocket = socket;
@@ -417,9 +484,9 @@ export class ResponsesWsSession {
         } catch {
           // Best-effort.
         }
-        // A shutdown or abort during the handshake is a cancellation, not an
-        // endpoint failure.
-        reject(this.closed || signal?.aborted ? abortError() : err);
+        // A shutdown, an abort, or an active owner cancellation during the
+        // handshake is a cancellation, not an endpoint failure.
+        reject(this.closed || signal?.aborted || this.abandoning !== null ? abortError() : err);
       };
       const onOpen = () => {
         if (settled) return;
@@ -428,10 +495,22 @@ export class ResponsesWsSession {
         resolve();
       };
       const onError = () => {
+        if (signal?.aborted || this.closed || this.abandoning !== null) {
+          fail(abortError());
+          return;
+        }
         this.disabled = true;
         fail(new ResponsesWsUpgradeError("Could not open Responses WebSocket connection."));
       };
       const onClose = (event: { readonly code?: number; readonly reason?: string }) => {
+        // A close dispatched while the request is being cancelled (the fake
+        // in the tests, and some socket implementations, dispatch
+        // synchronously) must not disable WebSockets for the session
+        // (LOCAL-009).
+        if (signal?.aborted || this.closed || this.abandoning !== null) {
+          fail(abortError());
+          return;
+        }
         this.disabled = true;
         fail(new ResponsesWsUpgradeError(`Responses WebSocket closed during handshake (${event.code ?? 0}).`));
       };
@@ -466,7 +545,27 @@ export class ResponsesWsSession {
     return delta;
   }
 
-  async *stream(
+  /**
+   * Start a stream on this session (exclusive while it runs; a second stream
+   * queues behind it). The result is an async iterator whose `return()`
+   * actively interrupts a pending read and releases ownership, so abandoning a
+   * stream that is waiting for its first frame never starves the queue behind
+   * it: an async generator's own `return()` would be queued behind its
+   * unresolved `next()` and could not free the owner until the endpoint spoke
+   * (LOCAL-009).
+   */
+  stream(
+    request: ChatRequest,
+    buildFullBody: (replayReasoning: boolean) => Record<string, unknown>,
+    replayReasoning: boolean,
+  ): ResponsesWsStream {
+    const owner = {};
+    const inner = this.runStream(owner, request, buildFullBody, replayReasoning);
+    return new ResponsesWsStreamHandle(this, inner, owner);
+  }
+
+  private async *runStream(
+    owner: object,
     request: ChatRequest,
     buildFullBody: (replayReasoning: boolean) => Record<string, unknown>,
     replayReasoning: boolean,
@@ -497,7 +596,6 @@ export class ResponsesWsSession {
       });
     }
     if (this.closed || request.signal?.aborted) throw abortError();
-    const owner = {};
     this.streamOwner = owner;
     // Explicit owner cleanup on request abort or session close even while the
     // generator is suspended: a dropped suspended iterator must not hold the
@@ -521,8 +619,38 @@ export class ResponsesWsSession {
       yield* this.streamOwned(owner, request, buildFullBody, replayReasoning);
     } finally {
       request.signal?.removeEventListener("abort", onOwnerAbort);
+      if (this.abandoning === owner) this.abandoning = null;
       this.releaseStream(owner);
     }
+  }
+
+  /**
+   * Actively interrupt the owned stream: mark the owner as being cancelled
+   * BEFORE closing anything so close handlers classify it as cancellation,
+   * reject its pending frame read, and release ownership (LOCAL-009). The
+   * cancellation mark is cleared before the queued waiters are woken, so a
+   * stream that takes over right away never misreads the old owner's
+   * shutdown as its own cancellation. Only `ResponsesWsStreamHandle` calls
+   * this, for the stream it wraps.
+   */
+  interruptOwnedRead(owner: object): void {
+    if (this.streamOwner !== owner) return;
+    this.abandoning = owner;
+    const connecting = this.connectingSocket;
+    this.resetSocket();
+    this.connectingSocket = null;
+    if (connecting) {
+      try {
+        connecting.close(1000, "client reset");
+      } catch {
+        // Best-effort.
+      }
+    }
+    const readCancel = this.readCancel;
+    this.readCancel = null;
+    this.abandoning = null;
+    this.releaseStream(owner);
+    readCancel?.();
   }
 
   private releaseStream(owner: object): void {
@@ -654,12 +782,38 @@ export class ResponsesWsSession {
         }
 
         let retryReason: "reconnect" | "full-chain" | null = null;
+        // Cancellation settled anywhere (an aborted request, a released owner
+        // token, an active return()): no buffered frame — terminal or not — may
+        // be consumed or yielded as this stream's output afterwards; the close
+        // it triggered was this stream's own cancellation, never a transport
+        // failure (LOCAL-009).
+        const cancelled = (): boolean =>
+          request.signal?.aborted === true || !this.ownsStream(owner) || this.abandoning === owner;
 
         while (reducer.finish === null) {
+          if (cancelled()) {
+            if (this.ownsSocket(owner, socket)) this.resetSocket();
+            throw abortError();
+          }
           if (queue.length === 0) {
-            await new Promise<void>((resolve) => {
+            await new Promise<void>((resolve, reject) => {
               wake = resolve;
+              // An actively abandoned owner interrupts this read instead of
+              // waiting for a socket that may never speak (LOCAL-009).
+              this.readCancel = () => {
+                this.readCancel = null;
+                wake = null;
+                reject(abortError());
+              };
             });
+            this.readCancel = null;
+            // The interrupt (or one it synchronously closed) may have woken
+            // this read with a buffered "closed" frame: never consume it as a
+            // transport failure — cancellation wins.
+            if (cancelled()) {
+              if (this.ownsSocket(owner, socket)) this.resetSocket();
+              throw abortError();
+            }
           }
           const frame = queue.shift()!;
           if (frame.kind === "abort") {
@@ -676,6 +830,10 @@ export class ResponsesWsSession {
             throw new ChatHttpError(frame.message, null, false, true);
           }
           const text = await decodeSocketData(frame.data);
+          if (cancelled()) {
+            if (this.ownsSocket(owner, socket)) this.resetSocket();
+            throw abortError();
+          }
           if (!text) continue;
           let event: Record<string, unknown> | null;
           try {
@@ -688,6 +846,10 @@ export class ResponsesWsSession {
           try {
             const events = reducer.push(event);
             for (const modelEvent of events) {
+              if (cancelled()) {
+                if (this.ownsSocket(owner, socket)) this.resetSocket();
+                throw abortError();
+              }
               emitted = true;
               yield modelEvent;
             }
@@ -716,6 +878,15 @@ export class ResponsesWsSession {
         terminalConsumed = reducer.finish !== null;
 
         if (retryReason !== null) continue;
+
+        // A cancellation that raced the terminal frame (an abort after the
+        // response completed, before the suspended consumer resumed) must not
+        // deliver a buffered finish as this stream's output, and must not
+        // record the continuation chain for a dead stream (LOCAL-009).
+        if (cancelled()) {
+          if (this.ownsStream(owner)) this.resetChain();
+          throw abortError();
+        }
 
         if (reducer.completed && reducer.responseId !== null) {
           // Continuation writes are conditional on ownership: a stream that lost

@@ -899,3 +899,175 @@ describe("ResponsesWsSession stream ownership round 3 (LOCAL-009)", () => {
     wsSession.close();
   });
 });
+
+describe("ResponsesWsSession stream ownership round 4 (LOCAL-009)", () => {
+  const wsQuirks = () => quirks({ chatgptOAuth: true, sendReasoning: true });
+  const transcript: TranscriptMessage[] = [{ role: "user", content: "one" }];
+  const req = (
+    wsSession: ResponsesWsSession,
+    overrides: Partial<ChatRequest> = {},
+  ) =>
+    request(() => { throw new Error("HTTP fallback should not run"); }, {
+      model: "gpt-6.2-sol",
+      transcript,
+      quirks: wsQuirks(),
+      responsesSession: wsSession,
+      ...overrides,
+    });
+  const outcomeOf = (run: Promise<unknown>, ms = 300) =>
+    Promise.race([
+      run.then(
+        () => "completed",
+        (error: unknown) => (error as Error).name ?? String(error),
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), ms)),
+    ]);
+
+  it("classifies an abort during the handshake as cancellation and keeps WebSockets enabled (LOCAL-009)", async () => {
+    const controller = new AbortController();
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        // A socket that never opens, and dispatches `close` synchronously.
+        const socket = new FakeResponsesSocket(() => {});
+        sockets.push(socket);
+        // Abort while the handshake is still pending, before any open event.
+        queueMicrotask(() => controller.abort());
+        return socket;
+      },
+    });
+
+    const outcome = await outcomeOf(collect(req(wsSession, { signal: controller.signal })));
+    expect(outcome).toBe("AbortError");
+    // The cancellation must not disable WebSockets for the rest of the session.
+    expect(wsSession.isDisabled).toBe(false);
+    expect(sockets[0]!.sent).toHaveLength(0);
+    wsSession.close();
+  });
+
+  it("rejects a resumed stream with AbortError when its request aborted after a delta, not a transport failure (LOCAL-009)", async () => {
+    const controller = new AbortController();
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket((_payload, self) => {
+          queueMicrotask(() => {
+            // The stream stalls after one delta and never finishes.
+            self.sendEvent({ type: "response.output_text.delta", delta: "partial" });
+          });
+        });
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    const it = streamResponses(req(wsSession, { signal: controller.signal }))[Symbol.asyncIterator]();
+    expect((await it.next()).value).toEqual({ type: "text.delta", text: "partial" });
+    // Abort while the iterator is suspended after a delta, then resume it.
+    controller.abort();
+    const resumed = await outcomeOf(it.next());
+    expect(resumed).toBe("AbortError");
+    expect(wsSession.isDisabled).toBe(false);
+    // A later stream can still use a WebSocket (the owner token was freed).
+    const socketsBefore = sockets.length;
+    const second = await outcomeOf((async () => {
+      const events: ModelEvent[] = [];
+      for await (const event of streamResponses(req(wsSession))) events.push(event);
+      return events.at(-1);
+    })() as Promise<unknown>);
+    // The fallback-when-disabled case would return "completed" via HTTP; here a
+    // fresh WS attempt means ownership was released cleanly.
+    expect(sockets.length).toBeGreaterThan(socketsBefore);
+    wsSession.close();
+  });
+
+  it("never delivers a buffered terminal frame after the request aborted (LOCAL-009)", async () => {
+    const controller = new AbortController();
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket((_payload, self) => {
+          queueMicrotask(() => {
+            self.sendEvent({ type: "response.output_text.delta", delta: "partial" });
+          });
+        });
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    const it = streamResponses(req(wsSession, { signal: controller.signal }))[Symbol.asyncIterator]();
+    expect((await it.next()).value).toEqual({ type: "text.delta", text: "partial" });
+    // The terminal frame arrives while the iterator is suspended, then the
+    // request aborts: the buffered frame must not be consumed as a finish.
+    sockets[0]!.sendEvent({ type: "response.completed", response: { id: "resp_1", usage: { input_tokens: 1, output_tokens: 1 } } });
+    controller.abort();
+    const resumed = await outcomeOf(it.next());
+    expect(resumed).toBe("AbortError");
+    wsSession.close();
+  });
+
+  it("frees an owner waiting for its first frame when the consumer calls return() without aborting (LOCAL-009)", async () => {
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        // Opens, sends nothing: the endpoint stays silent.
+        const socket = new FakeResponsesSocket(() => {});
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    const iterator = wsSession
+      .stream(req(wsSession), () => ({ model: "gpt-6.2-sol", input: [] }), false);
+    const first = iterator.next();
+    await vi.waitFor(() => expect(sockets[0]!.sent.length).toBeGreaterThanOrEqual(1));
+
+    // return() while the first next() is still waiting on a silent endpoint:
+    // it must actively interrupt the read and release ownership, not queue
+    // behind the unresolved next().
+    const returned = await Promise.race([
+      iterator.return!().then(() => "returned"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ]);
+    expect(returned).toBe("returned");
+    expect(await outcomeOf(first)).toBe("AbortError");
+
+    // A new stream acquires ownership at once (a stale owner would leave it
+    // queued, silent forever): it opens its own socket and sends its request.
+    const queued = (async () => {
+      const out: ModelEvent[] = [];
+      for await (const event of streamResponses(req(wsSession))) out.push(event);
+      return out;
+    })();
+    await vi.waitFor(() => expect(sockets.at(-1)!.sent.length).toBeGreaterThanOrEqual(1), { timeout: 1_000 });
+    expect(sockets.length).toBeGreaterThan(1);
+    expect(sockets.at(-1)).not.toBe(sockets[0]);
+    wsSession.close();
+    await queued.catch(() => undefined);
+  });
+
+  it("closes the socket a factory returned after the factory itself closed the session (LOCAL-009)", async () => {
+    let wsSession!: ResponsesWsSession;
+    const sockets: FakeResponsesSocket[] = [];
+    wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        // The factory closes the session synchronously before returning a
+        // socket that never opens and never announces its death.
+        const socket = new FakeResponsesSocket(() => {});
+        sockets.push(socket);
+        wsSession.close();
+        return socket;
+      },
+    });
+
+    const outcome = await outcomeOf(collect(req(wsSession)));
+    expect(outcome).toBe("AbortError");
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.sent).toHaveLength(0);
+    expect(sockets[0]!.closed).toBe(true);
+  });
+});

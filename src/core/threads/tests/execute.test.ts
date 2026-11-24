@@ -585,6 +585,68 @@ describe("context usage", () => {
     expect(Date.parse(checkpoints[0]!.createdAt)).toBeLessThan(Date.parse(activities[interrupted]!.createdAt));
   });
 
+  /** LOCAL-009: interrupted spend must reach the turn ledger, not only the driver outcome. */
+  it("persists the driver's final observed usage when the turn settles interrupted (LOCAL-009)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-interrupted-usage-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Interrupted usage",
+      modelSelection: { instanceId: "antigravity/default", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      // The provider ended the turn interrupted, and its final observed usage
+      // (spend the driver booked) must survive into the stored turn.
+      awaitTurn: async () =>
+        ({ status: "interrupted", text: "", usage: { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 }, error: null }),
+      streamEvents: Stream.never,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    expect((await store.readTurns(thread.id))[0]?.status).toBe("interrupted");
+    expect((await store.readTurns(thread.id))[0]?.usage?.costUsd).toBeCloseTo(0.42, 9);
+  });
+
+  it("persists the last observed usage when a signal-aborted wait bypasses the normal outcome path (LOCAL-009)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-aborted-usage-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Aborted usage",
+      modelSelection: { instanceId: "antigravity/default", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const observed = { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: (_threadId, _turnId, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new CliError("TURN_ABORTED", "Interrupted before result")), { once: true });
+        }),
+      liveTurnUsage: () => observed,
+      streamEvents: Stream.never,
+    };
+    // Run the turn and stop it while it runs: the store's tracked abort fires
+    // onAbort (capturing the final observed usage before the driver interrupt)
+    // and the aborted wait bypasses the normal outcome path.
+    const running = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    await interruptTurn(store, thread.id, turn.id);
+    await running;
+    expect((await store.readTurns(thread.id))[0]?.status).toBe("interrupted");
+    expect((await store.readTurns(thread.id))[0]?.usage?.costUsd).toBeCloseTo(0.42, 9);
+  });
+
   /** MXN-374: a server shutdown stops provider runs; the ledger must say why, not only "interrupted". */
   it("records why a run stopped outside Moxen's interrupt ended the turn", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-shutdown-interrupt-"));

@@ -2920,3 +2920,287 @@ describe("LOCAL-009 round 3: steer rejection classification, idle activity attri
     await Effect.runPromise(driver.stopAll());
   });
 });
+
+describe("LOCAL-009 round 4: steer reconciliation, cancelled-prompt drain, and counter baseline accounting", () => {
+  const outcomeWithinMs = 500;
+  const settledOutcome = async (driver: AcpDriver, turnId: string) =>
+    await Promise.race([
+      driver.awaitTurn("thread-1", turnId),
+      new Promise<null>((r) => setTimeout(() => r(null), outcomeWithinMs)),
+    ]);
+  const promptScript = () => {
+    const pending: Array<{ resolve: (value: unknown) => void; reject: (cause: unknown) => void }> = [];
+    return {
+      pending,
+      script: {
+        onPrompt: () =>
+          new Promise((resolve, reject) => {
+            pending.push({ resolve, reject });
+          }),
+      } as const,
+    };
+  };
+
+  it("abandons and drains the cancelled main prompt so its trailing output cannot leak into the next turn (LOCAL-009)", async () => {
+    const { pending, script } = promptScript();
+    const transport = new FakeAcpTransport(script);
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "start work" }));
+    void Effect.runPromise(Effect.exit(driver.steerTurn!("thread-1", "focus on tests")));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    // Let the acknowledgement window (50 ms) pass, then fail the steer: the turn
+    // fails and session/cancel is sent while the main prompt is still pending.
+    await new Promise((r) => setTimeout(r, 80));
+    pending[1]!.reject(new Error("late steer failure"));
+    const outcome1 = await driver.awaitTurn("thread-1", sent.turnId);
+    expect(outcome1.status).toBe("failed");
+    await vi.waitFor(() => expect(server.notificationsTo("session/cancel")).toHaveLength(1));
+
+    // The next send must not admit while the cancelled main prompt is draining.
+    const second = Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "turn two" }));
+    await new Promise((r) => setTimeout(r, 20));
+    // A trailing chunk from the cancelled main prompt lands on the session.
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "OLD MAIN OUTPUT" } });
+    // The agent only now acknowledges the cancellation.
+    pending[0]!.resolve({ stopReason: "cancelled" });
+    const t2 = await second;
+    pending[2]!.resolve({ stopReason: "end_turn" });
+    const outcome2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(outcome2.status).toBe("completed");
+    expect(outcome2.text).not.toContain("OLD MAIN OUTPUT");
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("bounds the cancelled-prompt drain when the agent never acknowledges session/cancel (LOCAL-009)", async () => {
+    const { pending, script } = promptScript();
+    const transport = new FakeAcpTransport(script);
+    const driver = new AcpDriver({ provider: "antigravity", transport, cancelDrainTimeoutMs: 150 });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "start work" }));
+    void Effect.runPromise(Effect.exit(driver.steerTurn!("thread-1", "focus on tests")));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    await new Promise((r) => setTimeout(r, 80));
+    pending[1]!.reject(new Error("late steer failure"));
+    expect((await driver.awaitTurn("thread-1", sent.turnId)).status).toBe("failed");
+    // The main prompt is never answered: the next send must still proceed
+    // within the bounded drain window instead of waiting forever.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "turn two" }));
+    pending[2]!.resolve({ stopReason: "end_turn" });
+    const outcome2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(outcome2.status).toBe("completed");
+    expect(outcome2.text).not.toContain("OLD MAIN OUTPUT");
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("settles the turn from the main prompt's stored error when an early steer refusal follows it (LOCAL-009)", async () => {
+    const { pending, script } = promptScript();
+    const transport = new FakeAcpTransport(script);
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "start work" }));
+    void Effect.runPromise(Effect.exit(driver.steerTurn!("thread-1", "focus on tests")));
+    await vi.waitFor(() => expect(pending).toHaveLength(2), { interval: 1, timeout: 1_000 });
+    // The main RPC fails while the steer is still pending...
+    pending[0]!.reject(new Error("quota boom"));
+    // ...and the steer is refused before the acknowledgement window (50 ms).
+    pending[1]!.reject(new Error("steering refused"));
+    const outcome = await settledOutcome(driver, sent.turnId);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.status).toBe("failed");
+    expect(outcome!.error).toContain("quota boom");
+    // The main failure alone never cancels the session turn.
+    expect(server.notificationsTo("session/cancel")).toHaveLength(0);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("keeps the main prompt's usage when the steer settles the turn (LOCAL-009)", async () => {
+    const { pending, script } = promptScript();
+    const transport = new FakeAcpTransport(script);
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "start work" }));
+    void Effect.runPromise(Effect.exit(driver.steerTurn!("thread-1", "focus on tests")));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    // The main prompt completes first with usage that must survive the settle.
+    pending[0]!.resolve({ stopReason: "end_turn", usage: { inputTokens: 900, outputTokens: 100, cost: 0.25 } });
+    await new Promise((r) => setTimeout(r, 80));
+    // The steer resolves last with no usage of its own.
+    pending[1]!.resolve({ stopReason: "end_turn" });
+    const outcome = await settledOutcome(driver, sent.turnId);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.status).toBe("completed");
+    expect(outcome!.usage?.costUsd).toBeCloseTo(0.25, 9);
+    expect(outcome!.usage?.input).toBe(900);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("keeps the main prompt's usage when a late steer rejection fails the turn (LOCAL-009)", async () => {
+    const { pending, script } = promptScript();
+    const transport = new FakeAcpTransport(script);
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "start work" }));
+    void Effect.runPromise(Effect.exit(driver.steerTurn!("thread-1", "focus on tests")));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[0]!.resolve({ stopReason: "end_turn", usage: { inputTokens: 900, outputTokens: 100, cost: 0.25 } });
+    await new Promise((r) => setTimeout(r, 80));
+    // The steer was acknowledged and then failed: the turn fails with a cancel,
+    // but the main prompt's recorded usage must reach the outcome.
+    pending[1]!.reject(new Error("late steer failure"));
+    const outcome = await settledOutcome(driver, sent.turnId);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.status).toBe("failed");
+    expect(outcome!.usage?.costUsd).toBeCloseTo(0.25, 9);
+    expect(outcome!.usage?.input).toBe(900);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("carries the main prompt's runtime instructions through the early steer-refusal recovery (LOCAL-009)", async () => {
+    const { pending, script } = promptScript();
+    const transport = new FakeAcpTransport(script);
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(
+      driver.startSession({
+        ...START,
+        instructions: "# Runtime\nStay in worktree.",
+      }),
+    );
+    const server = transport.sessions[0]!.server;
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "first" }));
+    void Effect.runPromise(Effect.exit(driver.steerTurn!("thread-1", "focus on tests")));
+    await vi.waitFor(() => expect(pending).toHaveLength(2), { interval: 1, timeout: 1_000 });
+    // The main prompt returns a refusal (a failed result) while the steer is pending.
+    pending[0]!.resolve({ stopReason: "refusal" });
+    // The steer is refused before the acknowledgement window: the turn settles
+    // from the stored main result and must recover its carried instructions.
+    pending[1]!.reject(new Error("steering refused"));
+    const outcome = await settledOutcome(driver, sent.turnId);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.status).toBe("failed");
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "first retry" }));
+    pending[2]!.resolve({ stopReason: "end_turn" });
+    await driver.awaitTurn("thread-1", t2.turnId);
+    const prompts = server.requestsTo("session/prompt");
+    expect(String((prompts.at(-1)!.params as { prompt: Array<{ text: string }> }).prompt[0]!.text)).toContain("Stay in worktree.");
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("keeps a resumed session's counter baseline unknown when only post-resume result costs were booked (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport({ sessionId: "acp-old" });
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-old" }));
+    const server = transport.sessions[0]!.server;
+    // Turn 1 settles on its own explicit result cost, with no cumulative reading.
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.finishPrompt("end_turn", { usage: { inputTokens: 500, outputTokens: 50, cost: 0.05 } });
+    const o1 = await driver.awaitTurn("thread-1", t1.turnId);
+    expect(o1.usage?.costUsd).toBeCloseTo(0.05, 9);
+    // Turn 2: the first cumulative reading arrives mid-turn. Neither zero nor the
+    // booked $0.05 establishes the provider's counter origin, so no delta is
+    // reported from the counter; the estimate applies instead.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-old", { sessionUpdate: "usage_update", used: 6_000, size: 100_000, cost: 0.6 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(driver.liveTurnUsage("thread-1")?.costUsd).toBeUndefined();
+    server.finishPrompt("end_turn");
+    const o2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(o2.usage?.costUsd).toBeUndefined();
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("does not report a counter delta for a turn with no fresh counter reading (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    // Turn 1 settles from a $0.20 cumulative reading.
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.2 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const o1 = await driver.awaitTurn("thread-1", t1.turnId);
+    expect(o1.usage?.costUsd).toBeCloseTo(0.2, 9);
+    // Turn 2 finishes with token usage but neither a fresh counter reading nor a
+    // result cost: an unchanged cached reading is not evidence of zero spend, so
+    // the cost stays undefined and the token-based estimate applies.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.finishPrompt("end_turn", { usage: { inputTokens: 800, outputTokens: 120 } });
+    const o2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(o2.usage?.input).toBe(800);
+    expect(o2.usage?.costUsd).toBeUndefined();
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("does not charge a fresh session's pre-turn reading to the first turn (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    // A $0.50 cumulative reading arrives before any turn exists.
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 100, size: 100_000, cost: 0.5 });
+    await new Promise((r) => setTimeout(r, 10));
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    // The counter grows to $0.60 during the turn: only the $0.10 delta past the
+    // absorbed out-of-turn baseline belongs to this turn.
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.6 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(driver.liveTurnUsage("thread-1")?.costUsd).toBeCloseTo(0.1, 9);
+    server.finishPrompt("end_turn");
+    const o1 = await driver.awaitTurn("thread-1", t1.turnId);
+    expect(o1.usage?.costUsd).toBeCloseTo(0.1, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("books the per-turn counter high-water so the ledger totals the counter (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    // Turn 1: the counter reads $0.20 then $0.10 (downward) with no result cost:
+    // the per-turn high-water ($0.20) is booked, not the last reading.
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.2 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_500, size: 100_000, cost: 0.1 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const o1 = await driver.awaitTurn("thread-1", t1.turnId);
+    expect(o1.usage?.costUsd).toBeCloseTo(0.2, 9);
+    // Turn 2: the counter reaches $0.25, so the booked ledger must total $0.25 —
+    // the baseline advanced only by the spend actually booked.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_000, size: 100_000, cost: 0.25 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const o2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(o2.usage?.costUsd).toBeCloseTo(0.05, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("books the counter over a lower prompt-result cost so the ledger totals the counter (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    // Turn 1: the counter moved to $0.20 while the prompt result claims $0.10.
+    // The spec-defined cumulative counter wins; the result cost never advanced
+    // the accounted baseline past the spend actually booked.
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.2 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn", { usage: { inputTokens: 900, outputTokens: 100, cost: 0.1 } });
+    const o1 = await driver.awaitTurn("thread-1", t1.turnId);
+    expect(o1.usage?.costUsd).toBeCloseTo(0.2, 9);
+    // Turn 2: the counter reaches $0.25; the ledger totals $0.25 against it.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_000, size: 100_000, cost: 0.25 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const o2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(o2.usage?.costUsd).toBeCloseTo(0.05, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+});
