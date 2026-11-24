@@ -43,6 +43,10 @@ access controls. When you're unsure whether an integration pattern is allowed
 and orchestration use), check the provider's current terms and official
 guidance before implementing it.
 
+Exception: Antigravity delegation and automatic prompts may exist as a setting
+that is off by default and warns that Google doesn't support it on consumer
+plans. Never turn it on for the user.
+
 ### UI and the design system
 
 For visual changes, use the render harness and inspect the result to verify
