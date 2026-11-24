@@ -6,7 +6,7 @@ import { createGridScene } from "../grid.js";
 import { seasonAt } from "../haiku.js";
 import { journeyBetween, journeyFrames } from "../journey.js";
 import { landAt, moonPhase, subsolarPoint, SYNODIC_DAYS } from "../sky.js";
-import { createFrame, type Frame, type Pointer, type SceneWindow } from "../raster.js";
+import { createFrame, scenePointerFor, sceneWindowFor, type Frame, type Pointer, type SceneWindow } from "../raster.js";
 
 function paint(scene: SceneId, win: SceneWindow, t: number, pointer: Pointer | null): Frame {
   const frame = createFrame(win.width, win.height);
@@ -205,5 +205,31 @@ describe("model scenes", () => {
         else if (glyph === "·") throw new Error(`lattice dot off the sidebar's grid at ${x},${y}`);
       }
     }
+  });
+
+  it("scopes model scenes to the creating pane while keeping grid terminal-global", () => {
+    // The Threads sidebar is opaque and never paints model scenes; passing the
+    // full terminal width clipped the left side of every model backdrop behind
+    // it. Only `"grid"` shares the terminal field with the sidebar's lattice.
+    expect(sceneWindowFor("grid", 36, 0, 152, 53, 188, 53)).toEqual({
+      x: 36,
+      y: 0,
+      width: 152,
+      height: 53,
+      fieldWidth: 188,
+      fieldHeight: 53,
+    });
+    expect(sceneWindowFor("neon", 36, 0, 152, 53, 188, 53)).toEqual({
+      x: 0,
+      y: 0,
+      width: 152,
+      height: 53,
+      fieldWidth: 152,
+      fieldHeight: 53,
+    });
+    const ptr: Pointer = { x: 80.5, y: 21, strength: 1 };
+    expect(scenePointerFor("grid", ptr, 36, 2)).toEqual(ptr);
+    expect(scenePointerFor("neon", ptr, 36, 2)).toEqual({ x: 44.5, y: 17, strength: 1 });
+    expect(scenePointerFor("neon", null, 36, 2)).toBeNull();
   });
 });
