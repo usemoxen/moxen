@@ -7,7 +7,7 @@ import { UI_BLOCK_LIMITS, UI_COLORS, UI_NODE_TYPES, UI_OP_NAMES, UI_STATES, pars
 import { describe, expect, it } from "vitest";
 
 import { withModeChange } from "../modes.js";
-import { runningModelOf, OPENCODE_PROGRESS_GUIDANCE, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, THREAD_CLI_GUIDANCE, BACKGROUND_WAIT_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
+import { runningModelOf, ACP_PROGRESS_GUIDANCE, OPENCODE_PROGRESS_GUIDANCE, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, THREAD_CLI_GUIDANCE, BACKGROUND_WAIT_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
 import { buildShellGuidance, type ShellKind } from "../shells.js";
 
 const LOCAL = { mode: "local" as const, path: "/repo", branch: "main" };
@@ -176,6 +176,15 @@ describe("runtime instructions", () => {
       expect(buildRuntimeInstructions({ instanceId, env: LOCAL, shell: LINUX })).toContain(`${PROGRESS_GUIDANCE} ${OPENCODE_PROGRESS_GUIDANCE}`);
     }
     expect(buildRuntimeInstructions({ instanceId: CLAUDE, env: LOCAL, shell: LINUX })).not.toContain(OPENCODE_PROGRESS_GUIDANCE);
+  });
+
+  it("tells Antigravity and ACP agents not to write a note after every tool call, and no other harness", () => {
+    for (const instanceId of ["antigravity", "acp/some-agent"]) {
+      expect(buildRuntimeInstructions({ instanceId, env: LOCAL, shell: LINUX })).toContain(`${PROGRESS_GUIDANCE} ${ACP_PROGRESS_GUIDANCE}`);
+    }
+    for (const instanceId of [CLAUDE, "codex", "opencode"]) {
+      expect(buildRuntimeInstructions({ instanceId, env: LOCAL, shell: LINUX })).not.toContain(ACP_PROGRESS_GUIDANCE);
+    }
   });
 
   it("tells an OpenCode session how to keep its checklist, and no harness that has its own", () => {

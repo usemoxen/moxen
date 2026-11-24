@@ -130,14 +130,23 @@ export interface AcpInitializeResult {
   readonly authMethods: ReadonlyArray<AcpAuthMethod>;
 }
 
-export function parseAcpInitializeResult(raw: unknown, agentLabel?: string): AcpInitializeResult {
+export function parseAcpInitializeResult(
+  raw: unknown,
+  agentLabel?: string,
+  options?: { readonly defaultHttpMcp?: boolean },
+): AcpInitializeResult {
   const record = asRecord(raw);
   const protocolVersion = assertSupportedAcpProtocolVersion(record?.["protocolVersion"], agentLabel);
   const caps = asRecord(record?.["agentCapabilities"]) ?? {};
   const promptCaps = asRecord(caps["promptCapabilities"]) ?? {};
-  const mcpCaps = asRecord(caps["mcpCapabilities"]) ?? {};
+  const mcpCaps = asRecord(caps["mcpCapabilities"]) ?? asRecord(caps["mcp_capabilities"]) ?? {};
   const sessionCaps = asRecord(caps["sessionCapabilities"]) ?? asRecord(caps["session_capabilities"]) ?? {};
   const info = asRecord(record?.["agentInfo"]) ?? {};
+  const agentName = asNonEmptyString(info["name"]);
+  const isAntigravity =
+    options?.defaultHttpMcp === true ||
+    asRecord(asRecord(caps["_meta"])?.["antigravity"]) !== null ||
+    (agentName !== null && /antigravity/iu.test(agentName));
   const rawAuth = Array.isArray(record?.["authMethods"]) ? record!["authMethods"] : [];
   const authMethods: AcpAuthMethod[] = [];
   for (const entry of rawAuth) {
@@ -163,12 +172,16 @@ export function parseAcpInitializeResult(raw: unknown, agentLabel?: string): Acp
         embeddedContext: promptCaps["embeddedContext"] === true,
       },
       mcpCapabilities: {
-        http: mcpCaps["http"] === true,
+        // `agy acp` (verified through v1.5.14) omits `mcpCapabilities` from
+        // `initialize` even though `session/new`, `session/load`, and
+        // `session/resume` natively parse and connect Streamable HTTP servers.
+        // Honor an explicit `http: false` if ever advertised.
+        http: mcpCaps["http"] === true || (isAntigravity && mcpCaps["http"] !== false),
         sse: mcpCaps["sse"] === true,
       },
     },
     agentInfo: {
-      name: asNonEmptyString(info["name"]),
+      name: agentName,
       title: asNonEmptyString(info["title"]),
       version: asNonEmptyString(info["version"]),
     },
@@ -494,23 +507,43 @@ export function parseAcpCatalogModels(
 export function acpMcpServersOf(
   servers: readonly McpServerSpec[] | undefined,
   capabilities: AcpMcpCapabilities,
+  options?: { readonly stdioEnvDefaults?: Readonly<Record<string, string>> },
 ): Array<Record<string, unknown>> {
   if (!servers || servers.length === 0) return [];
   const out: Array<Record<string, unknown>> = [];
+  const defaults = options?.stdioEnvDefaults;
+  const pushStdio = (server: Extract<ReturnType<typeof outOfProcess>, { type: "stdio" }>) => {
+    const merged: Record<string, string> = {};
+    const explicitLower = new Set(Object.keys(server.env ?? {}).map((k) => k.toLowerCase()));
+    if (defaults) {
+      for (const [name, value] of Object.entries(defaults)) {
+        if (!explicitLower.has(name.toLowerCase())) merged[name] = value;
+      }
+    }
+    for (const [name, value] of Object.entries(server.env ?? {})) {
+      merged[name] = value;
+    }
+    const env = Object.entries(merged).map(([name, value]) => ({ name, value }));
+    out.push({
+      name: server.name,
+      command: server.command,
+      args: [...(server.args ?? [])],
+      env,
+    });
+  };
   for (const spec of servers) {
     const server = outOfProcess(spec);
     if (server.type === "stdio") {
-      const env = Object.entries(server.env ?? {}).map(([name, value]) => ({ name, value }));
-      out.push({
-        name: server.name,
-        command: server.command,
-        args: [...(server.args ?? [])],
-        env,
-      });
+      pushStdio(server);
       continue;
     }
     if (server.type === "http") {
-      if (!capabilities.http) continue;
+      if (!capabilities.http) {
+        if (spec.type === "in-process" && spec.stdioFallback) {
+          pushStdio(spec.stdioFallback);
+        }
+        continue;
+      }
       const headers = Object.entries(server.headers ?? {}).map(([name, value]) => ({ name, value }));
       out.push({
         type: "http",
@@ -641,6 +674,20 @@ export function normalizeAcpToolCall(
   const runMatch = /^Run\s+(.+)$/iu.exec(trimmedTitle);
   if (runMatch !== null && (kind === null || kind === "other")) {
     const bare = runMatch[1]!.trim();
+    // Unwrap calls through Moxen's Antigravity lazy MCP gateway (`moxen-mcp`)
+    // so they appear under the real target server/tool in timelines and permission gates.
+    if (/^mcp_+moxen-mcp(?:-\d+)?_+call_tool$/iu.test(bare)) {
+      const gwServer = asNonEmptyString(rawInput["server"]);
+      const gwTool = asNonEmptyString(rawInput["tool"]);
+      if (gwServer !== null && gwTool !== null) {
+        const canonicalTool = canonicalMcpName(gwServer, gwTool);
+        const unwrapped =
+          rawInput["arguments"] !== undefined || rawInput["Arguments"] !== undefined
+            ? unwrapMcpArguments(rawInput)
+            : {};
+        return { canonicalTool, kind: "other", title: canonicalTool, input: unwrapped };
+      }
+    }
     if (/^mcp__(.+?)__(.+)$/iu.test(bare)) {
       return { canonicalTool: bare, kind: "other", title: bare, input: rawInput };
     }

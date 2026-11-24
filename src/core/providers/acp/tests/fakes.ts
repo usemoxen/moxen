@@ -21,6 +21,8 @@ export interface FakeAcpScript {
   readonly imageCapability?: boolean;
   readonly mcpHttp?: boolean;
   readonly mcpSse?: boolean;
+  /** Omit `mcpCapabilities` from `initialize` (matches real `agy acp` v1.5.14). */
+  readonly omitMcpCapabilities?: boolean;
   readonly sessionId?: string;
   readonly lostSessions?: readonly string[];
   readonly modes?: unknown;
@@ -87,10 +89,14 @@ export class FakeAcpServer {
               audio: false,
               embeddedContext: true,
             },
-            mcpCapabilities: {
-              http: this.script.mcpHttp ?? true,
-              sse: this.script.mcpSse ?? false,
-            },
+            ...(this.script.omitMcpCapabilities
+              ? {}
+              : {
+                  mcpCapabilities: {
+                    http: this.script.mcpHttp ?? true,
+                    sse: this.script.mcpSse ?? false,
+                  },
+                }),
           },
           agentInfo: { name: this.spawnOptions.agent.id, title: this.spawnOptions.agent.name ?? this.spawnOptions.agent.id, version: this.script.version ?? "1.0.0" },
           authMethods: this.script.authMethods ?? [],

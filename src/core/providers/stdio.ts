@@ -87,8 +87,19 @@ export function nodeProcessSpawner(): ProcessSpawner {
 type PendingRequest = {
   readonly resolve: (value: unknown) => void;
   readonly reject: (cause: unknown) => void;
-  readonly timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout>;
+  /** Set for idle-timeout requests: restarts the timer whenever the peer sends anything. */
+  readonly restart?: () => void;
 };
+
+export interface JsonRpcRequestOptions {
+  /**
+   * Treat `timeoutMs` as an idle limit instead of a wall-clock one: any line
+   * received from the peer (notification, server request, other response)
+   * restarts the timer, so only a silent peer times out.
+   */
+  readonly idle?: boolean;
+}
 
 export interface JsonRpcPeerOptions {
   readonly onParseError?: (line: string, cause: unknown) => void;
@@ -135,7 +146,12 @@ export class JsonRpcPeer {
     return this.process.pid;
   }
 
-  request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
+  request<T = unknown>(
+    method: string,
+    params?: unknown,
+    timeoutMs?: number,
+    requestOptions: JsonRpcRequestOptions = {},
+  ): Promise<T> {
     if (this.closedFlag) {
       return Promise.reject(
         new CliError("PEER_CLOSED", `Cannot send ${method}: the peer is closed.`, {
@@ -146,19 +162,32 @@ export class JsonRpcPeer {
     const id: JsonRpcId = `req-${this.nextId++}`;
     const timeout = timeoutMs ?? this.options.defaultRequestTimeoutMs ?? 30_000;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const onTimeout = (): void => {
         this.pending.delete(id);
         reject(
-          new CliError("PEER_REQUEST_TIMEOUT", `Request ${method} timed out after ${timeout}ms.`, {
-            details: { method, timeoutMs: timeout },
-          }),
+          new CliError(
+            "PEER_REQUEST_TIMEOUT",
+            requestOptions.idle
+              ? `Request ${method} timed out after ${timeout}ms without activity.`
+              : `Request ${method} timed out after ${timeout}ms.`,
+            { details: { method, timeoutMs: timeout, idle: requestOptions.idle === true } },
+          ),
         );
-      }, timeout);
-      this.pending.set(id, {
+      };
+      const entry: PendingRequest = {
         resolve: (value) => resolve(value as T),
         reject,
-        timer,
-      });
+        timer: setTimeout(onTimeout, timeout),
+        ...(requestOptions.idle
+          ? {
+              restart: () => {
+                clearTimeout(entry.timer);
+                entry.timer = setTimeout(onTimeout, timeout);
+              },
+            }
+          : {}),
+      };
+      this.pending.set(id, entry);
       this.send({ jsonrpc: JSONRPC_VERSION, id, method, ...(params === undefined ? {} : { params }) });
     });
   }
@@ -241,6 +270,7 @@ export class JsonRpcPeer {
   }
 
   private onLine(line: string): void {
+    for (const pending of this.pending.values()) pending.restart?.();
     let message: unknown;
     try {
       message = JSON.parse(line) as unknown;

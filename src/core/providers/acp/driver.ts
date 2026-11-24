@@ -24,8 +24,10 @@ import type { ModelSelection, RuntimeMode } from "../../types.js";
 import { APP_VERSION } from "../../version.js";
 import { conversationContextBreakdown } from "../context.js";
 import { assessCommandLine, classifyPath } from "../harness/commandsafety.js";
+import type { ConnectMcp } from "../harness/mcp.js";
 import { parseSkillFile } from "../harness/skills.js";
 import { JsonRpcPeer } from "../stdio.js";
+import { AcpLazyMcpGateway, antigravityLazyMcpInstruction } from "./lazymcp.js";
 import {
   isCompactCommand,
   type ApprovalRequestId,
@@ -49,6 +51,7 @@ import {
   type TokenUsageDelta,
   type TurnId,
 } from "../spi.js";
+import { ANTIGRAVITY_FILE_STORAGE_SSH_MARKER } from "../antigravity/config.js";
 import {
   antigravityQuotaWindowForModel,
   parseAntigravityQuotaError,
@@ -119,8 +122,11 @@ export interface AcpDriverOptions {
   /** Configured ACP agents keyed by id (e.g. `agy`, `cline`). */
   readonly agents?: Readonly<Record<string, AcpAgentLaunchSpec>>;
   readonly env?: NodeJS.ProcessEnv;
+  /** Host environment before per-account isolation overrides, used to restore `HOME`/`USERPROFILE` on stdio MCP children. Defaults to `process.env`. */
+  readonly hostEnv?: NodeJS.ProcessEnv;
   readonly transport?: AcpTransport;
   readonly initializeTimeoutMs?: number;
+  /** Idle limit (ms) for `session/prompt`: restarts on any agent traffic. */
   readonly promptTimeoutMs?: number;
   /** Idle settle delay (ms) for out-of-turn reactive wakeup turns (`origin: "background"`). */
   readonly backgroundTurnIdleMs?: number;
@@ -134,6 +140,10 @@ export interface AcpDriverOptions {
   readonly probeUsage?: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
   /** Override whether this driver advertises mid-turn steering (`steerTurn`). Defaults to `provider === "antigravity"`. */
   readonly supportsSteering?: boolean;
+  /** Route external (non-`moxen`) MCP servers through Moxen's compact loopback lazy gateway so `agy`'s 20k eager schema budget never evicts tools. Defaults to `provider === "antigravity"`. */
+  readonly lazyMcp?: boolean;
+  /** Test seam for upstream MCP connections inside `AcpLazyMcpGateway`. */
+  readonly connectMcp?: ConnectMcp;
   /** Override home directory for local skill discovery (test seam). */
   readonly skillHome?: string;
 }
@@ -239,6 +249,7 @@ interface AcpTranscriptTurn {
   compacted: boolean;
   sentNativeSubagentReminder: boolean;
   usage: TokenUsageDelta | null;
+  liveUsage: TokenUsageDelta | null;
   sawUsageUpdate: boolean;
   hasAssistantTextSinceLastTool: boolean;
   awaitingPostUsageSettle: boolean;
@@ -276,6 +287,7 @@ interface AcpSession {
   readonly agent: AcpAgentLaunchSpec;
   readonly peer: JsonRpcPeer;
   readonly clientHandlers: AcpClientHandlers;
+  readonly lazyMcp: AcpLazyMcpGateway | null;
   readonly workingDirectory: string;
   readonly startedAt: string;
   readonly capabilities: AcpAgentCapabilities;
@@ -312,6 +324,7 @@ interface AcpSession {
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 15_000;
+// Idle limit: restarts on any traffic from the agent, so long active turns are not cut off.
 const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
 // Out-of-turn wakeup turns have no explicit ACP end-of-turn signal: wait long enough
 // across thinking/streaming/post-tool LLM pauses so replies do not split mid-turn.
@@ -593,6 +606,29 @@ function splitOutputLines(text: string): string[] {
     : lines;
 }
 
+function stdioMcpEnvDefaults(
+  agentEnv: NodeJS.ProcessEnv,
+  hostEnv: NodeJS.ProcessEnv,
+): Readonly<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const hostHome = hostEnv["HOME"];
+  const hostUserProfile = hostEnv["USERPROFILE"];
+  if (agentEnv["HOME"] !== hostHome) {
+    const restoredHome = hostHome || hostUserProfile;
+    if (restoredHome) out["HOME"] = restoredHome;
+  }
+  if (agentEnv["USERPROFILE"] !== hostUserProfile) {
+    out["USERPROFILE"] = hostUserProfile ?? "";
+  }
+  if (
+    agentEnv["SSH_CONNECTION"] === ANTIGRAVITY_FILE_STORAGE_SSH_MARKER &&
+    agentEnv["SSH_CONNECTION"] !== hostEnv["SSH_CONNECTION"]
+  ) {
+    out["SSH_CONNECTION"] = hostEnv["SSH_CONNECTION"] ?? "";
+  }
+  return out;
+}
+
 function isLeadingSlashCommand(prompt: string): boolean {
   return /^\/[A-Za-z0-9_:-]+(?:\s|$)/.test(prompt.trimStart());
 }
@@ -614,6 +650,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly agents: Map<string, AcpAgentLaunchSpec>;
   private readonly usageInstanceId: string | undefined;
   private readonly baseEnv: NodeJS.ProcessEnv;
+  private readonly hostEnv: NodeJS.ProcessEnv;
   private readonly transport: AcpTransport;
   private readonly initializeTimeoutMs: number;
   private readonly promptTimeoutMs: number;
@@ -621,6 +658,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   private readonly backgroundTurnPostUsageIdleMs: number;
   private readonly cancelDrainTimeoutMs: number;
   private readonly cancelQuietMs: number;
+  private readonly lazyMcpEnabled: boolean;
+  private readonly connectMcp: ConnectMcp | undefined;
   private readonly skillHome: string;
   private readonly probeUsageFn: (command: string, env: NodeJS.ProcessEnv, options?: { readonly force?: boolean }) => Promise<AntigravityUsageSnapshot | null>;
   private readonly sessions = new Map<ThreadId, AcpSession>();
@@ -644,6 +683,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       }
     }
     this.baseEnv = options.env ?? process.env;
+    this.hostEnv = options.hostEnv ?? process.env;
     this.transport = options.transport ?? new SpawnAcpTransport();
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
     this.promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS;
@@ -653,6 +693,8 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       Math.min(this.backgroundTurnIdleMs, DEFAULT_BACKGROUND_TURN_POST_USAGE_IDLE_MS);
     this.cancelDrainTimeoutMs = options.cancelDrainTimeoutMs ?? DEFAULT_CANCEL_DRAIN_TIMEOUT_MS;
     this.cancelQuietMs = options.cancelQuietMs ?? DEFAULT_CANCEL_QUIET_MS;
+    this.lazyMcpEnabled = options.lazyMcp ?? this.provider === "antigravity";
+    this.connectMcp = options.connectMcp;
     this.skillHome = options.skillHome ?? os.homedir();
     if (this.provider === "antigravity") {
       this.compaction = { type: "slash-command", command: "/compact" };
@@ -755,7 +797,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         },
         this.initializeTimeoutMs,
       );
-      const init = parseAcpInitializeResult(rawInit, agent.name ?? agent.id);
+      const init = parseAcpInitializeResult(rawInit, agent.name ?? agent.id, {
+        defaultHttpMcp: this.provider === "antigravity",
+      });
       if (!init.agentCapabilities.canForkSession) {
         throw new CliError(
           "FORK_UNSUPPORTED",
@@ -816,7 +860,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         },
         this.initializeTimeoutMs,
       );
-      const init = parseAcpInitializeResult(raw, agent.name ?? agent.id);
+      const init = parseAcpInitializeResult(raw, agent.name ?? agent.id, {
+        defaultHttpMcp: this.provider === "antigravity",
+      });
       const wantModels = (options.shouldDiscover?.(init) ?? true) && init.agentCapabilities.canCloseSession;
       if (!wantModels) {
         return { init, models: [], authError: false, tier: null };
@@ -874,6 +920,13 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
     this.sessions.get(threadId)?.context ?? null;
+
+  readonly liveTurnUsage = (threadId: ThreadId): TokenUsageDelta | null => {
+    const session = this.sessions.get(threadId);
+    const open = session ? this.openTurn(session) : undefined;
+    if (!open) return null;
+    return open.usage ?? open.liveUsage ?? null;
+  };
 
   /** Estimated context breakdown from the live session's transcript since the last compaction. */
   readonly contextBreakdown = async (threadId: ThreadId): Promise<ContextBreakdown | null> => {
@@ -1109,6 +1162,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         );
       });
 
+      let lazyMcp: AcpLazyMcpGateway | null = null;
       try {
         const initRaw = await peer.request(
           ACP_METHODS.initialize,
@@ -1123,9 +1177,31 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           },
           this.initializeTimeoutMs,
         );
-        const init = parseAcpInitializeResult(initRaw, agentLabel);
+        const init = parseAcpInitializeResult(initRaw, agentLabel, {
+          defaultHttpMcp: this.provider === "antigravity",
+        });
 
-        const mcpServers = acpMcpServersOf(input.mcpServers, init.agentCapabilities.mcpCapabilities);
+        const agentEnv: NodeJS.ProcessEnv = { ...this.baseEnv, ...(agent.env ?? {}) };
+        const rawServers = input.mcpServers ?? [];
+        const directServers = rawServers.filter((spec) => spec.name === "moxen");
+        const externalServers = rawServers.filter((spec) => spec.name !== "moxen");
+        const useLazyGateway =
+          this.lazyMcpEnabled &&
+          init.agentCapabilities.mcpCapabilities.http &&
+          externalServers.length > 0;
+        if (useLazyGateway) {
+          lazyMcp = await AcpLazyMcpGateway.start({
+            specs: externalServers,
+            cwd: input.workingDirectory,
+            ...(input.disabledMcpTools ? { disabledTools: input.disabledMcpTools } : {}),
+            takenNames: new Set(directServers.map((spec) => spec.name)),
+            ...(this.connectMcp ? { connect: this.connectMcp } : {}),
+          });
+        }
+        const effectiveServers = lazyMcp ? [...directServers, lazyMcp.spec] : rawServers;
+        const mcpServers = acpMcpServersOf(effectiveServers, init.agentCapabilities.mcpCapabilities, {
+          stdioEnvDefaults: stdioMcpEnvDefaults(agentEnv, this.hostEnv),
+        });
         let acpSessionId: string | null = null;
         let modes: AcpSessionModesState | null = null;
         let configOptions: AcpConfigOption[] = [];
@@ -1200,12 +1276,16 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         }
 
         const baseInstructions = !resumed && input.instructions?.trim() ? input.instructions.trim() : null;
-        const initialInstructions =
-          !resumed && this.provider === "antigravity"
-            ? baseInstructions
-              ? `${baseInstructions}\n\n${ANTIGRAVITY_NO_NATIVE_SUBAGENTS_INSTRUCTION}`
-              : ANTIGRAVITY_NO_NATIVE_SUBAGENTS_INSTRUCTION
-            : baseInstructions;
+        const extraInstructions: string[] = [];
+        if (!resumed && this.provider === "antigravity") {
+          extraInstructions.push(ANTIGRAVITY_NO_NATIVE_SUBAGENTS_INSTRUCTION);
+        }
+        if (!resumed && lazyMcp) {
+          extraInstructions.push(antigravityLazyMcpInstruction(lazyMcp.name, lazyMcp.serverNames));
+        }
+        const initialInstructions = [baseInstructions, ...extraInstructions]
+          .filter((part): part is string => Boolean(part))
+          .join("\n\n") || null;
 
         const startedAt = new Date().toISOString();
         session = {
@@ -1213,6 +1293,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           agent,
           peer,
           clientHandlers,
+          lazyMcp,
           workingDirectory: input.workingDirectory,
           startedAt,
           capabilities: init.agentCapabilities,
@@ -1284,6 +1365,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           startedAt: session.startedAt,
         };
       } catch (cause) {
+        await lazyMcp?.close().catch(() => undefined);
         clientHandlers.closeAll();
         peer.close();
         throw toCliError("ACP_START_FAILED", `Could not start ACP session for ${agentLabel}`, cause, agentLabel);
@@ -1346,6 +1428,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           compacted: false,
           sentNativeSubagentReminder: false,
           usage: null,
+          liveUsage: null,
           sawUsageUpdate: false,
           hasAssistantTextSinceLastTool: false,
           awaitingPostUsageSettle: false,
@@ -1384,6 +1467,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
               prompt: promptBlocks,
             },
             this.promptTimeoutMs,
+        { idle: true },
           )
           .then(
             (result) => this.handlePromptSuccess(session, turn, inFlight, result, carriedInstructions),
@@ -1569,6 +1653,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           prompt: promptBlocks,
         },
         this.promptTimeoutMs,
+        { idle: true },
       );
       const settled = req.then(
         (result) => {
@@ -2005,18 +2090,20 @@ export class AcpDriver implements ProviderAdapter<CliError> {
               ? { costUsd: prev.costUsd }
               : {}),
         };
+        const liveUsage: TokenUsageDelta = {
+          input: parsed.used,
+          cacheRead: 0,
+          cacheCreate: 0,
+          output: 0,
+          thinking: 0,
+          ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
+        };
+        if (activeTurn) activeTurn.liveUsage = liveUsage;
         this.publish({
           type: "token-usage.updated",
           provider: this.provider,
           threadId: session.threadId,
-          usage: {
-            input: parsed.used,
-            cacheRead: 0,
-            cacheCreate: 0,
-            output: 0,
-            thinking: 0,
-            ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
-          },
+          usage: liveUsage,
           raw: update,
         });
       }
@@ -2354,6 +2441,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           prompt: [{ type: "text", text: ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER }],
         },
         this.promptTimeoutMs,
+        { idle: true },
       )
       .then(
         () => {
@@ -2393,6 +2481,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       compacted: false,
       sentNativeSubagentReminder: false,
       usage: null,
+      liveUsage: null,
       sawUsageUpdate: false,
       hasAssistantTextSinceLastTool: false,
       awaitingPostUsageSettle: false,
@@ -3141,6 +3230,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         .catch(() => undefined);
     }
     this.closeSession(session, status, error);
+    await session.lazyMcp?.close().catch(() => undefined);
   }
 
   private closeSession(session: AcpSession, status: TerminalTurnStatus, error: string | null): void {
@@ -3169,6 +3259,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     if (open) {
       this.settleTurn(session, open, status, error);
     }
+    void session.lazyMcp?.close().catch(() => undefined);
     session.clientHandlers.closeAll();
     session.peer.close();
     this.sessions.delete(session.threadId);

@@ -43,6 +43,31 @@ describe("stdio JSON-RPC peer", () => {
     });
   });
 
+  it("idle timeout restarts on peer traffic and fires only when the peer goes silent", async () => {
+    const { client, server } = createLinkedPair();
+    const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });
+    const serverPeer = new JsonRpcPeer(server, { forceKillAfterMs: 0 });
+    serverPeer.onRequest(async () => {
+      for (let i = 0; i < 5; i++) {
+        await sleep(30);
+        serverPeer.notify("progress", { i });
+      }
+      return "done";
+    });
+    // 150ms of work total, but never more than ~30ms silent against a 80ms idle limit.
+    await expect(clientPeer.request("busy", {}, 80, { idle: true })).resolves.toBe("done");
+
+    serverPeer.onRequest(async () => {
+      await sleep(500);
+      return null;
+    });
+    await expect(clientPeer.request("silent", {}, 30, { idle: true })).rejects.toMatchObject({
+      code: "PEER_REQUEST_TIMEOUT",
+    });
+    clientPeer.close();
+    serverPeer.close();
+  });
+
   it("times out and closes cleanly", async () => {
     const { client, server } = createLinkedPair();
     const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });

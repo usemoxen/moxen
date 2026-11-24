@@ -32,8 +32,8 @@ export interface McpRouting {
   readonly disabled?: boolean;
 }
 
-export type McpProviderKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity";
-const PROVIDER_KINDS: readonly McpProviderKind[] = ["claude", "codex", "chatgpt", "opencode", "harness", "acp", "antigravity"];
+export type McpProviderKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe";
+const PROVIDER_KINDS: readonly McpProviderKind[] = ["claude", "codex", "chatgpt", "opencode", "harness", "acp", "antigravity", "vibe"];
 
 export type McpServerEntry = McpRouting &
   (
@@ -93,6 +93,8 @@ export interface InProcessMcpServerSpec extends McpRouting {
   readonly tools: readonly InProcessMcpTool[];
   readonly call: (tool: string, args: Record<string, unknown>) => Promise<{ readonly text: string; readonly isError: boolean }>;
   readonly fallback: OutOfProcessMcpServerSpec;
+  /** Stdio fallback for out-of-process providers whose transport cannot reach an HTTP `fallback` (e.g. an ACP agent without `mcpCapabilities.http`). */
+  readonly stdioFallback?: Extract<OutOfProcessMcpServerSpec, { type: "stdio" }>;
   /**
    * `fallback` also offering a checklist tool, for a provider that keeps no
    * checklist of its own (OpenCode v2 has no `todowrite`). Absent when the

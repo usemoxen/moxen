@@ -2312,4 +2312,237 @@ describe("Antigravity native subagent discouragement & reminder (MXN-465)", () =
       await Effect.runPromise(driver.stopAll());
     }
   });
+
+  it("does not drop HTTP MCP servers or built-in moxen tools for Antigravity when agy acp omits mcpCapabilities", async () => {
+    const mcpServers = [
+      { name: "brave-search", type: "stdio" as const, command: "npx", args: ["-y", "@brave/brave-search-mcp-server"], env: { BRAVE_API_KEY: "k1" } },
+      { name: "exa", type: "http" as const, url: "https://mcp.exa.ai/mcp", headers: { "x-api-key": "k2" } },
+      { name: "linear", type: "http" as const, url: "https://mcp.linear.app/mcp", headers: { Authorization: "Bearer k3" } },
+      {
+        name: "moxen",
+        type: "in-process" as const,
+        tools: [],
+        call: async () => ({ text: "", isError: false }),
+        fallback: { name: "moxen", type: "http" as const, url: "http://127.0.0.1:9999/mcp/thread-1", headers: { Authorization: "Bearer tok" } },
+        stdioFallback: { name: "moxen", type: "stdio" as const, command: "bun", args: ["mcp.ts", "--thread", "thread-1"], env: {} },
+      },
+    ];
+
+    const agyTransport = new FakeAcpTransport({ omitMcpCapabilities: true, canResumeSession: true });
+    const agyDriver = new AcpDriver({ provider: "antigravity", lazyMcp: false, transport: agyTransport });
+    const acpTransport = new FakeAcpTransport({ omitMcpCapabilities: true });
+    const acpDriver = new AcpDriver({
+      provider: "acp",
+      agents: { custom: { id: "custom", name: "Custom", command: "custom-acp", args: [] } },
+      transport: acpTransport,
+    });
+    try {
+      await Effect.runPromise(
+        agyDriver.startSession({
+          threadId: "thread-1",
+          workingDirectory: process.cwd(),
+          modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+          mcpServers,
+        }),
+      );
+      const newParams = agyTransport.sessions[0]?.server.requestsTo("session/new")[0]?.params as {
+        mcpServers?: Array<Record<string, unknown>>;
+      };
+      expect(newParams.mcpServers).toEqual([
+        { name: "brave-search", command: "npx", args: ["-y", "@brave/brave-search-mcp-server"], env: [{ name: "BRAVE_API_KEY", value: "k1" }] },
+        { type: "http", name: "exa", url: "https://mcp.exa.ai/mcp", headers: [{ name: "x-api-key", value: "k2" }] },
+        { type: "http", name: "linear", url: "https://mcp.linear.app/mcp", headers: [{ name: "Authorization", value: "Bearer k3" }] },
+        { type: "http", name: "moxen", url: "http://127.0.0.1:9999/mcp/thread-1", headers: [{ name: "Authorization", value: "Bearer tok" }] },
+      ]);
+
+      // A generic ACP agent that omits mcpCapabilities drops user HTTP servers
+      // but still receives Moxen's built-in tools via stdioFallback.
+      await Effect.runPromise(
+        acpDriver.startSession({
+          threadId: "thread-2",
+          workingDirectory: process.cwd(),
+          modelSelection: { instanceId: "acp/custom", model: "default" },
+          mcpServers,
+        }),
+      );
+      const acpNewParams = acpTransport.sessions[0]?.server.requestsTo("session/new")[0]?.params as {
+        mcpServers?: Array<Record<string, unknown>>;
+      };
+      expect(acpNewParams.mcpServers).toEqual([
+        { name: "brave-search", command: "npx", args: ["-y", "@brave/brave-search-mcp-server"], env: [{ name: "BRAVE_API_KEY", value: "k1" }] },
+        { name: "moxen", command: "bun", args: ["mcp.ts", "--thread", "thread-1"], env: [] },
+      ]);
+    } finally {
+      await Effect.runPromise(agyDriver.stopAll());
+      await Effect.runPromise(acpDriver.stopAll());
+    }
+  });
+
+  it("restores host HOME/USERPROFILE and clears synthetic SSH_CONNECTION on stdio MCP servers under isolated Antigravity accounts", async () => {
+    const posixHostEnv: NodeJS.ProcessEnv = { HOME: "/Users/alice", PATH: "/usr/bin" };
+    const posixIsolated = path.join("/Users/alice", ".moxen", "accounts", "antigravity", "default");
+    const posixTransport = new FakeAcpTransport({ omitMcpCapabilities: true });
+    const posixDriver = new AcpDriver({
+      provider: "antigravity",
+      lazyMcp: false,
+      hostEnv: posixHostEnv,
+      env: { ...posixHostEnv, HOME: posixIsolated, USERPROFILE: posixIsolated, SSH_CONNECTION: "127.0.0.1 0 127.0.0.1 22" },
+      agents: {
+        antigravity: {
+          id: "antigravity",
+          command: "agy",
+          args: ["acp"],
+          env: { HOME: posixIsolated, USERPROFILE: posixIsolated, SSH_CONNECTION: "127.0.0.1 0 127.0.0.1 22" },
+        },
+      },
+      transport: posixTransport,
+    });
+
+    const winHostEnv: NodeJS.ProcessEnv = { USERPROFILE: "C:\\Users\\alice", PATH: "C:\\Windows" };
+    const winIsolated = "C:\\Users\\alice\\.moxen\\accounts\\antigravity\\default";
+    const winTransport = new FakeAcpTransport({ omitMcpCapabilities: true });
+    const winDriver = new AcpDriver({
+      provider: "antigravity",
+      lazyMcp: false,
+      hostEnv: winHostEnv,
+      env: { ...winHostEnv, HOME: winIsolated, USERPROFILE: winIsolated, SSH_CONNECTION: "127.0.0.1 0 127.0.0.1 22" },
+      agents: {
+        antigravity: {
+          id: "antigravity",
+          command: "agy",
+          args: ["acp"],
+          env: { HOME: winIsolated, USERPROFILE: winIsolated, SSH_CONNECTION: "127.0.0.1 0 127.0.0.1 22" },
+        },
+      },
+      transport: winTransport,
+    });
+
+    try {
+      await Effect.runPromise(
+        posixDriver.startSession({
+          threadId: "thread-posix",
+          workingDirectory: process.cwd(),
+          modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+          mcpServers: [
+            { name: "linear", type: "stdio", command: "npx", args: ["-y", "mcp-remote", "https://mcp.linear.app/mcp"], env: {} },
+          ],
+        }),
+      );
+      const posixParams = posixTransport.sessions[0]?.server.requestsTo("session/new")[0]?.params as {
+        mcpServers?: Array<{ env?: Array<{ name: string; value: string }> }>;
+      };
+      expect(posixParams.mcpServers?.[0]?.env).toEqual([
+        { name: "HOME", value: "/Users/alice" },
+        { name: "USERPROFILE", value: "" },
+        { name: "SSH_CONNECTION", value: "" },
+      ]);
+
+      await Effect.runPromise(
+        winDriver.startSession({
+          threadId: "thread-win",
+          workingDirectory: process.cwd(),
+          modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+          mcpServers: [
+            { name: "linear", type: "stdio", command: "npx", args: ["-y", "mcp-remote", "https://mcp.linear.app/mcp"], env: {} },
+          ],
+        }),
+      );
+      const winParams = winTransport.sessions[0]?.server.requestsTo("session/new")[0]?.params as {
+        mcpServers?: Array<{ env?: Array<{ name: string; value: string }> }>;
+      };
+      expect(winParams.mcpServers?.[0]?.env).toEqual([
+        { name: "HOME", value: "C:\\Users\\alice" },
+        { name: "USERPROFILE", value: "C:\\Users\\alice" },
+        { name: "SSH_CONNECTION", value: "" },
+      ]);
+    } finally {
+      await Effect.runPromise(posixDriver.stopAll());
+      await Effect.runPromise(winDriver.stopAll());
+    }
+  });
+
+  it("routes Antigravity external MCP servers through the compact moxen-mcp lazy gateway while keeping moxen direct", async () => {
+    const transport = new FakeAcpTransport({ omitMcpCapabilities: true });
+    let closedClient = false;
+    const driver = new AcpDriver({
+      provider: "antigravity",
+      transport,
+      connectMcp: async (spec) =>
+        ({
+          alive: true,
+          tools: [
+            {
+              name: spec.name === "linear" ? "get_issue" : "web_search_exa",
+              description: "Test tool",
+              inputSchema: { type: "object", properties: { id: { type: "string" } } },
+              readOnly: true,
+            },
+          ],
+          dropped: 0,
+          call: async (_tool: string, args: Record<string, unknown>) => ({ text: JSON.stringify(args), isError: false }),
+          close: async () => {
+            closedClient = true;
+          },
+        }) as never,
+    });
+    try {
+      await Effect.runPromise(
+        driver.startSession({
+          threadId: "thread-lazy",
+          workingDirectory: process.cwd(),
+          modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+          mcpServers: [
+            {
+              name: "moxen",
+              type: "in-process",
+              tools: [],
+              call: async () => ({ text: "", isError: false }),
+              fallback: { name: "moxen", type: "http", url: "http://127.0.0.1:9999/mcp/thread-lazy", headers: { Authorization: "Bearer tok" } },
+            },
+            { name: "brave-search", type: "stdio", command: "bunx", args: ["@brave/brave-search-mcp-server"], env: { BRAVE_API_KEY: "secret" } },
+            { name: "exa", type: "http", url: "https://mcp.exa.ai/mcp", headers: { "x-api-key": "secret" } },
+            { name: "linear", type: "stdio", command: "npx", args: ["-y", "mcp-remote", "https://mcp.linear.app/mcp"], env: {} },
+          ],
+        }),
+      );
+
+      const newParams = transport.sessions[0]?.server.requestsTo("session/new")[0]?.params as {
+        mcpServers?: Array<{ type?: string; name?: string; url?: string; headers?: Array<{ name: string; value: string }> }>;
+      };
+      expect(newParams.mcpServers?.map((s) => s.name)).toEqual(["moxen", "moxen-mcp"]);
+      const gw = newParams.mcpServers![1]!;
+      expect(gw.type).toBe("http");
+      expect(gw.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
+      const authHeader = gw.headers?.find((h) => h.name === "Authorization")?.value ?? "";
+      expect(authHeader).toMatch(/^Bearer [0-9a-f]{48}$/);
+
+      // Call through the live loopback gateway to verify linear is reachable end-to-end.
+      const res = await fetch(gw.url!, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "call_tool", arguments: { server: "linear", tool: "get_issue", arguments: { id: "MXN-77" } } },
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        result: { isError: false, content: [{ type: "text", text: '{"id":"MXN-77"}' }] },
+      });
+
+      // First prompt includes external MCP server names in instructions.
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-lazy", prompt: "Check MXN-77" }));
+      const promptReq = transport.sessions[0]!.server.requests.find((r) => r.method === "session/prompt");
+      const promptText = String((promptReq?.params as { prompt?: Array<{ text?: string }> })?.prompt?.[0]?.text ?? "");
+      expect(promptText).toContain("brave-search, exa, linear");
+      expect(promptText).toContain("mcp_moxen-mcp_search_tools");
+      transport.sessions[0]!.server.finishPrompt("end_turn");
+      await driver.awaitTurn("thread-lazy", sent.turnId);
+    } finally {
+      await Effect.runPromise(driver.stopAll());
+    }
+    expect(closedClient).toBe(true);
+  });
 });

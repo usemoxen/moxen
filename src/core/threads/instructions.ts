@@ -190,6 +190,15 @@ export const OPENCODE_PROGRESS_GUIDANCE =
   "Write one before your first tool call and another each time you start a new step, in the same reply as the tool call.";
 
 /**
+ * The opposite failure from OpenCode's: Antigravity (and the ACP agents beside it) narrate every
+ * tool call, a line of status between each read, search and edit. A note is for a change of step,
+ * not a receipt for each call.
+ */
+export const ACP_PROGRESS_GUIDANCE =
+  "Do not write a note after every tool call. Run related calls back to back with no text between them, and write a note only when you " +
+  "start a new step, change direction, or have found something the user should know. Never narrate a result you are about to act on.";
+
+/**
  * What a session is told about the messages Moxen sends it. They ride inside
  * the conversation, where a model has every reason to read instructions as
  * the user's words — or, being wary of instructions in a message, to ignore
@@ -354,7 +363,15 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
   add("Environment", environment.join("\n\n"));
   add("Look it up", LOOKUP_GUIDANCE);
   if (input.knowledge === true) add("Moxen knowledge base", KNOWLEDGE_GUIDANCE);
-  add("Progress notes", harness === "OpenCode" ? `${PROGRESS_GUIDANCE} ${OPENCODE_PROGRESS_GUIDANCE}` : PROGRESS_GUIDANCE);
+  const kind = driverKindOfInstance(input.instanceId);
+  add(
+    "Progress notes",
+    harness === "OpenCode"
+      ? `${PROGRESS_GUIDANCE} ${OPENCODE_PROGRESS_GUIDANCE}`
+      : kind === "antigravity" || kind === "acp"
+        ? `${PROGRESS_GUIDANCE} ${ACP_PROGRESS_GUIDANCE}`
+        : PROGRESS_GUIDANCE,
+  );
   add("Showing images", IMAGE_GUIDANCE);
   // A subagent's final message is a report another agent reads; a layout is for a person.
   if (!delegation) add("Layouts, charts and states", UI_BLOCK_GUIDANCE);

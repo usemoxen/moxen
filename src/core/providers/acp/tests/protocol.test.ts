@@ -13,6 +13,7 @@ import {
   normalizeAcpToolCall,
   parseAcpCatalogModels,
   parseAcpElicitationQuestions,
+  parseAcpInitializeResult,
   parseAcpTurnUsage,
   parseAcpUsageUpdate,
   selectAcpPermissionOutcome,
@@ -38,18 +39,83 @@ describe("ACP protocol version pinning", () => {
 });
 
 describe("ACP wire helpers", () => {
-  it("filters HTTP MCP servers when the agent lacks mcpCapabilities.http", () => {
+  it("filters HTTP MCP servers when the agent lacks mcpCapabilities.http, falling back to stdioFallback for in-process servers", () => {
     const servers: McpServerSpec[] = [
       { name: "local", type: "stdio", command: "node", args: ["server.js"], env: { FOO: "bar" } },
       { name: "remote", type: "http", url: "https://example.test/mcp", headers: { Authorization: "Bearer x" } },
+      {
+        name: "moxen",
+        type: "in-process",
+        tools: [],
+        call: async () => ({ text: "", isError: false }),
+        fallback: { name: "moxen", type: "http", url: "http://127.0.0.1:4321/mcp/t1", headers: { Authorization: "Bearer tok" } },
+        stdioFallback: { name: "moxen", type: "stdio", command: "bun", args: ["mcp.ts", "--thread", "t1"], env: { MOXEN_STORE_ROOT: "/store" } },
+      },
     ];
     expect(acpMcpServersOf(servers, { http: false, sse: false })).toEqual([
       { name: "local", command: "node", args: ["server.js"], env: [{ name: "FOO", value: "bar" }] },
+      { name: "moxen", command: "bun", args: ["mcp.ts", "--thread", "t1"], env: [{ name: "MOXEN_STORE_ROOT", value: "/store" }] },
     ]);
     expect(acpMcpServersOf(servers, { http: true, sse: false })).toEqual([
       { name: "local", command: "node", args: ["server.js"], env: [{ name: "FOO", value: "bar" }] },
       { type: "http", name: "remote", url: "https://example.test/mcp", headers: [{ name: "Authorization", value: "Bearer x" }] },
+      { type: "http", name: "moxen", url: "http://127.0.0.1:4321/mcp/t1", headers: [{ name: "Authorization", value: "Bearer tok" }] },
     ]);
+    // stdioEnvDefaults fills missing keys (case-insensitively) without overwriting explicit server env.
+    expect(
+      acpMcpServersOf(
+        [
+          { name: "linear", type: "stdio", command: "npx", args: ["-y", "mcp-remote", "https://mcp.linear.app/mcp"], env: {} },
+          { name: "custom", type: "stdio", command: "node", args: ["s.js"], env: { home: "/custom" } },
+        ],
+        { http: true, sse: false },
+        { stdioEnvDefaults: { HOME: "/Users/real", SSH_CONNECTION: "" } },
+      ),
+    ).toEqual([
+      { name: "linear", command: "npx", args: ["-y", "mcp-remote", "https://mcp.linear.app/mcp"], env: [{ name: "HOME", value: "/Users/real" }, { name: "SSH_CONNECTION", value: "" }] },
+      { name: "custom", command: "node", args: ["s.js"], env: [{ name: "SSH_CONNECTION", value: "" }, { name: "home", value: "/custom" }] },
+    ]);
+  });
+
+  it("treats Antigravity as HTTP-MCP-capable when agy acp omits mcpCapabilities, while honoring explicit false and keeping generic ACP strict", () => {
+    // Real `agy acp` v1.5.14 initialize shape omits `mcpCapabilities`.
+    const agyInit = parseAcpInitializeResult({
+      protocolVersion: ACP_PROTOCOL_VERSION,
+      agentCapabilities: {
+        loadSession: true,
+        _meta: { antigravity: { tier: true } },
+      },
+      agentInfo: { name: "Antigravity ACP Server", version: "1.5.14" },
+    });
+    expect(agyInit.agentCapabilities.mcpCapabilities).toEqual({ http: true, sse: false });
+
+    // Explicit `http: false` still wins even for Antigravity.
+    const agyExplicitFalse = parseAcpInitializeResult(
+      {
+        protocolVersion: ACP_PROTOCOL_VERSION,
+        agentCapabilities: { mcpCapabilities: { http: false, sse: false } },
+        agentInfo: { name: "Antigravity ACP Server", version: "2.0.0" },
+      },
+      "Antigravity",
+      { defaultHttpMcp: true },
+    );
+    expect(agyExplicitFalse.agentCapabilities.mcpCapabilities).toEqual({ http: false, sse: false });
+
+    // Snake_case `mcp_capabilities` is parsed alongside camelCase.
+    const snakeInit = parseAcpInitializeResult({
+      protocolVersion: ACP_PROTOCOL_VERSION,
+      agentCapabilities: { mcp_capabilities: { http: true, sse: true } },
+      agentInfo: { name: "custom-agent" },
+    });
+    expect(snakeInit.agentCapabilities.mcpCapabilities).toEqual({ http: true, sse: true });
+
+    // Non-Antigravity ACP agents without `mcpCapabilities` stay `http: false`.
+    const genericInit = parseAcpInitializeResult({
+      protocolVersion: ACP_PROTOCOL_VERSION,
+      agentCapabilities: { loadSession: true },
+      agentInfo: { name: "generic-acp-agent" },
+    });
+    expect(genericInit.agentCapabilities.mcpCapabilities).toEqual({ http: false, sse: false });
   });
 
   it("sends native image blocks when supported and falls back to imageMention when not", () => {
@@ -209,6 +275,30 @@ describe("ACP wire helpers", () => {
       canonicalTool: "mcp__chrome-devtools__click",
       kind: "other",
       title: "mcp__chrome-devtools__click",
+      input: {},
+    });
+    // Calls through Moxen's Antigravity lazy gateway unwrap to the target server/tool.
+    expect(
+      normalizeAcpToolCall("other", "Run mcp_moxen-mcp_call_tool", {
+        server: "linear",
+        tool: "get_issue",
+        arguments: { id: "MXN-77" },
+      }),
+    ).toEqual({
+      canonicalTool: "mcp__linear__get_issue",
+      kind: "other",
+      title: "mcp__linear__get_issue",
+      input: { id: "MXN-77" },
+    });
+    expect(
+      normalizeAcpToolCall("other", "Run mcp_moxen-mcp_call_tool", {
+        server: "linear",
+        tool: "whoami",
+      }),
+    ).toEqual({
+      canonicalTool: "mcp__linear__whoami",
+      kind: "other",
+      title: "mcp__linear__whoami",
       input: {},
     });
   });
