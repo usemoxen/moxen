@@ -271,7 +271,9 @@ export class ResponsesWsSession {
   private socket: ResponsesSocket | null = null;
   /** Exclusive owner token of the stream currently running, if any. */
   private streamOwner: object | null = null;
-  private readonly streamWaiters: Array<() => void> = [];
+  private readonly streamWaiters: Array<{ wake: () => void }> = [];
+  /** Socket currently mid-handshake; closed by close()/owner-abort so it can never send after shutdown. */
+  private connectingSocket: ResponsesSocket | null = null;
   private connectedUrl: string | null = null;
   private connectedApiKey: string | undefined = undefined;
   private connectedAt = 0;
@@ -321,9 +323,21 @@ export class ResponsesWsSession {
   close(): void {
     this.closed = true;
     this.resetSocket();
+    // A socket still mid-handshake must not be allowed to install itself or
+    // send after shutdown: close it now; ensureOpen rechecks `closed` after the
+    // handshake resolves and refuses to install it.
+    const connecting = this.connectingSocket;
+    this.connectingSocket = null;
+    if (connecting) {
+      try {
+        connecting.close(1000, "session closed");
+      } catch {
+        // Best-effort.
+      }
+    }
     // Wake queued streams so they see the closed session instead of waiting forever.
     this.streamOwner = null;
-    for (const wake of this.streamWaiters.splice(0)) wake();
+    for (const entry of this.streamWaiters.splice(0)) entry.wake();
   }
 
   /** True when the given stream owner still owns the session's current socket. */
@@ -355,7 +369,36 @@ export class ResponsesWsSession {
       throw new ResponsesWsUpgradeError(cause instanceof Error ? cause.message : String(cause));
     }
 
-    await new Promise<void>((resolve, reject) => {
+    // Track the connecting socket so close() and owner-abort can shut it down
+    // even before the handshake continuation runs.
+    this.connectingSocket = socket;
+    try {
+      await this.handshake(socket, signal);
+    } finally {
+      if (this.connectingSocket === socket) this.connectingSocket = null;
+    }
+
+    // Recheck shutdown and abort between the `open` event and this
+    // continuation: close() or an abort may have run synchronously in between,
+    // and the request must not be installed on a dead session or signal.
+    if (this.closed || signal?.aborted) {
+      try {
+        socket.close();
+      } catch {
+        // Best-effort.
+      }
+      throw abortError();
+    }
+
+    this.socket = socket;
+    this.connectedUrl = url;
+    this.connectedApiKey = apiKey;
+    this.connectedAt = this.now();
+    return { socket, reused: false };
+  }
+
+  private handshake(socket: ResponsesSocket, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
@@ -374,7 +417,9 @@ export class ResponsesWsSession {
         } catch {
           // Best-effort.
         }
-        reject(err);
+        // A shutdown or abort during the handshake is a cancellation, not an
+        // endpoint failure.
+        reject(this.closed || signal?.aborted ? abortError() : err);
       };
       const onOpen = () => {
         if (settled) return;
@@ -402,23 +447,6 @@ export class ResponsesWsSession {
       signal?.addEventListener("abort", onAbort, { once: true });
       if (socket.readyState === WS_OPEN) onOpen();
     });
-
-    if (signal?.aborted) {
-      // Aborted between the `open` event and this continuation: the handshake
-      // resolved, but the request must not be sent on a dead signal.
-      try {
-        socket.close();
-      } catch {
-        // Best-effort.
-      }
-      throw abortError();
-    }
-
-    this.socket = socket;
-    this.connectedUrl = url;
-    this.connectedApiKey = apiKey;
-    this.connectedAt = this.now();
-    return { socket, reused: false };
   }
 
   private continuationDelta(
@@ -447,17 +475,52 @@ export class ResponsesWsSession {
     // two concurrent streams cannot both open sockets: the second queues until
     // the first releases. One stream therefore owns the session's socket for its
     // whole lifetime, and every reset / continuation write below is conditional
-    // on that ownership.
+    // on that ownership. Acquisition is abortable: an aborted waiter leaves the
+    // queue at once instead of waiting for the owner to exit.
     while (this.streamOwner !== null) {
-      if (this.closed) throw abortError();
-      await new Promise<void>((resolve) => this.streamWaiters.push(resolve));
+      if (this.closed || request.signal?.aborted) throw abortError();
+      await new Promise<void>((resolve, reject) => {
+        let onAbort: (() => void) | undefined;
+        const entry = {
+          wake: () => {
+            if (onAbort) request.signal?.removeEventListener("abort", onAbort);
+            resolve();
+          },
+        };
+        onAbort = () => {
+          const index = this.streamWaiters.indexOf(entry);
+          if (index !== -1) this.streamWaiters.splice(index, 1);
+          reject(abortError());
+        };
+        this.streamWaiters.push(entry);
+        request.signal?.addEventListener("abort", onAbort, { once: true });
+      });
     }
-    if (this.closed) throw abortError();
+    if (this.closed || request.signal?.aborted) throw abortError();
     const owner = {};
     this.streamOwner = owner;
+    // Explicit owner cleanup on request abort or session close even while the
+    // generator is suspended: a dropped suspended iterator must not hold the
+    // owner token and starve every queued stream.
+    const onOwnerAbort = () => {
+      if (this.streamOwner !== owner) return;
+      this.resetSocket();
+      const connecting = this.connectingSocket;
+      this.connectingSocket = null;
+      if (connecting) {
+        try {
+          connecting.close(1000, "client reset");
+        } catch {
+          // Best-effort.
+        }
+      }
+      this.releaseStream(owner);
+    };
+    request.signal?.addEventListener("abort", onOwnerAbort, { once: true });
     try {
       yield* this.streamOwned(owner, request, buildFullBody, replayReasoning);
     } finally {
+      request.signal?.removeEventListener("abort", onOwnerAbort);
       this.releaseStream(owner);
     }
   }
@@ -465,7 +528,7 @@ export class ResponsesWsSession {
   private releaseStream(owner: object): void {
     if (this.streamOwner !== owner) return;
     this.streamOwner = null;
-    for (const wake of this.streamWaiters.splice(0)) wake();
+    for (const entry of this.streamWaiters.splice(0)) entry.wake();
   }
 
   private ownsStream(owner: object): boolean {
@@ -501,9 +564,11 @@ export class ResponsesWsSession {
     for (;;) {
       if (request.signal?.aborted) throw abortError();
       const { socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal);
-      // The signal may have aborted between the open event and the handshake
-      // resuming: never send a request on a dead signal.
-      if (request.signal?.aborted) {
+      // The signal may have aborted, the session closed, or ownership changed
+      // between the open event and the handshake resuming: never send a
+      // request on a dead signal, a closed session, or a socket this stream no
+      // longer owns.
+      if (request.signal?.aborted || this.closed || !this.ownsStream(owner)) {
         if (this.ownsSocket(owner, socket)) this.resetSocket();
         throw abortError();
       }
@@ -563,14 +628,17 @@ export class ResponsesWsSession {
       let terminalConsumed = false;
 
       try {
-        // Recheck the signal right before sending: an abort that landed while
-        // the listeners were being attached must not leave a pending request.
-        if (request.signal?.aborted) {
+        // Serialize first, then recheck cancellation and ownership immediately
+        // before sending: a payload whose toJSON() aborts the request, or an
+        // abort that landed while the listeners were being attached, must not
+        // leave a request pending on the socket.
+        const wire = JSON.stringify(payload);
+        if (request.signal?.aborted || this.closed || !this.ownsStream(owner)) {
           if (this.ownsSocket(owner, socket)) this.resetSocket();
           throw abortError();
         }
         try {
-          socket.send(JSON.stringify(payload));
+          socket.send(wire);
         } catch (cause) {
           if (this.ownsSocket(owner, socket)) this.resetSocket();
           if (reused && !reconnectedAfterDrop) {

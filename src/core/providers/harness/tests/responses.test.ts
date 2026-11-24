@@ -761,3 +761,141 @@ describe("ResponsesWsSession persistent WebSocket mode", () => {
     wsSession.close();
   });
 });
+
+describe("ResponsesWsSession stream ownership round 3 (LOCAL-009)", () => {
+  const wsQuirks = () => quirks({ chatgptOAuth: true, sendReasoning: true });
+  const transcript: TranscriptMessage[] = [{ role: "user", content: "one" }];
+  const req = (
+    wsSession: ResponsesWsSession,
+    overrides: Partial<ChatRequest> = {},
+  ) =>
+    request(() => { throw new Error("HTTP fallback should not run"); }, {
+      model: "gpt-6.2-sol",
+      transcript,
+      quirks: wsQuirks(),
+      responsesSession: wsSession,
+      ...overrides,
+    });
+
+  it("rejects a queued stream immediately when its request aborts, and releases the owner when a suspended stream's request aborts (LOCAL-009)", async () => {
+    const controllerA = new AbortController();
+    const controllerB = new AbortController();
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket((_payload, self) => {
+          queueMicrotask(() => {
+            if (sockets.length === 1 && socket.sent.length === 1) {
+              // The first socket's first request stalls after one delta.
+              self.sendEvent({ type: "response.output_text.delta", delta: "A partial" });
+            } else {
+              self.sendEvent({ type: "response.completed", response: { id: "resp_c", usage: { input_tokens: 1, output_tokens: 1 } } });
+            }
+          });
+        });
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    // Stream A starts, emits one delta, then stays suspended while owning the stream.
+    const itA = streamResponses(req(wsSession, { signal: controllerA.signal }))[Symbol.asyncIterator]();
+    expect((await itA.next()).value).toEqual({ type: "text.delta", text: "A partial" });
+
+    // Stream B queues behind A, then aborts while queued: it must reject with
+    // AbortError at once instead of waiting for the owner to exit.
+    const bPromise = collect(req(wsSession, { signal: controllerB.signal })).then(
+      () => "completed",
+      (error: unknown) => (error as Error).name ?? String(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controllerB.abort();
+    const bOutcome = await Promise.race([
+      bPromise,
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ]);
+    expect(bOutcome).toBe("AbortError");
+    expect(sockets).toHaveLength(1);
+
+    // Aborting A while its generator is suspended must release the owner token,
+    // so a later stream is not starved.
+    controllerA.abort();
+    const c = await collect(req(wsSession));
+    expect(c.at(-1)).toEqual({ type: "finish", reason: "stop" });
+    expect(sockets).toHaveLength(2);
+    wsSession.close();
+  });
+
+  it("closes a connecting socket and never sends after close() runs during the handshake (LOCAL-009)", async () => {
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket(() => {
+          // Never answers.
+        });
+        sockets.push(socket);
+        queueMicrotask(() => {
+          socket.open();
+          // close() synchronously right after `open` fires, before the handshake
+          // continuation runs.
+          wsSession.close();
+        });
+        return socket;
+      },
+    });
+
+    const outcome = await Promise.race([
+      collect(req(wsSession)).then(
+        () => "completed",
+        (error: unknown) => (error as Error).name ?? String(error),
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ]);
+    expect(outcome).toBe("AbortError");
+    expect(sockets).toHaveLength(1);
+    // The connecting socket was shut down: nothing was sent on it.
+    expect(sockets[0]!.sent).toHaveLength(0);
+    expect(sockets[0]!.closed).toBe(true);
+  });
+
+  it("serializes the payload before the final cancellation check, so an aborting toJSON() prevents the send (LOCAL-009)", async () => {
+    const controller = new AbortController();
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket(() => {
+          // Never answers.
+        });
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    // The config key is serialized once up front; the payload is serialized again
+    // immediately before send. Abort only on the second serialization.
+    let serializations = 0;
+    const abortingParameters = {
+      type: "object",
+      toJSON() {
+        serializations += 1;
+        if (serializations >= 2) controller.abort();
+        return { type: "object" };
+      },
+    };
+    const tools = [{ name: "read", description: "Reads.", parameters: abortingParameters }];
+
+    const outcome = await Promise.race([
+      collect(req(wsSession, { tools, signal: controller.signal })).then(
+        () => "completed",
+        (error: unknown) => (error as Error).name ?? String(error),
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ]);
+    expect(outcome).toBe("AbortError");
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.sent).toHaveLength(0);
+    wsSession.close();
+  });
+});

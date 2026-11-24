@@ -85,7 +85,11 @@ negotiates any other protocol version is refused loudly
   sends best-effort `session/close` on session teardown, adopts provider titles
   from `session_info_update` (`sessionTitle`), and refreshes cached agent
   profiles live when `providers.acp.agents` changes. For Antigravity, Moxen
-  wires mid-turn steering (`steerTurn` via concurrent `session/prompt`) and
+  wires mid-turn steering (`steerTurn` via concurrent `session/prompt`; a steer
+  refused before its acknowledgement window is handed back to the caller —
+  settling the turn from the stored main result if it removed the last pending
+  prompt — while any failure after acknowledgment fails the turn and sends
+  `session/cancel` exactly like a main prompt failure) and
   `/compact` compaction (`session.notice: "compacted"`), merges local
   `.claude/skills` / `.agents/skills` with live `available_commands_update` in
   `skillInventory`, and computes estimated `contextBreakdown` from the live
@@ -104,7 +108,12 @@ negotiates any other protocol version is refused loudly
 - **Context, token & plan usage**: `AcpDriver` consumes ACP `usage_update`
   notifications for live context-window readings (`contextUsage`; its `cost` is
   the session's cumulative cost per ACP v1, tracked against a per-session
-  baseline so only the unaccounted delta is added on top of settled turns) and
+  baseline so only the unaccounted delta is added on top of settled turns; the
+  baseline is a high-water mark that never decreases — 0 for a new session,
+  unknown until the first pre-turn reading on a resumed session, in which case
+  no delta is reported — and at settle the turn's cost is the prompt result's
+  per-turn cost, or the measured cumulative delta when the result carries none,
+  so observed spend is persisted exactly once) and
   per-turn `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
   Moxen also probes `agy --print /usage --output-format json` and
   `agy --print /credits --output-format json` (zero-turn local slash commands,

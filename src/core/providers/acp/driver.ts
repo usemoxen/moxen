@@ -252,6 +252,8 @@ interface AcpTranscriptTurn {
   sentNativeSubagentReminder: boolean;
   usage: TokenUsageDelta | null;
   liveUsage: TokenUsageDelta | null;
+  /** The main prompt's result, kept while a steer is still pending, so an early steer refusal can still settle the turn from it. */
+  mainResult: unknown;
   sawUsageUpdate: boolean;
   hasAssistantTextSinceLastTool: boolean;
   awaitingPostUsageSettle: boolean;
@@ -307,12 +309,15 @@ interface AcpSession {
   title: string | null;
   context: ContextWindowUsage | null;
   /**
-   * Baseline of the ACP session's CUMULATIVE `usage_update.cost` already
-   * accounted for by settled turns (or, for a resumed session, predating this
-   * driver process — established at the first reading). Null until the first
-   * cost reading on a resumed session; 0 for a new session.
+   * High-water mark of the ACP session's CUMULATIVE `usage_update.cost` already
+   * accounted for by settled turns: 0 for a new session, the first pre-turn
+   * reading of a resumed session, advanced only at settle by spend actually
+   * accounted, never lowered. Null while unknown (a resumed session with no
+   * pre-turn reading yet) — no delta is reported from an unknown baseline.
    */
   costBaselineUsd: number | null;
+  /** High-water mark of every observed cumulative counter reading (never lowered). */
+  costCounterHighUsd: number;
   tier: string | null;
   readonly sessionAllowKeys: Set<string>;
   readonly transcript: AcpTranscriptTurn[];
@@ -357,18 +362,56 @@ const SKILL_MARKER_FILE = ".moxen-skill.json";
 const MAX_LOCAL_SKILLS = 60;
 const MAX_SKILL_DESCRIPTION_CHARS = 300;
 
+/** ACP `session/update` variants that report prompt progress (per the ACP v1 spec). */
+const ACP_PROGRESS_UPDATE_KINDS = new Set([
+  "agent_message_chunk",
+  "agent_thought_chunk",
+  "tool_call",
+  "tool_call_update",
+  "plan",
+  "plan_update",
+  "usage_update",
+]);
+
+/** ACP agent→client methods that belong to a session's prompt progress (all carry `params.sessionId`). */
+const ACP_SESSION_METHODS: Set<string> = new Set([
+  ACP_METHODS.sessionUpdate,
+  ACP_METHODS.requestPermission,
+  ACP_METHODS.elicitationCreate,
+  ACP_METHODS.fsReadTextFile,
+  ACP_METHODS.fsWriteTextFile,
+  ACP_METHODS.terminalCreate,
+  ACP_METHODS.terminalOutput,
+  ACP_METHODS.terminalWaitForExit,
+  ACP_METHODS.terminalKill,
+  ACP_METHODS.terminalRelease,
+]);
+
 /**
- * Idle-timer activity matcher for ACP requests: only valid JSON-RPC frames that
- * carry this ACP session's id count as activity for a pending prompt. Frames
- * ACP cannot attribute (no `params.sessionId` — e.g. a bare response id or
- * another session's update) never restart the idle timer; where the protocol
- * cannot tell same-session siblings apart, the hard deadline (`promptDeadlineMs`)
- * still bounds the request.
+ * Idle-timer activity matcher for ACP requests: only recognized ACP frames that
+ * carry this session's id count as activity for a pending prompt — a
+ * `session/update` with a prompt-progress update kind, or one of the ACP
+ * agent→client requests, all with `params.sessionId` matching. Response-shaped
+ * frames (an id with `result`/`error`, no method), unrelated methods that merely
+ * reuse `params.sessionId`, other sessions' updates, and non-progress update
+ * kinds never restart the idle timer. Same-session siblings cannot be told
+ * apart at this layer, so the hard deadline (`promptDeadlineMs`) still bounds
+ * the request.
  */
 function acpSessionActivity(sessionId: string): (message: Record<string, unknown>) => boolean {
   return (message) => {
+    const method = message["method"];
+    if (typeof method !== "string") return false; // response-shaped frame
+    if (message["result"] !== undefined || message["error"] !== undefined) return false;
+    if (!ACP_SESSION_METHODS.has(method)) return false;
     const params = asRecord(message["params"]);
-    return params !== null && params["sessionId"] === sessionId;
+    if (params === null || params["sessionId"] !== sessionId) return false;
+    if (method === ACP_METHODS.sessionUpdate) {
+      const update = asRecord(params["update"]);
+      const kind = update === null ? null : asNonEmptyString(update["sessionUpdate"]);
+      return kind !== null && ACP_PROGRESS_UPDATE_KINDS.has(kind);
+    }
+    return true;
   };
 }
 
@@ -1349,6 +1392,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           // A resumed session's first cost reading stands for pre-resume spend;
           // a new session's cumulative counter starts at zero.
           costBaselineUsd: resumed ? null : 0,
+          costCounterHighUsd: 0,
           tier,
           sessionAllowKeys: new Set(),
           transcript: [],
@@ -1465,6 +1509,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           sentNativeSubagentReminder: false,
           usage: null,
           liveUsage: null,
+          mainResult: null,
           sawUsageUpdate: false,
           hasAssistantTextSinceLastTool: false,
           awaitingPostUsageSettle: false,
@@ -1506,7 +1551,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
             { idle: true, deadlineMs: this.promptDeadlineMs, activityMatch: acpSessionActivity(session.acpSessionId) },
           )
           .then(
-            (result) => this.handlePromptSuccess(session, turn, inFlight, result, carriedInstructions),
+            (result) => this.handlePromptSuccess(session, turn, inFlight, result, carriedInstructions, true),
             (cause) => this.handlePromptFailure(session, turn, inFlight, cause, carriedInstructions),
           );
 
@@ -1536,10 +1581,29 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     inFlight: InFlightAcpPrompt,
     result: unknown,
     carriedInstructions: string | null,
+    isMainPrompt = false,
   ): void {
     turn.activePrompts.delete(inFlight);
     this.finishInFlightPrompt(session, inFlight);
     if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
+    // Wait for any sibling steering prompt on the same turn before settling;
+    // keep the main prompt's result so an early steer refusal can still settle
+    // the turn from it.
+    if (turn.activePrompts.size > 0) {
+      if (isMainPrompt) turn.mainResult = result;
+      return;
+    }
+    turn.mainResult = null;
+    this.settleFromPromptResult(session, turn, result, carriedInstructions);
+  }
+
+  /** Settle the turn from a prompt result (its own, or the stored main result after an early steer refusal). */
+  private settleFromPromptResult(
+    session: AcpSession,
+    turn: AcpTranscriptTurn,
+    result: unknown,
+    carriedInstructions: string | null,
+  ): void {
     const record = asRecord(result);
     const usage = parseAcpTurnUsage(record?.["usage"]);
     if (usage) {
@@ -1557,8 +1621,6 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         ...(prev?.costUsd !== undefined ? { costUsd: prev.costUsd } : {}),
       };
     }
-    // Wait for any sibling steering prompt on the same turn before settling.
-    if (turn.activePrompts.size > 0) return;
 
     const stopReason = record?.["stopReason"];
     const status = acpStopReasonToStatus(stopReason);
@@ -1618,11 +1680,15 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     inFlight: InFlightAcpPrompt,
     cause: unknown,
     carriedInstructions: string | null,
+    afterAck = false,
   ): void {
     turn.activePrompts.delete(inFlight);
     this.finishInFlightPrompt(session, inFlight);
     if (inFlight.abandoned || turn.status !== "running" || session.closed) return;
-    if (turn.activePrompts.size > 0) return;
+    // A prompt that failed after its acknowledgement (a steer past the ack
+    // window) fails the turn outright, whatever else is pending; otherwise wait
+    // for sibling prompts before settling.
+    if (!afterAck && turn.activePrompts.size > 0) return;
     if (
       carriedInstructions !== null &&
       session.pendingInstructions === null &&
@@ -1631,7 +1697,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     ) {
       session.pendingInstructions = carriedInstructions;
     }
-    if (cause instanceof CliError && cause.code === "PEER_REQUEST_TIMEOUT") {
+    if (afterAck || (cause instanceof CliError && cause.code === "PEER_REQUEST_TIMEOUT")) {
+      // Fail the turn the way the main prompt's timeout path does: cancel the
+      // session turn and suppress the cancelled stream's trailing output.
       this.cancelAllParked(session);
       session.peer.notify(ACP_METHODS.sessionCancel, { sessionId: session.acpSessionId });
       this.startCancelledStreamSuppression(session);
@@ -1680,7 +1748,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
       let earlyRejection: unknown = undefined;
       let rejectedEarly = false;
-      const sentAt = Date.now();
+      // Acknowledgment state is exactly what resolves the caller's race below —
+      // never a wall-clock comparison, so a rolled-back clock cannot misclassify.
+      let acknowledged = false;
       const req = session.peer.request(
         ACP_METHODS.sessionPrompt,
         {
@@ -1695,33 +1765,44 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           this.handlePromptSuccess(session, open, inFlight, result, null);
         },
         (cause) => {
-          if (Date.now() - sentAt <= STEER_ACK_CHECK_MS) {
-            // Early refusal within the acknowledgement window: hand the error
-            // back to the steer caller without touching the running turn.
+          if (!acknowledged) {
+            // Early refusal before acknowledgment: hand the error back to the
+            // steer caller; if it removed the last pending prompt and the main
+            // prompt's result was stored, settle the turn from that result.
             earlyRejection = cause;
             rejectedEarly = true;
             open.activePrompts.delete(inFlight);
             this.finishInFlightPrompt(session, inFlight);
+            if (
+              open.activePrompts.size === 0 &&
+              open.status === "running" &&
+              !session.closed &&
+              open.mainResult !== null
+            ) {
+              const stored = open.mainResult;
+              open.mainResult = null;
+              this.settleFromPromptResult(session, open, stored, null);
+            }
           } else {
-            // Past the acknowledgement window the steer is a real in-flight
-            // prompt: route its failure (e.g. the idle deadline firing after
-            // the main prompt already finished) through the same turn failure
-            // and session/cancel path as the main prompt, so the turn cannot
-            // stay running with no pending prompt left.
-            this.handlePromptFailure(session, open, inFlight, cause, null);
+            // Past acknowledgment the steer is a real in-flight prompt: fail the
+            // turn through the same path as a main prompt failure (session/cancel
+            // + cancelled-output suppression + failed settle), whatever the error,
+            // so the turn cannot stay running with no pending prompt left.
+            this.handlePromptFailure(session, open, inFlight, cause, null, true);
           }
         },
       );
 
       // Give the agent a brief tick to reject immediately if it refuses concurrent steering,
       // without blocking while a valid steered prompt runs to completion.
-      await Promise.race([
-        settled,
-        new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, STEER_ACK_CHECK_MS);
-          t.unref?.();
-        }),
-      ]);
+      const ackWindow = new Promise<void>((resolve) => {
+        const t = setTimeout(() => {
+          acknowledged = true;
+          resolve();
+        }, STEER_ACK_CHECK_MS);
+        t.unref?.();
+      });
+      await Promise.race([settled, ackWindow]);
       if (rejectedEarly) {
         throw earlyRejection;
       }
@@ -2125,12 +2206,21 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         }
         const prev = session.context;
         // ACP `usage_update.cost` is the session's CUMULATIVE cost (ACP v1), not
-        // a per-turn figure: the reading keeps the cumulative value, and the
-        // per-session baseline is established at the first reading of a resumed
-        // session (0 for a new one). Only the delta past the baseline is spend
-        // not yet accounted for by settled turns.
-        if (parsed.costUsd !== undefined && session.costBaselineUsd === null) {
-          session.costBaselineUsd = parsed.costUsd;
+        // a per-turn figure. Invariant: `costBaselineUsd` is a high-water mark of
+        // the cumulative counter already accounted for by settled turns — 0 for a
+        // new session, the first pre-turn reading of a resumed session — and it
+        // never decreases (a downward reading is not evidence of a counter
+        // reset); it advances only at settle, by spend actually accounted. An
+        // in-turn reading on a resumed session with no baseline yet does NOT
+        // establish one: no delta is reported from an unknown baseline.
+        if (parsed.costUsd !== undefined) {
+          // The counter never resets mid-session from our point of view; track
+          // its high-water mark so a downward reading can never lower the
+          // accounted baseline.
+          session.costCounterHighUsd = Math.max(session.costCounterHighUsd, parsed.costUsd);
+          if (session.costBaselineUsd === null && !activeTurn) {
+            session.costBaselineUsd = parsed.costUsd;
+          }
         }
         session.context = {
           usedTokens: parsed.used,
@@ -2144,15 +2234,20 @@ export class AcpDriver implements ProviderAdapter<CliError> {
               ? { costUsd: prev.costUsd }
               : {}),
         };
+        const prevLive = activeTurn?.liveUsage ?? null;
         const liveUsage: TokenUsageDelta = {
           input: parsed.used,
           cacheRead: 0,
           cacheCreate: 0,
           output: 0,
           thinking: 0,
-          ...(parsed.costUsd !== undefined
-            ? { costUsd: Math.max(0, parsed.costUsd - (session.costBaselineUsd ?? 0)) }
-            : {}),
+          ...(parsed.costUsd !== undefined && session.costBaselineUsd !== null
+            ? { costUsd: Math.max(0, parsed.costUsd - session.costBaselineUsd) }
+            // Token-only update: retain the open turn's last known cost delta
+            // and refresh the token fields independently.
+            : prevLive?.costUsd !== undefined
+              ? { costUsd: prevLive.costUsd }
+              : {}),
         };
         if (activeTurn) activeTurn.liveUsage = liveUsage;
         this.publish({
@@ -2538,6 +2633,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       sentNativeSubagentReminder: false,
       usage: null,
       liveUsage: null,
+      mainResult: null,
       sawUsageUpdate: false,
       hasAssistantTextSinceLastTool: false,
       awaitingPostUsageSettle: false,
@@ -3118,6 +3214,30 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     this.finishReasoning(session, turn);
     this.pauseGenerationTimer(turn);
     turn.activeSegment = null;
+    // Reconcile cost at settle (any status, including failed/interrupted turns
+    // where spend was observed). Invariant: `costBaselineUsd` is the high-water
+    // mark of the session's cumulative counter already accounted in the ledger;
+    // it never decreases. The turn's cost is the prompt result's per-turn cost
+    // when present, otherwise the measured delta (latest cumulative reading
+    // minus the baseline); the baseline then advances only by spend actually
+    // accounted. With no baseline yet (resumed session, nothing established),
+    // everything observed so far becomes the baseline instead of new spend.
+    const counter = session.context?.costUsd;
+    const baseline = session.costBaselineUsd;
+    let turnCost = turn.usage?.costUsd;
+    if (turnCost === undefined && counter !== undefined && baseline !== null) {
+      turnCost = Math.max(0, counter - baseline);
+    }
+    // Reconcile the baseline: it is the high-water mark of spend accounted in
+    // the ledger, so it never decreases and never falls below an observed
+    // counter reading. With no baseline yet (resumed session, nothing
+    // established), everything observed so far becomes the baseline rather than
+    // new spend — no delta is ever reported from an unknown baseline.
+    session.costBaselineUsd = Math.max(
+      baseline ?? 0,
+      session.costCounterHighUsd,
+      (baseline ?? 0) + (turnCost ?? 0),
+    );
     settleAndPublishTurn({
       open: turn,
       waiters: session.waiters,
@@ -3129,17 +3249,16 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         if (open.text.length > 0) {
           open.items.push({ kind: "assistant", text: open.text });
         }
+        // Persist the settled cost on the outcome usage so the ledger records
+        // observed spend even when the prompt result carried no cost.
+        if (turnCost !== undefined) {
+          open.usage = { input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0, ...(open.usage ?? {}), costUsd: turnCost };
+        }
         return this.outcomeOf(open);
       },
       publish: (event) => this.publish(event),
       event: (turnId) => terminalTurnEvent(this.provider, session.threadId, turnId, status, raw),
     });
-    // The settled turn's cost is now accounted in the ledger: advance the
-    // session's cumulative-cost baseline to the current reading so the next
-    // turn's unaccounted delta starts after it (no double count).
-    if (session.context?.costUsd !== undefined) {
-      session.costBaselineUsd = session.context.costUsd;
-    }
   }
 
   private failInProgressForegroundTools(
