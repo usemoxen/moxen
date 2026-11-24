@@ -100,6 +100,59 @@ describe("stdio JSON-RPC peer", () => {
     serverPeer.close();
   });
 
+  it("idle timeout restarts only on messages the caller attributes to the session, and clamps timer values above 2^31-1 ms (LOCAL-009)", async () => {
+    const { client, server } = createLinkedPair();
+    const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });
+    const serverPeer = new JsonRpcPeer(server, { forceKillAfterMs: 0 });
+    // The server takes requests but never answers them.
+    serverPeer.onRequest(() => new Promise(() => {}));
+
+    const match = (message: Record<string, unknown>): boolean => {
+      const params = message["params"];
+      return (
+        params !== null &&
+        typeof params === "object" &&
+        !Array.isArray(params) &&
+        (params as Record<string, unknown>)["sessionId"] === "s1"
+      );
+    };
+
+    // Valid frames for ANOTHER session, a bare unrelated id, and garbage never restart this request's idle timer.
+    const noise = setInterval(() => {
+      serverPeer.notify("session/update", { sessionId: "s2", update: { sessionUpdate: "agent_message_chunk" } });
+      server.writeLine("not json at all");
+      server.writeLine(JSON.stringify({ jsonrpc: "2.0", id: "req-999", result: null }));
+    }, 20);
+    const outcome = await Promise.race([
+      clientPeer
+        .request("prompt", {}, 120, { idle: true, activityMatch: match })
+        .then(
+          () => "answered",
+          (error: unknown) => (error as { code: string }).code,
+        ),
+      sleep(500).then(() => "still-pending"),
+    ]);
+    clearInterval(noise);
+    expect(outcome).toBe("PEER_REQUEST_TIMEOUT");
+
+    // Same-session traffic does restart the idle timer, and a deadline above
+    // 2147483647 ms must not fire immediately (the platform clamps it to 1ms).
+    const ticks = setInterval(() => serverPeer.notify("session/update", { sessionId: "s1", update: { sessionUpdate: "agent_message_chunk" } }), 30);
+    const clamped = await Promise.race([
+      clientPeer
+        .request("prompt2", {}, 80, { idle: true, deadlineMs: 2 ** 31, activityMatch: match })
+        .then(
+          () => "answered",
+          (error: unknown) => (error as { code: string }).code,
+        ),
+      sleep(400).then(() => "still-pending"),
+    ]);
+    clearInterval(ticks);
+    expect(clamped).toBe("still-pending");
+    clientPeer.close();
+    serverPeer.close();
+  });
+
   it("times out and closes cleanly", async () => {
     const { client, server } = createLinkedPair();
     const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });

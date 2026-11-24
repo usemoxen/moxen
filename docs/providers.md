@@ -102,8 +102,10 @@ negotiates any other protocol version is refused loudly
   5.5) carry an `(Antigravity)` suffix so they stay distinct from Claude Code's
   own models across every client.
 - **Context, token & plan usage**: `AcpDriver` consumes ACP `usage_update`
-  notifications for live context-window readings (`contextUsage`) and per-turn
-  `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
+  notifications for live context-window readings (`contextUsage`; its `cost` is
+  the session's cumulative cost per ACP v1, tracked against a per-session
+  baseline so only the unaccounted delta is added on top of settled turns) and
+  per-turn `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
   Moxen also probes `agy --print /usage --output-format json` and
   `agy --print /credits --output-format json` (zero-turn local slash commands,
   no shell, no credential access) to report subscription quota windows and

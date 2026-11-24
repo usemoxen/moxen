@@ -552,13 +552,13 @@ describe("ResponsesWsSession persistent WebSocket mode", () => {
 
   it("never sends a second request on a stream that still has one in flight (LOCAL-009)", async () => {
     const sockets: FakeResponsesSocket[] = [];
-    const stalled = new Set<FakeResponsesSocket>();
     const wsSession = new ResponsesWsSession({
       webSocketFactory: () => {
+        const stallFirst = sockets.length === 0;
         const socket = new FakeResponsesSocket((_payload, self) => {
           queueMicrotask(() => {
-            if (stalled.has(self)) {
-              // The first request on this socket stalls mid-reply and never completes.
+            if (stallFirst && socket.sent.length === 1) {
+              // The first socket's first request stalls after one delta.
               self.sendEvent({ type: "response.output_text.delta", delta: "first partial" });
             } else {
               self.sendEvent({ type: "response.completed", response: { id: "resp_done", usage: { input_tokens: 1, output_tokens: 1 } } });
@@ -566,7 +566,6 @@ describe("ResponsesWsSession persistent WebSocket mode", () => {
           });
         });
         sockets.push(socket);
-        if (sockets.length === 1) stalled.add(socket);
         queueMicrotask(() => socket.open());
         return socket;
       },
@@ -586,13 +585,179 @@ describe("ResponsesWsSession persistent WebSocket mode", () => {
     const firstEvent = await firstIterator.next();
     expect(firstEvent.value).toEqual({ type: "text.delta", text: "first partial" });
 
-    // A second stream on the same session must not reuse the busy socket.
+    // A second stream on the same session queues behind the first owner: it must
+    // not reset the first stream's socket or open a replacement while it is busy.
     const secondPromise = collect(req());
-    await vi.waitFor(() => expect(sockets).toHaveLength(2));
-    expect(sockets[0]!.closed).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.closed).toBe(false);
+
+    // The first stream then finishes on its own socket (terminal frame), releasing ownership.
+    sockets[0]!.sendEvent({ type: "response.completed", response: { id: "resp_1", usage: { input_tokens: 1, output_tokens: 1 } } });
+    expect((await firstIterator.next()).value).toMatchObject({ type: "usage" });
+    expect((await firstIterator.next()).value).toEqual({ type: "finish", reason: "stop" });
+    expect((await firstIterator.next()).done).toBe(true);
+
+    // Now the queued second stream runs (reusing the still-open socket) and completes.
     const second = await secondPromise;
     expect(second.at(-1)).toEqual({ type: "finish", reason: "stop" });
-    await firstIterator.return(undefined);
+    expect(sockets).toHaveLength(1);
+    wsSession.close();
+  });
+
+  it("lets a paused stream process its queued close without closing the socket a later stream owns (LOCAL-009)", async () => {
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const stallFirst = sockets.length === 0;
+        const socket = new FakeResponsesSocket((_payload, self) => {
+          queueMicrotask(() => {
+            if (stallFirst && socket.sent.length === 1) {
+              // The first socket's first request stalls after one delta.
+              self.sendEvent({ type: "response.output_text.delta", delta: "partial" });
+            } else {
+              self.sendEvent({ type: "response.output_text.delta", delta: "later reply" });
+              self.sendEvent({ type: "response.completed", response: { id: "resp_later", usage: { input_tokens: 2, output_tokens: 2 } } });
+            }
+          });
+        });
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    const transcript: TranscriptMessage[] = [{ role: "user", content: "one" }];
+    const req = () =>
+      request(() => { throw new Error("HTTP fallback should not run"); }, {
+        model: "gpt-6.2-sol",
+        transcript,
+        quirks: wsQuirks(),
+        responsesSession: wsSession,
+      });
+
+    // Stream A pauses after its first delta, still owning the session.
+    const itA = streamResponses(req())[Symbol.asyncIterator]();
+    expect((await itA.next()).value).toEqual({ type: "text.delta", text: "partial" });
+
+    // Stream B starts while A is paused: it queues behind A instead of stealing the socket.
+    const itB = streamResponses(req())[Symbol.asyncIterator]();
+    const bPromise = (async () => {
+      const out: ModelEvent[] = [];
+      for (;;) {
+        const step = await itB.next();
+        if (step.done) return out;
+        out.push(step.value);
+      }
+    })();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sockets).toHaveLength(1);
+
+    // A advances and processes its queued close: its reset must be scoped to its
+    // own socket, so B's later socket is never closed underneath it.
+    sockets[0]!.emit("close", { code: 1006, reason: "dropped" });
+    const aOutcome = await Promise.race([
+      itA.next().then(() => "next", (error: unknown) => (error as Error).message),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ]);
+    expect(typeof aOutcome).toBe("string");
+
+    const second = await bPromise;
+    expect(second.at(-1)).toEqual({ type: "finish", reason: "stop" });
+    expect(second).toContainEqual({ type: "text.delta", text: "later reply" });
+    expect(sockets.every((socket) => !socket.closed || socket === sockets[0])).toBe(true);
+    wsSession.close();
+  });
+
+  it("serializes two cold concurrent streams into one socket (LOCAL-009)", async () => {
+    const sockets: FakeResponsesSocket[] = [];
+    let counter = 0;
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket((_payload, self) => {
+          counter += 1;
+          const id = `resp_${counter}`;
+          queueMicrotask(() => {
+            self.sendEvent({ type: "response.output_text.delta", delta: `reply-${id}` });
+            self.sendEvent({ type: "response.completed", response: { id, usage: { input_tokens: 1, output_tokens: 1 } } });
+          });
+        });
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+    });
+
+    const transcript: TranscriptMessage[] = [{ role: "user", content: "one" }];
+    const req = () =>
+      request(() => { throw new Error("HTTP fallback should not run"); }, {
+        model: "gpt-6.2-sol",
+        transcript,
+        quirks: wsQuirks(),
+        responsesSession: wsSession,
+      });
+
+    const drain = async (iterator: AsyncIterator<ModelEvent>): Promise<ModelEvent[]> => {
+      const out: ModelEvent[] = [];
+      for (;;) {
+        const step = await iterator.next();
+        if (step.done) return out;
+        out.push(step.value);
+      }
+    };
+
+    // Start both streams before either handshake resolves.
+    const itA = streamResponses(req())[Symbol.asyncIterator]();
+    const itB = streamResponses(req())[Symbol.asyncIterator]();
+    const aPromise = drain(itA);
+    const bPromise = drain(itB);
+    const [a, b] = await Promise.all([aPromise, bPromise]);
+
+    expect(a.at(-1)).toEqual({ type: "finish", reason: "stop" });
+    expect(b.at(-1)).toEqual({ type: "finish", reason: "stop" });
+    // Two requests, one socket: the second stream waited for the first to finish.
+    expect(sockets).toHaveLength(1);
+    wsSession.close();
+  });
+
+  it("does not send the request when aborted between the open event and the handshake resuming (LOCAL-009)", async () => {
+    const controller = new AbortController();
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        const socket = new FakeResponsesSocket(() => {
+          // Never answers.
+        });
+        sockets.push(socket);
+        queueMicrotask(() => {
+          socket.open();
+          // Abort synchronously right after `open` fires, before the handshake promise resumes.
+          controller.abort();
+        });
+        return socket;
+      },
+    });
+
+    const transcript: TranscriptMessage[] = [{ role: "user", content: "one" }];
+    const req = request(() => { throw new Error("HTTP fallback should not run"); }, {
+      model: "gpt-6.2-sol",
+      transcript,
+      quirks: wsQuirks(),
+      responsesSession: wsSession,
+      signal: controller.signal,
+    });
+
+    const outcome = await Promise.race([
+      collect(req).then(
+        () => "completed",
+        (error: unknown) => (error as Error).name ?? String(error),
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ]);
+    expect(outcome).toBe("AbortError");
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.sent).toHaveLength(0);
+    expect(sockets[0]!.closed).toBe(true);
     wsSession.close();
   });
 });

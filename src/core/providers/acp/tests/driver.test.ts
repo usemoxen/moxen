@@ -1889,6 +1889,103 @@ describe("ACP session/resume, session/close, steering, compaction, skills invent
     await Effect.runPromise(driver.stopAll());
   });
 
+  it("routes a steer prompt that outlives the ack window through the same turn failure and cancel path as the main prompt (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({
+      provider: "antigravity",
+      transport,
+      promptTimeoutMs: 300,
+      backgroundTurnIdleMs: 10_000,
+      cancelQuietMs: 50,
+      cancelDrainTimeoutMs: 200,
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(
+      Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))),
+    );
+    try {
+      await Effect.runPromise(driver.startSession(START));
+      const server = transport.sessions[0]!.server;
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "start work" }));
+      await Effect.runPromise(driver.steerTurn!("thread-1", "focus on tests"));
+      expect(server.requestsTo("session/prompt")).toHaveLength(2);
+
+      // Let the early steering acknowledgement window pass, then finish the main
+      // prompt while the steer is still pending.
+      await new Promise((r) => setTimeout(r, 80));
+      server.finishPrompt("end_turn");
+
+      // The steer request now reaches its idle deadline: the turn must fail and
+      // send session/cancel instead of staying running with no pending prompt.
+      const outcome = await Promise.race([
+        driver.awaitTurn("thread-1", sent.turnId),
+        new Promise<null>((r) => setTimeout(() => r(null), 1500)),
+      ]);
+      expect(outcome).not.toBeNull();
+      expect(outcome!.status).toBe("failed");
+      await vi.waitFor(() => expect(server.notificationsTo("session/cancel")).toHaveLength(1));
+      expect(events.some((e) => e.type === "turn.failed")).toBe(true);
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("tracks ACP usage_update cost as cumulative per session and reports only the unaccounted delta live (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+
+    // Turn 1: cumulative session cost 0.25 while the prompt is held.
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.25 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(driver.liveTurnUsage("thread-1")?.costUsd).toBeCloseTo(0.25, 9);
+    expect((await driver.contextUsage("thread-1"))?.costUsd).toBeCloseTo(0.25, 9);
+    // The prompt-result usage stays per-turn and separate from the cumulative reading.
+    server.finishPrompt("end_turn", { usage: { inputTokens: 900, outputTokens: 100, cost: 0.25 } });
+    const o1 = await driver.awaitTurn("thread-1", t1.turnId);
+    expect(o1.usage?.costUsd).toBeCloseTo(0.25, 9);
+
+    // Turn 2: the cumulative reading grows to 0.60; only the delta past the
+    // settled baseline (0.25) is the open turn's live cost.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_000, size: 100_000, cost: 0.6 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect((await driver.contextUsage("thread-1"))?.costUsd).toBeCloseTo(0.6, 9);
+    expect(driver.liveTurnUsage("thread-1")?.costUsd).toBeCloseTo(0.35, 9);
+    server.finishPrompt("end_turn", { usage: { inputTokens: 800, outputTokens: 90, cost: 0.35 } });
+    const o2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(o2.usage?.costUsd).toBeCloseTo(0.35, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("baselines a resumed ACP session's cumulative cost at its first reading (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport({
+      sessionId: "acp-old",
+      onSessionLoad: (server, sessionId) => {
+        // Pre-resume spend already inside the agent's cumulative counter.
+        server.notifyUpdate(sessionId, { sessionUpdate: "usage_update", used: 5_000, size: 100_000, cost: 0.1 });
+      },
+    });
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-old" }));
+    const server = transport.sessions[0]!.server;
+    // The pre-resume 0.10 is the baseline, not new spend.
+    expect((await driver.contextUsage("thread-1"))?.costUsd).toBeCloseTo(0.1, 9);
+
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+    server.notifyUpdate("acp-old", { sessionUpdate: "usage_update", used: 6_000, size: 100_000, cost: 0.3 });
+    await new Promise((r) => setTimeout(r, 10));
+    // Only 0.20 of the 0.30 cumulative reading is unaccounted.
+    expect(driver.liveTurnUsage("thread-1")?.costUsd).toBeCloseTo(0.2, 9);
+    server.finishPrompt("end_turn", { usage: { inputTokens: 500, outputTokens: 50, cost: 0.2 } });
+    const outcome = await driver.awaitTurn("thread-1", sent.turnId);
+    expect(outcome.usage?.costUsd).toBeCloseTo(0.2, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
   it("emits compacted session.notice on /compact and computes scaled contextBreakdown & skillInventory", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-skills-"));
     const home = await mkdtemp(path.join(os.tmpdir(), "moxen-acp-home-"));

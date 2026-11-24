@@ -12,12 +12,14 @@
  * transparently to HTTP SSE; disconnects, 60-minute connection limits, token
  * rotations, compactions, and `previous_response_not_found` recover cleanly.
  *
- * One socket carries at most one in-flight `response.create`: a stream that
- * ends without consuming a terminal response frame (the consumer abandoned
- * it, the connection dropped, or it is being retried) closes and resets the
- * socket in its `finally`, so a late frame from the abandoned request can
- * never be delivered as the next turn's output, and the continuation chain
- * restarts from a full input on a fresh socket.
+ * One stream owns the session exclusively while it runs: a second concurrent
+ * stream queues behind it instead of opening or stealing a socket. A stream
+ * that ends without consuming a terminal response frame (the consumer
+ * abandoned it, the connection dropped, or it is being retried) closes and
+ * resets its own socket in its `finally` — conditional on still owning it —
+ * so a late frame from an abandoned request can never be delivered as the
+ * next turn's output, and the continuation chain restarts from a full input
+ * on a fresh socket.
  */
 import { responsesUrl } from "../profiles.js";
 import { buildResponsesInput, type ResponsesItem } from "../normalize-responses.js";
@@ -267,8 +269,9 @@ export class ResponsesWsSession {
   private readonly now: () => number;
 
   private socket: ResponsesSocket | null = null;
-  /** The socket a request is currently in flight on, if any; one per stream. */
-  private inFlightSocket: ResponsesSocket | null = null;
+  /** Exclusive owner token of the stream currently running, if any. */
+  private streamOwner: object | null = null;
+  private readonly streamWaiters: Array<() => void> = [];
   private connectedUrl: string | null = null;
   private connectedApiKey: string | undefined = undefined;
   private connectedAt = 0;
@@ -318,6 +321,14 @@ export class ResponsesWsSession {
   close(): void {
     this.closed = true;
     this.resetSocket();
+    // Wake queued streams so they see the closed session instead of waiting forever.
+    this.streamOwner = null;
+    for (const wake of this.streamWaiters.splice(0)) wake();
+  }
+
+  /** True when the given stream owner still owns the session's current socket. */
+  private ownsSocket(owner: object, socket: ResponsesSocket): boolean {
+    return this.streamOwner === owner && this.socket === socket;
   }
 
   private async ensureOpen(url: string, apiKey: string | undefined, signal?: AbortSignal): Promise<{ readonly socket: ResponsesSocket; readonly reused: boolean }> {
@@ -392,6 +403,17 @@ export class ResponsesWsSession {
       if (socket.readyState === WS_OPEN) onOpen();
     });
 
+    if (signal?.aborted) {
+      // Aborted between the `open` event and this continuation: the handshake
+      // resolved, but the request must not be sent on a dead signal.
+      try {
+        socket.close();
+      } catch {
+        // Best-effort.
+      }
+      throw abortError();
+    }
+
     this.socket = socket;
     this.connectedUrl = url;
     this.connectedApiKey = apiKey;
@@ -421,6 +443,41 @@ export class ResponsesWsSession {
     buildFullBody: (replayReasoning: boolean) => Record<string, unknown>,
     replayReasoning: boolean,
   ): AsyncGenerator<ModelEvent> {
+    // Take exclusive stream ownership synchronously, before any socket work, so
+    // two concurrent streams cannot both open sockets: the second queues until
+    // the first releases. One stream therefore owns the session's socket for its
+    // whole lifetime, and every reset / continuation write below is conditional
+    // on that ownership.
+    while (this.streamOwner !== null) {
+      if (this.closed) throw abortError();
+      await new Promise<void>((resolve) => this.streamWaiters.push(resolve));
+    }
+    if (this.closed) throw abortError();
+    const owner = {};
+    this.streamOwner = owner;
+    try {
+      yield* this.streamOwned(owner, request, buildFullBody, replayReasoning);
+    } finally {
+      this.releaseStream(owner);
+    }
+  }
+
+  private releaseStream(owner: object): void {
+    if (this.streamOwner !== owner) return;
+    this.streamOwner = null;
+    for (const wake of this.streamWaiters.splice(0)) wake();
+  }
+
+  private ownsStream(owner: object): boolean {
+    return this.streamOwner === owner;
+  }
+
+  private async *streamOwned(
+    owner: object,
+    request: ChatRequest,
+    buildFullBody: (replayReasoning: boolean) => Record<string, unknown>,
+    replayReasoning: boolean,
+  ): AsyncGenerator<ModelEvent> {
     const url = responsesWsUrl(request.baseUrl);
     const transcript = request.transcript ?? [];
     const fullBody = buildFullBody(replayReasoning);
@@ -442,13 +499,13 @@ export class ResponsesWsSession {
     let retriedFullChain = false;
 
     for (;;) {
-      let { socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal);
-      if (this.inFlightSocket !== null) {
-        // A previous request never reached a terminal frame, so this stream is
-        // still busy: one socket carries at most one in-flight response.create,
-        // so drop it and send the new request on a fresh socket.
-        this.resetSocket();
-        ({ socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal));
+      if (request.signal?.aborted) throw abortError();
+      const { socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal);
+      // The signal may have aborted between the open event and the handshake
+      // resuming: never send a request on a dead signal.
+      if (request.signal?.aborted) {
+        if (this.ownsSocket(owner, socket)) this.resetSocket();
+        throw abortError();
       }
       const delta = reused ? this.continuationDelta(transcript, configKey) : null;
       let payload: Record<string, unknown>;
@@ -503,14 +560,19 @@ export class ResponsesWsSession {
       socket.addEventListener("error", onError);
       socket.addEventListener("close", onClose);
       request.signal?.addEventListener("abort", onAbort, { once: true });
-      this.inFlightSocket = socket;
       let terminalConsumed = false;
 
       try {
+        // Recheck the signal right before sending: an abort that landed while
+        // the listeners were being attached must not leave a pending request.
+        if (request.signal?.aborted) {
+          if (this.ownsSocket(owner, socket)) this.resetSocket();
+          throw abortError();
+        }
         try {
           socket.send(JSON.stringify(payload));
         } catch (cause) {
-          this.resetSocket();
+          if (this.ownsSocket(owner, socket)) this.resetSocket();
           if (reused && !reconnectedAfterDrop) {
             reconnectedAfterDrop = true;
             continue;
@@ -533,11 +595,11 @@ export class ResponsesWsSession {
           }
           const frame = queue.shift()!;
           if (frame.kind === "abort") {
-            this.resetSocket();
+            if (this.ownsSocket(owner, socket)) this.resetSocket();
             throw abortError();
           }
           if (frame.kind === "closed") {
-            this.resetSocket();
+            if (this.ownsSocket(owner, socket)) this.resetSocket();
             if (reused && !emitted && !reconnectedAfterDrop) {
               reconnectedAfterDrop = true;
               retryReason = "reconnect";
@@ -564,19 +626,19 @@ export class ResponsesWsSession {
           } catch (error) {
             if (error instanceof ChatHttpError && !emitted) {
               if (error.errorCode === "previous_response_not_found" && usedContinuation && !retriedFullChain) {
-                this.resetChain();
+                if (this.ownsStream(owner)) this.resetChain();
                 retriedFullChain = true;
                 retryReason = "full-chain";
                 break;
               }
               if (error.errorCode === "websocket_connection_limit_reached" && !reconnectedAfterDrop) {
-                this.resetSocket();
+                if (this.ownsSocket(owner, socket)) this.resetSocket();
                 reconnectedAfterDrop = true;
                 retryReason = "reconnect";
                 break;
               }
             }
-            this.resetChain();
+            if (this.ownsStream(owner)) this.resetChain();
             throw error;
           }
         }
@@ -588,28 +650,32 @@ export class ResponsesWsSession {
         if (retryReason !== null) continue;
 
         if (reducer.completed && reducer.responseId !== null) {
-          this.lastResponseId = reducer.responseId;
-          this.sentPrefix = transcript.slice();
-          this.lastConfigKey = configKey;
-        } else {
+          // Continuation writes are conditional on ownership: a stream that lost
+          // its socket must not record a chain it cannot continue.
+          if (this.ownsSocket(owner, socket)) {
+            this.lastResponseId = reducer.responseId;
+            this.sentPrefix = transcript.slice();
+            this.lastConfigKey = configKey;
+          } else if (this.ownsStream(owner)) {
+            this.resetChain();
+          }
+        } else if (this.ownsStream(owner)) {
           this.resetChain();
         }
         if (reducer.usage) yield { type: "usage", usage: reducer.usage };
         yield { type: "finish", reason: reducer.finish! };
         return;
       } finally {
-        if (this.inFlightSocket === socket) this.inFlightSocket = null;
         socket.removeEventListener("message", onMessage);
         socket.removeEventListener("error", onError);
         socket.removeEventListener("close", onClose);
         request.signal?.removeEventListener("abort", onAbort);
         // Unless a terminal response frame was consumed (the request completed
-        // normally), close and reset the socket: leaving it open would let a
-        // late frame from this request be delivered as the next turn's output
-        // and would allow a second in-flight request on one stream. Resetting
-        // also clears the previous_response_id chain, so the next request on
-        // the fresh socket sends the full input again.
-        if (!terminalConsumed && this.socket === socket) this.resetSocket();
+        // normally), close and reset the socket — but only while this stream
+        // still owns it, so a stale iterator can never close a newer stream's
+        // socket. Resetting also clears the previous_response_id chain, so the
+        // next request on the fresh socket sends the full input again.
+        if (!terminalConsumed && this.ownsSocket(owner, socket)) this.resetSocket();
       }
     }
   }

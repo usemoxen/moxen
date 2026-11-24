@@ -92,6 +92,8 @@ type PendingRequest = {
   readonly restart?: () => void;
   /** Hard-deadline timer for idle requests; restarts never extend it. */
   deadlineTimer?: ReturnType<typeof setTimeout>;
+  /** Caller-supplied test for which received messages count as activity for this request. */
+  readonly activityMatch?: (message: Record<string, unknown>) => boolean;
 };
 
 function clearPendingTimers(pending: PendingRequest): void {
@@ -99,13 +101,15 @@ function clearPendingTimers(pending: PendingRequest): void {
   if (pending.deadlineTimer !== undefined) clearTimeout(pending.deadlineTimer);
 }
 
+/** setTimeout clamps anything above 2^31-1 ms to 1 ms, so clamp before arming. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 export interface JsonRpcRequestOptions {
   /**
    * Treat `timeoutMs` as an idle limit instead of a wall-clock one: a valid
-   * JSON-RPC message from the peer (a response, notification, or server
-   * request — anything attributable to this session) restarts the timer, so
-   * only a silent peer times out. Malformed or non-JSON-RPC lines (a CLI
-   * printing to stdout, say) never restart it.
+   * JSON-RPC message from the peer restarts the timer, so only a silent peer
+   * times out. Malformed or non-JSON-RPC lines (a CLI printing to stdout,
+   * say) never restart it.
    */
   readonly idle?: boolean;
   /**
@@ -114,6 +118,14 @@ export interface JsonRpcRequestOptions {
    * alone bounds the request.
    */
   readonly deadlineMs?: number;
+  /**
+   * Which valid JSON-RPC messages count as activity attributable to this
+   * request or its session (e.g. `params.sessionId` matching the session the
+   * request belongs to). Frames the matcher rejects — another session's
+   * update, a response to a different request, a bare unrelated id — never
+   * restart the idle timer. Absent: any valid JSON-RPC frame counts.
+   */
+  readonly activityMatch?: (message: Record<string, unknown>) => boolean;
 }
 
 export interface JsonRpcPeerOptions {
@@ -175,8 +187,11 @@ export class JsonRpcPeer {
       );
     }
     const id: JsonRpcId = `req-${this.nextId++}`;
-    const timeout = timeoutMs ?? this.options.defaultRequestTimeoutMs ?? 30_000;
-    const deadline = requestOptions.idle === true ? requestOptions.deadlineMs : undefined;
+    const timeout = Math.min(timeoutMs ?? this.options.defaultRequestTimeoutMs ?? 30_000, MAX_TIMER_MS);
+    const deadline =
+      requestOptions.idle === true && requestOptions.deadlineMs !== undefined
+        ? Math.min(requestOptions.deadlineMs, MAX_TIMER_MS)
+        : undefined;
     return new Promise<T>((resolve, reject) => {
       const fail = (error: CliError): void => {
         this.pending.delete(id);
@@ -214,6 +229,7 @@ export class JsonRpcPeer {
                 entry.timer = setTimeout(onTimeout, timeout);
               },
               ...(deadline !== undefined ? { deadlineTimer: setTimeout(onDeadline, deadline) } : {}),
+              ...(requestOptions.activityMatch !== undefined ? { activityMatch: requestOptions.activityMatch } : {}),
             }
           : {}),
       };
@@ -311,12 +327,16 @@ export class JsonRpcPeer {
     const id = message["id"];
     const hasId = id !== undefined && (typeof id === "string" || typeof id === "number");
     const method = message["method"];
-    // Only a valid JSON-RPC frame — attributable to this request or its
-    // session — proves the peer is alive; malformed or unrelated lines never
-    // restart an idle timer, so a hung request times out even while other
-    // traffic flows.
+    // Only a valid JSON-RPC frame proves the peer is alive; malformed lines
+    // never restart an idle timer, and when the caller supplied a matcher only
+    // frames attributable to that request's session do — a hung request times
+    // out even while unrelated traffic flows.
     if (typeof method === "string" || hasId) {
-      for (const pending of this.pending.values()) pending.restart?.();
+      for (const pending of this.pending.values()) {
+        if (!pending.restart) continue;
+        if (pending.activityMatch && !pending.activityMatch(message)) continue;
+        pending.restart();
+      }
     }
     // A method member means call/notification even when an id is present
     // (server→client request); id-only frames are responses.

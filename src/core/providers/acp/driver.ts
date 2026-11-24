@@ -306,6 +306,13 @@ interface AcpSession {
   availableCommands: AcpAvailableCommand[];
   title: string | null;
   context: ContextWindowUsage | null;
+  /**
+   * Baseline of the ACP session's CUMULATIVE `usage_update.cost` already
+   * accounted for by settled turns (or, for a resumed session, predating this
+   * driver process — established at the first reading). Null until the first
+   * cost reading on a resumed session; 0 for a new session.
+   */
+  costBaselineUsd: number | null;
   tier: string | null;
   readonly sessionAllowKeys: Set<string>;
   readonly transcript: AcpTranscriptTurn[];
@@ -349,6 +356,21 @@ const USAGE_REFRESH_COALESCE_MS = 2_000;
 const SKILL_MARKER_FILE = ".moxen-skill.json";
 const MAX_LOCAL_SKILLS = 60;
 const MAX_SKILL_DESCRIPTION_CHARS = 300;
+
+/**
+ * Idle-timer activity matcher for ACP requests: only valid JSON-RPC frames that
+ * carry this ACP session's id count as activity for a pending prompt. Frames
+ * ACP cannot attribute (no `params.sessionId` — e.g. a bare response id or
+ * another session's update) never restart the idle timer; where the protocol
+ * cannot tell same-session siblings apart, the hard deadline (`promptDeadlineMs`)
+ * still bounds the request.
+ */
+function acpSessionActivity(sessionId: string): (message: Record<string, unknown>) => boolean {
+  return (message) => {
+    const params = asRecord(message["params"]);
+    return params !== null && params["sessionId"] === sessionId;
+  };
+}
 
 function discoverLocalAcpSkills(cwd: string, home: string): SkillSummary[] {
   const folders = [
@@ -1324,6 +1346,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           availableCommands: [],
           title: initialTitle,
           context: null,
+          // A resumed session's first cost reading stands for pre-resume spend;
+          // a new session's cumulative counter starts at zero.
+          costBaselineUsd: resumed ? null : 0,
           tier,
           sessionAllowKeys: new Set(),
           transcript: [],
@@ -1478,7 +1503,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
               prompt: promptBlocks,
             },
             this.promptTimeoutMs,
-            { idle: true, deadlineMs: this.promptDeadlineMs },
+            { idle: true, deadlineMs: this.promptDeadlineMs, activityMatch: acpSessionActivity(session.acpSessionId) },
           )
           .then(
             (result) => this.handlePromptSuccess(session, turn, inFlight, result, carriedInstructions),
@@ -1527,11 +1552,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         cachedInputTokens: usage.cacheRead > 0 ? usage.cacheRead : (prev?.cachedInputTokens ?? null),
         autoCompactThreshold: prev?.autoCompactThreshold ?? null,
         compactsAutomatically: prev?.compactsAutomatically ?? null,
-        ...(usage.costUsd !== undefined
-          ? { costUsd: usage.costUsd }
-          : prev?.costUsd !== undefined
-            ? { costUsd: prev.costUsd }
-            : {}),
+        // The prompt-result usage is per-turn and stays on the turn (kept
+        // separate); it must not overwrite the session's cumulative reading.
+        ...(prev?.costUsd !== undefined ? { costUsd: prev.costUsd } : {}),
       };
     }
     // Wait for any sibling steering prompt on the same turn before settling.
@@ -1657,6 +1680,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
 
       let earlyRejection: unknown = undefined;
       let rejectedEarly = false;
+      const sentAt = Date.now();
       const req = session.peer.request(
         ACP_METHODS.sessionPrompt,
         {
@@ -1664,17 +1688,28 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           prompt: promptBlocks,
         },
         this.promptTimeoutMs,
-        { idle: true, deadlineMs: this.promptDeadlineMs },
+        { idle: true, deadlineMs: this.promptDeadlineMs, activityMatch: acpSessionActivity(session.acpSessionId) },
       );
       const settled = req.then(
         (result) => {
           this.handlePromptSuccess(session, open, inFlight, result, null);
         },
         (cause) => {
-          earlyRejection = cause;
-          rejectedEarly = true;
-          open.activePrompts.delete(inFlight);
-          this.finishInFlightPrompt(session, inFlight);
+          if (Date.now() - sentAt <= STEER_ACK_CHECK_MS) {
+            // Early refusal within the acknowledgement window: hand the error
+            // back to the steer caller without touching the running turn.
+            earlyRejection = cause;
+            rejectedEarly = true;
+            open.activePrompts.delete(inFlight);
+            this.finishInFlightPrompt(session, inFlight);
+          } else {
+            // Past the acknowledgement window the steer is a real in-flight
+            // prompt: route its failure (e.g. the idle deadline firing after
+            // the main prompt already finished) through the same turn failure
+            // and session/cancel path as the main prompt, so the turn cannot
+            // stay running with no pending prompt left.
+            this.handlePromptFailure(session, open, inFlight, cause, null);
+          }
         },
       );
 
@@ -2089,6 +2124,14 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           }
         }
         const prev = session.context;
+        // ACP `usage_update.cost` is the session's CUMULATIVE cost (ACP v1), not
+        // a per-turn figure: the reading keeps the cumulative value, and the
+        // per-session baseline is established at the first reading of a resumed
+        // session (0 for a new one). Only the delta past the baseline is spend
+        // not yet accounted for by settled turns.
+        if (parsed.costUsd !== undefined && session.costBaselineUsd === null) {
+          session.costBaselineUsd = parsed.costUsd;
+        }
         session.context = {
           usedTokens: parsed.used,
           maxTokens: parsed.size ?? prev?.maxTokens ?? null,
@@ -2107,7 +2150,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           cacheCreate: 0,
           output: 0,
           thinking: 0,
-          ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
+          ...(parsed.costUsd !== undefined
+            ? { costUsd: Math.max(0, parsed.costUsd - (session.costBaselineUsd ?? 0)) }
+            : {}),
         };
         if (activeTurn) activeTurn.liveUsage = liveUsage;
         this.publish({
@@ -2452,7 +2497,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           prompt: [{ type: "text", text: ANTIGRAVITY_NATIVE_SUBAGENT_REMINDER }],
         },
         this.promptTimeoutMs,
-        { idle: true, deadlineMs: this.promptDeadlineMs },
+        { idle: true, deadlineMs: this.promptDeadlineMs, activityMatch: acpSessionActivity(session.acpSessionId) },
       )
       .then(
         () => {
@@ -3089,6 +3134,12 @@ export class AcpDriver implements ProviderAdapter<CliError> {
       publish: (event) => this.publish(event),
       event: (turnId) => terminalTurnEvent(this.provider, session.threadId, turnId, status, raw),
     });
+    // The settled turn's cost is now accounted in the ledger: advance the
+    // session's cumulative-cost baseline to the current reading so the next
+    // turn's unaccounted delta starts after it (no double count).
+    if (session.context?.costUsd !== undefined) {
+      session.costBaselineUsd = session.context.costUsd;
+    }
   }
 
   private failInProgressForegroundTools(

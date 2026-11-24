@@ -262,22 +262,27 @@ describe("threadCostUsd and resolveContextCostUsd (MXN-412)", () => {
     expect(threadCostUsd({ modelSelection: unknown }, [storedTurn("u1", unknown, u)], { providers: {} })).toBeNull();
   });
 
-  it("keeps a per-turn ACP reported cost apart from settled turns and combines it exactly once (LOCAL-009)", () => {
+  it("adds only the unaccounted delta of an ACP cumulative reading on top of the settled ledger (LOCAL-009)", () => {
     const agy = { instanceId: "antigravity/default", model: "gemini-4-neon" };
     const u = { input: 10, cacheRead: 0, cacheCreate: 0, output: 5, thinking: 0 };
+    // The ledger records each settled turn's prompt-result (per-turn) cost.
     const t1 = storedTurn("a1", agy, { ...u, costUsd: 0.25 });
     const t2 = storedTurn("a2", agy, null, "running");
-    const live = { ...u };
-    // The live reading reports the latest turn's $0.25, not a thread total: live must read $0.50 like the ledger.
+    // ACP `usage_update.cost` is the session's CUMULATIVE cost; the driver reports
+    // only the delta past the session baseline as the open turn's live cost.
+    const live = { ...u, costUsd: 0.15 };
+    // Cumulative reading 0.40 (= 0.25 settled + 0.15 in flight): the thread total is
+    // 0.40, not 0.65 (the reading must not be counted again as the open turn's cost).
     expect(
-      resolveContextCostUsd({ modelSelection: agy }, [t1, t2], { providers: {} }, 0.25, { turnId: "a2", modelSelection: agy, usage: live }),
-    ).toBeCloseTo(0.5, 9);
-    // While the turn settles (stored usage appears), the same reported cost is not counted twice.
+      resolveContextCostUsd({ modelSelection: agy }, [t1, t2], { providers: {} }, 0.4, { turnId: "a2", modelSelection: agy, usage: live }),
+    ).toBeCloseTo(0.4, 9);
+    // No open turn: the settled ledger stands; a stale cumulative reading is never
+    // attached to a new turn.
+    expect(resolveContextCostUsd({ modelSelection: agy }, [t1], { providers: {} }, 0.4, null)).toBeCloseTo(0.25, 9);
+    // While the turn settles (stored usage appears), nothing is counted twice.
     const t2Done = storedTurn("a2", agy, { ...u, costUsd: 0.25 });
     expect(
-      resolveContextCostUsd({ modelSelection: agy }, [t1, t2Done], { providers: {} }, 0.25, { turnId: "a2", modelSelection: agy, usage: live }),
+      resolveContextCostUsd({ modelSelection: agy }, [t1, t2Done], { providers: {} }, 0.5, { turnId: "a2", modelSelection: agy, usage: live }),
     ).toBeCloseTo(0.5, 9);
-    // After it settles, with no open turn, the settled total still wins over the per-turn reading.
-    expect(resolveContextCostUsd({ modelSelection: agy }, [t1, t2Done], { providers: {} }, 0.25)).toBeCloseTo(0.5, 9);
   });
 });
