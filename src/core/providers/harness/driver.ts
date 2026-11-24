@@ -81,6 +81,7 @@ import { copySessionState, loadSessionState, saveSessionState } from "./sessions
 import { applyToolDescriptions, builtinTools, ReadState } from "./tools/index.js";
 import type { ChatRequest } from "./transport/chat.js";
 import { conversationFields, streamModel } from "./transport/model.js";
+import { ResponsesWsSession } from "./transport/responses-ws.js";
 import type { ModelUsage, ToolCall, ToolDefinition, TranscriptMessage } from "./types.js";
 
 export interface HarnessDriverOptions {
@@ -125,6 +126,8 @@ interface HarnessTurn {
   usage: TurnUsage | null;
   readonly controller: AbortController;
   readonly reasoningStarted: Set<string>;
+  /** What the main loop has spent so far in this turn (cumulative across rounds). */
+  readonly liveUsage: { input: number; cacheRead: number; output: number; thinking: number };
   /** What the turn's subagents used, which the loop's own totals do not include. */
   readonly subagentUsage: { input: number; cacheRead: number; output: number; thinking: number };
   readonly waiters: Array<{ resolve: (outcome: HarnessTurnOutcome) => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void }>;
@@ -187,6 +190,8 @@ interface HarnessSession {
   wakeStreak: number;
   /** What the model should be told before its next request (a background command ended). */
   readonly modelNotes: Array<{ readonly taskId: string; readonly text: string }>;
+  /** Persistent WebSocket session for OpenAI Responses API continuation (`previous_response_id`). */
+  readonly responsesSession: ResponsesWsSession;
   /** Things to tell the user at the next turn (a server that did not come up); a session has no turn to attach them to before. */
   readonly notices: Array<{ readonly title: string; readonly detail: string | null }>;
 }
@@ -451,6 +456,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         wakeTimer: null,
         wakeStreak: 0,
         modelNotes: [],
+        responsesSession: new ResponsesWsSession(),
         notices: mcp.problems.length > 0 ? [{ title: mcp.problems.length === 1 ? "An MCP server or tool is unavailable" : `${mcp.problems.length} MCP problems`, detail: mcp.problems.join("\n") }] : [],
       };
       if (transcript.messages.length === 0) {
@@ -598,6 +604,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       usage: null,
       controller: new AbortController(),
       reasoningStarted: new Set(),
+      liveUsage: { input: 0, cacheRead: 0, output: 0, thinking: 0 },
       subagentUsage: { input: 0, cacheRead: 0, output: 0, thinking: 0 },
       waiters: [],
     };
@@ -665,6 +672,8 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       sampling: target.profile.sampling,
       effort: typeof effort?.value === "string" ? effort.value : undefined,
       maxOutput: target.model.maxOutput,
+      promptCacheKey: session.sessionId,
+      responsesSession: session.responsesSession,
       tools: () => this.toolsFor(session, turn),
       takeSteering: () => session.steering.splice(0),
       takeNotes: () => session.modelNotes.splice(0).filter((note) => !session.background.endSeen(note.taskId)).map((note) => note.text),
@@ -876,17 +885,15 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         break;
       case "usage":
         session.lastUsage = event.usage;
+        turn.liveUsage.input += Math.max(0, event.usage.inputTokens - event.usage.cachedInputTokens);
+        turn.liveUsage.cacheRead += event.usage.cachedInputTokens;
+        turn.liveUsage.output += event.usage.outputTokens;
+        turn.liveUsage.thinking += event.usage.reasoningTokens;
         this.publish({
           provider: "harness",
           threadId: session.threadId,
           type: "token-usage.updated",
-          usage: {
-            input: Math.max(0, event.usage.inputTokens - event.usage.cachedInputTokens),
-            cacheRead: event.usage.cachedInputTokens,
-            cacheCreate: 0,
-            output: event.usage.outputTokens,
-            thinking: event.usage.reasoningTokens,
-          },
+          usage: this.turnLiveUsage(turn),
         });
         break;
       case "retry":
@@ -998,6 +1005,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     }
 
     const unit: CompactionUnit = { transcript, readState: new ReadState(), interactionMode: "default", todos: [], compactFailures: 0, lastUsage: null, definitions: () => tools().map((tool) => tool.definition) };
+    const subagentResponsesSession = new ResponsesWsSession();
     const config: TurnConfig = {
       baseUrl: target.profile.baseUrl,
       apiKey: () => this.readKey(target, session.instanceId),
@@ -1007,6 +1015,8 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       sampling: target.profile.sampling,
       effort: this.sessionEffort(session),
       maxOutput: target.model.maxOutput,
+      promptCacheKey: `${session.sessionId}:sub:${agentId}`,
+      responsesSession: subagentResponsesSession,
       tools,
       // Its own read state: an edit is checked against what this agent read, and the parent has to read again what the agent changed.
       toolContext: { cwd: session.workingDirectory, readState: unit.readState, artifactDir: session.artifactDir, acceptsImages: target.quirks.images === "native", secretEnv: this.secretEnvNames(), background: session.background },
@@ -1036,7 +1046,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
             turn.subagentUsage.cacheRead += usage.cacheRead;
             turn.subagentUsage.output += usage.output;
             turn.subagentUsage.thinking += usage.thinking;
-            this.publish({ provider: "harness", threadId: session.threadId, type: "token-usage.updated", usage });
+            this.publish({ provider: "harness", threadId: session.threadId, type: "token-usage.updated", usage: this.turnLiveUsage(turn) });
           }
         },
         signal,
@@ -1051,6 +1061,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       return { content: outcome.report === "" ? "The subagent finished without writing a report." : untrustedContext(outcome.report, "subagent"), ...(outcome.report === "" ? { isError: true } : {}) };
     };
     const stopped = (report: string): void => {
+      subagentResponsesSession.close();
       session.subagents.delete(agentId);
       this.publish({ ...base, type: "subagent.updated", status: "stopped", lastMessage: report === "" ? null : report.slice(0, 2000) });
     };
@@ -1188,6 +1199,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       sampling: target.profile.sampling,
       maxTokens: options.maxTokens ?? target.model.maxOutput,
       effort: options.effort,
+      ...(session ? { promptCacheKey: session.sessionId } : {}),
       signal: options.signal,
     };
     let text = "";
@@ -1423,6 +1435,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         sampling: target.profile.sampling,
         maxTokens: target.model.maxOutput,
         effort: settings.effort,
+        promptCacheKey: session.sessionId,
         signal,
       };
       let text = "";
@@ -1589,6 +1602,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       // only the session this stop closed.
       if (this.sessions.get(threadId) === session) this.sessions.delete(threadId);
       // The servers' processes end with the session; the signals go out now, the wait is only for the tidy-up.
+      session.responsesSession.close();
       session.background.stopAll();
       await this.closeMcp(session);
     });
@@ -1619,6 +1633,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       }
       await Promise.allSettled(
         stopping.map(async (session) => {
+          session.responsesSession.close();
           session.background.stopAll();
           await this.closeMcp(session);
         }),
@@ -1667,9 +1682,27 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     };
   }
 
+  private turnLiveUsage(turn: HarnessTurn): TurnUsage {
+    return {
+      input: turn.liveUsage.input + turn.subagentUsage.input,
+      cacheRead: turn.liveUsage.cacheRead + turn.subagentUsage.cacheRead,
+      cacheCreate: 0,
+      output: turn.liveUsage.output + turn.subagentUsage.output,
+      thinking: turn.liveUsage.thinking + turn.subagentUsage.thinking,
+    };
+  }
+
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> => {
     const input = this.contextInput(threadId);
     return input ? contextUsageOf(input) : null;
+  };
+
+  readonly liveTurnUsage = (threadId: ThreadId): TurnUsage | null => {
+    const session = this.sessions.get(threadId);
+    const open = session ? this.openTurn(session) : undefined;
+    if (!open) return null;
+    const usage = this.turnLiveUsage(open);
+    return usage.input + usage.cacheRead + usage.cacheCreate + usage.output + usage.thinking > 0 ? usage : null;
   };
 
   readonly contextBreakdown = async (threadId: ThreadId): Promise<ContextBreakdown | null> => {

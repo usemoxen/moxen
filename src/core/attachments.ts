@@ -127,12 +127,15 @@ export function imageDimensions(bytes: Uint8Array): { width: number; height: num
   return null;
 }
 
-/** The header of a data URL's image: enough bytes for any of the formats above to state its size. */
-function dataUrlHead(dataUrl: string): Uint8Array {
-  const comma = dataUrl.indexOf(",");
+/** Read the dimensions without decoding the whole base64 image. */
+export function imageDimensionsFromBase64(data: string): ReturnType<typeof imageDimensions> {
   // 256 KiB of image: a JPEG's EXIF block (up to 64 KiB) comes before its frame header.
-  const head = dataUrl.slice(comma + 1, comma + 1 + 349_528);
-  return Buffer.from(head.slice(0, head.length - (head.length % 4)), "base64");
+  const head = data.slice(0, 349_528);
+  return imageDimensions(Buffer.from(head.slice(0, head.length - (head.length % 4)), "base64"));
+}
+
+function dataUrlDimensions(dataUrl: string): ReturnType<typeof imageDimensions> {
+  return imageDimensionsFromBase64(dataUrl.slice(dataUrl.indexOf(",") + 1));
 }
 
 /**
@@ -148,7 +151,7 @@ export function imageSetError(images: readonly Pick<ImageAttachmentUpload, "name
   }
   if (images.length > IMAGE_LIMITS.manyImages) {
     for (const image of images) {
-      const size = imageDimensions(dataUrlHead(image.dataUrl));
+      const size = dataUrlDimensions(image.dataUrl);
       if (size !== null && Math.max(size.width, size.height) > IMAGE_LIMITS.manyImagesMaxDimension) {
         return `${image.name} is ${size.width}×${size.height}; with more than ${IMAGE_LIMITS.manyImages} images each must fit ${IMAGE_LIMITS.manyImagesMaxDimension} px`;
       }

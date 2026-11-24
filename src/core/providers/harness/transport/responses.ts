@@ -1,21 +1,34 @@
 /**
- * OpenAI Responses API over SSE, reduced to `ModelEvent`s. Requests are
- * stateless (`store: false`): the whole conversation goes out each time, and
- * the model's encrypted reasoning comes back (`include`) to be replayed.
- * Servers that implement the Responses shape differ in which events they
- * send, so the parser is tolerant: a function call is taken from its
- * finished output item, falling back to the argument deltas.
+ * OpenAI Responses API over persistent WebSocket (when enabled for Sign in with
+ * ChatGPT) or HTTP SSE, reduced to `ModelEvent`s. Requests are stateless
+ * (`store: false`): over HTTP the whole conversation goes out each time with
+ * sealed reasoning replayed; over WebSocket the connection retains in-memory
+ * `previous_response_id` state so follow-up steps send only new items and keep
+ * prompt-cache affinity.
  */
 import { responsesUrl } from "../profiles.js";
 import { buildResponsesInput, responsesTools } from "../normalize-responses.js";
-import type { FinishReason, ModelEvent, ModelUsage } from "../types.js";
-import { asNumber, asRecord, ChatHttpError, failureFrom, OVERFLOW, sseData, type ChatRequest } from "./chat.js";
+import type { ModelEvent } from "../types.js";
+import { asRecord, ChatHttpError, failureFrom, sseData, type ChatRequest } from "./chat.js";
+import { ResponsesEventReducer, ResponsesWsUpgradeError } from "./responses-ws.js";
+
+/** GPT-6.2+ appends top-level `instructions` after `input` uncached; put static instructions in a leading `developer` message instead. */
+function usesDeveloperInstructions(request: ChatRequest): boolean {
+  return request.quirks.chatgptOAuth || /^gpt-6\.2(?:[.\-]|$)/i.test(request.model.trim());
+}
 
 export function responsesRequestBody(request: ChatRequest, replayReasoning = true): Record<string, unknown> {
   const { quirks } = request;
-  const { instructions, input } = buildResponsesInput(request.transcript ?? [], quirks, { replayReasoning });
+  const developerInstructions = usesDeveloperInstructions(request);
+  const { instructions, input } = buildResponsesInput(request.transcript ?? [], quirks, {
+    replayReasoning,
+    developerInstructions,
+  });
   const body: Record<string, unknown> = { model: request.model, input, stream: true, store: false };
   if (instructions !== "") body.instructions = instructions;
+  if (request.promptCacheKey && request.promptCacheKey.trim() !== "") {
+    body.prompt_cache_key = request.promptCacheKey.trim();
+  }
   if (request.tools.length > 0) {
     body.tools = responsesTools(request.tools);
     if (!quirks.omitToolChoice) body.tool_choice = request.toolChoice ?? "auto";
@@ -35,24 +48,7 @@ export function responsesRequestBody(request: ChatRequest, replayReasoning = tru
   return body;
 }
 
-function usageFrom(response: Record<string, unknown>): ModelUsage | null {
-  const usage = asRecord(response.usage);
-  if (!usage) return null;
-  return {
-    inputTokens: asNumber(usage.input_tokens),
-    outputTokens: asNumber(usage.output_tokens),
-    cachedInputTokens: asNumber(asRecord(usage.input_tokens_details)?.cached_tokens),
-    reasoningTokens: asNumber(asRecord(usage.output_tokens_details)?.reasoning_tokens),
-  };
-}
-
-function failureMessage(value: unknown): string {
-  const record = asRecord(value);
-  const message = record?.message;
-  return typeof message === "string" && message !== "" ? message : "The model endpoint reported an error.";
-}
-
-async function* once(request: ChatRequest, replayReasoning: boolean): AsyncGenerator<ModelEvent> {
+async function* onceHttp(request: ChatRequest, replayReasoning: boolean): AsyncGenerator<ModelEvent> {
   const doFetch = request.fetch ?? fetch;
   const headers: Record<string, string> = { "content-type": "application/json", accept: "text/event-stream" };
   if (request.apiKey) headers.authorization = `Bearer ${request.apiKey}`;
@@ -71,13 +67,7 @@ async function* once(request: ChatRequest, replayReasoning: boolean): AsyncGener
   if (!response.ok) throw await failureFrom(response);
   if (!response.body) throw new ChatHttpError("The model endpoint sent no body.", response.status, false, true);
 
-  /** Arguments streamed for a call, by output item id, in case the finished item does not carry them. */
-  const streamedArguments = new Map<string, string>();
-  const yieldedCalls = new Set<string>();
-  let sawCall = false;
-  let usage: ModelUsage | null = null;
-  let finish: FinishReason | null = null;
-  let summaryParts = 0;
+  const reducer = new ResponsesEventReducer();
 
   try {
     for await (const data of sseData(response.body)) {
@@ -88,53 +78,35 @@ async function* once(request: ChatRequest, replayReasoning: boolean): AsyncGener
         continue;
       }
       if (!event) continue;
-      const type = event.type;
-      if (type === "response.output_text.delta" && typeof event.delta === "string") {
-        if (event.delta !== "") yield { type: "text.delta", text: event.delta };
-      } else if ((type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") && typeof event.delta === "string") {
-        if (event.delta !== "") yield { type: "reasoning.delta", text: event.delta };
-      } else if (type === "response.reasoning_summary_part.added") {
-        // Separate summary paragraphs the way a reader expects.
-        if (summaryParts > 0) yield { type: "reasoning.delta", text: "\n\n" };
-        summaryParts += 1;
-      } else if (type === "response.function_call_arguments.delta" && typeof event.item_id === "string" && typeof event.delta === "string") {
-        streamedArguments.set(event.item_id, `${streamedArguments.get(event.item_id) ?? ""}${event.delta}`);
-      } else if (type === "response.output_item.done") {
-        const item = asRecord(event.item);
-        if (item?.type === "function_call" && typeof item.name === "string") {
-          const id = typeof item.call_id === "string" && item.call_id !== "" ? item.call_id : typeof item.id === "string" ? item.id : `call_${yieldedCalls.size}`;
-          if (!yieldedCalls.has(id)) {
-            yieldedCalls.add(id);
-            sawCall = true;
-            const args = typeof item.arguments === "string" && item.arguments.trim() !== "" ? item.arguments : (streamedArguments.get(typeof item.id === "string" ? item.id : "") ?? "");
-            yield { type: "tool.call", call: { id, name: item.name, arguments: args.trim() === "" ? "{}" : args } };
-          }
-        } else if (item?.type === "reasoning" && typeof item.encrypted_content === "string" && item.encrypted_content !== "") {
-          // The server-side id and status are left out: the next request does not store anything for them to point at.
-          yield { type: "reasoning.item", item: { format: "responses", item: { type: "reasoning", summary: Array.isArray(item.summary) ? item.summary : [], encrypted_content: item.encrypted_content } } };
-          summaryParts = 0;
-        }
-      } else if (type === "response.completed" || type === "response.incomplete") {
-        const done = asRecord(event.response) ?? {};
-        usage = usageFrom(done) ?? usage;
-        const reason = asRecord(done.incomplete_details)?.reason;
-        finish = reason === "max_output_tokens" ? "length" : reason === "content_filter" ? "filter" : sawCall ? "tool-calls" : "stop";
-        break;
-      } else if (type === "response.failed") {
-        const message = failureMessage(asRecord(event.response)?.error);
-        throw new ChatHttpError(message, null, OVERFLOW.test(message), false);
-      } else if (type === "error") {
-        const message = failureMessage(event);
-        throw new ChatHttpError(message, null, OVERFLOW.test(message), false);
-      }
+      for (const modelEvent of reducer.push(event)) yield modelEvent;
+      if (reducer.finish !== null) break;
     }
   } catch (error) {
     if (request.signal?.aborted || error instanceof ChatHttpError) throw error;
     throw new ChatHttpError(`The model endpoint dropped the connection: ${(error as Error).message}`, null, false, true);
   }
-  if (finish === null) throw new ChatHttpError("The model endpoint ended the stream before the reply was complete.", null, false, true);
-  if (usage) yield { type: "usage", usage };
-  yield { type: "finish", reason: finish };
+  if (reducer.finish === null) throw new ChatHttpError("The model endpoint ended the stream before the reply was complete.", null, false, true);
+  if (reducer.usage) yield { type: "usage", usage: reducer.usage };
+  yield { type: "finish", reason: reducer.finish };
+}
+
+async function* once(request: ChatRequest, replayReasoning: boolean): AsyncGenerator<ModelEvent> {
+  const ws = request.responsesSession;
+  const useWs =
+    ws !== undefined &&
+    !ws.isDisabled &&
+    request.quirks.chatgptOAuth &&
+    (!request.fetch || ws.hasCustomFactory);
+  if (useWs) {
+    try {
+      yield* ws.stream(request, (replay) => responsesRequestBody(request, replay), replayReasoning);
+      return;
+    } catch (error) {
+      if (!(error instanceof ResponsesWsUpgradeError)) throw error;
+      // WebSocket upgrade unavailable on this endpoint/proxy: fall back cleanly to HTTP SSE.
+    }
+  }
+  yield* onceHttp(request, replayReasoning);
 }
 
 const REASONING_REJECTED = /reasoning|encrypted|item.*not found|not persisted/i;

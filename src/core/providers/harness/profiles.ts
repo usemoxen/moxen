@@ -6,10 +6,10 @@
  */
 import { cachedSecret, isSecretRef, primeSecret } from "../../secrets.js";
 import { CliError } from "../../errors.js";
-import type { HarnessModelConfig, HarnessProbedConfig, HarnessProfileConfig, HarnessProviderConfig } from "../../types.js";
+import { parseAccountInstanceId, type HarnessModelConfig, type HarnessProbedConfig, type HarnessProfileConfig, type HarnessProviderConfig } from "../../types.js";
 import { parseLine } from "../../threads/lines.js";
 import { autoCompactThreshold, DEFAULT_COMPACTION, type CompactionSettings } from "./compactsettings.js";
-import { parseQuirkOverrides, resolveQuirks, type ModelQuirks, type ResolveQuirksInput } from "./quirks.js";
+import { detectQuirkFamily, parseQuirkOverrides, resolveQuirks, type ModelQuirks, type ResolveQuirksInput } from "./quirks.js";
 
 const PROFILE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -313,10 +313,11 @@ export function resolveProfileQuirks(profile: HarnessProfileConfig, model: Harne
 
 export function quirkInputs(profile: HarnessProfileConfig, model: HarnessModelConfig, options: { readonly ignoreProbed?: boolean } = {}): ResolveQuirksInput {
   const label = `providers.harness.profiles(${profile.id})`;
+  const detected = detectQuirkFamily(model.id);
   return {
     modelId: model.id,
-    // Anthropic's API serves Claude models whatever the id is called (a proxy may rename them).
-    family: model.family ?? (profile.apiFormat === "anthropic" ? "claude" : undefined),
+    // Anthropic's API serves Claude models whatever the id is called (a proxy may rename them), unless the id names another known family.
+    family: model.family ?? (profile.apiFormat === "anthropic" && detected === "generic" ? "claude" : undefined),
     vision: model.vision,
     preserveThinking: profile.preserveThinking,
     probed: model.probed && !options.ignoreProbed ? parseQuirkOverrides(model.probed.quirks, `${label}.models(${model.id}).probed.quirks`) : undefined,
@@ -360,10 +361,55 @@ export function readProfileApiKey(profile: HarnessProfileConfig, env: NodeJS.Pro
   return value !== undefined && value.trim() !== "" ? value.trim() : undefined;
 }
 
+const CHATGPT_1M_MODEL_RE = /^(?:gpt-6(?:[.\-]|$)|gpt-5\.6(?:[.\-]|$)|gpt-5\.4(?!-(?:mini|nano)\b)(?:[.\-]|$))/i;
+
+const chatgptKnownWindowsByAccount = new Map<string, Map<string, number>>();
+const chatgptKnownWindowsByModel = new Map<string, number>();
+
 /** Default context window inferred for a Sign in with ChatGPT model when the catalog entry isn't cached locally. */
 export function chatgptDefaultContextWindow(modelId: string): number {
   const lower = modelId.trim().toLowerCase();
-  return lower.startsWith("gpt-6") || lower.startsWith("gpt-5") ? 400_000 : 200_000;
+  if (CHATGPT_1M_MODEL_RE.test(lower)) return 872_000;
+  return lower.startsWith("gpt-5") ? 400_000 : 200_000;
+}
+
+/** Record discovered context windows from ChatGPT `/v1/models` so runtime target synthesis and compaction lines use the real maximum. */
+export function recordChatGptContextWindows(
+  accountId: string | undefined,
+  models: ReadonlyArray<{ readonly id: string; readonly contextWindow: number }>,
+): void {
+  const normAccount = accountId?.trim().toLowerCase();
+  let bucket = normAccount ? chatgptKnownWindowsByAccount.get(normAccount) : undefined;
+  if (normAccount && !bucket) {
+    bucket = new Map<string, number>();
+    chatgptKnownWindowsByAccount.set(normAccount, bucket);
+  }
+  for (const model of models) {
+    const normModel = model.id.trim().toLowerCase();
+    if (!normModel || !Number.isFinite(model.contextWindow) || model.contextWindow <= 0) continue;
+    const window = Math.floor(model.contextWindow);
+    bucket?.set(normModel, window);
+    chatgptKnownWindowsByModel.set(normModel, window);
+  }
+}
+
+/** Resolve the largest known context window for a Sign in with ChatGPT model (account cache -> model cache -> family default). */
+export function chatgptContextWindowFor(modelId: string, accountId?: string): number {
+  const normModel = modelId.trim().toLowerCase();
+  const normAccount = accountId?.trim().toLowerCase();
+  if (normAccount) {
+    const hit = chatgptKnownWindowsByAccount.get(normAccount)?.get(normModel);
+    if (hit !== undefined) return hit;
+  }
+  const shared = chatgptKnownWindowsByModel.get(normModel);
+  if (shared !== undefined) return shared;
+  return chatgptDefaultContextWindow(modelId);
+}
+
+/** Tests only: clear cached Sign in with ChatGPT model context windows. */
+export function resetChatGptContextWindowsForTests(): void {
+  chatgptKnownWindowsByAccount.clear();
+  chatgptKnownWindowsByModel.clear();
 }
 
 /**
@@ -389,10 +435,12 @@ export function harnessAskLine(config: HarnessProviderConfig | undefined, instan
  * Where a Sign in with ChatGPT thread on "ask" is offered compaction: the same
  * loop threshold `HarnessDriver` uses for its synthesized ChatGPT target.
  */
-export function chatgptAskLine(config: HarnessProviderConfig | undefined, modelId: string): { readonly tokens: number } | null {
-  const contextWindow = chatgptDefaultContextWindow(modelId);
+export function chatgptAskLine(config: HarnessProviderConfig | undefined, modelId: string, instanceId?: string): { readonly tokens: number } | null {
+  const parsed = instanceId ? parseAccountInstanceId(instanceId) : null;
+  const accountId = parsed?.kind === "chatgpt" ? parsed.accountId : undefined;
+  const contextWindow = chatgptContextWindowFor(modelId, accountId);
   const profile: HarnessProfileConfig = {
-    id: "chatgpt",
+    id: accountId ?? "chatgpt",
     baseUrl: "https://api.openai.com/v1",
     apiFormat: "responses",
     models: [{ id: modelId, contextWindow }],

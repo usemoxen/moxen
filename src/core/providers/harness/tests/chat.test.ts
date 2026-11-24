@@ -124,6 +124,14 @@ describe("chatRequestBody", () => {
       tool_choice: "auto",
       chat_template_kwargs: { preserve_thinking: true, reasoning_effort: "xhigh" },
     });
+    const qwen4Body = chatRequestBody({
+      ...request(sseResponse([])),
+      model: "qwen4-max-preview",
+      effort: "xhigh",
+      quirks: { ...DEFAULT_QUIRKS, effortParam: "reasoning_effort", images: "native" },
+    });
+    expect(qwen4Body.reasoning_effort).toBe("xhigh");
+    expect(qwen4Body).not.toHaveProperty("chat_template_kwargs");
   });
 
   it("omits tool_choice for a server that rejects it", () => {

@@ -2,10 +2,21 @@
  * Sign in with ChatGPT model discovery (`GET https://api.openai.com/v1/models`)
  * and Moxen Harness target synthesis for `chatgpt/<id>` instances.
  */
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
 import type { ModelSummary } from "../../catalog/summary.js";
+import { renameReplacing } from "../../infra/atomic.js";
 import { parseAccountInstanceId, type HarnessModelConfig, type HarnessProfileConfig } from "../../types.js";
 import { HarnessDriver, type HarnessDriverOptions } from "../harness/driver.js";
-import { chatgptDefaultContextWindow, resolveHarnessTarget, type ResolvedHarnessTarget } from "../harness/profiles.js";
+import {
+  chatgptContextWindowFor,
+  recordChatGptContextWindows,
+  resetChatGptContextWindowsForTests,
+  resolveHarnessTarget,
+  type ResolvedHarnessTarget,
+} from "../harness/profiles.js";
 import { DEFAULT_QUIRKS, type ModelQuirks } from "../harness/quirks.js";
 import { ensureFreshChatGptToken, OPENAI_API_RESOURCE, type OAuthDeps } from "./oauth.js";
 
@@ -67,14 +78,20 @@ function parseSupportedEfforts(raw: unknown): readonly string[] | null {
   return out;
 }
 
-export function inferChatGptModelMetadata(id: string, raw?: Record<string, unknown>): ChatGptModelInfo {
+export function inferChatGptModelMetadata(
+  id: string,
+  raw?: Record<string, unknown>,
+  accountId?: string,
+): ChatGptModelInfo {
   const lower = id.toLowerCase();
   const displayName = typeof raw?.display_name === "string" && raw.display_name.trim() ? raw.display_name.trim() : undefined;
-  const contextWindow =
-    positiveInt(raw?.context_window) ??
-    positiveInt(raw?.context_length) ??
-    positiveInt(raw?.max_model_len) ??
-    chatgptDefaultContextWindow(id);
+  const advertisedWindow = Math.max(
+    positiveInt(raw?.max_context_window) ?? 0,
+    positiveInt(raw?.context_window) ?? 0,
+    positiveInt(raw?.context_length) ?? 0,
+    positiveInt(raw?.max_model_len) ?? 0,
+  );
+  const contextWindow = advertisedWindow > 0 ? advertisedWindow : chatgptContextWindowFor(id, accountId);
   const maxOutput = positiveInt(raw?.max_output_tokens) ?? 32_768;
   const reasoningModel = /^(?:gpt-5|gpt-6|o[1-9])/.test(lower);
   const parsedEfforts = parseSupportedEfforts(raw?.supported_reasoning_levels);
@@ -185,6 +202,119 @@ export async function discoverChatGptModels(
   return collected.map((entry) => entry.info);
 }
 
+const MODELS_CACHE_FILE = "chatgpt-models-cache.json";
+
+const discoveredByAccount = new Map<string, Map<string, ChatGptModelInfo>>();
+const discoveredByModel = new Map<string, ChatGptModelInfo>();
+const hydratedStoreRoots = new Set<string>();
+let cachePersistChain: Promise<unknown> = Promise.resolve();
+
+function parseCachedModelInfo(raw: unknown): ChatGptModelInfo | null {
+  const rec = asRecord(raw);
+  const id = typeof rec?.id === "string" ? rec.id.trim() : "";
+  const contextWindow = positiveInt(rec?.contextWindow);
+  const maxOutput = positiveInt(rec?.maxOutput);
+  if (!id || contextWindow === undefined || maxOutput === undefined) return null;
+  const displayName = typeof rec?.displayName === "string" && rec.displayName.trim() ? rec.displayName.trim() : undefined;
+  const efforts = Array.isArray(rec?.efforts)
+    ? rec.efforts.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const defaultEffort =
+    typeof rec?.defaultEffort === "string" && efforts.includes(rec.defaultEffort) ? rec.defaultEffort : undefined;
+  return {
+    id,
+    ...(displayName !== undefined ? { displayName } : {}),
+    contextWindow,
+    maxOutput,
+    vision: rec?.vision === true,
+    efforts,
+    ...(defaultEffort !== undefined ? { defaultEffort } : {}),
+  };
+}
+
+function storeDiscoveredInMemory(accountId: string, models: readonly ChatGptModelInfo[]): void {
+  const normAccount = accountId.trim().toLowerCase();
+  if (!normAccount || models.length === 0) return;
+  let bucket = discoveredByAccount.get(normAccount);
+  if (!bucket) {
+    bucket = new Map<string, ChatGptModelInfo>();
+    discoveredByAccount.set(normAccount, bucket);
+  }
+  for (const model of models) {
+    const normModel = model.id.trim().toLowerCase();
+    if (!normModel) continue;
+    bucket.set(normModel, model);
+    discoveredByModel.set(normModel, model);
+  }
+  recordChatGptContextWindows(normAccount, models);
+}
+
+/** Load previously discovered ChatGPT model metadata from `<storeRoot>/chatgpt-models-cache.json` (best-effort, once per store root). */
+export function hydrateChatGptModelsCache(storeRoot: string): void {
+  const file = path.join(storeRoot, MODELS_CACHE_FILE);
+  if (hydratedStoreRoots.has(file)) return;
+  hydratedStoreRoots.add(file);
+  try {
+    const parsed = asRecord(JSON.parse(fs.readFileSync(file, "utf8")));
+    const accounts = asRecord(parsed?.accounts);
+    if (!accounts) return;
+    for (const [accountId, list] of Object.entries(accounts)) {
+      if (!Array.isArray(list)) continue;
+      const models = list.map(parseCachedModelInfo).filter((entry): entry is ChatGptModelInfo => entry !== null);
+      if (models.length > 0) storeDiscoveredInMemory(accountId, models);
+    }
+  } catch {
+    // No cache yet or unreadable: start fresh.
+  }
+}
+
+/** Record discovered ChatGPT models in memory and persist to `<storeRoot>/chatgpt-models-cache.json` when given. */
+export function recordDiscoveredChatGptModels(
+  accountId: string,
+  models: readonly ChatGptModelInfo[],
+  storeRoot?: string,
+): void {
+  if (models.length === 0) return;
+  storeDiscoveredInMemory(accountId, models);
+  if (!storeRoot) return;
+  const file = path.join(storeRoot, MODELS_CACHE_FILE);
+  hydratedStoreRoots.add(file);
+  const accounts: Record<string, readonly ChatGptModelInfo[]> = {};
+  for (const [id, map] of discoveredByAccount) {
+    accounts[id] = [...map.values()];
+  }
+  const payload = JSON.stringify({ accounts }, null, 2);
+  cachePersistChain = cachePersistChain
+    .catch(() => undefined)
+    .then(async () => {
+      await fs.promises.mkdir(path.dirname(file), { recursive: true });
+      const tmp = `${file}.${randomUUID()}.tmp`;
+      await fs.promises.writeFile(tmp, payload);
+      await renameReplacing(tmp, file);
+    })
+    .catch(() => undefined);
+}
+
+/** Look up cached discovered metadata for a ChatGPT model (account-specific first, then any account). */
+export function cachedChatGptModelInfo(modelId: string, accountId?: string): ChatGptModelInfo | null {
+  const normModel = modelId.trim().toLowerCase();
+  if (!normModel) return null;
+  const normAccount = accountId?.trim().toLowerCase();
+  if (normAccount) {
+    const hit = discoveredByAccount.get(normAccount)?.get(normModel);
+    if (hit) return hit;
+  }
+  return discoveredByModel.get(normModel) ?? null;
+}
+
+/** Tests only: clear cached discovered ChatGPT model metadata. */
+export function resetChatGptModelCacheForTests(): void {
+  discoveredByAccount.clear();
+  discoveredByModel.clear();
+  hydratedStoreRoots.clear();
+  resetChatGptContextWindowsForTests();
+}
+
 export function chatgptOAuthQuirks(): ModelQuirks {
   return {
     ...DEFAULT_QUIRKS,
@@ -203,7 +333,8 @@ export function synthesizeChatGptTarget(
   const parsed = parseAccountInstanceId(instanceId);
   const accountId = parsed?.kind === "chatgpt" ? parsed.accountId : instanceId.trim().toLowerCase() === "chatgpt" ? "default" : null;
   if (accountId === null) return null;
-  const info = inferChatGptModelMetadata(modelId);
+  const cached = cachedChatGptModelInfo(modelId, accountId);
+  const info = cached ? { ...cached, id: modelId } : inferChatGptModelMetadata(modelId, undefined, accountId);
   const profile: HarnessProfileConfig = {
     id: accountId,
     label: `ChatGPT (${accountId})`,

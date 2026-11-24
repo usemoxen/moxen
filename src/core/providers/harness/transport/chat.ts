@@ -13,6 +13,7 @@ import type { HarnessApiFormat } from "../../../types.js";
 import { chatCompletionsUrl } from "../profiles.js";
 import type { ModelQuirks } from "../quirks.js";
 import type { WireMessage } from "../normalize.js";
+import type { ResponsesWsSession } from "./responses-ws.js";
 import type { FinishReason, ModelEvent, ModelUsage, ToolCall, ToolDefinition, TranscriptMessage } from "../types.js";
 
 export interface ChatRequest {
@@ -36,6 +37,10 @@ export interface ChatRequest {
    * conversation's and its cache applies) but the model may not call one.
    */
   readonly toolChoice?: "none" | undefined;
+  /** Stable per-session key sent as `prompt_cache_key` on OpenAI Responses requests to improve cache affinity. */
+  readonly promptCacheKey?: string | undefined;
+  /** Persistent per-session WebSocket connection for OpenAI Responses API continuation (`previous_response_id`). */
+  readonly responsesSession?: ResponsesWsSession | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly fetch?: typeof fetch | undefined;
   /** Sees each raw stream delta before it is reduced; the probe reads which reasoning field a server uses from it. */
@@ -166,10 +171,14 @@ export async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let completed = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        completed = true;
+        break;
+      }
       buffer += decoder.decode(value, { stream: true });
       for (;;) {
         const split = /\r?\n\r?\n/.exec(buffer);
@@ -191,6 +200,7 @@ export async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator
       .join("\n");
     if (rest !== "") yield rest;
   } finally {
+    if (!completed) await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }

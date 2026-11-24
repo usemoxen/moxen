@@ -85,11 +85,13 @@ export const DEFAULT_QUIRKS: ModelQuirks = {
 };
 
 /** The families a preset exists for; anything else is `generic`. */
-export const QUIRK_FAMILIES = ["generic", "qwen3", "mistral", "deepseek", "glm", "kimi", "claude"] as const;
+export const QUIRK_FAMILIES = ["generic", "qwen4", "qwen3", "mistral", "deepseek", "glm", "kimi", "claude"] as const;
 export type QuirkFamily = (typeof QUIRK_FAMILIES)[number];
 
 const FAMILY_PRESETS: Record<QuirkFamily, Partial<ModelQuirks>> = {
   generic: {},
+  // Qwen 4 is natively multimodal and takes `reasoning_effort` at the top level on OpenAI-compatible Chat Completions.
+  qwen4: { effortParam: "reasoning_effort", images: "native" },
   // Qwen 3.6+ templates only render earlier `<think>` blocks when told to (Oh My Pi: `qwenPreserveThinking`);
   // 3.8+ take the effort as a template kwarg. Unconfirmed against a live server.
   qwen3: { chatTemplateKwargs: { preserve_thinking: true }, effortKwarg: "reasoning_effort" },
@@ -109,6 +111,7 @@ const FAMILY_PRESETS: Record<QuirkFamily, Partial<ModelQuirks>> = {
 /** Which preset a model id belongs to, by name. `generic` when nothing matches. */
 export function detectQuirkFamily(modelId: string): QuirkFamily {
   const id = modelId.toLowerCase();
+  if (/qwen\s*-?4/.test(id)) return "qwen4";
   if (/qwen\s*-?3|qwq/.test(id)) return "qwen3";
   if (/mistral|mixtral|magistral|devstral|codestral|ministral/.test(id)) return "mistral";
   if (/deepseek/.test(id)) return "deepseek";

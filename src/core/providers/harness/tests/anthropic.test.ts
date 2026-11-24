@@ -133,6 +133,12 @@ describe("anthropicRequestBody", () => {
     expect(anthropicRequestBody(request(() => sse([]), { quirks: quirks({ anthropicThinking: "off" }) }))).not.toHaveProperty("thinking");
   });
 
+  it("omits Claude's adaptive thinking object for non-Claude model families on Anthropic gateways while still passing output_config.effort", () => {
+    const qwenBody = anthropicRequestBody(request(() => sse([]), { model: "qwen4-max-preview", effort: "xhigh", maxTokens: 8000 }));
+    expect(qwenBody).not.toHaveProperty("thinking");
+    expect(qwenBody.output_config).toEqual({ effort: "xhigh" });
+  });
+
   it("forbids tool calls for compaction without dropping the tool list, honours one-at-a-time, and leaves tool_choice out when the server rejects it", () => {
     expect(anthropicRequestBody(request(() => sse([]), { tools, toolChoice: "none" })).tool_choice).toEqual({ type: "none" });
     expect(anthropicRequestBody(request(() => sse([]), { tools, quirks: quirks({ parallelToolCalls: false }) })).tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
@@ -233,5 +239,27 @@ describe("streamAnthropic", () => {
     expect(bodies[1]!.messages[1]!.content.map((block) => block.type)).toEqual(["text"]);
     // Some other 400 is not retried.
     await expect(collect(request(() => new Response(JSON.stringify({ error: { message: "max_tokens too large" } }), { status: 400 }), { transcript }))).rejects.toThrow(/max_tokens/);
+  });
+
+  it("retries without adaptive thinking when an Anthropic-compatible gateway rejects thinking.type adaptive", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const answers = [
+      new Response(JSON.stringify({ error: { message: "thinking.type: Input should be 'enabled' or 'disabled'" } }), { status: 400 }),
+      sse([{ type: "message_start", message: { usage: { input_tokens: 3 } } }, { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } }, { type: "message_stop" }]),
+    ];
+    const events = await collect(
+      request(
+        (_url, init) => {
+          bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return answers.shift()!;
+        },
+        { model: "auto", effort: "high" },
+      ),
+    );
+    expect(events.at(-1)).toEqual({ type: "finish", reason: "stop" });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.thinking).toEqual({ type: "adaptive", display: "summarized" });
+    expect(bodies[1]).not.toHaveProperty("thinking");
+    expect(bodies[1]!.output_config).toEqual({ effort: "high" });
   });
 });

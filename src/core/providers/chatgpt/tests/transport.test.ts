@@ -20,6 +20,9 @@ import {
   chatgptOAuthQuirks,
   createChatGptHarnessDriver,
   discoverChatGptModels,
+  hydrateChatGptModelsCache,
+  recordDiscoveredChatGptModels,
+  resetChatGptModelCacheForTests,
   synthesizeChatGptTarget,
 } from "../catalog.js";
 import { CHATGPT_OAUTH_SCOPES, saveChatGptAuthBundle, type KeychainAdapter } from "../oauth.js";
@@ -27,6 +30,7 @@ import { CHATGPT_OAUTH_SCOPES, saveChatGptAuthBundle, type KeychainAdapter } fro
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  resetChatGptModelCacheForTests();
   while (tempDirs.length > 0) {
     fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }
@@ -68,7 +72,8 @@ describe("ChatGPT OAuth Responses transport & per-app cap errors (MXN-461)", () 
 
     expect(body.store).toBe(false);
     expect(body.stream).toBe(true);
-    expect(body.instructions).toBe("You are helpful.");
+    // Static system prompt goes in a leading developer message (cacheable on GPT-6.2+), not top-level instructions.
+    expect(body.instructions).toBeUndefined();
     expect(body.max_output_tokens).toBeUndefined();
     expect(body.temperature).toBeUndefined();
     expect(body.top_p).toBeUndefined();
@@ -82,8 +87,12 @@ describe("ChatGPT OAuth Responses transport & per-app cap errors (MXN-461)", () 
         strict: false,
       },
     ]);
-    // No role:"system" items inside input.
+    // Leading system prompt becomes role:"developer"; no role:"system" items inside input.
     const inputItems = body.input as Array<Record<string, unknown>>;
+    expect(inputItems[0]).toEqual({
+      role: "developer",
+      content: [{ type: "input_text", text: "You are helpful." }],
+    });
     expect(inputItems.some((item) => item.role === "system")).toBe(false);
 
     // Non-ChatGPT Responses keeps max_output_tokens/temperature/top_p intact.
@@ -201,6 +210,51 @@ describe("ChatGPT OAuth Responses transport & per-app cap errors (MXN-461)", () 
     });
   });
 
+  it("picks max_context_window over default context_window and feeds cached discovered windows into synthesizeChatGptTarget", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "moxen-chatgpt-cache-"));
+    tempDirs.push(dir);
+    const mockFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          models: [
+            {
+              slug: "gpt-6.2-astra",
+              display_name: "GPT-6.2-Astra",
+              visibility: "list",
+              supported_in_api: true,
+              context_window: 272_000,
+              max_context_window: 872_000,
+            },
+            {
+              slug: "gpt-6.2-sol",
+              display_name: "GPT-6.2-Sol",
+              visibility: "list",
+              supported_in_api: true,
+              context_window: 500_000,
+              max_context_window: 1_050_000,
+            },
+          ],
+        }),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+
+    const models = await discoverChatGptModels("at_oauth_token", { fetch: mockFetch });
+    expect(models.find((m) => m.id === "gpt-6.2-astra")?.contextWindow).toBe(872_000);
+    expect(models.find((m) => m.id === "gpt-6.2-sol")?.contextWindow).toBe(1_050_000);
+
+    recordDiscoveredChatGptModels("trial", models, dir);
+    // Synthesized runtime targets use the discovered max context window instead of the fallback.
+    expect(synthesizeChatGptTarget("chatgpt/trial", "gpt-6.2-sol")?.model.contextWindow).toBe(1_050_000);
+    expect(synthesizeChatGptTarget("chatgpt/trial", "gpt-6.2-astra")?.model.contextWindow).toBe(872_000);
+
+    // Wait for async cache flush, clear memory, and verify hydration restores the windows.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    resetChatGptModelCacheForTests();
+    hydrateChatGptModelsCache(dir);
+    expect(synthesizeChatGptTarget("chatgpt/trial", "gpt-6.2-sol")?.model.contextWindow).toBe(1_050_000);
+    expect(synthesizeChatGptTarget("chatgpt/trial", "gpt-6.2-astra")?.model.contextWindow).toBe(872_000);
+  });
+
   it("runs zero-tool completeText on HarnessDriver for both chatgpt/<id> and harness/<id> and unlocks improvePrompt", async () => {
     const secrets = makeMemoryKeychain();
     await saveChatGptAuthBundle(
@@ -251,12 +305,14 @@ describe("ChatGPT OAuth Responses transport & per-app cap errors (MXN-461)", () 
     expect(seenRequests[0]?.apiKey).toBe("at_zero_tool_secret");
     expect(seenRequests[0]?.quirks.chatgptOAuth).toBe(true);
 
-    // Zero tools on wire in responsesRequestBody too.
+    // Zero tools on wire in responsesRequestBody too; instructions placed in leading developer item.
     const wire = responsesRequestBody(seenRequests[0]!);
     expect(wire.tools).toBeUndefined();
     expect(wire.tool_choice).toBeUndefined();
     expect(wire.max_output_tokens).toBeUndefined();
-    expect(wire.instructions).toContain("You have no tools");
+    expect(wire.instructions).toBeUndefined();
+    expect((wire.input as Array<{ role?: string; content?: Array<{ text?: string }> }>)[0]?.role).toBe("developer");
+    expect((wire.input as Array<{ role?: string; content?: Array<{ text?: string }> }>)[0]?.content?.[0]?.text).toContain("You have no tools");
 
     // Plain HarnessDriver profile also supports zero-tool completeText.
     const harnessDriver = new HarnessDriver({
