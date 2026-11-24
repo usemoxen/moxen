@@ -130,7 +130,11 @@ fn list(
             continue;
         }
         let limits_data = w.source.limits();
-        let limits = crate::usage::provider_limits(limits_data.as_deref(), Some(catalog), &provider.instance);
+        let limits = crate::usage::provider_limits(
+            limits_data.as_deref(),
+            Some(catalog),
+            &provider.instance,
+        );
         out = out.child(header(provider, limits));
         for model in shown {
             out = out.child(model_row(provider, model, current, row, cx));

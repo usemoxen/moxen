@@ -103,9 +103,14 @@ impl SettingsForm {
             | Self::Field { title, .. }
             | Self::ModelPrice { title, .. }
             | Self::AccountField { title, .. } => title.clone(),
-            Self::AddAccount { kind } => format!("Add {} account (slug id)", account_kind_name(kind)),
+            Self::AddAccount { kind } => {
+                format!("Add {} account (slug id)", account_kind_name(kind))
+            }
             Self::AccountLoginCode { kind, id, .. } => {
-                format!("Paste {} authorization code ({kind}/{id})", account_kind_name(kind))
+                format!(
+                    "Paste {} authorization code ({kind}/{id})",
+                    account_kind_name(kind)
+                )
             }
             Self::Duplicate { id, .. } => format!("Copy “{id}” under a new name"),
             Self::AddModel { .. } => "Name the model".into(),
@@ -576,7 +581,10 @@ impl Workspace {
                         if let Some((k, v)) = entry.split_once('=') {
                             let k = k.trim();
                             if !k.is_empty() {
-                                map.insert(k.to_string(), serde_json::Value::String(v.trim().to_string()));
+                                map.insert(
+                                    k.to_string(),
+                                    serde_json::Value::String(v.trim().to_string()),
+                                );
                             }
                         }
                     }
@@ -596,7 +604,8 @@ impl Workspace {
             SettingsForm::AddAccount { kind } => {
                 let slug = text.trim().to_lowercase();
                 if slug.is_empty() {
-                    self.settings_error = Some("Type an account id (for example: personal or work).".into());
+                    self.settings_error =
+                        Some("Type an account id (for example: personal or work).".into());
                 } else {
                     let instance_id = format!("{kind}/{slug}");
                     let mut payload = serde_json::json!({ "kind": kind, "id": slug });
@@ -620,7 +629,8 @@ impl Workspace {
             } => {
                 let code = text.trim();
                 if code.is_empty() {
-                    self.settings_error = Some("Paste the authorization code from your browser.".into());
+                    self.settings_error =
+                        Some("Paste the authorization code from your browser.".into());
                 } else {
                     self.source
                         .submit_account_login_code(&session_id, &kind, &id, code);
@@ -711,10 +721,11 @@ pub fn render(
     }
     w.sync_settings(cx);
     let snapshot = w.source.settings();
-    let accounts: Vec<settings::ProviderAccountSummary> = match w.source.provider_accounts().as_deref() {
-        Some(Ok(list)) => list.clone(),
-        _ => vec![],
-    };
+    let accounts: Vec<settings::ProviderAccountSummary> =
+        match w.source.provider_accounts().as_deref() {
+            Some(Ok(list)) => list.clone(),
+            _ => vec![],
+        };
     let tabs = snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.as_ref().as_ref().ok())
@@ -723,8 +734,7 @@ pub fn render(
     let selected = tabs
         .iter()
         .position(|tab| {
-            tab.section == w.settings_tab.0
-                && tab.group.as_deref() == w.settings_tab.1.as_deref()
+            tab.section == w.settings_tab.0 && tab.group.as_deref() == w.settings_tab.1.as_deref()
         })
         .or_else(|| tabs.iter().position(|tab| tab.section == w.settings_tab.0))
         .unwrap_or(0);
@@ -918,10 +928,9 @@ fn tabs(snapshot: &Snapshot, accounts: &[settings::ProviderAccountSummary]) -> V
                 .filter_map(|view| view.group.as_deref())
                 .filter(|group| bare.is_none_or(|bare| *group == bare));
             for group in groups {
-                if !tabs
-                    .iter()
-                    .any(|tab: &SettingsTab| tab.section == section && tab.group.as_deref() == Some(group))
-                {
+                if !tabs.iter().any(|tab: &SettingsTab| {
+                    tab.section == section && tab.group.as_deref() == Some(group)
+                }) {
                     tabs.push(SettingsTab {
                         section: section.to_owned(),
                         group: Some(group.to_owned()),
@@ -958,8 +967,9 @@ fn tabs(snapshot: &Snapshot, accounts: &[settings::ProviderAccountSummary]) -> V
         .iter()
         .position(|tab| tab.category != "Moxen")
         .unwrap_or(tabs.len());
-    let mut provider_tabs =
-        Vec::with_capacity(1 + accounts.len() + usize::from(opencode_enabled) + usize::from(vibe_enabled));
+    let mut provider_tabs = Vec::with_capacity(
+        1 + accounts.len() + usize::from(opencode_enabled) + usize::from(vibe_enabled),
+    );
     provider_tabs.push(SettingsTab {
         section: "providers:overview".to_owned(),
         group: None,
@@ -4782,11 +4792,15 @@ fn provider_profile_tab(
         Ok(snapshot) => snapshot,
         Err(message) => return error_row(message, w, cx).into_any_element(),
     };
-    let accounts: Vec<settings::ProviderAccountSummary> = match w.source.provider_accounts().as_deref() {
-        Some(Ok(list)) => list.clone(),
-        _ => vec![],
-    };
-    let Some(account) = accounts.iter().find(|entry| entry.instance_id == instance_id) else {
+    let accounts: Vec<settings::ProviderAccountSummary> =
+        match w.source.provider_accounts().as_deref() {
+            Some(Ok(list)) => list.clone(),
+            _ => vec![],
+        };
+    let Some(account) = accounts
+        .iter()
+        .find(|entry| entry.instance_id == instance_id)
+    else {
         return loading("This provider profile is no longer configured.").into_any_element();
     };
 
@@ -5117,7 +5131,8 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                 cx.listener(|this, _, _, cx| {
                     this.confirm_settings(
                         "Update all provider CLIs?".into(),
-                        "Runs each installed provider's own updater in parallel on this machine.".into(),
+                        "Runs each installed provider's own updater in parallel on this machine."
+                            .into(),
                         SettingsConfirm::UpdateAllProviders,
                         cx,
                     );
@@ -5181,8 +5196,11 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                                 if account.enabled { "On" } else { "Off" },
                                 "Enable or disable this account",
                                 cx.listener(move |this, _, _, cx| {
-                                    this.source
-                                        .toggle_provider_account(&toggle_kind, &toggle_id, next_enabled);
+                                    this.source.toggle_provider_account(
+                                        &toggle_kind,
+                                        &toggle_id,
+                                        next_enabled,
+                                    );
                                     cx.notify();
                                 }),
                             )),
@@ -5198,10 +5216,8 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                             catalog_ref.as_deref(),
                             &account.instance_id,
                         );
-                        let summary = crate::usage::compact_usage_summary(
-                            acct_limits,
-                            crate::live::now_ms(),
-                        );
+                        let summary =
+                            crate::usage::compact_usage_summary(acct_limits, crate::live::now_ms());
                         div()
                             .flex()
                             .items_center()
@@ -5240,12 +5256,11 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
             .gap(px(6.))
             .child(ui::caps("+ Add provider"))
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(4.))
-                    .children(["claude", "chatgpt", "antigravity"].into_iter().enumerate().map(
-                        |(idx, kind)| {
+                div().flex().flex_wrap().gap(px(4.)).children(
+                    ["claude", "chatgpt", "antigravity"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, kind)| {
                             let selected_kind = chosen_kind == kind;
                             let k = kind.to_string();
                             let label = if selected_kind {
@@ -5262,8 +5277,8 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                                     cx.notify();
                                 }),
                             )
-                        },
-                    )),
+                        }),
+                ),
             )
             .child({
                 let add_label = format!("+ Add {} account", account_kind_name(&chosen_kind));
@@ -5394,18 +5409,13 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                 ),
         );
 
-        detail_col = detail_col
-            .child(ui::caps("Status"))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(color("ink-2"))
-                    .child(format!(
-                        "{} · {}",
-                        account.instance_id,
-                        account_status_subtitle(account)
-                    )),
-            );
+        detail_col = detail_col.child(ui::caps("Status")).child(
+            div().text_xs().text_color(color("ink-2")).child(format!(
+                "{} · {}",
+                account.instance_id,
+                account_status_subtitle(account)
+            )),
+        );
 
         if is_chatgpt {
             let signed_in = account.signed_in == Some(true);
@@ -5557,7 +5567,11 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
         let rows: Vec<(&str, &str, String)> = vec![
             ("label", "Display name", account.label.clone()),
             (
-                if is_chatgpt { "codexBinaryPath" } else { "binaryPath" },
+                if is_chatgpt {
+                    "codexBinaryPath"
+                } else {
+                    "binaryPath"
+                },
                 "Binary path",
                 if is_chatgpt {
                     account.codex_binary_path.clone().unwrap_or_default()
@@ -5566,7 +5580,11 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                 },
             ),
             (
-                if is_chatgpt { "codexHomePath" } else { "homePath" },
+                if is_chatgpt {
+                    "codexHomePath"
+                } else {
+                    "homePath"
+                },
                 match account.kind.as_str() {
                     "claude" => "CLAUDE_CONFIG_DIR path",
                     "antigravity" => "Account home (HOME / USERPROFILE)",
@@ -5579,7 +5597,11 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                 },
             ),
             (
-                if is_chatgpt { "codexLaunchArgs" } else { "launchArgs" },
+                if is_chatgpt {
+                    "codexLaunchArgs"
+                } else {
+                    "launchArgs"
+                },
                 "Launch arguments",
                 if is_chatgpt {
                     account.codex_launch_args.clone().unwrap_or_default()
@@ -5587,7 +5609,11 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                     account.launch_args.clone().unwrap_or_default()
                 },
             ),
-            ("model", "Default model", account.model.clone().unwrap_or_default()),
+            (
+                "model",
+                "Default model",
+                account.model.clone().unwrap_or_default(),
+            ),
             (
                 "thinkingEffort",
                 "Thinking effort",
@@ -5616,17 +5642,13 @@ fn providers_overview_tab(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElem
                             .flex_1()
                             .min_w_0()
                             .child(div().text_color(color("ink")).child(title))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(color("ink-2"))
-                                    .truncate()
-                                    .child(if value.is_empty() {
-                                        "Default".to_string()
-                                    } else {
-                                        value
-                                    }),
-                            ),
+                            .child(div().text_xs().text_color(color("ink-2")).truncate().child(
+                                if value.is_empty() {
+                                    "Default".to_string()
+                                } else {
+                                    value
+                                },
+                            )),
                     )
                     .child(small_button(
                         ("providers-detail-edit", idx),
@@ -5812,9 +5834,18 @@ mod tests {
             populated,
             vec![
                 ("providers:overview".to_string(), "Overview".to_string()),
-                ("providers:profile".to_string(), "Antigravity · Default".to_string()),
-                ("providers:profile".to_string(), "ChatGPT · Work".to_string()),
-                ("providers:profile".to_string(), "Claude · Personal".to_string()),
+                (
+                    "providers:profile".to_string(),
+                    "Antigravity · Default".to_string()
+                ),
+                (
+                    "providers:profile".to_string(),
+                    "ChatGPT · Work".to_string()
+                ),
+                (
+                    "providers:profile".to_string(),
+                    "Claude · Personal".to_string()
+                ),
             ]
         );
     }

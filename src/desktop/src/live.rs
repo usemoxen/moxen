@@ -3528,7 +3528,9 @@ impl ThreadSource for ServerSource {
                     .args(["/c", "start", "", &auth_url])
                     .spawn();
                 #[cfg(all(unix, not(target_os = "macos")))]
-                let _ = std::process::Command::new("xdg-open").arg(&auth_url).spawn();
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&auth_url)
+                    .spawn();
             }
             shared.update(|state| {
                 state.settings_notice = Some(SettingsNotice {
@@ -3580,7 +3582,10 @@ impl ThreadSource for ServerSource {
             let res = wire
                 .dispatch("chatgpt.codex.pair", fields)
                 .map_err(|error| problem(&error, None))?;
-            let verified = res.get("verified").and_then(Value::as_bool).unwrap_or(false);
+            let verified = res
+                .get("verified")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let needs_confirmation = res
                 .get("needsConfirmation")
                 .and_then(Value::as_bool)
@@ -3641,7 +3646,9 @@ impl ThreadSource for ServerSource {
                     .args(["/c", "start", "", &auth_url])
                     .spawn();
                 #[cfg(all(unix, not(target_os = "macos")))]
-                let _ = std::process::Command::new("xdg-open").arg(&auth_url).spawn();
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&auth_url)
+                    .spawn();
             }
             let waiting = started
                 .get("message")
@@ -3675,7 +3682,10 @@ impl ThreadSource for ServerSource {
                 )
                 .map_err(|error| problem(&error, None))?;
             let notice = if kind_owned == "chatgpt" {
-                let verified = done.get("verified").and_then(Value::as_bool).unwrap_or(false);
+                let verified = done
+                    .get("verified")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let needs_confirmation = done
                     .get("needsConfirmation")
                     .and_then(Value::as_bool)
