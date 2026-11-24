@@ -31,27 +31,51 @@ export class SpawnVibeTransport implements VibeTransport {
   startPeer(options: VibeSpawnOptions): JsonRpcPeer {
     const spawner = options.spawner ?? nodeProcessSpawner();
     const baseEnv = options.env ?? process.env;
-    const resolved = resolveVibeBinary(options.settings.binaryPath, baseEnv, {
+    const platform = options.platform ?? process.platform;
+    const configured = options.settings.binaryPath;
+    // A drive-relative path (`C:tool.cmd`) is neither absolute nor a bare
+    // command name; reject it rather than resolve it against PATH or a
+    // per-drive current directory the child would not share.
+    if (platform === "win32" && /^[A-Za-z]:[^\\/]/.test(configured)) {
+      throw new CliError(
+        "VIBE_INVALID_BINARY_PATH",
+        `Mistral Vibe executable path "${configured}" is drive-relative. Use an absolute path (such as C:\\Tools\\vibe-app-server.exe) or a bare command name on PATH.`,
+        { details: { binaryPath: configured } },
+      );
+    }
+    const resolved = resolveVibeBinary(configured, baseEnv, {
       ...(options.platform !== undefined ? { platform: options.platform } : {}),
       ...(options.isFile ? { isFile: options.isFile } : {}),
     });
     if (!resolved.installed) {
       throw new CliError(
         "VIBE_NOT_INSTALLED",
-        `Could not find Mistral Vibe executable (${options.settings.binaryPath}). Install it with \`uv tool install --python 3.14 mistral-vibe\` or set providers.vibe.binaryPath.`,
-        { details: { binaryPath: options.settings.binaryPath } },
+        `Could not find Mistral Vibe executable (${configured}). Install it with \`uv tool install --python 3.14 mistral-vibe\` or set providers.vibe.binaryPath.`,
+        { details: { binaryPath: configured } },
       );
     }
     const args = vibeAppServerArgs(options.settings.launchArgs, baseEnv);
     const env = vibeProcessEnv(options.settings.vibeHome, baseEnv);
     // A Windows `.cmd`/`.bat`/`.ps1` launcher cannot be spawned with
-    // `shell: false`; unwrap it (or run it through cmd.exe) like every other
-    // provider transport, never by joining a shell command string.
+    // `shell: false`; unwrap recognized shims to the real executable (or run a
+    // `.ps1` through `powershell -File`), never by joining a shell string.
     const launch = resolveWindowsLaunch(resolved.command, args, env, {
       ...(options.platform !== undefined ? { platform: options.platform } : {}),
       ...(options.isFile ? { isFile: options.isFile } : {}),
       ...(options.readText ? { readText: options.readText } : {}),
     });
+    // resolveWindowsLaunch's last resort for an unrecognized `.bat`/`.cmd` is
+    // `cmd.exe /d /c <path> <args...>`. cmd.exe re-parses that line and would
+    // not preserve argv boundaries (an argument with spaces splits), so Vibe
+    // refuses it: only a direct executable or a shim it can unwrap is safe.
+    const comspec = (env.ComSpec || env.COMSPEC || "cmd.exe").toLowerCase();
+    if (launch.command.toLowerCase() === comspec && launch.args[0] === "/d" && launch.args[1] === "/c") {
+      throw new CliError(
+        "VIBE_UNSUPPORTED_LAUNCHER",
+        `Mistral Vibe launcher "${resolved.command}" is a batch wrapper Moxen cannot unwrap, and running it through cmd.exe would not preserve argument boundaries. Set providers.vibe.binaryPath to the real executable it calls (such as vibe-app-server.exe).`,
+        { details: { binaryPath: resolved.command } },
+      );
+    }
     const child = spawner.spawn(launch.command, launch.args, {
       cwd: options.cwd,
       env: { ...env, ...(launch.env ?? {}) },

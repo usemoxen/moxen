@@ -933,7 +933,7 @@ export const settingsEs: Readonly<Record<string, string>> = {
   "Add Mistral Vibe as a provider in Moxen.": "Añade Mistral Vibe como proveedor en Moxen.",
   "Vibe executable": "Ejecutable de Vibe",
   "Vibe home directory": "Directorio principal de Vibe",
-  "The `vibe-app-server` binary to spawn. A relative path resolves against the Moxen server's working directory.": "El binario `vibe-app-server` que se va a lanzar. Una ruta relativa se resuelve respecto al directorio de trabajo del servidor de Moxen.",
+  "The `vibe-app-server` binary to spawn. A relative path resolves against the Moxen server's working directory, and on Windows an unrecognized batch wrapper is rejected.": "El binario `vibe-app-server` que se va a lanzar. Una ruta relativa se resuelve respecto al directorio de trabajo del servidor de Moxen, y en Windows se rechaza un envoltorio por lotes no reconocido.",
   "Directory passed as `VIBE_HOME` for Vibe's configuration and session logs.": "Directorio pasado en `VIBE_HOME` para la configuración y los registros de sesión de Vibe.",
   "Extra arguments passed to `vibe-app-server`.": "Argumentos extra pasados a `vibe-app-server`.",
   "How much a new Mistral Vibe thread may do without asking.": "Cuánto puede hacer un hilo nuevo de Mistral Vibe sin pedir permiso.",

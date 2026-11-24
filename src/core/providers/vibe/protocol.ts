@@ -7,6 +7,8 @@
  * `vibe-app-server` probes). Every payload is read defensively to tolerate
  * additive fields across Vibe updates.
  */
+import { createHash } from "node:crypto";
+
 import { createTwoFilesPatch } from "diff";
 
 import type { ModelSummary } from "../../catalog/summary.js";
@@ -248,27 +250,51 @@ export function vibeMcpServersOf(servers: readonly McpServerSpec[] | undefined):
 }
 
 /**
- * Vibe's normalized MCP display name for a server/tool pair: every character
- * outside `[A-Za-z0-9_$]` becomes `_`, and a leading digit gains a `_` prefix
- * (`mistralai_vibe_local_harness/vibe/_mcp_naming.py`, v3.1.4).
+ * Vibe's MCP server alias normalization (`normalize_mcp_server_name`,
+ * `mistral-vibe` v3.1.4): characters outside `[a-zA-Z0-9_-]` become `_`,
+ * leading/trailing `_`/`-` are stripped, and the result is cut to 256 chars.
+ * Iterates code points so an astral character is one replacement, as Python
+ * does (a UTF-16 `.replace` would emit two underscores).
  */
-function vibeMcpDisplayName(server: string, tool: string): string {
-  const normalized = `${server}_${tool}`.replace(/[^A-Za-z0-9_$]/g, "_");
+function vibeMcpServerAlias(name: string): string {
+  const replaced = [...name].map((ch) => (/[a-zA-Z0-9_-]/.test(ch) ? ch : "_")).join("");
+  return replaced.replace(/^[_-]+/, "").replace(/[_-]+$/, "").slice(0, 256);
+}
+
+/**
+ * Vibe's identifier normalization (`_normalize_identifier` in
+ * `mistralai_vibe_local_harness/vibe/_mcp_naming.py`): code-point wise, every
+ * character outside `[A-Za-z0-9_$]` becomes a single `_`, and a leading digit
+ * gains a `_` prefix.
+ */
+function vibeMcpIdentifier(value: string): string {
+  const normalized = [...value].map((ch) => (/[A-Za-z0-9_$]/.test(ch) ? ch : "_")).join("") || "_";
   return /^[0-9]/.test(normalized) ? `_${normalized}` : normalized;
 }
 
 /**
  * Map Moxen's per-tool MCP exclusions (`mcp__<server>__<tool>`) onto Vibe's
  * `disabledTools` filter. Verified against `mistral-vibe` v3.1.4 (unified
- * harness, the required default runtime): MCP tools are published under the
- * display name `<server>_<tool>`, and `disabledTools` entries are
- * case-insensitive fnmatch globs or `re:` regex full matches against that
- * name (`MCPToolFilter` in `vibe/_mcp_models.py`). A disabled tool is left
- * out of both the published tool list and the route table, so it can neither
- * be listed nor invoked. A name collision appends `_<sha256 hex>` (8–64
- * chars) to the display name; the `re:` form covers the plain name and every
- * collision-suffix form without touching sibling tools. Exclusions for a
- * server that is not offered need no pattern: its tools cannot run anyway.
+ * harness, the required default runtime): a tool is published under the
+ * display name built from the normalized server alias and the remote tool
+ * name (`_display_names`), and `disabledTools` entries are case-insensitive
+ * fnmatch globs or `re:` regex full matches against that name
+ * (`MCPToolFilter`). A disabled tool is left out of both the published tool
+ * list and the route table, so it can neither be listed nor invoked.
+ *
+ * The published name is either the normalized `<alias>_<tool>` base, or — when
+ * another identity claims the same base — that base plus this identity's own
+ * `_<sha256(alias "\0" tool) hex>` collision suffix (a prefix of the digest,
+ * length 8–64). The pattern matches the base and exactly those own-digest
+ * forms, never an arbitrary hex suffix, so a sibling tool such as
+ * `demo_write_file` or `demo_write_deadbeef`, and a different server's
+ * colliding tool (a different digest), stay available.
+ *
+ * Limit: two offered servers whose aliases normalize identically (e.g. `demo`
+ * and `_demo_`) produce the same digest for the same tool, so their published
+ * names are indistinguishable and an exclusion of one necessarily covers the
+ * other. Exclusions for a server that is not offered need no pattern: its
+ * tools cannot run anyway.
  */
 export function vibeDisabledMcpToolPatterns(
   servers: readonly McpServerSpec[] | undefined,
@@ -278,12 +304,21 @@ export function vibeDisabledMcpToolPatterns(
   const patterns = new Set<string>();
   for (const server of servers) {
     const prefix = `mcp__${server.name}__`;
+    const alias = vibeMcpServerAlias(server.name);
     for (const name of disabled) {
       if (!name.startsWith(prefix)) continue;
       const tool = name.slice(prefix.length);
       if (tool.length === 0) continue;
-      const base = vibeMcpDisplayName(server.name, tool).replace(/[^A-Za-z0-9_]/g, "\\$&");
-      patterns.add(`re:${base}(_[0-9a-f]{8,64})?`);
+      const base = vibeMcpIdentifier(`${alias}_${tool}`);
+      const digest = createHash("sha256").update(`${alias}\0${tool}`, "utf8").digest("hex");
+      // Optional own-digest suffix: `_` + digest[:8] + an optional prefix of
+      // digest[8:], i.e. digest[:n] for any n in 8..64 (nested optionals).
+      let tail = "";
+      for (let i = digest.length - 1; i >= 8; i -= 1) {
+        tail = `(?:${digest[i]}${tail})?`;
+      }
+      const escaped = base.replace(/[^A-Za-z0-9_]/g, "\\$&");
+      patterns.add(`re:${escaped}(?:_${digest.slice(0, 8)}${tail})?`);
     }
   }
   return [...patterns];
