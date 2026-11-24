@@ -6,7 +6,9 @@
  * is `data` (not `properties`), text arrives as true deltas (v1 sent
  * cumulative snapshots), tools are `session.tool.*` events (v1: one
  * `message.part.updated` per tool part), questions are forms, a turn ends on
- * `session.execution.*`, and history is a flat timeline with no `info` /
+ * `session.execution.*` or the session's own `session.idle` marker (whichever
+ * the server sends — a `/compact` turn gets no execution, only the idle), and
+ * history is a flat timeline with no `info` /
  * `parts`. Everything here is pure (no SDK, no I/O) so it is tested against
  * real samples captured from a live v2.0.19 server; `transport.ts` is the only
  * caller. The internal vocabulary is v1's, which `driver.ts`, `context.ts`,
@@ -426,6 +428,18 @@ export class OpencodeEventTranslator {
         // execution, then the queued steer starts a new one). The turn is only
         // over once nothing is left waiting to be delivered.
         if (this.hasPendingInbox(sessionID)) return [];
+        return [{ type: "session.idle", properties: { sessionID } }];
+      }
+      case "session.idle": {
+        // The session's own idle marker, emitted when it goes idle without an
+        // execution to succeed — a compaction draining while the session is
+        // otherwise at rest, for one. A `/compact` turn sends no prompt, so
+        // this is the only idle it can ever hear; dropping it left the turn
+        // open forever when its `session.compaction.ended` had already been
+        // consumed by an earlier, merged compaction. Held back while a user
+        // item is still waiting to be delivered, exactly like the one above.
+        const sessionID = asString(data.sessionID);
+        if (!sessionID || this.hasPendingInbox(sessionID)) return [];
         return [{ type: "session.idle", properties: { sessionID } }];
       }
       case "session.execution.interrupted": {

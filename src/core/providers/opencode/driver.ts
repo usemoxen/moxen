@@ -7,7 +7,8 @@
  * server demuxed by `sessionID`. The transport translates v2's events into
  * the vocabulary read here (`translate.ts`). Turns run through
  * `session.prompt` and settle on `session.idle` / `session.error` (v2's
- * `session.execution.*`, once no steered input is still queued); permission
+ * `session.execution.*` or its own `session.idle` marker, once no steered
+ * input is still queued); permission
  * and question requests park until `respondToRequest` / `respondToUserInput`
  * resolve them (`permission.reply` once/always/reject, a question form is
  * replied to or cancelled). v2 prompts carry only text and files, so the

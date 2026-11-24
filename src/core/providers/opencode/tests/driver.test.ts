@@ -427,6 +427,29 @@ describe("opencode driver", () => {
     await Effect.runPromise(Fiber.interrupt(fiber));
   });
 
+  it("ends a /compact turn on the session's own idle marker when no execution ever runs for it", async () => {
+    // A /compact turn sends no prompt, so no `session.execution.succeeded` ever
+    // fires for it: when the compaction's own end event was already consumed by
+    // an earlier (merged) compaction, the idle marker is the one signal left.
+    const { transport, driver } = start();
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    const server = transport.servers[0]!;
+    expect(server.callsTo("session.compact")).toHaveLength(1);
+    expect(server.callsTo("session.prompt")).toHaveLength(0);
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    // The server marks the session idle once the compaction work drains.
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    // Bounded, so a turn that never settles fails in half a second, not at the
+    // test timeout: the waiter resolving is the whole assertion.
+    const settled = await Promise.race([
+      outcome.then((result) => ({ settled: true as const, result })),
+      new Promise<{ settled: false }>((resolve) => setTimeout(() => resolve({ settled: false }), 500)),
+    ]);
+    expect(settled.settled).toBe(true);
+    if (settled.settled) expect(settled.result).toMatchObject({ status: "completed", error: null });
+  });
+
   it("compacts and carries the task on when a request is rejected as too long, once per turn", async () => {
     // OpenCode's own recovery is off (Moxen runs the compaction), so the rejection is Moxen's to rescue.
     const { transport, driver } = start();

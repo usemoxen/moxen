@@ -243,6 +243,25 @@ describe("v2 turn end", () => {
     expect(translator.translate({ type: "session.execution.succeeded", data: { sessionID: SESSION } })).toEqual([]);
   });
 
+  it("maps the session's own idle marker to session.idle, held while a user item waits", () => {
+    const translator = new OpencodeEventTranslator();
+    // Emitted when the session goes idle without an execution succeeding —
+    // a compaction draining while at rest, for one. A /compact turn sends no
+    // prompt, so this marker is the only idle it can hear.
+    expect(translator.translate({ type: "session.idle", data: { sessionID: SESSION } })).toEqual([
+      { type: "session.idle", properties: { sessionID: SESSION } },
+    ]);
+    // Same hold as the one synthesized from `session.execution.succeeded`.
+    translator.translate({ type: "session.inbox.enqueued", data: { sessionID: SESSION, inboxID: "msg_1", item: { type: "user", payload: {} } } });
+    expect(translator.translate({ type: "session.idle", data: { sessionID: SESSION } })).toEqual([]);
+    translator.translate({ type: "session.inbox.delivered", data: { sessionID: SESSION, inboxID: "msg_1" } });
+    expect(translator.translate({ type: "session.idle", data: { sessionID: SESSION } })).toEqual([
+      { type: "session.idle", properties: { sessionID: SESSION } },
+    ]);
+    // A session-less or empty marker is nothing.
+    expect(translator.translate({ type: "session.idle", data: {} })).toEqual([]);
+  });
+
   it("maps a finished compaction to session.compacted, and only a requested one's failure to session.error", () => {
     const translator = new OpencodeEventTranslator();
     expect(
