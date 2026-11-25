@@ -141,6 +141,9 @@ import {
   cancelTask,
   sendTaskMessage,
   settleTask,
+  snoozeTask,
+  unsettleTask,
+  wakeDueSnoozes,
   requireTaskControl,
   continueThread,
   continueOwnThread,
@@ -1056,6 +1059,14 @@ export class DirectConnection implements ClientApi {
       this.usageTickRunning = true;
       try {
         await this.usageProtection.tick();
+        // A snooze that waits on conditions (task_snooze) ends on the pass
+        // that sees them met: the thread goes back to active without a turn,
+        // and its queued work is admitted on the next poll. The snapshot is
+        // the candidate rows the tick already keeps, so a provider condition
+        // reads the same protection the work queue does.
+        await this.context()
+          .then(async (ctx) => wakeDueSnoozes(ctx, Date.now(), await this.usageProtection.snapshotRows(ctx)))
+          .catch(() => undefined);
         void this.refreshStaleChatGptUsage().catch(() => undefined);
       }
       catch (cause) {
@@ -1979,6 +1990,13 @@ export class DirectConnection implements ClientApi {
         });
       case "thread.task.send":
         return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
+      case "thread.task.unsettle":
+        return await unsettleTask(await this.context(), command.parentThreadId, command.taskId);
+      case "thread.task.snooze":
+        return await snoozeTask(await this.context(), command.parentThreadId, command.taskId, {
+          ...(command.at === undefined ? {} : { at: command.at }),
+          ...(command.conditions === undefined ? {} : { conditions: command.conditions }),
+        });
       case "thread.task.ask":
         return await this.taskAsk(command);
       case "thread.message.queue": {

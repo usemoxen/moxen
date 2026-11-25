@@ -1,4 +1,5 @@
 import type { McpServerEntry } from "./mcp.js";
+import type { QueueCondition } from "./threads/queue.js";
 
 export type ProjectPolicy = "create" | "existing";
 export type WorkspaceMode = "repo" | "folder";
@@ -797,6 +798,11 @@ export interface ThreadEnvelope {
   unsettledAt?: string | null;
   snoozedUntil?: string | null;
   snoozedAt?: string | null;
+  /**
+   * The queue conditions this snooze waits for (`task_snooze`): present only
+   * while a snooze ends on conditions rather than only on the clock.
+   */
+  snoozeConditions?: QueueCondition[];
   latestUserMessageAt?: string | null;
   hasPendingApprovals?: boolean;
   hasPendingUserInput?: boolean;

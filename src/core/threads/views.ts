@@ -28,8 +28,14 @@ export function isVisibleThread(thread: ThreadEnvelope): boolean {
   return thread.hidden !== true && thread.archivedAt == null && thread.deletedAt == null;
 }
 
+/**
+ * Whether the thread is snoozed: its `snoozedUntil` still lies ahead, or its
+ * snooze waits on conditions (`task_snooze`) the server has yet to clear. A
+ * past-due snooze reads as active, which is what hides it from no list.
+ */
 export function isSnoozedThread(thread: ThreadEnvelope, now = Date.now()): boolean {
   if (thread.settledAt != null) return false;
+  if ((thread.snoozeConditions?.length ?? 0) > 0) return true;
   const until = thread.snoozedUntil;
   if (typeof until !== "string" || until.length === 0) return false;
   const parsed = Date.parse(until);

@@ -54,7 +54,9 @@ const SHARED_STEPS = [
   "- Merging is yours: review a child's branch (`git diff <yours>...<branch>`) before taking anything, one branch at a time, testing between merges. " +
     "Cancel a runaway task with `task_cancel`; its thread and worktree are kept. Pass `taskIds` (several) to stop more than one: " +
     "each outcome is reported separately, and one bad id does not stop the others. Settle a task whose work is done with `task_settle` " +
-    "(`stop: true` ends a still-running one first); `removeWorktree: true` also clears its checkout once its branch is merged, and never otherwise.",
+    "(`stop: true` ends a still-running one first); `removeWorktree: true` also clears its checkout once its branch is merged, and never otherwise. " +
+    "`task_unsettle` reopens a settled task without starting a turn, and `task_snooze` takes a task out of the active set until a time " +
+    "or conditions you name are met (a usage reset, another thread finishing), then lets it come back on its own.",
   "- To correct or redirect a task instead of cancelling it, send it a message with `task_send` and read `outcome` — `steered` (the running turn took it) and `started` (a new turn began) mean the task has the message; " +
     "`queued` means the task is busy and cannot take input mid-turn, so the message waits for its next turn and the task has not read it yet (do not assume it acted on it); " +
     "`not_delivered` means send it again once the task settles. A finished or settled task is refused unless you pass `wake: true`, which starts a new turn (spending usage); " +

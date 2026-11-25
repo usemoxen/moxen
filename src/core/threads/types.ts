@@ -10,7 +10,7 @@
 import type { ImageAttachmentUpload } from "../attachments.js";
 import type { ModelRequest } from "../catalog/selection.js";
 import type { ReviewVerdict, TaskNotification } from "./notify.js";
-import type { QueuePolicy } from "./queue.js";
+import type { QueueCondition, QueuePolicy } from "./queue.js";
 import type { UsageProtectionOverride } from "../usage/limits.js";
 import type {
   InteractionMode,
@@ -130,6 +130,14 @@ export interface StoredThread {
   readonly settledOverride: "settled" | "active" | null;
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
+  /**
+   * The queue conditions a snooze waits for (`task_snooze` with `conditions`):
+   * while they are present the thread reads snoozed, and `wakeDueSnoozes`
+   * unsnoozes it as soon as they are met. Absent for a snooze that ends on the
+   * clock alone, and on every thread stored before a snooze could wait on
+   * conditions.
+   */
+  readonly snoozeConditions?: readonly QueueCondition[] | null;
   /** Set by drivers; settle is blocked while either is true. */
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;

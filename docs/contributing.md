@@ -56,7 +56,8 @@ exceptions.
   live-diff and attachment reads a client makes; `main.ts` is the
   server process; `mcp/` is the `moxen` MCP server provider sessions get,
   over `ClientApi`: the delegation tools (`delegate`, `task_status`, `models`,
-  `task_cancel`, `task_settle`, `task_send`, `task_ask`, `message_queue`,
+  `task_cancel`, `task_settle`, `task_unsettle`, `task_snooze`, `task_send`,
+  `task_ask`, `message_queue`,
   `thread_search`, `thread_read`, `image_gen`, `thread_continue`) plus thread,
   memory and utility tools — not every session gets all of them (a delegated
   task gets none of the delegation tools; research, web-fetch, memory,

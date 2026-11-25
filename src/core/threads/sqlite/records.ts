@@ -258,6 +258,7 @@ export function encodeThread(thread: StoredThread): ThreadRow {
   if (thread.instructionState !== undefined) rest.instructionState = thread.instructionState;
   if (thread.modeState !== undefined) rest.modeState = thread.modeState;
   if (thread.nativeSubagents !== undefined) rest.nativeSubagents = thread.nativeSubagents;
+  if (thread.snoozeConditions !== undefined) rest.snoozeConditions = thread.snoozeConditions;
   // Required on the record, but a thread written before versions may carry no
   // value: keep the key so the record reads back the way it was written.
   rest.unsettledAt = thread.unsettledAt ?? null;
@@ -331,6 +332,7 @@ export function decodeThread(row: ThreadRow): StoredThread {
     ...(rest.instructionState === undefined ? {} : { instructionState: rest.instructionState as NonNullable<StoredThread["instructionState"]> }),
     ...(rest.modeState === undefined ? {} : { modeState: rest.modeState as NonNullable<StoredThread["modeState"]> }),
     ...(rest.nativeSubagents === undefined ? {} : { nativeSubagents: rest.nativeSubagents as NonNullable<StoredThread["nativeSubagents"]> }),
+    ...(rest.snoozeConditions === undefined ? {} : { snoozeConditions: rest.snoozeConditions as NonNullable<StoredThread["snoozeConditions"]> }),
   };
 }
 

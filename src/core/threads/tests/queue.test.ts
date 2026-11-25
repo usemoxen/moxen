@@ -9,14 +9,14 @@ import { testHarness } from "../../testing/harness.js";
 import { driverKindOfInstance } from "../../types.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { UsageProtection } from "../../usage/protection.js";
-import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeThread, unsnoozeThread, reconcileOrphanedTurn } from "../threads.js";
+import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, settleThread, snoozeThread, threadStatus, unsnoozeThread, reconcileOrphanedTurn } from "../threads.js";
 import { openThreadStore } from "../store.js";
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, loadTurnOrigins, parseQueuePolicy, queueAdmission, type QueuePolicy, type QueueRow } from "../queue.js";
 import type { StoredMessage, StoredThread, StoredTurn } from "../types.js";
 import { DEFAULT_CONFIG } from "../../config.js";
-import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
+import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, wakeDueSnoozes, type OperationContext } from "../operations.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -667,6 +667,56 @@ describe("admission of held plain queued turns", () => {
     await runWorkQueue(w.ctx, now + 61_000); await settleRuns();
     expect(w.sent.map((turn) => turn.prompt)).toContain("queued past the snooze");
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("completed");
+  });
+
+  it("holds a snooze that waits on conditions until they are met, then wakes it without a turn", async () => {
+    const w = await world(); const thread = await w.make();
+    const dependency = await w.make();
+    const running = await sendTurn(w.store, dependency.id, { prompt: "prerequisite" });
+    await snoozeThread(w.store, thread.id, null, [{ type: "thread", threadId: dependency.id }]);
+    const snoozed = (await w.store.readThreadRecord(thread.id))!;
+    expect(snoozed).toMatchObject({ snoozedUntil: null, snoozeConditions: [{ type: "thread", threadId: dependency.id }] });
+    // Snoozed by its conditions, not by the clock: the rest of the app reads it the same way.
+    expect(threadStatus(snoozed)).toBe("snoozed");
+    expect(await wakeDueSnoozes(w.ctx)).toEqual([]);
+    expect(threadStatus((await w.store.readThreadRecord(thread.id))!)).toBe("snoozed");
+
+    await completeTurn(w.store, dependency.id, running.turn.id, { text: "done" });
+    expect(await wakeDueSnoozes(w.ctx)).toEqual([thread.id]);
+    const woken = (await w.store.readThreadRecord(thread.id))!;
+    expect(woken.snoozeConditions).toBeNull();
+    expect(threadStatus(woken)).toBe("active");
+    // Nothing ran: the wake put the thread back in the active set, no more.
+    expect(w.sent).toEqual([]);
+    expect(await w.store.readTurns(thread.id)).toEqual([]);
+    expect(await wakeDueSnoozes(w.ctx)).toEqual([]);
+  });
+
+  it("starts a condition-held plain turn on the admission pass that meets its conditions", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "queued behind a snooze condition", delivery: "queue" });
+    await snoozeThread(w.store, thread.id, null, [{ type: "at", at: new Date(now + 60_000).toISOString() }]);
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("queued");
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent).toEqual([]);
+    // Due: the same pass both clears the snooze and starts the entry.
+    await runWorkQueue(w.ctx, now + 61_000); await settleRuns();
+    expect((await w.store.readThreadRecord(thread.id))!.snoozeConditions).toBeNull();
+    expect(w.sent.map((turn) => turn.prompt)).toContain("queued behind a snooze condition");
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("completed");
+  });
+
+  it("clears a pending snooze when the thread settles, and refuses a snooze with nothing to wait for", async () => {
+    const w = await world(); const thread = await w.make();
+    await expect(snoozeThread(w.store, thread.id, null, [])).rejects.toMatchObject({ code: "SNOOZE_UNTIL_INVALID" });
+    await snoozeThread(w.store, thread.id, null, [{ type: "at", at: new Date(Date.now() + 60_000).toISOString() }]);
+    await settleThread(w.store, thread.id);
+    const settled = (await w.store.readThreadRecord(thread.id))!;
+    expect(settled.snoozedUntil).toBeNull();
+    expect(settled.snoozeConditions).toBeNull();
+    expect(threadStatus(settled)).toBe("settled");
   });
 
   it("starts an exhaustion-held plain turn once the reset passes, with no further message", async () => {

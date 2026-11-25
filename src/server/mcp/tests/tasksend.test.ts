@@ -118,6 +118,33 @@ describe("task_send: a finished task", () => {
     }
   }, 20_000);
 
+  it("clears the settled mark when it wakes a settled task, so the thread reads active again", async () => {
+    // The settled mark is a lifecycle flag, not a one-shot gate: a wake that
+    // left it behind would say the task is finished while its new turn runs,
+    // and a later settle would have nothing to clear.
+    const t = await setup();
+    try {
+      const taskId = await t.delegate();
+      await expect.poll(async () => (await t.notifications()).length, WAIT).toBe(1);
+      await callMoxenTool(t.connection, t.orchestrator, "task_settle", { taskId });
+      const settled = (await t.store.readThreadRecord(taskId))!;
+      expect(settled.settledAt).not.toBeNull();
+
+      const woken = await t.send(t.orchestrator, taskId, "One more thing", true);
+      expect(woken.json).toMatchObject({ outcome: "started", woke: true });
+      await expect.poll(async () => (await t.store.readThreadRecord(taskId))!.settledAt, WAIT).toBeNull();
+      const wokenRecord = (await t.store.readThreadRecord(taskId))!;
+      expect(wokenRecord.settledOverride).toBe("active");
+      expect(wokenRecord.unsettledAt).not.toBeNull();
+      expect((await t.connection.query({ type: "thread.inspect", threadId: taskId })).thread.status).toBe("active");
+      // And it stays active once the woken turn ends: nothing re-settles it.
+      await expect.poll(async () => (await t.store.readTurns(taskId)).at(-1)?.status, WAIT).toBe("completed");
+      expect((await t.store.readThreadRecord(taskId))!.settledAt).toBeNull();
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
   it("reports running through task_status right after a wake, not the old finished report", async () => {
     // Turns never finish here, so the first one is stopped by task_cancel and the task is finished (interrupted).
     const t = await setup({ leaveTurnsRunning: true });

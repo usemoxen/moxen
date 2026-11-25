@@ -5,7 +5,7 @@ import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js"
 import { driverKindOfInstance } from "../types.js";
 import { startTurn, editWorkQueue, flushTaskNotifications, noteAutoContinueCancelled, queueTaskPauseNotification, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
 import { interruptTurn, openTurn, sendTurn, isContinuationBusy } from "../threads/threads.js";
-import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
+import { QUEUE_RESET_GRACE_MS, hasSnoozeConditions, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive, usageWindowMatchesModel, usageWindowsForModel } from "./limits.js";
 import { UsageForecaster, type UsageForecast } from "./forecast.js";
@@ -532,7 +532,7 @@ export class UsageProtection {
       const running = openTurn(row.turns);
       if (pause.phase === "resuming") {
         if (running) busy.add(pause.provider);
-        else if (!row.thread.settledAt && !row.thread.snoozedUntil && pause.turnId && row.turns.at(-1)?.id === pause.turnId) {
+        else if (!row.thread.settledAt && !row.thread.snoozedUntil && !hasSnoozeConditions(row.thread) && pause.turnId && row.turns.at(-1)?.id === pause.turnId) {
           // Restart between persisting recovery admission and recording its turn.
           await startTurn(ctx, { threadId: row.thread.id, prompt: RESUME_PROMPT, usageControl: true, origin: "usage-continue" });
           busy.add(pause.provider);
@@ -558,7 +558,7 @@ export class UsageProtection {
     }
     for (const row of queue) {
       const pause = row.thread.usagePause!;
-      if (row.thread.settledAt || row.thread.snoozedUntil) continue;
+      if (row.thread.settledAt || row.thread.snoozedUntil || hasSnoozeConditions(row.thread)) continue;
       const rowModel = (openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model;
       const windows = usageWindowsForModel(pause.provider, now, rowModel);
       if (pause.phase === "pending" && !busy.has(pause.provider)) {
