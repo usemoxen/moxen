@@ -42,7 +42,10 @@ function normalizeMemoryType(raw: string): MemoryType {
 
 export async function listMemory(config: CliConfig, options: { cwd?: string }) {
   const projectId = await projectFor(config, options.cwd);
-  return await (await cliClient(config)).query({ type: "memory.list", ...(projectId === null ? {} : { projectId }) });
+  const listed = await (await cliClient(config)).query({ type: "memory.list", ...(projectId === null ? {} : { projectId }) });
+  // The CLI's `--json` contract has always been these three fields; the cap the
+  // server adds for the Memory page stays there.
+  return { projectId: listed.projectId, memories: listed.memories, index: listed.index };
 }
 
 export async function readMemory(config: CliConfig, name: string, options: { cwd?: string; scope?: string }) {

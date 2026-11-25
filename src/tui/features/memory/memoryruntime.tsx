@@ -28,6 +28,11 @@ export function useMemoryRuntime(client: ClientApi | undefined, visible: boolean
   return status;
 }
 
+/** The main action as it reads: its "(r)"/"(c)" bare-key hint goes where the shortcut is off (the Settings page's rows). */
+export function memoryActionLabel(key: "memory.cancel" | "memory.recheck" | "memory.setup", hotkeys: boolean): string {
+  return hotkeys ? t(key) : t(key).replace(/\s+\((.)\)$/, "");
+}
+
 export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, onKeyword, hotkeys = true }: {
   status: Status | null;
   saving?: boolean;
@@ -42,7 +47,7 @@ export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, 
 }) {
   const busy = saving || status?.busy === true;
   /** The main button's label; where the bare-key shortcut is off, its "(r)" hint goes with it. */
-  const actionLabel = (key: "memory.cancel" | "memory.recheck" | "memory.setup"): string => (hotkeys ? t(key) : t(key).replace(/\s+\((.)\)$/, ""));
+  const actionLabel = (key: "memory.cancel" | "memory.recheck" | "memory.setup"): string => memoryActionLabel(key, hotkeys);
   const failed = status?.state === "failed";
   const phase = status?.phase ?? "idle";
   const phases = { idle: "memory.phase.idle", installing: "memory.phase.installing", downloading: "memory.phase.downloading", validating: "memory.phase.validating", indexing: "memory.phase.indexing" } as const;

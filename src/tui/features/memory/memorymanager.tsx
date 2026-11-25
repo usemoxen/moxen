@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
+import type { KeyEvent } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
 import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
@@ -123,6 +124,8 @@ export function MemoryManager({
   width,
   onEscapeList,
   footer,
+  memorySwitch,
+  tabLeavesList,
 }: {
   client: ClientApi;
   /** The open thread: its project is "this project". Null shows the global scope alone. */
@@ -133,6 +136,18 @@ export function MemoryManager({
   onEscapeList: () => void;
   /** The page's runtime section, on the list under the memories; absent in the modal. */
   footer?: MemoryFooter;
+  /**
+   * The memory switch as the enclosing Settings screen sees it right now, so a
+   * runtime row flipped under the list stands the writes down at once.
+   * Absent (the modal and the page without a snapshot), the manager reads it
+   * from the server itself.
+   */
+  readonly memorySwitch?: boolean | undefined;
+  /**
+   * Whether the tab key leaves the list view to the screen around it (the
+   * settings sidebar). The standalone modal keeps the key: it has nowhere to go.
+   */
+  readonly tabLeavesList?: boolean | undefined;
 }) {
   const inner = Math.max(20, width);
   const rowWidth = Math.max(10, inner - 2);
@@ -144,7 +159,7 @@ export function MemoryManager({
   const [searched, setSearched] = useState<readonly Searched[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [semanticNote, setSemanticNote] = useState<string | null>(null);
-  const [memoryOff, setMemoryOff] = useState(false);
+  const [memoryOffOnServer, setMemoryOffOnServer] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   /** How many memories one scope holds, as the server enforces it; null until it loads, or an older paired server never says. */
   const [cap, setCap] = useState<number | null>(null);
@@ -174,6 +189,8 @@ export function MemoryManager({
 
   const addressOf = (id: string | null): MemoryAddress => (id === null ? {} : { threadId: id });
   const via = addressOf(threadId);
+  /** Memory off as this view knows it now: the page passes the live switch, the modal what it asked the server (see above). */
+  const memoryOff = memorySwitch === undefined ? memoryOffOnServer : !memorySwitch;
   /** Writes are allowed while memory is on; viewing works either way. */
   const canWrite = !memoryOff;
   const hasProject = listProjectId !== null;
@@ -195,12 +212,16 @@ export function MemoryManager({
       .catch((cause: unknown) => {
         if (!cancelled) setListError(messageOf(cause));
       });
-    void client
-      .query({ type: "settings.read" })
-      .then((snapshot) => {
-        if (!cancelled) setMemoryOff(snapshot.settings.some((view) => view.descriptor.key === "memory" && view.value === false));
-      })
-      .catch(() => undefined);
+    // Where the live switch is handed in (the Settings page), it is never asked
+    // for: what this view reads is what it shows while the page's rows change it.
+    if (memorySwitch === undefined) {
+      void client
+        .query({ type: "settings.read" })
+        .then((snapshot) => {
+          if (!cancelled) setMemoryOffOnServer(snapshot.settings.some((view) => view.descriptor.key === "memory" && view.value === false));
+        })
+        .catch(() => undefined);
+    }
     return () => {
       cancelled = true;
     };
@@ -265,7 +286,10 @@ export function MemoryManager({
   // Grouped order is the navigation order, so ↑/↓ walks rows as drawn; the page's
   // section follows the memories, so its rows are reachable on the same walk.
   const ordered = searchingView ? rows : [...globalRows, ...projectRows];
-  const extraRows = footer?.rows ?? [];
+  // A search is about its own results: the section stays drawn below them but
+  // stays out of the walk, so a search that matches nothing leaves Enter with
+  // nothing to hit — never a setting hidden under the "no match" message.
+  const extraRows = footer === undefined || searchingView ? [] : footer.rows;
   const focusCount = ordered.length + extraRows.length;
   const safe = focusCount === 0 ? -1 : Math.min(index, focusCount - 1);
   const activeExtra = safe >= ordered.length ? extraRows[safe - ordered.length] : undefined;
@@ -403,6 +427,13 @@ export function MemoryManager({
         return;
       }
       if (screen.kind === "list") {
+        // What was typed is what esc leaves first: a filter gone, then the
+        // screen under it, and only on the second press.
+        if (query !== "") {
+          setQuery("");
+          setNotice(null);
+          return;
+        }
         onEscapeList();
         return;
       }
@@ -550,7 +581,12 @@ export function MemoryManager({
         }
       }
     }
-  }, { capture: true });
+  }, {
+    // From the page's list the tab key is the settings sidebar's way sideways;
+    // everywhere else (the standalone modal, an open memory, a form) this view
+    // is the whole screen, so it keeps the key.
+    capture: (key: KeyEvent) => !(tabLeavesList === true && key.name === "tab" && screen.kind === "list"),
+  });
 
   const formTitle = formKey !== null ? t("mem.edit") : t("mem.new");
 
@@ -634,9 +670,13 @@ export function MemoryManager({
                     key={row.id}
                     id={row.id}
                     row={row}
-                    active={safe === ordered.length + extraIndex}
+                    active={!searchingView && safe === ordered.length + extraIndex}
                     rowWidth={rowWidth}
-                    onHover={() => setIndex(ordered.length + extraIndex)}
+                    onHover={() => {
+                      // Hovering a row the search has out of the walk must not
+                      // drag the highlight onto a result behind the mouse.
+                      if (!searchingView) setIndex(ordered.length + extraIndex);
+                    }}
                   />
                 ))}
               </box>

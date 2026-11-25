@@ -900,6 +900,7 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
           width={92}
           status={{ state: "ready", phase: "idle", device: "webgpu", message: null, file: null, percent: null, validation: { version: "fixture", platform: "fixture", arch: "fixture", device: "webgpu", correct: 6, total: 6, queryP95Ms: 24, documentMs: 130, checkedAt: "2026-11-01" }, busy: false, indexed: 3 }}
           saving={false}
+          memorySwitch
           onSetup={noop}
           onCancel={noop}
           onKeyword={noop}

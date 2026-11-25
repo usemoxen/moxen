@@ -1,7 +1,7 @@
 import type { ClientApi, QueryResult } from "../../../server/api.js";
 import { t } from "../../i18n/index.js";
-import { MemoryManager, type MemoryFooter } from "../memory/memorymanager.js";
-import { MemoryRuntimePanel } from "../memory/memoryruntime.js";
+import { MemoryManager, type MemoryFooter, type MemoryFooterRow } from "../memory/memorymanager.js";
+import { MemoryRuntimePanel, memoryActionLabel } from "../memory/memoryruntime.js";
 
 /**
  * The Settings page's Memory tab: the memory manager itself, with the
@@ -32,6 +32,7 @@ export function MemoryPage({
   width,
   status,
   saving,
+  memorySwitch,
   onSetup,
   onCancel,
   onKeyword,
@@ -47,6 +48,8 @@ export function MemoryPage({
   status: QueryResult<"memory.embeddings.status"> | null;
   /** The panel's buttons stand down while a setting it drives is being saved. */
   saving: boolean;
+  /** The memory switch as the live settings snapshot has it, driving the writes the page stands down. */
+  memorySwitch: boolean;
   onSetup: () => void;
   onCancel: () => void;
   onKeyword: () => void;
@@ -54,20 +57,44 @@ export function MemoryPage({
   /** Escape on the list (nothing is open): the settings screen closes. */
   onEscapeList: () => void;
 }) {
+  const busy = saving || status?.busy === true;
+  /**
+   * The runtime actions as rows, so the arrows and Enter reach what the page's
+   * bare letter keys (r, c) gave up to the search: cancel while it is busy,
+   * otherwise the setup or recheck and the keyword mode. A search pulls them
+   * out of the walk (see the manager), the same as the setting rows.
+   */
+  const actionRows: readonly MemoryFooterRow[] = busy
+    ? [{ id: "memory-runtime-cancel", label: memoryActionLabel("memory.cancel", false), value: "", onActivate: onCancel }]
+    : [
+        { id: "memory-runtime-action", label: memoryActionLabel(status?.validation ? "memory.recheck" : "memory.setup", false), value: "", onActivate: onSetup },
+        { id: "memory-runtime-keyword", label: t("memory.keyword"), value: "", onActivate: onKeyword },
+      ];
   const footer: MemoryFooter = {
     heading: t("mem.runtime"),
     node: (
       <MemoryRuntimePanel status={status} saving={saving} hotkeys={false} onSetup={onSetup} onCancel={onCancel} onKeyword={onKeyword} />
     ),
-    rows: rows.map((row) => ({
-      id: row.id,
-      label: row.appliesAt === undefined ? row.label : `${row.label} (${row.appliesAt})`,
-      value: row.value,
-      description: row.description,
-      onActivate: row.onActivate,
-    })),
+    rows: [
+      ...actionRows,
+      ...rows.map((row) => ({
+        id: row.id,
+        label: row.appliesAt === undefined ? row.label : `${row.label} (${row.appliesAt})`,
+        value: row.value,
+        description: row.description,
+        onActivate: row.onActivate,
+      })),
+    ],
   };
   return (
-    <MemoryManager client={client} threadId={threadId} width={width} onEscapeList={onEscapeList} footer={footer} />
+    <MemoryManager
+      client={client}
+      threadId={threadId}
+      width={width}
+      onEscapeList={onEscapeList}
+      footer={footer}
+      memorySwitch={memorySwitch}
+      tabLeavesList
+    />
   );
 }

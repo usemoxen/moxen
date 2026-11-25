@@ -1125,6 +1125,7 @@ export function SettingsModal({
                   width={paneWidth}
                   status={memoryStatus}
                   saving={saving === "memoryEmbeddings"}
+                  memorySwitch={snapshot.settings.find((view) => view.descriptor.key === "memory")?.value !== false}
                   onSetup={() => { void Promise.resolve(onSet("memory", "true")).then((ok) => { if (ok !== false) return onSet("memoryEmbeddings", "true"); }); }}
                   onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }}
                   onKeyword={() => { void Promise.resolve(onSet("memoryEmbeddings", "false")).then((ok) => { if (ok !== false) return onSet("memory", "true"); }); }}
