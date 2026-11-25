@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "data": {
+    "projectId": null,
+    "memories": [
+      {
+        "name": "notes",
+        "description": "Notes",
+        "type": "project",
+        "body": "Body.",
+        "scope": "global"
+      }
+    ],
+    "index": "Global memory (about the user, for every project):\n- [notes](notes.md) — Notes"
+  }
+}

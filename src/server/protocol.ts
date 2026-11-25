@@ -886,7 +886,7 @@ export interface QueryResults {
   "skills.manage.read": { readonly text: string };
   "thread.background.list": { readonly live: boolean; readonly partial: boolean; readonly tasks: readonly BackgroundTaskSummary[] };
   "thread.agent-read": { readonly text: string };
-  "memory.list": { readonly projectId: string | null; readonly memories: readonly Memory[]; readonly index: string | null };
+  "memory.list": { readonly projectId: string | null; readonly memories: readonly Memory[]; readonly index: string | null; readonly cap: number };
   "memory.embeddings.status": EmbeddingStatus & { readonly busy: boolean; readonly indexed: number };
   "memory.read": Memory;
   "memory.search": MemorySearch;

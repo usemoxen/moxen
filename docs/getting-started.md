@@ -33,10 +33,12 @@ existing memories before activating semantic search. Progress and measured
 results appear inline. You can cancel, retry a failed check, or continue with
 keyword memory. No terminal command is required.
 
-Settings has a dedicated **Memory** page with the global switches, setup
-status and model loading policy. **Manage memories** on that page (or the
-command palette) lists, reads, edits and deletes the memories agents keep,
-global first, then the project; while memory is off its write buttons stand
+Settings has a dedicated **Memory** page: the memories agents keep are listed
+right on it — global first, then this project, each scope with its count
+against the server's cap — and, in a runtime section below the list, the
+global switches, setup status and model loading policy. From the page (or the
+command palette's manager) you can read, edit, create and delete memories;
+while memory is off its write buttons stand
 down and only viewing works. **Keep loaded** loads a validated local model
 when the server starts and keeps it ready; **On demand** releases it after a
 minute without inference. Startup never downloads a model. Each provider

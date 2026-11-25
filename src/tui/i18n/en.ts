@@ -356,6 +356,7 @@ export const en = {
   "mem.conflictBody": "Another agent saved this memory after you opened it.",
   "mem.conflictBodyTarget": "Another agent saved {name} while you were editing.",
   "mem.overwrite": "Save anyway",
+  "mem.runtime": "Runtime",
   "mem.loading": "Loading…",
   "mem.saving": "Saving…",
   "guide.addMcp": "Add an MCP server",

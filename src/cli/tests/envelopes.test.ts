@@ -37,6 +37,7 @@ import { serve } from "../../server/transport/serve.js";
 import { RemoteConnection } from "../../server/transport/remote.js";
 import { testEndpoint } from "../../server/transport/tests/endpoint.js";
 import { setClientFactory } from "../infra/client.js";
+import { listMemory, saveMemory } from "../memory/memory.js";
 import {
   archiveThread as archiveThreadCommand,
   cancelTask,
@@ -196,6 +197,14 @@ async function turnSettled(harness: TestHarness, threadId: string): Promise<void
 }
 
 function suite(): void {
+  describe("memory", () => {
+    it("list", async () => {
+      const harness = await seeded();
+      await saveMemory(harness.config, "notes", { scope: "global", description: "Notes", memoryType: "project", body: "Body." });
+      await expect(await success(harness, await listMemory(harness.config, {}))).toMatchFileSnapshot(golden("memory-list"));
+    });
+  });
+
   describe("projects", () => {
     it("list", async () => {
       const harness = await seeded();
