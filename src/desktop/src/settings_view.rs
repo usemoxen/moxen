@@ -422,6 +422,19 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Whether `providers.antigravity.allowUnsupportedUse` is on, as the
+    /// server-provided settings snapshot says: while it is off (the
+    /// default), adding an Antigravity account must not hand it a
+    /// Moxen-managed isolated home.
+    fn antigravity_unsupported_use_on(&self) -> bool {
+        self.source
+            .settings()
+            .as_deref()
+            .and_then(|res| res.as_ref().ok())
+            .and_then(|snap| snap.find("providers.antigravity.allowUnsupportedUse"))
+            .is_some_and(|view| view.value == SettingValue::Flag(true))
+    }
+
     /// Submits the form bar's text: validated like the server will, then sent.
     pub fn submit_settings_text(
         &mut self,
@@ -608,15 +621,8 @@ impl Workspace {
                         Some("Type an account id (for example: personal or work).".into());
                 } else {
                     let instance_id = format!("{kind}/{slug}");
-                    let mut payload = serde_json::json!({ "kind": kind, "id": slug });
-                    if slug != "default" {
-                        let managed = format!("~/.moxen/accounts/{kind}/{slug}");
-                        if kind == "chatgpt" {
-                            payload["codexHomePath"] = serde_json::Value::String(managed);
-                        } else {
-                            payload["homePath"] = serde_json::Value::String(managed);
-                        }
-                    }
+                    let payload =
+                        account_add_payload(&kind, &slug, self.antigravity_unsupported_use_on());
                     self.source.save_provider_account(payload);
                     self.settings_account = Some(instance_id);
                     self.settings_form = None;
@@ -3247,6 +3253,23 @@ fn form_bar(
     if form.secret() {
         bar = bar.child(sub_line("Characters are hidden while typing."));
     }
+    if let SettingsForm::AddAccount { kind } = form {
+        // Gated up front (LOCAL-014): while the setting is off, say there and
+        // then that the account gets no managed home and shares the host
+        // login, and that a second account stays disabled.
+        let accounts_state = w.source.provider_accounts();
+        let has_antigravity_account = matches!(
+            accounts_state.as_deref(),
+            Some(Ok(accounts)) if accounts.iter().any(|account| account.kind == "antigravity")
+        );
+        if let Some(hint) = antigravity_add_hint(
+            kind,
+            w.antigravity_unsupported_use_on(),
+            has_antigravity_account,
+        ) {
+            bar = bar.child(sub_line(&hint));
+        }
+    }
     bar = if let Some(stepper) = stepper {
         let text = w.settings_input.read(cx).text().to_owned();
         let step = |index, label, direction, cx: &mut Context<Workspace>| {
@@ -4746,6 +4769,52 @@ fn account_kind_name(kind: &str) -> &'static str {
     }
 }
 
+/// The payload the add-account form saves: a Moxen-managed isolated folder for
+/// any non-`default` account — except Antigravity while
+/// `providers.antigravity.allowUnsupportedUse` is off (the default), which
+/// then signs in on the host `agy` login with no folder of its own, because
+/// the off-mode gate would refuse an isolated home (`ANTIGRAVITY_ACCOUNT_OFF`).
+/// Once the setting is on, behavior is exactly as before.
+fn account_add_payload(
+    kind: &str,
+    slug: &str,
+    antigravity_unsupported_use_on: bool,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "kind": kind, "id": slug });
+    if slug != "default" && !(kind == "antigravity" && !antigravity_unsupported_use_on) {
+        let managed = format!("~/.moxen/accounts/{kind}/{slug}");
+        if kind == "chatgpt" {
+            payload["codexHomePath"] = serde_json::Value::String(managed);
+        } else {
+            payload["homePath"] = serde_json::Value::String(managed);
+        }
+    }
+    payload
+}
+
+/// What the add-account form says about an Antigravity account while
+/// `providers.antigravity.allowUnsupportedUse` is off (the default): no home
+/// folder is assigned and the account signs in on the host `agy` login — and
+/// when an Antigravity account is already configured, that this extra
+/// account stays disabled until the setting is on (the up-front explanation
+/// instead of a silently disabled account).
+fn antigravity_add_hint(
+    kind: &str,
+    antigravity_unsupported_use_on: bool,
+    has_antigravity_account: bool,
+) -> Option<String> {
+    if kind != "antigravity" || antigravity_unsupported_use_on {
+        return None;
+    }
+    let mut text = String::from(
+        "No home folder is assigned: while providers.antigravity.allowUnsupportedUse is off, an Antigravity account signs in on the host agy login.",
+    );
+    if has_antigravity_account {
+        text.push_str(" Moxen runs at most one Antigravity account then, so this extra account stays disabled until you turn the setting on.");
+    }
+    Some(text)
+}
+
 fn account_status_subtitle(account: &settings::ProviderAccountSummary) -> String {
     // A gated Antigravity account (multiple accounts off, the default) shows
     // the reason ahead of the user's own toggle and sign-in state.
@@ -5862,6 +5931,69 @@ mod tests {
     fn the_interface_offers_the_same_theme_as_the_tui() {
         let snapshot = crate::mock_settings::snapshot_fixture();
         assert_eq!(setting_label(snapshot.find("ui.theme").unwrap()), "Theme");
+    }
+
+    #[test]
+    fn adding_an_antigravity_account_saves_no_managed_home_while_the_gate_is_off() {
+        // While the setting is off (the default), any new Antigravity account
+        // signs in on the host `agy` login: no homePath, whatever the slug.
+        for slug in ["team", "default"] {
+            let off = super::account_add_payload("antigravity", slug, false);
+            assert!(
+                off.get("homePath").is_none(),
+                "antigravity/{slug} while off"
+            );
+            assert_eq!(off["kind"].as_str(), Some("antigravity"));
+            assert_eq!(off["id"].as_str(), Some(slug));
+        }
+        // Once the setting is on, every non-default account keeps today's
+        // managed home; "default" keeps its special case.
+        let on = super::account_add_payload("antigravity", "team", true);
+        assert_eq!(
+            on["homePath"].as_str(),
+            Some("~/.moxen/accounts/antigravity/team")
+        );
+        assert!(
+            super::account_add_payload("antigravity", "default", true)
+                .get("homePath")
+                .is_none()
+        );
+        // Other kinds behave exactly as before, gate on or off.
+        assert_eq!(
+            super::account_add_payload("claude", "work", false)["homePath"].as_str(),
+            Some("~/.moxen/accounts/claude/work")
+        );
+        assert_eq!(
+            super::account_add_payload("chatgpt", "work", false)["codexHomePath"].as_str(),
+            Some("~/.moxen/accounts/chatgpt/work")
+        );
+        assert!(
+            super::account_add_payload("chatgpt", "work", false)
+                .get("homePath")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_add_form_explains_a_gated_antigravity_account_up_front() {
+        // While the setting is on, or for another kind, the form says nothing.
+        for kind in ["claude", "chatgpt", "antigravity"] {
+            let hint = super::antigravity_add_hint(kind, true, true);
+            if kind == "antigravity" {
+                assert_eq!(hint, None);
+            } else {
+                assert_eq!(super::antigravity_add_hint(kind, false, false), None);
+            }
+        }
+        // While off, the form says the account shares the host agy login with
+        // no folder of its own…
+        let first = super::antigravity_add_hint("antigravity", false, false).unwrap();
+        assert!(first.contains("host agy login"), "{first}");
+        assert!(!first.contains("stays disabled"), "{first}");
+        // …and once an Antigravity account exists, that this extra account
+        // stays disabled until the setting is on.
+        let second = super::antigravity_add_hint("antigravity", false, true).unwrap();
+        assert!(second.contains("stays disabled"), "{second}");
     }
 
     #[test]

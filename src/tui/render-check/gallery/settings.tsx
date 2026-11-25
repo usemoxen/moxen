@@ -474,6 +474,7 @@ export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntrie
             codexVerified: true,
           },
         ]}
+        antigravityUnsupportedUseOn={false}
         selectedInstance={null}
         onSelectAccount={noop}
         providers={SETTINGS_PROVIDERS}

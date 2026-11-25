@@ -1082,6 +1082,14 @@ export function ProfileAccountHeader({
 
 export interface ProvidersOverviewPanelProps {
   readonly accounts: readonly ProviderAccountSummary[];
+  /**
+   * Whether `providers.antigravity.allowUnsupportedUse` is on, as the
+   * server-provided settings snapshot says. While it is off (the default)
+   * the add wizard gives a new Antigravity account no Moxen-managed isolated
+   * home: the account signs in on the host `agy` login, and a second account
+   * says it will stay disabled.
+   */
+  readonly antigravityUnsupportedUseOn: boolean;
   readonly opencodeEnabled?: boolean;
   readonly onToggleOpencode?: (enabled: boolean) => void;
   readonly onOpenOpencode?: () => void;
@@ -1121,6 +1129,7 @@ export interface ProvidersOverviewPanelProps {
 
 export function ProvidersOverviewPanel({
   accounts,
+  antigravityUnsupportedUseOn,
   opencodeEnabled = false,
   onToggleOpencode,
   onOpenOpencode,
@@ -1420,14 +1429,34 @@ export function ProvidersOverviewPanel({
             </>
           ) : (
             <>
-              <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
-                {t("settings.providers.addHome", { path: defaultHomeHint(wizard.kind, wizard.id) })}
-              </text>
+              {/* While the setting is off (the default), an Antigravity account gets
+                  no Moxen-managed isolated home: an empty answer signs it in on the
+                  host `agy` login, and a second account is told it stays disabled. */}
+              {wizard.kind === "antigravity" && !antigravityUnsupportedUseOn ? (
+                <>
+                  <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
+                    {t("settings.providers.addHomeShared")}
+                  </text>
+                  {accounts.some((entry) => entry.kind === "antigravity") ? (
+                    <text fg={COLOR.warn} bg={SURFACE.raised} wrapMode="word" selectable={false}>
+                      {t("settings.providers.addAntigravitySecond")}
+                    </text>
+                  ) : null}
+                </>
+              ) : (
+                <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
+                  {t("settings.providers.addHome", { path: defaultHomeHint(wizard.kind, wizard.id) })}
+                </text>
+              )}
               <TextField
                 key={`wizard-home-${wizard.kind}-${wizard.id}`}
-                initial={defaultHomeHint(wizard.kind, wizard.id)}
-                placeholder={defaultHomeHint(wizard.kind, wizard.id)}
-                fallback={t("settings.default")}
+                initial={wizard.kind === "antigravity" && !antigravityUnsupportedUseOn ? "" : defaultHomeHint(wizard.kind, wizard.id)}
+                placeholder={wizard.kind === "antigravity" && !antigravityUnsupportedUseOn ? "" : defaultHomeHint(wizard.kind, wizard.id)}
+                fallback={
+                  wizard.kind === "antigravity" && !antigravityUnsupportedUseOn
+                    ? t("settings.providers.addHomeSharedFallback")
+                    : t("settings.default")
+                }
                 width={Math.max(20, width - 4)}
                 onSubmit={(value) => {
                   const dir = value.trim();
