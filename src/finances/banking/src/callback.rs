@@ -356,6 +356,14 @@ enum Answer {
 
 /// Read one request, answer it, and report what it was.
 fn serve(mut stream: TcpStream, expected_state: &str) -> Result<Answer, CallbackError> {
+    // On macOS and Windows an accepted socket inherits the listener's
+    // non-blocking mode. Left that way, a request that has not arrived yet
+    // reads as nothing: the browser gets a 400 and then a reset.
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| CallbackError::Io {
+            message: error.kind().to_string(),
+        })?;
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
     let request = read_head(&mut stream)?;

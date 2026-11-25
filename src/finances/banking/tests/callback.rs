@@ -358,3 +358,34 @@ fn a_script_in_the_state_never_reaches_the_page() {
         Err(CallbackError::StateMismatch)
     );
 }
+
+#[test]
+fn a_request_that_arrives_after_the_connection_is_still_read() {
+    // The listener is non-blocking so `wait` can watch its deadline, and on
+    // macOS and Windows an accepted socket inherits that. A server that read
+    // such a socket at once saw nothing, answered 400 and reset the browser.
+    let server = CallbackServer::bind(&[free_port()]).expect("bind");
+    let port = server.port();
+    let waiter =
+        std::thread::spawn(move || server.wait("fictional-state", Duration::from_secs(10)));
+
+    let mut stream =
+        TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("connect to the loopback server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("a read timeout");
+    std::thread::sleep(Duration::from_millis(300));
+    let request = format!(
+        "GET /callback?code=fictional-code&state=fictional-state HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .expect("write the request");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read the answer");
+
+    let response = String::from_utf8_lossy(&response).into_owned();
+    assert_eq!(status(&response), "HTTP/1.1 200 OK");
+    let outcome = waiter.join().expect("the server thread").expect("a code");
+    assert_eq!(outcome.code, "fictional-code");
+}
