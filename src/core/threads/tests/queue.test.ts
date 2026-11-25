@@ -16,7 +16,7 @@ import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, loadTurnOrigins, parseQueuePolicy, queueAdmission, type QueuePolicy, type QueueRow } from "../queue.js";
 import type { StoredMessage, StoredThread, StoredTurn } from "../types.js";
 import { DEFAULT_CONFIG } from "../../config.js";
-import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, wakeDueSnoozes, type OperationContext } from "../operations.js";
+import { editWorkQueue, prepareQueuedHandoff, queueAgentMessage, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, wakeDueSnoozes, type OperationContext } from "../operations.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -706,6 +706,36 @@ describe("admission of held plain queued turns", () => {
     expect((await w.store.readThreadRecord(thread.id))!.snoozeConditions).toBeNull();
     expect(w.sent.map((turn) => turn.prompt)).toContain("queued behind a snooze condition");
     expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.status).toBe("completed");
+  });
+
+  it("queues an agent's message behind a snooze instead of starting the work it holds", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    await snoozeThread(w.store, thread.id, new Date(now + 60_000).toISOString(), []);
+    // The message the orchestrator queues is automatic work: a snooze that
+    // takes the task out of the active set holds it, as it holds every entry.
+    const queued = await queueAgentMessage(w.ctx, thread.id, { message: "next" });
+    expect(queued.status).toBe("queued");
+    expect(queued.waitingFor).toEqual(["Waiting for the task's snooze to end"]);
+    expect((await w.store.readTurns(thread.id)).filter((turn) => turn.status === "running")).toEqual([]);
+    expect(w.sent).toEqual([]);
+    // Nothing is lost: once the snooze has passed, the entry runs.
+    await runWorkQueue(w.ctx, now + 61_000); await settleRuns();
+    expect(w.sent.some((turn) => turn.prompt.includes("next"))).toBe(true);
+  });
+
+  it("prepares no handoff for a queued entry while its thread waits on a snooze condition", async () => {
+    const w = await world(); const thread = await w.make();
+    const dependency = await w.make();
+    const queued = await sendTurn(w.store, thread.id, { prompt: "Handoff", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) });
+    await snoozeThread(w.store, thread.id, null, [{ type: "thread", threadId: dependency.id }]);
+    const before = await w.store.listThreadIds();
+    await prepareQueuedHandoff(w.ctx, thread.id, queued.turn.id, Date.now());
+    // The snooze holds the entry, so preparing it would start a summary turn
+    // and a destination the snooze was set to keep from running.
+    const after = (await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)!;
+    expect(after.status).toBe("queued");
+    expect(after.handoff).toBeUndefined();
+    expect(await w.store.listThreadIds()).toEqual(before);
   });
 
   it("clears a pending snooze when the thread settles, and refuses a snooze with nothing to wait for", async () => {

@@ -636,6 +636,12 @@ export async function sendTurn(
     // (wrap-up and other maintenance) are exempt: they run past holds by design.
     const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !autoHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
       && turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
+    // A snooze takes the task out of the active set, so the automatic work an
+    // agent queues for it waits: the message queues held for admission, the
+    // same way one waits behind a held turn, instead of starting the work the
+    // snooze was set to keep from running. A direct send is the owning
+    // thread's own act and keeps its own rule (it reaches the task).
+    const snoozeHeld = scheduledFor === null && !running && origin === "agent-message" && snoozeActive(thread, Date.parse(now));
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
     let heldQueue = (usageHeld || autoHeld) && !input.queue && origin !== undefined ? {
       conditions: [], held: false, order: Math.max(Date.parse(now), ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)),
@@ -643,7 +649,7 @@ export async function sendTurn(
     } : input.queue;
     if ((usageHeld || autoHeld) && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
-    const status = heldQueue || usageHeld || autoHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    const status = heldQueue || usageHeld || autoHeld || holdUntil !== null || heldBehind || snoozeHeld || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
     // A manual continuation in flight owns the checkout now: no turn may
     // start beside its destination while it prepares. Queued and scheduled
     // turns are not starting, so they pass; the handoff clears the claim
@@ -660,10 +666,10 @@ export async function sendTurn(
       threadId,
       status,
       ...(heldQueue ? { queue: heldQueue } : {}),
-      ...(heldBehind ? { heldAtSettle: true } : {}),
+      ...(heldBehind || snoozeHeld ? { heldAtSettle: true } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
       delivery:
-        delivery === "queue" || waitingOut !== null || heldBehind ? (status === "queued" ? "queued" : "started")
+        delivery === "queue" || waitingOut !== null || heldBehind || snoozeHeld ? (status === "queued" ? "queued" : "started")
         : delivery === "restart" ? "restarted"
         : "started",
       messageId: store.newId(),

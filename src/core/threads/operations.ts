@@ -115,7 +115,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { QUEUE_ADMISSION_LOCK, conditionBlockers, hasSnoozeConditions, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { QUEUE_ADMISSION_LOCK, conditionBlockers, hasSnoozeConditions, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, snoozeActive, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
@@ -1026,7 +1026,10 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   const source = await store.readThreadRecord(threadId);
   const turns = await store.readTurns(threadId);
   let turn = turns.find((t) => t.id === turnId);
-  if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
+  // A snooze takes the thread out of the active set: preparing the handoff
+  // would start a summary turn and queue a destination for work the snooze
+  // holds. The live snooze is what holds it, so a passed time does not.
+  if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || snoozeActive(source, now)) return;
   // A moved entry's own onward handoff waits like its dispatch does: no
   // summary turn and no next destination until the destination's first
   // turn settles and the entry's message reads durable. The admission
@@ -6256,6 +6259,9 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
   });
   const turn = (await ctx.store.readTurns(targetId)).find((candidate) => candidate.id === started.turn.id) ?? started.turn;
   const thread = (await ctx.store.readThreadRecord(targetId)) ?? started.thread;
+  // A snoozed task is out of the active set, so the message waits for the
+  // snooze to end (or a time it names) rather than for a turn to finish.
+  const snoozed = snoozeActive(thread, Date.now());
   let waitingFor: string[] = [];
   if (turn.status === "queued") {
     const rows = snapshot ? [...snapshot] : await queueRows(ctx);
@@ -6263,11 +6269,12 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
     const row = rows.find((candidate) => candidate.thread.id === targetId) ?? { thread, turns: await ctx.store.readTurns(targetId) };
     waitingFor = turn.queue ? queueAdmission(row, turn, rows, ctx.config, undefined, await loadTurnOrigins(ctx.store, [row], ctx.config)).blocked : [];
     if (!turn.queue && thread.usagePause) waitingFor = ["Waiting for thread protection"];
+    else if (!turn.queue && snoozed) waitingFor = ["Waiting for the task's snooze to end"];
   }
   const held = typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) > Date.now() ? turn.scheduledFor : null;
   const expectedRun =
     turn.status === "running" ? "now: the thread was idle and nothing held the message back"
-    : turn.queue || thread.usagePause ? `when it is admitted: ${waitingFor.length ? waitingFor.join("; ") : "its conditions are met"}${held ? `, no earlier than ${held}` : ""}`
+    : turn.queue || thread.usagePause || snoozed ? `when it is admitted: ${waitingFor.length ? waitingFor.join("; ") : "its conditions are met"}${held ? `, no earlier than ${held}` : ""}`
     : held ? `at ${held}, once the thread is free`
     : "when the current turn ends";
   return {
