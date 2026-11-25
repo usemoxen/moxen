@@ -3,7 +3,7 @@
 //! after the amount; English does the reverse.
 
 use crate::data::{Currency, Money};
-use crate::language;
+use crate::language::{self, fill, message};
 use chrono::{Datelike, NaiveDate};
 
 pub fn money(amount: Money) -> String {
@@ -76,6 +76,88 @@ pub fn month_label(year: i32, month: u32) -> String {
     format!("{} {year}", language::months_long()[(month - 1) as usize])
 }
 
+/// "Nov 2026" / "nov 2026", for the chart axes.
+pub fn short_month_label(year: i32, month: u32) -> String {
+    let _ = year;
+    language::months_short()[(month - 1) as usize].to_string()
+}
+
+/// The abbreviated amount for tight spots like calendar cells: under 10,000
+/// in major units it is the plain amount, above it a compact form
+/// ("€4.2k" / "4,2 mil €").
+pub fn compact_money(amount: Money) -> String {
+    let symbol = match amount.currency {
+        Currency::Eur => "€",
+        Currency::Usd => "$",
+    };
+    let spanish = language::spanish();
+    let value = amount.minor as f64 / 100.;
+    let abs = value.abs();
+    let sign = if amount.minor < 0 { "-" } else { "" };
+    let body = if abs < 10_000. {
+        let grouped = group_thousands(&(abs.trunc() as i64).to_string(), spanish);
+        if spanish {
+            format!("{grouped} {symbol}")
+        } else {
+            format!("{symbol}{grouped}")
+        }
+    } else if abs < 1_000_000. {
+        // One decimal of thousands, comma in Spanish ("4,2 mil €").
+        let scaled = abs / 1_000.;
+        let whole = scaled.trunc() as i64;
+        let tenth = ((scaled - whole as f64) * 10.).round() as i64;
+        let (whole, tenth) = if tenth >= 10 {
+            (whole + 1, 0)
+        } else {
+            (whole, tenth)
+        };
+        if spanish {
+            format!("{whole},{tenth} mil {symbol}")
+        } else {
+            format!("{symbol}{whole}.{tenth}k")
+        }
+    } else {
+        let millions = abs / 1_000_000.;
+        if spanish {
+            format!("{millions:.1} M {symbol}")
+        } else {
+            format!("{symbol}{millions:.1}M")
+        }
+    };
+    format!("{sign}{body}")
+}
+
+/// "42%" / "42 %".
+pub fn percent(share: f64) -> String {
+    let value = (share * 100.).round() as i64;
+    if language::spanish() {
+        format!("{value} %")
+    } else {
+        format!("{value}%")
+    }
+}
+
+/// "Mon" / "lun".
+pub fn weekday_short(date: NaiveDate) -> &'static str {
+    let weekdays = language::weekdays_short();
+    weekdays[date.weekday().num_days_from_monday() as usize]
+}
+
+/// "Today" / "Hoy", "Tomorrow" / "Mañana", "Yesterday" / "Ayer",
+/// "In 5 days" / "En 5 días", "3 days ago" / "Hace 3 días", or the short date
+/// when it is further away.
+pub fn relative_day_label(date: NaiveDate, today: NaiveDate) -> String {
+    let days = (date - today).num_days();
+    match days {
+        0 => message("rel.today").to_string(),
+        1 => message("rel.tomorrow").to_string(),
+        -1 => message("rel.yesterday").to_string(),
+        d if (2..=30).contains(&d) => fill("rel.in", &[("{count}", &d.to_string())]),
+        d if (-30..=-2).contains(&d) => fill("rel.ago", &[("{count}", &(-d).to_string())]),
+        _ => short_date(date),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +190,60 @@ mod tests {
         assert_eq!(long_date(date), "25 de noviembre de 2026");
         assert_eq!(short_date(date), "25 nov 2026");
         assert_eq!(month_label(2026, 11), "noviembre 2026");
+        apply(None);
+    }
+
+    #[test]
+    fn compact_money_percent_weekday_and_relative_days() {
+        let date = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap(); // a Wednesday
+        apply(Some("en"));
+        assert_eq!(compact_money(Money::eur(421357)), "€4,213");
+        assert_eq!(compact_money(Money::eur(4213570)), "€42.1k");
+        assert_eq!(compact_money(Money::eur(950)), "€9");
+        assert_eq!(compact_money(Money::eur(-4213570)), "-€42.1k");
+        assert_eq!(compact_money(Money::eur(250000000)), "€2.5M");
+        assert_eq!(percent(0.423), "42%");
+        assert_eq!(weekday_short(date), "Wed");
+        assert_eq!(short_month_label(2026, 11), "Nov");
+        let today = date;
+        assert_eq!(relative_day_label(today, today), "Today");
+        assert_eq!(
+            relative_day_label(today + chrono::Duration::days(1), today),
+            "Tomorrow"
+        );
+        assert_eq!(
+            relative_day_label(today - chrono::Duration::days(1), today),
+            "Yesterday"
+        );
+        assert_eq!(
+            relative_day_label(today + chrono::Duration::days(5), today),
+            "In 5 days"
+        );
+        assert_eq!(
+            relative_day_label(today - chrono::Duration::days(3), today),
+            "3 days ago"
+        );
+        assert_eq!(
+            relative_day_label(today + chrono::Duration::days(90), today),
+            "Feb 23, 2027"
+        );
+        apply(Some("es-ES"));
+        assert_eq!(compact_money(Money::eur(421357)), "4.213 €");
+        assert_eq!(compact_money(Money::eur(4213570)), "42,1 mil €");
+        assert_eq!(compact_money(Money::eur(950)), "9 €");
+        assert_eq!(compact_money(Money::eur(-4213570)), "-42,1 mil €");
+        assert_eq!(percent(0.423), "42 %");
+        assert_eq!(weekday_short(date), "mié");
+        assert_eq!(short_month_label(2026, 11), "nov");
+        assert_eq!(relative_day_label(today, today), "Hoy");
+        assert_eq!(
+            relative_day_label(today + chrono::Duration::days(5), today),
+            "En 5 días"
+        );
+        assert_eq!(
+            relative_day_label(today - chrono::Duration::days(3), today),
+            "Hace 3 días"
+        );
         apply(None);
     }
 }

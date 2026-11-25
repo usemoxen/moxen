@@ -75,7 +75,17 @@ fn main() {
             cx.bind_keys([KeyBinding::new(primary_key("cmd-q", "ctrl-q"), Quit, None)]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             let language = settings_file::load_language();
-            let bounds = Bounds::centered(None, size(px(theme::WIDTH), px(theme::HEIGHT)), cx);
+            // The render harness may ask for a taller window (MOXEN_FINANCES_WINDOW
+            // = "WxH") so a screenshot captures a whole page, not just the fold.
+            let (width, height) = script
+                .as_ref()
+                .and_then(|_| std::env::var("MOXEN_FINANCES_WINDOW").ok())
+                .and_then(|value| {
+                    let (w, h) = value.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                })
+                .unwrap_or((theme::WIDTH, theme::HEIGHT));
+            let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
             let _window = cx
                 .open_window(
                     WindowOptions {

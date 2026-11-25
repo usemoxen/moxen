@@ -12,6 +12,7 @@
 //! page subscriptions       # dashboard | subscriptions | movements | projection | calendar | analysis | settings
 //! lang es-ES               # en | es-ES
 //! theme light              # dark | light
+//! scenario 350.00 5 Compra puntual   # add a scenario event: amount, days ahead, label
 //! screenshot out/main.png  # draws a frame and saves it
 //! quit
 //! ```
@@ -39,6 +40,7 @@ pub enum Command {
     Page(String),
     Lang(String),
     Theme(String),
+    Scenario(String, i64, String),
     Screenshot(PathBuf),
     Quit,
 }
@@ -58,6 +60,20 @@ pub fn parse(script: &str) -> Result<Vec<Command>, String> {
             "page" if !rest.is_empty() => Command::Page(rest.to_string()),
             "lang" if !rest.is_empty() => Command::Lang(rest.to_string()),
             "theme" if !rest.is_empty() => Command::Theme(rest.to_string()),
+            "scenario" => {
+                let (amount, rest) = rest
+                    .split_once(' ')
+                    .ok_or_else(|| at("scenario <amount> <days-ahead> <label…>"))?;
+                let (days, label) = rest
+                    .split_once(' ')
+                    .ok_or_else(|| at("scenario <amount> <days-ahead> <label…>"))?;
+                Command::Scenario(
+                    amount.to_string(),
+                    days.parse()
+                        .map_err(|_| at("days-ahead must be an integer"))?,
+                    label.to_string(),
+                )
+            }
             "screenshot" if !rest.is_empty() => Command::Screenshot(rest.into()),
             "quit" => Command::Quit,
             _ => return Err(at("unknown command")),
@@ -153,6 +169,19 @@ async fn execute(
                 .map_err(|cause| cause.to_string())?;
             draw(cx, any_window)?;
         }
+        Command::Scenario(amount, days, label) => {
+            draw(cx, any_window)?;
+            window
+                .update(cx, |app, _, cx| {
+                    let today = app.data.today();
+                    app.projection.draft_amount = amount;
+                    app.projection.draft_name = label;
+                    app.projection.draft_date = today + chrono::Duration::days(days);
+                    app.add_scenario_event(cx);
+                })
+                .map_err(|cause| cause.to_string())?;
+            draw(cx, any_window)?;
+        }
         Command::Screenshot(path) => {
             draw(cx, any_window)?;
             let image = cx
@@ -181,7 +210,7 @@ mod tests {
     #[test]
     fn reads_a_script() {
         let commands = parse(
-            "# render the dashboard in Spanish\npage dashboard\nlang es-ES\ntheme light\nwait 300\nscreenshot shots/a.png\nquit\n",
+            "# render the dashboard in Spanish\npage dashboard\nlang es-ES\ntheme light\nwait 300\nscenario 350.00 5 Compra puntual\nscreenshot shots/a.png\nquit\n",
         )
         .expect("script");
         assert_eq!(
@@ -191,6 +220,7 @@ mod tests {
                 Command::Lang("es-ES".into()),
                 Command::Theme("light".into()),
                 Command::Wait(300),
+                Command::Scenario("350.00".into(), 5, "Compra puntual".into()),
                 Command::Screenshot("shots/a.png".into()),
                 Command::Quit,
             ]
@@ -201,5 +231,15 @@ mod tests {
     fn names_the_line_that_is_wrong() {
         assert!(parse("page").unwrap_err().starts_with("line 1:"));
         assert!(parse("dance").unwrap_err().contains("unknown command"));
+        assert!(
+            parse("scenario 10")
+                .unwrap_err()
+                .contains("scenario <amount>")
+        );
+        assert!(
+            parse("scenario 10 x label")
+                .unwrap_err()
+                .contains("days-ahead")
+        );
     }
 }

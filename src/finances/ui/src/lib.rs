@@ -13,6 +13,7 @@ pub mod demo;
 pub mod format;
 pub mod kit;
 pub mod language;
+pub mod model;
 pub mod shell;
 mod sidebar;
 pub mod theme;
