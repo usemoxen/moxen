@@ -1,5 +1,25 @@
+# Moxen Finances core: the pure domain logic, pinned to the TypeScript
+# reference (8aaad15b) by golden test vectors. Money is integer minor
+# units; rates are scaled by 1e6; dates are YYYY-MM-DD strings.
 [package]
 name = "moxen-finances-core"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+# Serialize/Deserialize on every public type so the store crate, the golden
+# test vectors and any JSON backup read and write the same camelCase shapes
+# as the reference app.
+serde = { version = "1", features = ["derive"] }
+# Calendar-day date arithmetic (everything in the reference is Date.UTC on
+# proleptic Gregorian, which NaiveDate matches) and the current instant.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+# Europe/Madrid for today_madrid: chrono-tz embeds the IANA database as
+# generated Rust code, so the tz database does not have to be present on
+# the user's system (Windows ships none) and DST never depends on the OS.
+chrono-tz = "0.10"
+
+[dev-dependencies]
+# Parsing the golden test vectors in tests/vectors/ (see its README).
+serde_json = "1"
