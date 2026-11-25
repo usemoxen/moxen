@@ -13,11 +13,14 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CliConfig } from "../../types.js";
+import { driverKindOfInstance } from "../../types.js";
 import { openThreadStore, type ThreadStore } from "../store.js";
-import { createThread, sendTurn } from "../threads.js";
+import { createThread, completeTurn, interruptTurn, redeliverOrphanedSteers, sendTurn, settleThread } from "../threads.js";
 import { executeTurn, type TurnDriver } from "../execute.js";
-import { runDueScheduledTurn, type OperationContext } from "../operations.js";
+import { actOnLongThread, compactMidTurn, delegate, runDueScheduledTurn, runWorkQueue, type OperationContext } from "../operations.js";
 import { isDraining, setDraining } from "../drain.js";
+import { UsageProtection } from "../../usage/protection.js";
+import { testHarness } from "../../testing/harness.js";
 import { settleRuns } from "../../testing/turns.js";
 import { rmTempAsync } from "../../testing/tmp.js";
 import type { QueuePolicy } from "../queue.js";
@@ -133,5 +136,196 @@ describe("a drain holds what a settle would promote", () => {
     await settleRuns();
     expect(sent).toEqual(["first", "queued behind"]);
     expect((await store.readTurns(thread.id)).find((turn) => turn.id === behind.turn.id)?.status).toBe("completed");
+  });
+});
+
+// -- finding 2: a steer a stopped turn never confirmed -------------------------
+
+describe("a drain never loses a steer a stopped turn never confirmed", () => {
+  it("saves the redelivery copy as queued work instead of swallowing it", async () => {
+    const { store, thread } = await setup();
+    const first = await sendTurn(store, thread.id, { prompt: "first" });
+    await sendTurn(store, thread.id, { prompt: "STEER-ME", delivery: "steer" });
+    setDraining(true);
+    const stopped = await interruptTurn(store, thread.id, first.turn.id);
+    expect(stopped.turn?.status).toBe("interrupted");
+    // The provider never confirmed the steer, so it goes out again — and a
+    // drain must not lose it: the copy is durable queued work.
+    const copies = await redeliverOrphanedSteers(store, thread.id, first.turn.id);
+    expect(copies).toHaveLength(1);
+    const saved = (await store.readTurns(thread.id)).find((turn) => turn.id === copies[0]);
+    expect(saved).toMatchObject({ status: "queued" });
+    const messages = await store.readMessages(thread.id);
+    expect(messages.some((message) => message.turnId === saved!.id && message.text === "STEER-ME")).toBe(true);
+    expect((await store.readActivities(thread.id)).some((row) => row.kind === "steer.redelivered")).toBe(true);
+  });
+
+  it("keeps a queued send on an idle thread rather than refusing it", async () => {
+    const { store, thread } = await setup();
+    setDraining(true);
+    const queued = await sendTurn(store, thread.id, { prompt: "queued while draining", delivery: "queue" });
+    expect(queued.turn).toMatchObject({ status: "queued", heldAtSettle: true, delivery: "queued" });
+  });
+});
+
+// -- finding 6: an interrupted turn promotes nothing while draining --------------
+
+describe("a drain's interruptions promote nothing", () => {
+  it("an interrupted running turn holds its queued follower", async () => {
+    const { store, thread } = await setup();
+    const first = await sendTurn(store, thread.id, { prompt: "first" });
+    const behind = await sendTurn(store, thread.id, { prompt: "queued behind", delivery: "queue" });
+    expect(store.claimRun(first.turn.id)).toBe(true);
+    setDraining(true);
+    await interruptTurn(store, thread.id, first.turn.id);
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === behind.turn.id)).toMatchObject({
+      status: "queued",
+      heldAtSettle: true,
+    });
+  });
+
+  it("a turn that completes while draining holds its queued follower", async () => {
+    const { store, thread } = await setup();
+    const first = await sendTurn(store, thread.id, { prompt: "first" });
+    const behind = await sendTurn(store, thread.id, { prompt: "queued behind", delivery: "queue" });
+    expect(store.claimRun(first.turn.id)).toBe(true);
+    setDraining(true);
+    await completeTurn(store, thread.id, first.turn.id, { text: "done" });
+    expect((await store.readTurns(thread.id)).find((turn) => turn.id === behind.turn.id)).toMatchObject({
+      status: "queued",
+      heldAtSettle: true,
+    });
+  });
+});
+
+// -- gate-position pins: a refused send changes nothing else ----------------------
+
+describe("a drain's refusal leaves the rest of the thread untouched", () => {
+  it("does not wake a settled thread it refused to send to", async () => {
+    const { store, thread } = await setup();
+    const first = await sendTurn(store, thread.id, { prompt: "first" });
+    await completeTurn(store, thread.id, first.turn.id, { text: "done" });
+    await settleThread(store, thread.id);
+    expect((await store.readThreadRecord(thread.id))?.settledAt).not.toBeNull();
+    setDraining(true);
+    await expect(sendTurn(store, thread.id, { prompt: "wake up", wakeSettled: true })).rejects.toMatchObject({ code: "SERVER_DRAINING" });
+    expect((await store.readThreadRecord(thread.id))?.settledAt).not.toBeNull();
+    expect((await store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed"]);
+  });
+
+  it("does not release a usage hold it refused to continue", async () => {
+    const { store, thread } = await setup();
+    await sendTurn(store, thread.id, { prompt: "first" });
+    const pause = { provider: "claude", windows: [], resetsAt: null, order: 1, phase: "waiting" as const, handoff: false };
+    await store.withThreadLock(thread.id, async () => {
+      const record = (await store.readThreadRecord(thread.id))!;
+      await store.writeThreadRecord({ ...record, usagePause: pause });
+    });
+    setDraining(true);
+    await expect(sendTurn(store, thread.id, { prompt: "carry on" })).rejects.toMatchObject({ code: "SERVER_DRAINING" });
+    expect((await store.readThreadRecord(thread.id))?.usagePause).toMatchObject({ phase: "waiting" });
+    expect((await store.readThreadRecord(thread.id))?.usageProtectionOverride).toBeUndefined();
+  });
+});
+
+// -- findings 3-5: the automatic maintenance paths during a drain ----------------
+
+/** A harness whose operations run on the real fake drivers, one per provider kind. */
+async function operatingContext(config: Partial<CliConfig> = {}, sent: string[] = []) {
+  const harness = await testHarness({ onSendTurn: (turn) => sent.push(turn.prompt) });
+  const perKind = new Map<string, TurnDriver>();
+  const ctx: OperationContext = {
+    store: harness.store,
+    storeRoot: harness.root,
+    config: { ...harness.config, ...config } as CliConfig,
+    driverFor: (id) => {
+      const kind = driverKindOfInstance(id)!;
+      let found = perKind.get(kind);
+      if (!found) {
+        found = harness.drivers[kind]!();
+        perKind.set(kind, found);
+      }
+      return found;
+    },
+  };
+  return { ...harness, ctx, sent };
+}
+
+describe("a drain holds back the automatic maintenance", () => {
+  it("defers an automatic hand-off's first turn instead of leaving an empty continuation", async () => {
+    const { store, ctx, sent } = await operatingContext({ ui: { autoHandoff: "auto" } });
+    const source = await createThread(store, { projectId: "p", title: "src", env: { mode: "local", path: ctx.storeRoot, branch: null }, modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" } });
+    const kid = await createThread(store, { projectId: "p", title: "kid", env: { mode: "local", path: ctx.storeRoot, branch: null }, modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" } });
+    const now = store.nowIso();
+    await store.appendDelegation({ id: "d-kid", parentThreadId: source.id, childThreadId: kid.id, prompt: "x", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const kidTurn = await sendTurn(store, kid.id, { prompt: "kid work" });
+    await completeTurn(store, kid.id, kidTurn.turn.id, { text: "kid done" });
+    await store.updateDelegation("d-kid", { status: "completed" });
+    const turn = await sendTurn(store, source.id, { prompt: "Read the repo" });
+    await store.appendLedger(source.id, "activity", { id: store.newId(), threadId: source.id, turnId: turn.turn.id, kind: "context-window.updated", summary: "ctx", payload: { usedTokens: 120_000, maxTokens: 200_000 }, createdAt: store.nowIso() });
+    await completeTurn(store, source.id, turn.turn.id, { text: "reply" });
+    const before = await store.listThreadIds();
+    setDraining(true);
+    const action = await actOnLongThread(ctx, source.id).catch(() => null);
+    // The hand-off still happens — into a turn that waits for the drain,
+    // not into a "(continued)" thread with nothing in it.
+    expect(action).toMatchObject({ kind: "handoff" });
+    const made = (await store.listThreadIds()).filter((id) => !before.includes(id));
+    expect(made).toHaveLength(1);
+    const carried = (await store.readTurns(made[0]!)).filter((candidate) => candidate.status === "queued" && candidate.heldAtSettle === true);
+    expect(carried).toHaveLength(1);
+    // Work can start again: the held first turn runs, and a later look sees
+    // the line already handed off rather than creating a second destination.
+    setDraining(false);
+    await runWorkQueue(ctx);
+    await settleRuns();
+    expect(sent.some((prompt) => prompt.includes("Read the repo"))).toBe(true);
+    expect((await store.readTurns(made[0]!)).find((candidate) => candidate.id === carried[0]!.id)?.status).toBe("completed");
+    await actOnLongThread(ctx, source.id);
+    expect((await store.listThreadIds()).filter((id) => !before.includes(id))).toHaveLength(1);
+  });
+
+  it("refuses to stop a running turn for a mid-turn compaction", async () => {
+    const { store, ctx } = await operatingContext({ providers: { claude: { autoCompact: "auto" } } });
+    const t = await createThread(store, { projectId: "p", title: "c", env: { mode: "local", path: ctx.storeRoot, branch: null }, modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" } });
+    const earlier = await sendTurn(store, t.id, { prompt: "earlier" });
+    await completeTurn(store, t.id, earlier.turn.id, { text: "earlier reply" });
+    const long = await sendTurn(store, t.id, { prompt: "long task" });
+    setDraining(true);
+    expect(await compactMidTurn(ctx, t.id, { usedTokens: 170_000, maxTokens: 200_000, cachedInputTokens: null, autoCompactThreshold: null, compactsAutomatically: null })).toBe(false);
+    expect((await store.readTurns(t.id)).find((candidate) => candidate.id === long.turn.id)?.status).toBe("running");
+  });
+
+  it("keeps a pending usage wrap-up pending, without parking an error on it", async () => {
+    const { store, ctx, sent } = await operatingContext({ usageProtection: "auto", usageRecovery: "sequential" });
+    const guard = new UsageProtection(async () => ctx);
+    const t = await createThread(store, { projectId: "p", title: "held", env: { mode: "local", path: ctx.storeRoot, branch: null }, modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" } });
+    await sendTurn(store, t.id, { prompt: "Finish" });
+    await settleRuns();
+    await guard.protect(t.id);
+    expect((await store.readThreadRecord(t.id))?.usagePause?.phase).toBe("pending");
+    setDraining(true);
+    await guard.tick().catch(() => undefined);
+    expect((await store.readThreadRecord(t.id))?.usagePause).toMatchObject({ phase: "pending" });
+    expect(((await store.readThreadRecord(t.id))?.usagePause ?? { error: null }).error ?? null).toBeNull();
+    // Once work can start again the wrap-up goes out — the drain was a
+    // passing condition, not a broken thread.
+    setDraining(false);
+    await guard.tick();
+    await settleRuns();
+    expect(sent.some((prompt) => prompt.startsWith("wrap")) || (await store.readTurns(t.id)).some((candidate) => candidate.origin === "usage-protection")).toBe(true);
+    guard.close();
+  });
+
+  it("refuses a delegation before it creates anything", async () => {
+    const { store, ctx } = await operatingContext();
+    const parent = await createThread(store, { projectId: "p", title: "parent", env: { mode: "local", path: ctx.storeRoot, branch: null }, modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" } });
+    await sendTurn(store, parent.id, { prompt: "orchestrate" });
+    const before = await store.listThreadIds();
+    const delegations = await store.readDelegations();
+    setDraining(true);
+    await expect(delegate(ctx, { parentThreadId: parent.id, task: "Build it", title: "build", provider: "codex", model: "gpt-6.1-sol", wait: false })).rejects.toMatchObject({ code: "SERVER_DRAINING" });
+    expect(await store.listThreadIds()).toEqual(before);
+    expect(await store.readDelegations()).toEqual(delegations);
   });
 });

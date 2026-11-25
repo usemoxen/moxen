@@ -955,6 +955,7 @@ const ENV_OVERRIDDEN_KEYS = [
   "MODEL",
   "SPEED_MODE",
   "THINKING_EFFORT",
+  "RESTART_DRAIN_TIMEOUT",
 ] as const;
 
 const ENV_TO_KEY = {
@@ -968,6 +969,7 @@ const ENV_TO_KEY = {
   MODEL: "model",
   SPEED_MODE: "speedMode",
   THINKING_EFFORT: "thinkingEffort",
+  RESTART_DRAIN_TIMEOUT: "restartDrainTimeout",
 } as const;
 
 /**

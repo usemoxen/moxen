@@ -54,7 +54,18 @@ export async function serverStop(options: { readonly force?: boolean } = {}) {
   let drained: ShutdownDrainResult | null = null;
   try {
     // Held here while the server drains: running turns finish first, unless
-    // `force` interrupts them — the reply comes once the drain is done.
+    // `force` interrupts them — the reply comes once the drain is done. The
+    // wait can outlast a person's patience, so the moment it starts on work
+    // a line says what is happening and names the way out.
+    let said = false;
+    connection.subscribeShell({}, (frame) => {
+      if (said || frame.kind !== "event" || frame.event.type !== "app.server-draining") return;
+      const line = drainWaitLine(frame.event.payload);
+      if (line !== null) {
+        said = true;
+        process.stderr.write(`${line}\n`);
+      }
+    }, () => undefined);
     drained = await connection.shutdownServer(options.force ? { force: true } : {});
   } finally {
     await connection.close();
@@ -67,4 +78,13 @@ export async function serverStop(options: { readonly force?: boolean } = {}) {
   throw new CliError("SERVER_STOP_FAILED", `The moxen server at ${endpoint} acknowledged stop but is still listening.`, {
     details: { endpoint },
   });
+}
+
+/**
+ * What to tell the person waiting on a draining stop, from the server's
+ * `app.server-draining` event: null when nothing runs (nothing to explain).
+ */
+export function drainWaitLine(payload: { readonly running: number }): string | null {
+  if (payload.running < 1) return null;
+  return `The server is waiting for ${payload.running} running turn(s) to finish. Run "moxen server stop --force" to interrupt them and stop at once.`;
 }

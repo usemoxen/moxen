@@ -339,10 +339,12 @@ A stop drains first: running turns get up to `restartDrainTimeout` (2m) to
 finish before the server stops them, and nothing new starts while it waits
 (`SERVER_DRAINING` refuses a send that would start one). Queued and
 scheduled work is never stopped — it keeps its place and times and runs
-once the server is back. `server stop --force` interrupts the running turns
-at once instead of waiting, and the reply `server stop` waits for says what
-the drain got done: how many turns finished and how many it had to stop.
-Commands whose client vanished mid-drain behave as forced.
+once the server is back. While the stop waits it says so (what it is
+waiting on, and the `--force` way out). `server stop --force` interrupts
+the running turns at once instead of waiting, whoever interrupts them, and
+the reply `server stop` waits for says what the drain got done: how many
+turns finished and how many it had to stop. Commands whose client vanished
+mid-drain behave as forced.
 
 Errors worth knowing: `REMOTE_PAIRING_REFUSED` (wrong, used or expired
 code — show a new one), `REMOTE_DEVICE_REFUSED` (revoked, or the token is

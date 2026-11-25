@@ -109,7 +109,7 @@ import {
   type SendTurnResult,
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
-import { isDraining } from "./drain.js";
+import { isDraining, serverDrainingError } from "./drain.js";
 import { parseScheduledTime } from "./scheduledtime.js";
 import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
@@ -1342,6 +1342,11 @@ function longThreadHook(
  * is the loop's guard.
  */
 export async function compactMidTurn(ctx: OperationContext, threadId: string, usage: ContextWindowUsage): Promise<boolean> {
+  // A restart's drain may be waiting for this very turn to finish: stopping
+  // it for a compaction would both end work the drain is trying to save and
+  // refuse the turn that carries the task on. The line is still crossed;
+  // the settle after the drain (or the next reading) compacts.
+  if (isDraining()) return false;
   if ((await ctx.store.readThreadRecord(threadId))?.usagePause) return false;
   if (compactingMidTurn.has(threadId)) return false;
   const snapshot = await readLongThreadSnapshot(ctx.store, threadId);
@@ -2548,6 +2553,12 @@ async function continueThreadReserved(
     const started = await startTurn(ctx, {
       threadId: created.id,
       prompt: handoff + runningTasksNote(adopted) + firstMessageNote(request.firstMessage),
+      // While a drain stops the server, the first turn must not run now:
+      // with a `queue` delivery the drain holds it as queued work, so the
+      // continuation lands complete and starts once the next server is up
+      // — a start refused here would leave an empty destination that no
+      // retry repairs (the source records the move as done).
+      ...(isDraining() ? { delivery: "queue" as const } : {}),
       ...(request.queue ? { queue: request.queue } : {}),
       ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
       // Noop subscriber: the driver's shared pump exists before any client subscribes.
@@ -3811,6 +3822,9 @@ export interface Handover {
 export async function handover(ctx: OperationContext, request: HandoverRequest): Promise<Handover> {
   const prompt = request.prompt.trim();
   if (!prompt) throw new CliError("PROMPT_REQUIRED", "A non-empty handover prompt is required.");
+  // A drain stops the server: refuse before the thread is created, so a
+  // new thread is never left behind by the turn it would refuse next.
+  if (!request.dryRun && isDraining()) throw serverDrainingError();
   const { config } = ctx;
   const dryRun = request.dryRun === true;
   const scratch = request.scratch === true;
@@ -4817,6 +4831,10 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     ...(request.research.models ? { researchModels: request.research.models } : {}),
   };
   const parentThreadId = requireThreadId(request.parentThreadId);
+  // A drain stops the server: refuse before anything is created, so no
+  // child thread or delegation row is left behind by a start it would
+  // refuse a moment later. The caller can delegate again once it is back.
+  if (isDraining()) throw serverDrainingError();
   if (options.researchRole !== undefined) await requireResearchLead(ctx, parentThreadId);
   else {
     await syncResearchRun(ctx, parentThreadId);

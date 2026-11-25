@@ -1030,30 +1030,47 @@ export class DirectConnection implements ClientApi {
       }
       let interrupted = 0;
       if (running.length > 0 && !this.closed) {
-        for (const turn of running) {
-          // The pair every stop path uses: the driver cancels the session's
-          // turn, the ledger row settles with the reason.
-          await Effect.runPromise(this.driverFor(turn.instanceId).interruptTurn(turn.threadId)).catch(() => undefined);
-          const stopped = await interruptTurn(ctx.store, turn.threadId, turn.turnId, undefined, { reason: RESTART_INTERRUPT_REASON }).catch(() => null);
-          if (stopped?.interrupted === true) interrupted += 1;
-        }
+        // Every interrupt runs in parallel, the driver one against the same
+        // bound close() pays a driver's stopAll: a provider whose interrupt
+        // never returns cannot hold the drain — and the shutdown behind it —
+        // hostage. The ledger settle still runs, so the row says how the
+        // turn ended however the session took the interrupt.
+        const stops = await Promise.allSettled(running.map((turn) => this.interruptForDrain(ctx, turn)));
+        interrupted = stops.filter((stop) => stop.status === "fulfilled" && stop.value === true).length;
         // The interrupts abort the runners; their own settle writes are
         // bounded, like close()'s, so one stuck runner cannot hang the stop.
         await flushTurnRunners(this.closeDriverTimeoutMs).catch(() => undefined);
       }
       return { finished: wasRunning - interrupted, interrupted, waitedMs: Date.now() - startedAt };
     } finally {
-      // The stop that asked for this follows right behind; still, a drain
-      // whose stop never came leaves the server taking work again rather
-      // than wedged, and the next drain starts from a clean slate.
-      setDraining(false);
+      // The gate the drain set is not lifted here: the runners it stopped
+      // are still settling, and one of them could otherwise promote the next
+      // queued turn just as the server is going away. It stays on until
+      // close() takes the connection down — the stop that asked for the
+      // drain always follows — and with it gone there is nothing left to
+      // keep waiting. The reported status resets here, so a client that
+      // watches for the drain's end sees it.
       this.restartDrainForced = false;
       this.restartDrain = null;
       this.setDrainStatus(null);
     }
   }
 
-  /** Every turn still `running`, across all threads, with the driver each needs. Ledgers are reread only where their version moved. */
+  /** One drain interrupt: the driver's cancel bounded like close()'s, then the ledger settle. */
+  private async interruptForDrain(ctx: OperationContext, turn: { threadId: string; turnId: string; instanceId: string }): Promise<boolean> {
+    const cancelled = Effect.runPromise(this.driverFor(turn.instanceId).interruptTurn(turn.threadId)).then(() => true, () => false);
+    const deadline = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), this.closeDriverTimeoutMs);
+      timer.unref?.();
+    });
+    await Promise.race([cancelled, deadline]);
+    // The pair every stop path uses settles at once: a driver that hung
+    // still leaves a final row, and close() kills its session the ordinary way.
+    const stopped = await interruptTurn(ctx.store, turn.threadId, turn.turnId, undefined, { reason: RESTART_INTERRUPT_REASON }).catch(() => null);
+    return stopped?.interrupted === true;
+  }
+
+  /** Every turn still `running` under this server's own runners, with the driver each needs. Ledgers are reread only where their version moved. */
   private async drainRunningTurns(ctx: OperationContext): Promise<readonly { threadId: string; turnId: string; instanceId: string }[]> {
     const store = ctx.store;
     const out: Array<{ threadId: string; turnId: string; instanceId: string }> = [];
@@ -1065,6 +1082,11 @@ export class DirectConnection implements ClientApi {
       if (version !== null && (!cached || cached.version !== version)) this.restartDrainTurnCache.set(id, { version, turns });
       for (const turn of turns) {
         if (turn.status !== "running") continue;
+        // Only what this server runs: a live runner tracks it here. A row
+        // another owner recorded — another host, another process, a server
+        // that crashed long ago — is not this drain's to wait on or stop;
+        // its own owner (or the next start's recovery) settles it.
+        if (!store.isTracked(turn.id)) continue;
         const instanceId = turn.modelSelection?.instanceId
           ?? (await store.readThreadRecord(id).catch(() => null))?.modelSelection.instanceId
           ?? "";
@@ -3637,6 +3659,11 @@ export class DirectConnection implements ClientApi {
     // The store is free for the next server: without this a fast restart
     // would meet this process's own lock and have to take it over.
     await this.releaseStore().catch(() => undefined);
+    // The drain gate goes with the connection: while it stood, settling
+    // runners could promote nothing and no turn started; with the server
+    // down there is nothing left to hold, and a caller that closed without
+    // stopping (an abandoned drain) leaves the process taking work again.
+    setDraining(false);
   }
 }
 

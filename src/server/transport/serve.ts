@@ -42,6 +42,14 @@ import {
 /** Three missed heartbeats (`./remote.ts` pings every 2.5s when quiet). */
 export const CLIENT_SILENCE_MS = 30_000;
 
+/**
+ * How long a vanished requester waits for the forced drain its stop leaves
+ * behind: generous beside the drain's own bounds (interrupts and runner
+ * settles each bounded by the server's driver-stop deadline) — but a bound,
+ * so the server still goes down if the drain wedges past everything.
+ */
+const DISCONNECTED_DRAIN_WAIT_MS = 30_000;
+
 export interface ServerHandle {
   readonly endpoint: string;
   /** Resolves once the server has stopped (after `close`, or a client's `shutdown`). */
@@ -348,8 +356,19 @@ export function handleSocket<Socket extends Duplex>(socket: Socket, api: ClientA
           };
           // The socket's own close stops the server too, for a client that
           // is already gone — including one that gave up on a draining stop:
-          // a vanished requester is a forced one.
-          socket.once("close", stop);
+          // a vanished requester is a forced one. The drain it leaves
+          // behind is forced and waited out, bounded: the interrupted turns
+          // settle with the restart's reason and the queued ones stay
+          // waiting, rather than the server dying mid-work (and a promoted
+          // turn running behind its back on the way out).
+          socket.once("close", () => {
+            const forced = Promise.resolve(context.drain ? context.drain(true) : null).catch(() => null);
+            const giveUp = new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, DISCONNECTED_DRAIN_WAIT_MS);
+              timer.unref?.();
+            });
+            void Promise.race([forced, giveUp]).finally(stop);
+          });
           // The drain runs before the reply and before the stop: a restart
           // holds off while running turns finish (up to its grace; `force`
           // takes them down at once), and only then does the reply say the

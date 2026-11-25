@@ -1638,7 +1638,7 @@ export const en = {
   "update.installedNow": "Moxen {version} is installed.",
   "update.alreadyCurrent": "Moxen {version} is already the current version. Nothing was changed.",
   "update.rolledBack": "Went back to Moxen {version}. {from} is kept, so you can return to it.",
-  "update.restartNote": "To use it, quit Moxen, run moxen server stop and start Moxen again. That interrupts running threads, so do it when you're ready. Nothing was restarted.",
+  "update.restartNote": "To use it, quit Moxen, run moxen server stop and start Moxen again. The stop first lets running turns finish, then stops the rest for the restart. Nothing was restarted.",
   "update.warning": "Warning: {warning}",
   "update.untouched": "Your running version is untouched.",
   "update.lost": "Lost track of the update: the connection to the server dropped.",
