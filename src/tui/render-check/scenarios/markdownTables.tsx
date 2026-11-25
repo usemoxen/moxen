@@ -46,6 +46,21 @@ const REPLY = [
   "- [x] plain done",
   "- [ ] plain todo",
   "",
+  "loose and nested:",
+  "",
+  "- [x] loose done",
+  "",
+  "  | lh1 | lh2 |",
+  "  |-----|-----|",
+  "  | lc1 | lc2 |",
+  "- [ ] loose todo",
+  "- outer item",
+  "  - [x] nested done",
+  "  - [ ] nested todo",
+  "  | nh1 | nh2 |",
+  "  |-----|-----|",
+  "  | nc1 | nc2 |",
+  "",
   "Step number follows on this line",
   "2. this is still paragraph text",
   "9. these are literal numbers",
@@ -83,7 +98,7 @@ function gridRow(rows: string[], a: string, b: string, quoteBorder = false): boo
 }
 
 export async function runMarkdownTables(): Promise<void> {
-  const setup = await render(reply(REPLY, false), 80, 62);
+  const setup = await render(reply(REPLY, false), 80, 84);
   try {
     const frame = setup.captureCharFrame();
     const rows = frame.split("\n");
@@ -99,6 +114,8 @@ export async function runMarkdownTables(): Promise<void> {
       ["qh1", "qh2", "qc1", "qc2", true],
       ["th1", "th2", "tc1", "tc2", false],
       ["mh1", "mh2", "mc1", "mc2", false],
+      ["lh1", "lh2", "lc1", "lc2", false],
+      ["nh1", "nh2", "nc1", "nc2", false],
     ];
     for (const [h1, h2, c1, c2, quoted] of tables) {
       if (!gridRow(rows, h1, h2, quoted)) fail(`table header ${h1}/${h2} did not render as a grid row`);
@@ -121,6 +138,12 @@ export async function runMarkdownTables(): Promise<void> {
     if (frame.includes("[x] mixed") || frame.includes("[ ] mixed")) fail("table-holding task list kept raw checkbox markers");
     if (!frame.includes("[x] plain done")) fail("ordinary task list lost its literal [x] marker");
     if (!frame.includes("[ ] plain todo")) fail("ordinary task list lost its literal [ ] marker");
+    // Loose (blank line before the table) and nested task items in table-holding
+    // lists keep their checkbox state too, at their original indentation.
+    for (const [needle, glyph] of [["loose done", "☒"], ["loose todo", "☐"], ["nested done", "☒"], ["nested todo", "☐"]] as const) {
+      const row = rows.find((line) => line.includes(needle));
+      if (row === undefined || !row.includes(glyph)) fail(`task item "${needle}" lost its ${glyph} checkbox`);
+    }
 
     // Numbered prose stays prose: a list starting at 2 cannot interrupt a paragraph.
     if (!frame.includes("9. these are literal numbers")) fail("numbered prose was renumbered");
@@ -154,5 +177,24 @@ export async function runMarkdownTables(): Promise<void> {
     }
   } finally {
     await act(async () => streaming.renderer.destroy());
+  }
+
+  // CRLF input keeps the blank row between split blocks: line endings are
+  // normalized once before lexing, so token offsets still find the gap.
+  const crlf = await render(reply("CRLF INTRO\r\n\r\n- crlf item\r\n  | ch1 | ch2 |\r\n  |----|----|\r\n  | cc1 | cc2 |", false), 60, 14);
+  try {
+    const rows = crlf.captureCharFrame().split("\n");
+    console.log("--- CRLF paragraph and list gap ---");
+    console.log(crlf.captureCharFrame());
+    const intro = rows.findIndex((row) => row.includes("CRLF INTRO"));
+    const item = rows.findIndex((row) => row.includes("crlf item"));
+    if (intro === -1 || item === -1) fail("CRLF paragraph/list not visible");
+    else {
+      const blanks = rows.slice(intro + 1, item).filter((row) => row.trim() === "").length;
+      if (blanks !== 1) fail(`expected one blank row between CRLF paragraph and list, got ${blanks}`);
+      if (!gridRow(rows, "ch1", "ch2") || !gridRow(rows, "cc1", "cc2")) fail("table in a CRLF list did not render");
+    }
+  } finally {
+    await act(async () => crlf.renderer.destroy());
   }
 }

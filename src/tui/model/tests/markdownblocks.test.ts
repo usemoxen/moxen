@@ -36,6 +36,41 @@ describe("splitting markdown into TUI blocks", () => {
     ]);
   });
 
+  it("rewrites loose task checkboxes (blank line before the table) from the paragraph's inline tokens", () => {
+    const text = "- [x] done\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- [ ] todo";
+    expect(splitMarkdownBlocks(text)).toEqual([
+      {
+        kind: "list",
+        text: "- ☒ done\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- ☐ todo",
+        gapBefore: false,
+      },
+    ]);
+  });
+
+  it("rewrites nested task checkboxes at their original indented source lines", () => {
+    const unordered = "- outer\n  - [x] nested done\n  - [ ] nested todo\n  | a | b |\n  |---|---|\n  | 1 | 2 |";
+    expect(splitMarkdownBlocks(unordered)).toEqual([
+      {
+        kind: "list",
+        text: "- outer\n  - ☒ nested done\n  - ☐ nested todo\n  | a | b |\n  |---|---|\n  | 1 | 2 |",
+        gapBefore: false,
+      },
+    ]);
+    const ordered = "1. outer\n   1. [x] deep done\n   2. [ ] deep todo\n   | a |\n   |---|\n   | 1 |";
+    expect(splitMarkdownBlocks(ordered)).toEqual([
+      {
+        kind: "list",
+        text: "1. outer\n   1. ☒ deep done\n   2. ☐ deep todo\n   | a |\n   |---|\n   | 1 |",
+        gapBefore: false,
+      },
+    ]);
+  });
+
+  it("never rewrites a task marker inside a fenced block in a table-holding list", () => {
+    const text = "- item\n  ```\n  - [x] code\n  ```\n  | a | b |\n  |---|---|\n  | 1 | 2 |";
+    expect(splitMarkdownBlocks(text)).toEqual([{ kind: "list", text, gapBefore: false }]);
+  });
+
   it("keeps a task list without a table in the text run, markers untouched", () => {
     const text = "notes\n\n- [x] finished\n- [ ] pending";
     expect(splitMarkdownBlocks(text)).toEqual([{ kind: "text", text, gapBefore: false }]);
@@ -115,5 +150,16 @@ describe("splitting markdown into TUI blocks", () => {
   it("finds a table nested in a blockquote inside a list item", () => {
     const text = "- item\n  > | a |\n  > |---|\n  > | 1 |";
     expect(splitMarkdownBlocks(text)).toEqual([{ kind: "list", text, gapBefore: false }]);
+  });
+
+  it("normalizes CRLF once, so token offsets still find the blank-line gap", () => {
+    expect(splitMarkdownBlocks("INTRO\r\n\r\n- item\r\n  | a | b |\r\n  |---|---|\r\n  | 1 | 2 |")).toEqual([
+      { kind: "text", text: "INTRO", gapBefore: false },
+      { kind: "list", text: "- item\n  | a | b |\n  |---|---|\n  | 1 | 2 |", gapBefore: true },
+    ]);
+    expect(splitMarkdownBlocks("INTRO\r\n- item\r\n  | a |\r\n  |---|")).toEqual([
+      { kind: "text", text: "INTRO", gapBefore: false },
+      { kind: "list", text: "- item\n  | a |\n  |---|", gapBefore: false },
+    ]);
   });
 });

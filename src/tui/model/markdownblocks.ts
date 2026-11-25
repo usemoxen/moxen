@@ -52,25 +52,69 @@ function quoteInner(raw: string): string {
     .join("\n");
 }
 
-/**
- * A list that renders structurally loses marked's checkbox tokens (OpenTUI's
- * list renderer skips them), so task-list state is rewritten into the item
- * text as a ballot box the text token keeps: `- [x] done` becomes `- ☒ done`.
- */
-function listText(list: Tokens.List): string {
-  return list.items.map(itemText).join("");
-}
-
 /** `Tokens.Generic` keeps `type` a plain string, so narrowing needs this guard. */
 const isList = (token: Token): token is Tokens.List => token.type === "list";
 
-function itemText(item: Tokens.ListItem): string {
-  let raw = item.raw;
-  for (const child of item.tokens) {
-    if (child.type === "checkbox") raw = raw.replace(child.raw, `${item.checked ? "☒" : "☐"} `);
-    else if (isList(child)) raw = raw.replace(child.raw, listText(child));
-  }
-  return raw;
+/** A task-list marker line: `- [x] done`, `  2. [ ] todo` — indentation kept in the capture. */
+const TASK_MARKER = /^([ \t]*(?:[*+-]|\d{1,9}[.)])[ \t]+)\[[ xX]\][ \t]*/;
+/** A fence line at any indent, as inside a list item. */
+const FENCE_LINE = /^[ \t]*(`{3,}|~{3,})/;
+
+/** Every task item's checked state in document order, loose and nested items included. */
+function taskChecks(token: unknown): boolean[] {
+  const out: boolean[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const t = node as { items?: unknown; tokens?: unknown; task?: boolean; checked?: boolean };
+    if (Array.isArray(t.items)) {
+      for (const item of t.items as Array<{ task?: boolean; checked?: boolean; tokens?: unknown }>) {
+        if (item.task === true) out.push(item.checked === true);
+        walk(item.tokens);
+      }
+    }
+    if (Array.isArray(t.tokens)) walk(t.tokens);
+  };
+  walk(token);
+  return out;
+}
+
+/**
+ * A list that renders structurally loses marked's checkbox tokens (OpenTUI's
+ * list renderer skips them — loose items keep the checkbox inside paragraph
+ * inline tokens, nested lists dedent their raw), so each task marker is
+ * rewritten at its original source line, in order, from the token's checked
+ * state: `- [x] done` becomes `- ☒ done`, nesting and indentation intact.
+ * Fenced lines are never touched.
+ */
+function listText(list: Tokens.List): string {
+  const checks = taskChecks(list);
+  let next = 0;
+  let fenceChar = "";
+  let fenceLen = 0;
+  return list.raw
+    .split("\n")
+    .map((line) => {
+      if (fenceChar !== "") {
+        if (new RegExp(`^[ \\t]*${fenceChar === "`" ? "`" : "~"}{${fenceLen},}[ \\t]*$`).test(line)) fenceChar = "";
+        return line;
+      }
+      const open = FENCE_LINE.exec(line);
+      if (open) {
+        fenceChar = open[1]![0]!;
+        fenceLen = open[1]!.length;
+        return line;
+      }
+      if (next < checks.length && TASK_MARKER.test(line)) {
+        const glyph = checks[next++] ? "☒" : "☐";
+        return line.replace(TASK_MARKER, `$1${glyph} `);
+      }
+      return line;
+    })
+    .join("\n");
 }
 
 /**
@@ -80,8 +124,13 @@ function itemText(item: Tokens.ListItem): string {
  * trailing blank lines — the separator comes from the source whitespace or
  * the following block's margin, never both. Lists without a table stay in
  * the text run, rendered as ordinary markdown exactly as before.
+ *
+ * Line endings are normalized to `\n` once, up front: marked normalizes them
+ * before lexing, so its token raws (and the offsets measured against them)
+ * only line up with the normalized text, never with raw `\r\n` input.
  */
 export function splitMarkdownBlocks(text: string): MarkdownBlock[] {
+  const source = text.replace(/\r\n|\r/g, "\n");
   const blocks: MarkdownBlock[] = [];
   let run: string[] = [];
   let runGap = false;
@@ -93,7 +142,7 @@ export function splitMarkdownBlocks(text: string): MarkdownBlock[] {
     run = [];
   };
 
-  for (const token of lexer(text, { gfm: true })) {
+  for (const token of lexer(source, { gfm: true })) {
     const start = offset;
     offset += token.raw.length;
     if (token.type === "space") {
@@ -102,7 +151,7 @@ export function splitMarkdownBlocks(text: string): MarkdownBlock[] {
       continue;
     }
     // The run not yet flushed counts as a block too, for the gap test.
-    const gapBefore = (blocks.length > 0 || run.length > 0) && BLANK_BEFORE.test(text.slice(Math.max(0, start - GAP_LOOKBACK), start));
+    const gapBefore = (blocks.length > 0 || run.length > 0) && BLANK_BEFORE.test(source.slice(Math.max(0, start - GAP_LOOKBACK), start));
     if (token.type === "blockquote") {
       flushRun();
       blocks.push({ kind: "quote", inner: quoteInner(token.raw), gapBefore });
