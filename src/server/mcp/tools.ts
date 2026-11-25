@@ -458,6 +458,56 @@ export const THREAD_TOOLS: readonly McpTool[] = [
 ];
 
 /**
+ * Moxen's own projects registry (`core/projects/`), as a session sees it
+ * (MXN-415): list and resolve are reads every session gets, register is a
+ * registry write only the orchestrator's own thread has (a delegated task
+ * works inside the project it was started in, and a provider with
+ * orchestration switched off shares the same `delegated` gate).
+ */
+export const PROJECT_TOOLS: readonly McpTool[] = [
+  {
+    name: "project_list",
+    description:
+      "List the projects registered with Moxen, one line each: project id, the folder it is keyed by (workspace root) and its title — what `moxen projects list` shows. " +
+      "Projects are how Moxen groups threads and defaults per folder. Read-only; register a folder with project_register.",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "project_resolve",
+    description:
+      "Resolve one folder on the machine Moxen runs on to the project it belongs to, as `moxen projects resolve` does: the workspace root Moxen keys the folder by " +
+      "(the Git repository root in repo workspace mode, the canonical folder itself otherwise, per the server's workspaceMode setting), whether it is a repository, its branch, and the project — or no project. " +
+      "The folder must exist and be a directory; pass an absolute path (it is not resolved against your working directory).",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: { cwd: { type: "string", description: "The folder to resolve, an absolute path on the machine Moxen runs on." } },
+      required: ["cwd"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "project_register",
+    description:
+      "Register a folder on the machine Moxen runs on as a Moxen project, the agent's `moxen projects ensure`: threads for that folder then live under the project, with its per-project settings and memory. " +
+      "The folder must exist and be a directory (nothing is created); the project takes its folder's name as its title. " +
+      "The registered `projectPolicy` setting decides what a folder without a project does, and is honoured, never bypassed: `existing` refuses with PROJECT_NOT_FOUND, `create` registers it. " +
+      "Pass dryRun: true to report what would be registered without changing anything. " +
+      "Registering a folder back after it was removed revives its original project and threads. Only for the orchestrator's own thread, never a delegated task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cwd: { type: "string", description: "The folder to register, an absolute path on the machine Moxen runs on." },
+        dryRun: { type: "boolean", description: "Report what would be registered without writing." },
+      },
+      required: ["cwd"],
+      additionalProperties: false,
+    },
+  },
+];
+
+/**
  * The tools that reach other threads: handing work to them, and finding and
  * reading them. A delegated task gets none: it neither delegates again nor
  * continues itself in a new thread (a full context there is compacted in
@@ -617,6 +667,11 @@ export interface MoxenToolOptions {
 /** Whether a session with these options may call `name`: hidden tools are refused too, since a client can call a tool it was never shown. */
 function offered(name: string, options: MoxenToolOptions): boolean {
   if (options.delegated === true && DELEGATION_TOOLS.has(name)) return false;
+  // Registration is a registry write the orchestrator's thread owns: a
+  // delegated task (or a provider with orchestration switched off, which
+  // shares this flag) works inside the project it was started in and never
+  // registers another.
+  if (options.delegated === true && name === "project_register") return false;
   // A research run's lead and roles continue only through the run, never by starting a new thread.
   if (options.researchMember === true && name === "thread_continue") return false;
   if (options.webFetch === false && name === "web_fetch") return false;
@@ -627,7 +682,7 @@ function offered(name: string, options: MoxenToolOptions): boolean {
 
 /** The tools one session is offered: all of them, less the delegation ones for a delegated task, plus the checklist where the provider keeps none. */
 export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
-  const tools = [...MOXEN_TOOLS, ...THREAD_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
+  const tools = [...MOXEN_TOOLS, ...PROJECT_TOOLS, ...THREAD_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
   if (options.researchLead === true) tools.push(...RESEARCH_ROLE_TOOLS);
   if (options.researchMember === true) tools.push(...RESEARCH_MESSAGE_TOOLS);
   if (options.imageGeneration === true && options.delegated !== true) tools.push(IMAGE_GENERATION_TOOL);
@@ -844,6 +899,9 @@ export async function callMoxenTool(
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
   if (options.delegated === true && DELEGATION_TOOLS.has(name)) return { text: `${name} is not available in a delegated task: do the task yourself.`, isError: true };
+  if (options.delegated === true && name === "project_register") {
+    return { text: "project_register is not available in a delegated task: registration is the orchestrator's call. Say what needs registering in your report.", isError: true };
+  }
   if (options.webFetch === false && name === "web_fetch") return { text: "web_fetch is switched off for this provider.", isError: true };
   if (!offered(name, options) && name.startsWith("memory_")) {
     return { text: options.memory === "read" ? `${name} is not available in a delegated task: put what is worth remembering in your report.` : "Moxen memory is switched off here.", isError: true };
@@ -904,6 +962,29 @@ export async function callMoxenTool(
           ...(typeof args.before === "number" ? { before: args.before } : {}),
         });
         return { text: read.text, isError: false };
+      }
+      case "project_list":
+        return await projectListTool(api);
+      case "project_resolve":
+        return ok(await projectResolveTool(api, args));
+      case "project_register": {
+        if (args.dryRun !== undefined && typeof args.dryRun !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "dryRun must be true or false.");
+        const dryRun = args.dryRun === true;
+        // No `projectPolicy` of its own: the server takes the configured
+        // setting, so a policy that refuses creation is honoured, never
+        // bypassed (a refusal surfaces as this tool's error).
+        const ensured = await api.dispatch({ type: "project.ensure", cwd: argFolder(args), ...(dryRun ? { dryRun: true } : {}) });
+        return ok({
+          project: { id: ensured.project.id, title: ensured.project.title, workspaceRoot: ensured.project.workspaceRoot, createdAt: ensured.project.createdAt },
+          workspaceRoot: ensured.workspace.workspaceRoot,
+          created: ensured.created,
+          ...(dryRun ? { dryRun: true } : {}),
+          note: dryRun
+            ? "Dry run: nothing was written. Call project_register again without dryRun to register the folder."
+            : ensured.created
+              ? "Registered: threads for this folder now live under this project, which appears in the user's project list."
+              : "This folder already has a project; nothing was changed.",
+        });
       }
       case "memory_search": {
         const found = await api.query({
@@ -1050,6 +1131,45 @@ export async function callMoxenTool(
 }
 
 const SEARCH_SNIPPET_CHARS = 120;
+
+/**
+ * A folder argument for the project tools: non-empty and absolute. The
+ * folder lives on the machine Moxen runs on, where the server resolves it —
+ * a relative path would land against the server's own working directory,
+ * not the caller's, so it is refused instead of meaning the wrong folder.
+ */
+function argFolder(args: Record<string, unknown>, key = "cwd"): string {
+  const value = argString(args, key, true)!;
+  if (!path.isAbsolute(value)) {
+    throw new CliError("INVALID_TOOL_INPUT", `${key} must be an absolute path on the machine Moxen runs on; it is not resolved against your working directory.`);
+  }
+  return value;
+}
+
+/**
+ * `project_list`: the registry as `moxen projects list` prints it — id,
+ * workspace root and title, one line per project. The one shared scratch
+ * entry is not a folder's project, so it is left out as the CLI does.
+ */
+async function projectListTool(api: ClientApi): Promise<ToolResult> {
+  const { projects } = await api.query({ type: "projects.list" });
+  const rows = projects.filter((project) => project.scratch !== true);
+  if (rows.length === 0) return { text: "No registered projects. Register a folder with project_register.", isError: false };
+  const lines = rows.map((project) => `- ${project.id} · ${project.workspaceRoot} · ${project.title}`);
+  return { text: `${rows.length === 1 ? "One registered project" : `${rows.length} registered projects`}:\n${lines.join("\n")}`, isError: false };
+}
+
+/** `project_resolve`: the same read as `moxen projects resolve` — the workspace resolution, and the project or none. */
+async function projectResolveTool(api: ClientApi, args: Record<string, unknown>) {
+  const resolved = await api.query({ type: "project.resolve", cwd: argFolder(args) });
+  return {
+    workspace: resolved.workspace,
+    project: resolved.project,
+    ...(resolved.project === null
+      ? { note: `No project for ${resolved.workspace.workspaceRoot}. project_register registers the folder when the configured project policy allows.` }
+      : {}),
+  };
+}
 
 /** Exactly one of `taskId` (one task) or `taskIds` (several): one bad id never stops the others. */
 function settleIds(args: Record<string, unknown>): string[] {

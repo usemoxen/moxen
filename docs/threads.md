@@ -1203,6 +1203,37 @@ A `modelSelection` with `provider`/`model` together is refused.
   the old thread, where the user can hold or remove it. There is no CLI
   surface for this: the palette and `threads continue` stay the user's.
 
+### Listing, resolving and registering projects (`project_list`, `project_resolve`, `project_register`)
+
+The projects registry behind `moxen projects list`, `resolve` and
+`ensure`, as agent tools. `project_list` lists every registered project
+(id, folder and title, one per line; the shared "No project" entry is left
+out, as the CLI's own list leaves it). `project_resolve` resolves one
+folder to the project Moxen keys it by — the Git root in repo workspace
+mode, the canonical folder otherwise, per the server's `workspaceMode`
+setting — with the same workspace read the CLI gives, and reports no
+project plainly when the folder has none. Each takes an absolute path: the
+folder lives on the machine Moxen runs on, and a relative path is refused
+rather than resolved against the server's own working directory. A folder
+that does not exist, or is not a directory, is refused the same way the CLI
+refuses it (`WORKSPACE_NOT_FOUND`, `WORKSPACE_NOT_DIRECTORY`).
+
+`project_register` registers an existing folder as a project: the folder
+must exist (nothing is created), it takes the folder's name as its title,
+and a folder whose project was removed is revived with its original id and
+threads. The `projectPolicy` setting decides what a folder without a
+project does, and is honoured, never bypassed: `existing` refuses with
+`PROJECT_NOT_FOUND`, `create` registers. An optional `dryRun` reports what
+would be registered without writing. What happens is written at once and
+shows in the user's project list; the tool says whether it created the
+project or the folder already had one.
+
+The two reads come with the `moxen` server for every session, delegated
+tasks included. Registering belongs to the orchestrator's own thread: a
+delegated task (and a provider with orchestration switched off, which
+shares the same gate) is offered none of the register and is refused when
+it calls anyway, pointed at its report.
+
 ### Continuing in a new thread (palette / `threads continue`)
 
 The user's own **Continue in a new thread** palette action (and

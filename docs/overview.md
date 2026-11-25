@@ -172,10 +172,12 @@ instructions. Every top-level thread also gets the `moxen` MCP server
 subagent thread in a worktree of its own, find and read other threads
 (`thread_search`, `thread_read`), consult the shipped [knowledge base](knowledge.md)
 (`knowledge_search`, `knowledge_read`), keep Moxen memory (`memory_*`, see
-[threads.md](threads.md#memory)), and see how full its own context window is.
-Delegated threads retain knowledge search/read,
-`web_fetch`, `context_usage`, `usage_status` and memory read/search when enabled, but cannot delegate or write
-memory; `"moxen": null` in project `mcpServers` turns it off.
+[threads.md](threads.md#memory)), see how full its own context window is, and
+list, resolve and register projects (`project_list`, `project_resolve`,
+`project_register`). Delegated threads retain knowledge search/read,
+`web_fetch`, `context_usage`, `usage_status`, the project reads, and memory
+read/search when enabled, but cannot delegate, write memory or register
+projects; `"moxen": null` in project `mcpServers` turns it off.
 
 `context_usage` answers with the calling thread's tokens used, window size,
 percent used and the time the reading was taken — the same reading the
