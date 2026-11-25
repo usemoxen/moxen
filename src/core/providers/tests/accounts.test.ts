@@ -199,9 +199,13 @@ describe("per-account runtime and cache isolation", () => {
     const baseHome = path.resolve(path.join(os.tmpdir(), "moxen-real-home"));
     const altHome = path.resolve(path.join(os.tmpdir(), "moxen-agy-alt"));
     const baseEnv: NodeJS.ProcessEnv = { HOME: baseHome, USERPROFILE: baseHome };
+    // Isolation exists only while multiple accounts are allowed
+    // (`providers.antigravity.allowUnsupportedUse` on): while it is off the
+    // gated extra account is refused instead (see antigravityaccounts.test.ts).
+    const on = { allowUnsupportedUse: true, accounts: [{ id: "default", label: "Default" }, { id: "alt", label: "Alt", homePath: altHome }] };
 
     const defaultAccount = resolveAntigravityAccount(
-      { accounts: [{ id: "default", label: "Default" }, { id: "alt", label: "Alt", homePath: altHome }] },
+      on,
       "antigravity/default",
       baseEnv,
     );
@@ -210,7 +214,7 @@ describe("per-account runtime and cache isolation", () => {
     expect(defaultAccount.spec.args).toEqual(["acp"]);
 
     const altAccount = resolveAntigravityAccount(
-      { accounts: [{ id: "default", label: "Default" }, { id: "alt", label: "Alt", homePath: altHome }] },
+      on,
       "antigravity/alt",
       baseEnv,
     );

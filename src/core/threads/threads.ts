@@ -14,15 +14,12 @@ import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
-import type {
-  InteractionMode,
-  ModelSelection,
-  RuntimeMode,
-} from "../types.js";
+import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
 import type {
   CreateThreadInput,
+  MessageOrigin,
   ReadView,
   SendDelivery,
   SendIfBusy,
@@ -379,6 +376,8 @@ export async function sendTurn(
   store: ThreadStore,
   rawThreadId: string,
   input: SendTurnInput,
+  /** The config in force, when the caller has it: lets admission hold Antigravity automatic prompts while delegation is off. */
+  config?: Pick<CliConfig, "providers">,
 ): Promise<SendTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const prompt = input.prompt.trim();
@@ -419,11 +418,21 @@ export async function sendTurn(
     }
     const manualContinuation = thread.usagePause != null && thread.usagePause.phase !== "resuming" && origin === undefined && input.usageControl !== true && scheduledFor === null && !input.queue && delivery !== "queue";
     const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true && !manualContinuation;
-    if (usageHeld) delivery = "queue";
+    // Antigravity with delegation off holds an automatic prompt the same way
+    // a usage hold does: queued as a wake-up for the user's next message (or
+    // the setting turning on), never started on its own. Task notices are
+    // held upstream in their batch file and ride the user's send, so they
+    // pass here. Usage-control maintenance (wrap-up, recovery) is Moxen's own
+    // prompt too, so it holds for Antigravity like any other: the usage
+    // exemption it keeps elsewhere skips usage pauses, not this gate.
+    const autoHeld = config !== undefined && origin !== undefined && origin !== "task-notification"
+      && driverKindOfInstance((input.modelSelection ?? thread.modelSelection).instanceId) === "antigravity"
+      && !antigravityUnsupportedUseAllowed(config);
+    if (usageHeld || autoHeld) delivery = "queue";
 
     let turns = await store.readTurns(threadId);
 
-    if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled && !usageHeld) {
+    if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled && !usageHeld && !autoHeld) {
       throw new CliError(
         "SETTLED_THREAD_CONFIRMATION_REQUIRED",
         `Thread ${threadId} is settled. Re-run with wakeSettled to send and wake it.`,
@@ -446,13 +455,13 @@ export async function sendTurn(
     const joinsExisting = duplicate !== undefined && duplicate.status !== "running";
     const gateWaitingOut = scheduledFor === null && !openTurn(turns) && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
     const gateHoldUntil = gateWaitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
-    const gateHeldQueue = (usageHeld && !input.queue && origin !== undefined) || input.queue !== undefined;
+    const gateHeldQueue = ((usageHeld || autoHeld) && !input.queue && origin !== undefined) || input.queue !== undefined;
     const gateHeldBehind =
-      scheduledFor === null && !openTurn(turns) && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue") &&
+      scheduledFor === null && !openTurn(turns) && !input.queue && !usageHeld && !autoHeld && !manualContinuation && (delivery === "auto" || delivery === "queue") &&
       turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
     const joinsWaitingReset = input.scheduleReason === "usage-reset" && turns.some((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset");
     const gateQueued =
-      gateHeldQueue || usageHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && openTurn(turns) !== null);
+      gateHeldQueue || usageHeld || autoHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && openTurn(turns) !== null);
     if (joinsExisting ? false : live !== null || manualContinuation || !gateQueued) {
       const admission = await continuationInFlight(store, thread);
       thread = admission.thread;
@@ -460,7 +469,7 @@ export async function sendTurn(
         throw continuationBusyError(threadId);
       }
     }
-    if (thread.settledAt != null && input.wakeSettled === true && !usageHeld) {
+    if (thread.settledAt != null && input.wakeSettled === true && !usageHeld && !autoHeld) {
       thread = {
         ...thread,
         settledAt: null,
@@ -613,16 +622,16 @@ export async function sendTurn(
     // come): the new message queues behind it rather than overtaking it, and
     // rides along in its turn when model and mode match. Usage-control turns
     // (wrap-up and other maintenance) are exempt: they run past holds by design.
-    const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
+    const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !autoHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
       && turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
-    let heldQueue = usageHeld && !input.queue && origin !== undefined ? {
+    let heldQueue = (usageHeld || autoHeld) && !input.queue && origin !== undefined ? {
       conditions: [], held: false, order: Math.max(Date.parse(now), ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)),
       sequential: true, continuation: "same-thread" as const, automatic: true, wakeUp: true,
     } : input.queue;
-    if (usageHeld && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
+    if ((usageHeld || autoHeld) && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
-    const status = heldQueue || usageHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    const status = heldQueue || usageHeld || autoHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
     // A manual continuation in flight owns the checkout now: no turn may
     // start beside its destination while it prepares. Queued and scheduled
     // turns are not starting, so they pass; the handoff clears the claim
@@ -649,6 +658,7 @@ export async function sendTurn(
       runtimeMode,
       interactionMode,
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
+      ...(origin !== undefined ? { origin } : {}),
       modelSelection,
       parentTurnId: delivery === "restart" && running ? running.id : null,
       ...(holdUntil !== null
@@ -967,6 +977,7 @@ export async function redeliverUnconfirmedSteers(
   rawThreadId: string,
   turnId: string,
   steers: readonly RedeliverSteer[],
+  config?: Pick<CliConfig, "providers">,
 ): Promise<string[]> {
   if (steers.length === 0) return [];
   const threadId = requireThreadId(rawThreadId);
@@ -1004,7 +1015,7 @@ export async function redeliverUnconfirmedSteers(
       ...(original?.notification ? { notification: original.notification } : {}),
       ...(uploads.length > 0 ? { attachments: uploads } : {}),
       ...(wakeSettled ? { wakeSettled: true } : {}),
-    }).catch(() => null);
+    }, config).catch(() => null);
     if (!sent) continue;
     copies.push(sent.turn.id);
     redelivered.add(original ? original.id : `text:${steer.text}`);
@@ -1060,14 +1071,14 @@ export function orphanedSteers(
  * it always did — in its runner's prompt build, not here. Returns the new
  * turn ids.
  */
-export async function redeliverOrphanedSteers(store: ThreadStore, rawThreadId: string, turnId: string): Promise<string[]> {
+export async function redeliverOrphanedSteers(store: ThreadStore, rawThreadId: string, turnId: string, config?: Pick<CliConfig, "providers">): Promise<string[]> {
   const threadId = requireThreadId(rawThreadId);
   const activities = await store.readActivities(threadId).catch(() => null);
   if (!activities) return [];
   if (!activities.some((activity) => activity.turnId === turnId && (activity.kind === "turn.steered" || activity.kind === "message.injected"))) return [];
   const messages = await store.readMessages(threadId).catch(() => null);
   if (!messages) return [];
-  return await redeliverUnconfirmedSteers(store, threadId, turnId, orphanedSteers(messages, activities, turnId)).catch(() => []);
+  return await redeliverUnconfirmedSteers(store, threadId, turnId, orphanedSteers(messages, activities, turnId), config).catch(() => []);
 }
 
 /**

@@ -1888,6 +1888,10 @@ pub struct ProviderAccountSummary {
     pub codex_binary_path: Option<String>,
     pub codex_launch_args: Option<String>,
     pub codex_verified: bool,
+    /// Why a configured account cannot run regardless of its `enabled` flag:
+    /// an Antigravity account gated by the off-by-default `providers.
+    /// antigravity.allowUnsupportedUse` (multiple or isolated accounts).
+    pub disabled_reason: Option<String>,
 }
 
 impl ProviderAccountSummary {
@@ -1925,6 +1929,7 @@ impl ProviderAccountSummary {
             codex_binary_path: text(value, "codexBinaryPath"),
             codex_launch_args: text(value, "codexLaunchArgs"),
             codex_verified: boolean(value, "codexVerified").unwrap_or(false),
+            disabled_reason: text(value, "disabledReason"),
         })
     }
 

@@ -134,7 +134,7 @@ export async function migrateProviderProfiles(
     );
 
   const legacyAntigravity =
-    hasOtherKeys(fileConfig.providers?.antigravity, new Set(["accounts"])) ||
+    hasOtherKeys(fileConfig.providers?.antigravity, new Set(["accounts", "allowUnsupportedUse"])) ||
     isLegacyAntigravityId(fileConfig.provider) ||
     isLegacyAntigravityId(fileConfig.promptImprover?.provider) ||
     projects.some((project) => isLegacyAntigravityId(project.defaultModelSelection?.instanceId)) ||
@@ -197,7 +197,10 @@ export async function migrateProviderProfiles(
   }
 
   if (legacyAntigravity) {
-    const { accounts: existingAccounts = [], ...legacyFields } = fileConfig.providers?.antigravity ?? {};
+    // The consumer-use switch is provider-level, not an account field: it
+    // travels across untouched (a migration never turns it on) and stays off
+    // the migrated account entries.
+    const { accounts: existingAccounts = [], allowUnsupportedUse, ...legacyFields } = fileConfig.providers?.antigravity ?? {};
     const hasDefault = existingAccounts.some((entry) => entry.id.trim().toLowerCase() === "default");
     const migratedDefault: AntigravityAccountConfig = {
       ...legacyFields,
@@ -206,7 +209,10 @@ export async function migrateProviderProfiles(
     };
     const accounts = hasDefault ? existingAccounts : [migratedDefault, ...existingAccounts];
     if (!hasDefault) createdAccounts.push("antigravity/default");
-    nextProviders.antigravity = { accounts };
+    nextProviders.antigravity = {
+      accounts,
+      ...(allowUnsupportedUse !== undefined ? { allowUnsupportedUse } : {}),
+    };
   }
 
   let enabledOpencode = false;

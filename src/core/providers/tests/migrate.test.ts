@@ -170,6 +170,71 @@ describe("migrateProviderProfiles", () => {
     expect(afterDelete.fileConfig.providers?.claude).toBeUndefined();
   });
 
+  it("carries providers.antigravity.allowUnsupportedUse across the legacy migration, and never adds it when unset", async () => {
+    // A legacy singleton Antigravity config with the consumer-use switch on:
+    // the switch is provider-level, so it must stay there (a migration never
+    // turns it on either: it only preserves what the file said).
+    const root = makeTempDir();
+    const configPath = path.join(root, "config.json");
+    const storeRoot = path.join(root, "threads");
+    const store = await openThreadStore(storeRoot);
+    await saveConfig(
+      configPath,
+      normalizeFileConfig({
+        providers: {
+          antigravity: {
+            allowUnsupportedUse: true,
+            binaryPath: "/usr/local/bin/agy",
+          },
+        },
+      }),
+    );
+    const workspaceRoot = path.join(root, "repo");
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    const { project } = await ensureStoredProject(storeRoot, {
+      workspaceRoot,
+      defaultModelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+    });
+    await createThread(store, {
+      projectId: project.id,
+      title: "Legacy Antigravity",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: workspaceRoot },
+    });
+
+    const first = await migrateProviderProfiles({ configPath, storeRoot, store });
+    expect(first.migrated).toBe(true);
+    const migrated = await loadConfig(configPath);
+    expect(migrated.fileConfig.providers?.antigravity?.allowUnsupportedUse).toBe(true);
+    // It is never copied onto an account entry.
+    expect(migrated.fileConfig.providers?.antigravity?.accounts?.[0]).not.toHaveProperty("allowUnsupportedUse");
+    expect(migrated.fileConfig.providers?.antigravity?.accounts?.[0]).toMatchObject({ id: "default", binaryPath: "/usr/local/bin/agy" });
+
+    // Without it, the migration never stamps the setting on.
+    const root2 = makeTempDir();
+    const configPath2 = path.join(root2, "config.json");
+    const storeRoot2 = path.join(root2, "threads");
+    const store2 = await openThreadStore(storeRoot2);
+    await saveConfig(
+      configPath2,
+      normalizeFileConfig({
+        providers: {
+          antigravity: { accounts: [{ id: "default", label: "Default" }], binaryPath: "/usr/local/bin/agy" },
+        },
+      }),
+    );
+    await createThread(store2, {
+      projectId: "p",
+      title: "Legacy Antigravity",
+      modelSelection: { instanceId: "agy", model: "gemini-4-neon" },
+      env: { mode: "local", path: workspaceRoot },
+    });
+    await migrateProviderProfiles({ configPath: configPath2, storeRoot: storeRoot2, store: store2 });
+    const after = await loadConfig(configPath2);
+    expect(after.fileConfig.providers?.antigravity?.allowUnsupportedUse).toBeUndefined();
+    expect(after.fileConfig.providers?.antigravity?.accounts?.[0]).not.toHaveProperty("allowUnsupportedUse");
+  });
+
   it("keeps per-profile settings completely independent and writable via account setting keys", () => {
     const base = normalizeFileConfig({
       providers: {

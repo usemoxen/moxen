@@ -188,6 +188,14 @@ export interface ProviderAccountSummary {
   readonly codexBinaryPath: string | null;
   readonly codexLaunchArgs: string | null;
   readonly codexVerified: boolean;
+  /**
+   * Why a configured account cannot run regardless of its own `enabled`
+   * flag: an Antigravity account gated by the off-by-default
+   * `providers.antigravity.allowUnsupportedUse` (multiple or isolated
+   * accounts). The user's own toggle stays `enabled`; the reason says how
+   * to fix it. Absent for every other account kind.
+   */
+  readonly disabledReason?: string | null;
 }
 
 /** Multi-account provider kinds addressed as `<kind>/<id>`. */
@@ -305,6 +313,14 @@ export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundl
 /** First-class Antigravity CLI (`agy`) provider configuration (`providers.antigravity.*`). */
 export interface AntigravityProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
   launchArgs?: string;
+  /**
+   * Whether Moxen may do what Google does not support on Antigravity consumer
+   * plans: delegate to it, start automatic prompts on its threads, and run
+   * multiple accounts with isolated home folders. Off by default. One key
+   * for every account (`antigravity`, `antigravity/<id>`, legacy `agy`);
+   * Moxen never turns it on for the user.
+   */
+  allowUnsupportedUse?: boolean;
   accounts?: AntigravityAccountConfig[];
 }
 
@@ -918,6 +934,187 @@ export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "
   if (key === "acp" || key.startsWith("acp/")) return "acp";
   if (key === "claudeagent" || key === "claude" || key.startsWith("claude/")) return "claude";
   return null;
+}
+
+/**
+ * Whether Moxen may do what Google does not support on Antigravity consumer
+ * plans (`providers.antigravity.allowUnsupportedUse`, off by default):
+ * delegation, automatic prompts, and multiple accounts. The default makes
+ * Moxen refuse or disable all three. The one provider-level key governs
+ * every Antigravity account; resolve the instance's kind with
+ * `driverKindOfInstance` before asking this. Moxen never turns it on for
+ * the user.
+ */
+export function antigravityUnsupportedUseAllowed(config: Pick<CliConfig, "providers">): boolean {
+  return config.providers?.antigravity?.allowUnsupportedUse === true;
+}
+
+/**
+ * Environment keys that would move an Antigravity launch or login off the
+ * host user's own login environment: the POSIX and Windows homes, the
+ * Windows profile and app-data directories, the XDG config/state/data/cache
+ * directories that redirect where CLI state is kept, and `SSH_CONNECTION`,
+ * whose presence makes `agy` use per-home file-based token storage instead
+ * of the OS keyring. Matched case-insensitively: Windows env keys have no
+ * case, so an override in any case is an override.
+ */
+const ANTIGRAVITY_LOGIN_ENV_KEYS: ReadonlySet<string> = new Set([
+  "home",
+  "userprofile",
+  "appdata",
+  "localappdata",
+  "ssh_connection",
+  "xdg_config_home",
+  "xdg_data_home",
+  "xdg_state_home",
+  "xdg_cache_home",
+]);
+
+/** The keys of `env` that would override the host login environment for an Antigravity launch, in config order. */
+export function antigravityLoginEnvOverrides(env: Readonly<Record<string, string>> | undefined): string[] {
+  return Object.keys(env ?? {}).filter((key) => ANTIGRAVITY_LOGIN_ENV_KEYS.has(key.trim().toLowerCase()));
+}
+
+/**
+ * Tokenize one launch-args string the way a launch does — the mirror of
+ * `tokenizeLaunchArgs` (`providers/codex/config.js`): single/double quotes,
+ * backslash escapes, whitespace-separated. This module is the root of the
+ * graph that tokenizer lives in, so it cannot import it; the mirror is
+ * pinned by the Antigravity account tests against it. Null when the string
+ * is malformed (an unterminated quote).
+ */
+function tokenizeLaunchArgsForGate(raw: string): string[] | null {
+  const args: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  let escaped = false;
+  let pushed = false;
+  const flush = (): void => {
+    if (current.length > 0 || pushed) args.push(current);
+    current = "";
+    pushed = false;
+  };
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index]!;
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'" && /[\s"\\]/.test(raw[index + 1] ?? "")) {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      quote = char;
+      pushed = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      flush();
+      continue;
+    }
+    current += char;
+  }
+  if (quote) return null;
+  flush();
+  return args;
+}
+
+/**
+ * Whether a launch-args string asks `agy` to keep its state somewhere other
+ * than the login's own home (`--gemini-dir`/`--gemini-dir=...`). Tokens are
+ * compared unquoted, exactly as the launch would read them, so a quoted
+ * `"--gemini-dir"` is caught too; a malformed string is refused while the
+ * gate is on if it could contain the flag at all.
+ */
+function antigravityLaunchArgsSelectDirectory(launchArgs: string | undefined): boolean {
+  const trimmed = launchArgs?.trim();
+  if (!trimmed) return false;
+  const tokens = tokenizeLaunchArgsForGate(trimmed);
+  if (tokens === null) return trimmed.includes("--gemini-dir");
+  return tokens.some((token) => token === "--gemini-dir" || token.startsWith("--gemini-dir="));
+}
+
+/**
+ * The one off-mode policy for every Antigravity launch and login input (see
+ * `providers.antigravity.allowUnsupportedUse`): null when the input may run,
+ * and otherwise the reason the off-by-default gate refuses it — an isolated
+ * `homePath`, an env override of a home/profile/SSH/config-dir variable, or a
+ * `--gemini-dir` launch argument all land the login on an environment or
+ * directory other than the host user's own. While off such input is refused
+ * with `ANTIGRAVITY_ACCOUNT_OFF`, never silently stripped down to the host
+ * login: a config that picks out a folder the user did not opt into is an
+ * accident to report, not a detail to quietly drop.
+ */
+export function antigravityOffUseLaunchBlockedReason(
+  config: Pick<AntigravityProviderConfig, "allowUnsupportedUse"> | undefined,
+  input: { readonly homePath?: string | undefined; readonly env?: Readonly<Record<string, string>> | undefined; readonly launchArgs?: string | undefined },
+): string | null {
+  if (config?.allowUnsupportedUse === true) return null;
+  if (input.homePath?.trim()) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login runs only on the host agy login, with the host home. Google does not support multiple consumer accounts and may suspend them. Remove this Antigravity profile's homePath so it uses the host agy login, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  const envOverrides = antigravityLoginEnvOverrides(input.env);
+  if (envOverrides.length > 0) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login runs only in the host user's own environment, and an override of ${envOverrides.join(", ")} would move it off that login. Google does not support multiple consumer accounts and may suspend them. Remove the override${envOverrides.length === 1 ? "" : "s"} from this Antigravity profile, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  if (antigravityLaunchArgsSelectDirectory(input.launchArgs)) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login keeps its state in the host user's own home, and --gemini-dir would move it off that login. Google does not support multiple consumer accounts and may suspend them. Remove --gemini-dir from this Antigravity profile's launchArgs, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  return null;
+}
+
+/**
+ * Why the Antigravity account behind `instanceId` cannot run while
+ * `providers.antigravity.allowUnsupportedUse` is off (the default): null
+ * when it may. While off Moxen runs at most one Antigravity account — the
+ * first configured account without a `homePath`, which shares the host
+ * `agy` login with its environment untouched — and never launches, probes
+ * for usage or credits, or routes to any configured account that has an
+ * isolated `homePath`, an env override of a home/profile/SSH/config-dir
+ * variable, a `--gemini-dir` launch argument, or any configured account
+ * beyond that one; the host instance ids answer the same question for the
+ * provider-level launch config. The host instance ids (`antigravity`,
+ * legacy `agy`) and an account id with no configured entry are the host
+ * login itself (no folder, no isolation) and stay allowed. No path on
+ * this gate may read or write another account's folder.
+ */
+export function antigravityAccountBlockedReason(
+  config: Pick<AntigravityProviderConfig, "allowUnsupportedUse" | "accounts" | "launchArgs"> | undefined,
+  instanceId: string,
+): string | null {
+  if (config?.allowUnsupportedUse === true) return null;
+  if (driverKindOfInstance(instanceId) !== "antigravity") return null;
+  const parsed = parseAccountInstanceId(instanceId);
+  if (parsed === null) {
+    // The host login: its only launch input of its own is the
+    // provider-level launch config, so an argument that moves the login
+    // off the host home is refused, not quietly dropped.
+    return antigravityOffUseLaunchBlockedReason(config, { launchArgs: config?.launchArgs });
+  }
+  const accounts = config?.accounts ?? [];
+  const account = accounts.find((entry) => entry.id.trim().toLowerCase() === parsed.accountId);
+  // No configured entry: no account folder and no isolation, so it runs on
+  // the host `agy` login, the one account that stays while off.
+  if (account === undefined) return null;
+  if (account.homePath?.trim()) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the one that shares the host agy login with no homePath. Google does not support multiple consumer accounts and may suspend them. Remove account "${parsed.accountId}" homePath so it uses the host agy login, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  const launch = antigravityOffUseLaunchBlockedReason(config, { env: account.env, launchArgs: account.launchArgs ?? config?.launchArgs });
+  if (launch !== null) return launch;
+  // The account that stays while the gate is off: the first configured
+  // without a `homePath` or any non-host env/launch-args override of its
+  // own — env overrides keep an account out even without a folder, and a
+  // second clean account never displaces the first.
+  const survivor = accounts.find((entry) => antigravityOffUseLaunchBlockedReason(config, { homePath: entry.homePath, env: entry.env, launchArgs: entry.launchArgs ?? config?.launchArgs }) === null);
+  if (survivor && survivor.id.trim().toLowerCase() === parsed.accountId) return null;
+  return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the first without a homePath. Google does not support multiple consumer accounts and may suspend them. Keep only that account, or turn providers.antigravity.allowUnsupportedUse on.`;
 }
 
 /** Parse an account-addressed instance id (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`), or null for legacy/non-account ids. */

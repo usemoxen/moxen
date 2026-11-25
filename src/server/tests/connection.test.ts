@@ -1920,7 +1920,9 @@ describe("DirectConnection plan usage", () => {
       JSON.stringify({
         providers: {
           claude: { accounts: [{ id: "default", label: "Default", homePath: claudeHome }] },
-          antigravity: { accounts: [{ id: "default", label: "Default", homePath: agyHome }] },
+          // Multiple Antigravity accounts need the setting on (LOCAL-011):
+          // an isolated homePath account is gated while it is off.
+          antigravity: { allowUnsupportedUse: true, accounts: [{ id: "default", label: "Default", homePath: agyHome }] },
         },
       }),
     );

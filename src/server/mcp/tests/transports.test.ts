@@ -34,7 +34,10 @@ function provider(instanceId: string, overrides: Partial<ProviderSummary> = {}, 
 function catalogApi(providers: ProviderSummary[]): ClientApi {
   return {
     query: async (query: { type: string }) =>
-      query.type === "research.run" ? null : query.type === "thread.entry-sessions" ? { count: 1 } : ({ providers }),
+      query.type === "research.run" ? null
+        : query.type === "thread.entry-sessions" ? { count: 1 }
+        : query.type === "config.read" ? { config: {} }
+        : ({ providers }),
   } as unknown as ClientApi;
 }
 

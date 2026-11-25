@@ -113,6 +113,11 @@ export function useSettings(client: ClientApi, open: boolean): SettingsState {
           if (generation.current === mine) {
             setSnapshot(snapshotFromMutation(result));
             setError(null);
+            // Turning this on is the user's choice against Google's consumer
+            // terms: say plainly what it risks, as the row's description does.
+            if (key === "providers.antigravity.allowUnsupportedUse" && value === "true") {
+              setNotice({ text: t("settings.antigravityUnsupportedUseOn"), error: false });
+            }
           }
           return true;
         })

@@ -4747,6 +4747,11 @@ fn account_kind_name(kind: &str) -> &'static str {
 }
 
 fn account_status_subtitle(account: &settings::ProviderAccountSummary) -> String {
+    // A gated Antigravity account (multiple accounts off, the default) shows
+    // the reason ahead of the user's own toggle and sign-in state.
+    if let Some(reason) = &account.disabled_reason {
+        return format!("Disabled · {reason}");
+    }
     if !account.enabled {
         return "Disabled".into();
     }
@@ -5781,6 +5786,7 @@ mod tests {
                 codex_binary_path: None,
                 codex_launch_args: None,
                 codex_verified: false,
+                disabled_reason: None,
             },
             settings::ProviderAccountSummary {
                 kind: "chatgpt".into(),
@@ -5802,6 +5808,7 @@ mod tests {
                 codex_binary_path: None,
                 codex_launch_args: None,
                 codex_verified: false,
+                disabled_reason: None,
             },
             settings::ProviderAccountSummary {
                 kind: "antigravity".into(),
@@ -5823,6 +5830,7 @@ mod tests {
                 codex_binary_path: None,
                 codex_launch_args: None,
                 codex_verified: false,
+                disabled_reason: None,
             },
         ];
         let populated: Vec<_> = super::tabs(&snapshot, &accounts)

@@ -385,6 +385,7 @@ export const en = {
   "quit.confirm": " Quit (enter / ctrl+c again) ",
   "toast.ctrlCAgain": "ctrl-c again if you want to quit",
   "settings.title": "Settings",
+  "settings.antigravityUnsupportedUseOn": "Antigravity unsupported use is on: delegation, automatic prompts and multiple accounts. Google does not support these on consumer plans and may suspend the Antigravity account.",
   "settings.reading": "Reading settings…",
   "settings.none": "No settings available.",
   "settings.notCreated": "{path} (not created yet)",

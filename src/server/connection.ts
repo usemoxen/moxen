@@ -186,8 +186,8 @@ import type { ContextBreakdown, ContextWindowUsage, ProviderRuntimeEvent } from 
 import { isCompactCommand } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredActivity, StoredCheckpoint, StoredThread, StoredTurn, TurnStatus } from "../core/threads/types.js";
-import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
-import { driverKindOfInstance, parseAccountInstanceId } from "../core/types.js";
+import type { AntigravityAccountConfig, CliConfig, ForgeConfig, ModelSelection, ProviderAccountSummary, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
+import { antigravityAccountBlockedReason, antigravityOffUseLaunchBlockedReason, antigravityUnsupportedUseAllowed, driverKindOfInstance, parseAccountInstanceId } from "../core/types.js";
 import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
@@ -442,6 +442,8 @@ export class DirectConnection implements ClientApi {
   private readonly driversOwner = {};
   private readonly ownedDrivers = new Set<TurnDriver>();
   private readonly driverInstanceIds = new WeakMap<TurnDriver, string>();
+  /** Antigravity drivers this connection owns, by instance id: the accounts the off-by-default gate can revoke while the server runs. */
+  private readonly antigravityDrivers = new Map<TurnDriver, string>();
   private readonly chatGptUsageInFlight = new Map<string, Promise<void>>();
   private readonly chatGptUsageLastProbedAt = new Map<string, number>();
   private lastChatGptStaleSweepAt = 0;
@@ -511,6 +513,10 @@ export class DirectConnection implements ClientApi {
       // What the drivers read, with the long-thread lines already resolved (global ones included).
       this.lastProviders = driverProviders(config);
       this.lastWeb = config.web;
+      // A config edit must not need a restart to apply: an Antigravity
+      // account gated by the config just read loses its driver (and with
+      // it its live sessions) before anything can probe it again.
+      await this.revokeGatedAntigravityDrivers(config);
       return config;
     };
     void this.applyEmbeddingPolicy().catch(() => undefined);
@@ -900,9 +906,25 @@ export class DirectConnection implements ClientApi {
       auth.set(`claude/${account.id.trim().toLowerCase()}`, probeClaudeAccountAuth(account));
     }
     for (const account of providers?.antigravity?.accounts ?? []) {
-      auth.set(`antigravity/${account.id.trim().toLowerCase()}`, probeAntigravityAccountAuth(account));
+      // A gated account's folder is never read: while multiple Antigravity
+      // accounts are off (`providers.antigravity.allowUnsupportedUse`), the
+      // only account Moxen may observe is the host-login one.
+      const gated = antigravityAccountBlockedReason(providers?.antigravity, `antigravity/${account.id.trim().toLowerCase()}`) !== null;
+      if (!gated) auth.set(`antigravity/${account.id.trim().toLowerCase()}`, probeAntigravityAccountAuth(account));
     }
     return auth;
+  }
+
+  /**
+   * One configured Antigravity account's public summary: a gated account
+   * (multiple accounts off, the default) is reported disabled with the
+   * reason and without probing its home folder.
+   */
+  private antigravityAccountSummary(account: AntigravityAccountConfig, providers: CliConfig["providers"]): ProviderAccountSummary {
+    const instanceId = `antigravity/${account.id.trim().toLowerCase()}`;
+    const reason = antigravityAccountBlockedReason(providers?.antigravity, instanceId);
+    const auth = reason === null ? probeAntigravityAccountAuth(account) : undefined;
+    return { ...summarizeAccount("antigravity", account, auth), disabledReason: reason };
   }
 
   private async settingsSnapshot(): Promise<SettingsSnapshot> {
@@ -1111,6 +1133,7 @@ export class DirectConnection implements ClientApi {
       driver.setConfig(harnessConfig, this.lastWeb);
     }
     this.driverInstanceIds.set(driver, instanceId);
+    if (driverKindOfInstance(instanceId) === "antigravity") this.antigravityDrivers.set(driver, instanceId);
     if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.observeDriverEvent(driver, event)));
     this.ownedDrivers.add(driver);
     return driver;
@@ -1223,6 +1246,13 @@ export class DirectConnection implements ClientApi {
     const config = await this.loadConfig();
     this.lastProviders = driverProviders(config);
     const targets = new Set<TurnDriver>(this.ownedDrivers);
+    for (const driver of [...targets]) {
+      // Owned Antigravity drivers acquired while the setting was on lose
+      // their probe the moment the account is gated: eligibility is checked
+      // before probing, not only at acquisition.
+      const instanceId = this.antigravityDrivers.get(driver);
+      if (instanceId !== undefined && antigravityAccountBlockedReason(config.providers?.antigravity, instanceId) !== null) targets.delete(driver);
+    }
     for (const account of config.providers?.claude?.accounts ?? []) {
       if (account.enabled === false) continue;
       if (!probeClaudeAccountAuth(account).signedIn) continue;
@@ -1234,6 +1264,9 @@ export class DirectConnection implements ClientApi {
     }
     for (const account of config.providers?.antigravity?.accounts ?? []) {
       if (account.enabled === false) continue;
+      // A gated account (multiple accounts off, the default) is never
+      // launched or probed: not even its home folder is read.
+      if (antigravityAccountBlockedReason(config.providers?.antigravity, `antigravity/${account.id.trim().toLowerCase()}`) !== null) continue;
       if (!probeAntigravityAccountAuth(account).signedIn) continue;
       try {
         targets.add(this.driverFor(`antigravity/${account.id.trim().toLowerCase()}`));
@@ -1282,7 +1315,34 @@ export class DirectConnection implements ClientApi {
           await Promise.race([landed, deadline]);
         }),
     );
-    return usageLimitsSnapshot();
+    return this.gatedUsageLimitsSnapshot(config);
+  }
+
+  /**
+   * A config edit must not need a restart to apply to Antigravity: an
+   * account this connection acquired while the setting was on (so: an
+   * isolated driver, live sessions, maybe a usage probe away) is revoked
+   * the moment the config just read gates it — the driver stops, its
+   * sessions stop with it, and it is no longer owned, so no probe or
+   * prompt keeps running after the user opts out.
+   */
+  private async revokeGatedAntigravityDrivers(config: CliConfig): Promise<void> {
+    if (this.closed || this.antigravityDrivers.size === 0) return;
+    for (const [driver, instanceId] of [...this.antigravityDrivers]) {
+      if (antigravityAccountBlockedReason(config.providers?.antigravity, instanceId) === null) continue;
+      this.ownedDrivers.delete(driver);
+      this.antigravityDrivers.delete(driver);
+      if (driver.stopAll) await Effect.runPromise(driver.stopAll()).catch(() => undefined);
+    }
+  }
+
+  /** The stored usage snapshot minus gated Antigravity accounts: their windows and credits are not served while the gate is off. */
+  private gatedUsageLimitsSnapshot(config: CliConfig): Record<string, ProviderUsageLimits> {
+    const snapshot = usageLimitsSnapshot();
+    for (const key of Object.keys(snapshot)) {
+      if (driverKindOfInstance(key) === "antigravity" && antigravityAccountBlockedReason(config.providers?.antigravity, key) !== null) delete snapshot[key];
+    }
+    return snapshot;
   }
 
   // -- subscriptions -------------------------------------------------------
@@ -2042,6 +2102,18 @@ export class DirectConnection implements ClientApi {
               throw cause;
             }
           }
+          if (command.key === "providers.antigravity.allowUnsupportedUse" && next.providers?.antigravity?.allowUnsupportedUse === true) {
+            // Turning it on releases what the off default held: task notices
+            // go out now, and an admission pass starts the held wake-ups.
+            void this.context().then((ctx) => recoverTaskNotifications(ctx)).catch(() => undefined);
+            void this.usageProtection.tick().catch(() => undefined);
+          }
+          if (command.key === "providers.antigravity.allowUnsupportedUse" && next.providers?.antigravity?.allowUnsupportedUse !== true) {
+            // Turning it off revokes what the setting allowed immediately:
+            // owned drivers (and their live sessions) of now-gated accounts
+            // stop, without waiting for the next operation to load config.
+            await this.revokeGatedAntigravityDrivers(next);
+          }
           return { ...(await this.settingsSnapshot()), accepted: true };
         });
       }
@@ -2141,7 +2213,7 @@ export class DirectConnection implements ClientApi {
             if (stored) account = summarizeAccount("claude", stored, probeClaudeAccountAuth(stored));
           } else if (account.kind === "antigravity") {
             const stored = saved.config.providers?.antigravity?.accounts?.find((entry) => entry.id === account.id);
-            if (stored) account = summarizeAccount("antigravity", stored, probeAntigravityAccountAuth(stored));
+            if (stored) account = this.antigravityAccountSummary(stored, saved.config.providers);
           }
           return { account, created: saved.created, settings: await this.settingsSnapshot(), accepted: true };
         });
@@ -2174,7 +2246,7 @@ export class DirectConnection implements ClientApi {
             if (stored) account = summarizeAccount("claude", stored, probeClaudeAccountAuth(stored));
           } else if (account.kind === "antigravity") {
             const stored = updated.config.providers?.antigravity?.accounts?.find((entry) => entry.id === account.id);
-            if (stored) account = summarizeAccount("antigravity", stored, probeAntigravityAccountAuth(stored));
+            if (stored) account = this.antigravityAccountSummary(stored, updated.config.providers);
           }
           return { account, settings: await this.settingsSnapshot(), accepted: true };
         });
@@ -2215,6 +2287,27 @@ export class DirectConnection implements ClientApi {
           command.homePath?.trim() ||
           savedHome?.trim() ||
           (normalizedId !== "default" ? managedAccountHomeDisplayPath(command.kind, normalizedId) : undefined);
+        // Signing in an Antigravity account anywhere but the host `agy`
+        // login is a multiple-account use: while the setting is off (the
+        // default) it would write a homePath, an env override, or a
+        // `--gemini-dir` Moxen then refuses to ever run. Every input the
+        // login session will be given passes the one off-mode launch
+        // policy first; nothing is written and nothing is launched.
+        if (command.kind === "antigravity") {
+          const reason = antigravityOffUseLaunchBlockedReason(config.providers?.antigravity, {
+            homePath: effectiveHome,
+            env: existingAgy?.env,
+            // Account-level launch args, with the provider-level ones the
+            // login inherits when the account sets none of its own.
+            launchArgs: existingAgy?.launchArgs ?? config.providers?.antigravity?.launchArgs,
+          });
+          if (reason !== null) {
+            throw new CliError("ANTIGRAVITY_ACCOUNT_OFF", reason, {
+              exitCode: 4,
+              details: { instanceId: `antigravity/${normalizedId}`, setting: "providers.antigravity.allowUnsupportedUse" },
+            });
+          }
+        }
 
         if (effectiveHome && effectiveHome !== savedHome) {
           await this.withConfigWrite(async () => {
@@ -2338,7 +2431,7 @@ export class DirectConnection implements ClientApi {
                 })()
               : (() => {
                   const found = config.providers?.antigravity?.accounts?.find((item) => item.id.trim().toLowerCase() === entry.id);
-                  return found ? summarizeAccount("antigravity", found, probeAntigravityAccountAuth(found)) : null;
+                  return found ? this.antigravityAccountSummary(found, config.providers) : null;
                 })();
           return {
             account,
@@ -3053,7 +3146,7 @@ export class DirectConnection implements ClientApi {
       case "thread.turn.await":
         return { status: await this.turnSettled(query.threadId, query.turnId, signal) };
       case "providers.list":
-        return { providers: withLiveUsage(await this.providers()) };
+        return { providers: withLiveUsage(await this.providers(), ctx.config) };
       case "providers.accounts": {
         const config = await this.loadConfig();
         const chatgptAccounts = config.providers?.chatgpt?.accounts ?? [];
@@ -3141,7 +3234,7 @@ export class DirectConnection implements ClientApi {
       case "app.update.check":
         return await this.checkAppUpdate();
       case "usage.limits":
-        return { providers: usageLimitsSnapshot() };
+        return { providers: this.gatedUsageLimitsSnapshot(ctx.config) };
       case "usage.refresh":
         return { providers: await this.refreshUsageWindows() };
       case "usage.protection":
@@ -3363,11 +3456,14 @@ export class DirectConnection implements ClientApi {
  * is recorded under its instance id; every other provider shares its
  * driver's account.
  */
-function withLiveUsage(providers: readonly ProviderSummary[]): ProviderSummary[] {
+function withLiveUsage(providers: readonly ProviderSummary[], config: CliConfig): ProviderSummary[] {
   const live = usageLimitsSnapshot();
   return providers.map((provider) => {
     if (provider.usageLimits !== null) return provider;
     const key = usageKeyForInstance(provider.instanceId);
+    // A gated Antigravity account serves no stored usage either: its numbers
+    // are not reported once the account is off.
+    if (antigravityAccountBlockedReason(config.providers?.antigravity, provider.instanceId) !== null) return provider;
     const lower = provider.instanceId.trim().toLowerCase();
     const isMultiAccount =
       lower.startsWith("claude/") ||

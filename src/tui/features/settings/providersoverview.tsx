@@ -97,6 +97,9 @@ function isCliAuthenticated(account: ProviderAccountSummary, catalog: readonly P
 }
 
 function accountStatusLine(account: ProviderAccountSummary, catalog: readonly ProviderSummary[] | null): string {
+  // A gated Antigravity account (multiple accounts off, the default) is
+  // disabled with the reason, ahead of the user's own toggle and sign-in.
+  if (account.disabledReason) return account.disabledReason;
   if (!account.enabled) return t("settings.providers.disabled");
   const parts: string[] = [];
   if (account.email) {

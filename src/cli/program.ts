@@ -710,8 +710,13 @@ configCommand
       const context = await commandContext();
       await (await cliClient(context.config)).dispatch({ type: "settings.set", key, value });
       const { path: file, config } = await serverConfig(context);
+      // Turning Antigravity delegation on is the user's choice against
+      // Google's consumer terms: say plainly what it risks.
+      const antigravityWarning = key === "providers.antigravity.allowUnsupportedUse" && config.providers?.antigravity?.allowUnsupportedUse === true
+        ? "\nWarning: Google does not support delegation, automatic prompts or multiple accounts on Antigravity consumer plans and may suspend the account."
+        : "";
       // A secret is never echoed back.
-      writeSuccess({ path: file, config }, context, secretKeyName(key) !== null ? `Saved ${key} to the OS keychain.` : `Saved ${key}=${value}.`);
+      writeSuccess({ path: file, config }, context, secretKeyName(key) !== null ? `Saved ${key} to the OS keychain.` : `Saved ${key}=${value}.${antigravityWarning}`);
     }),
   );
 
@@ -1816,7 +1821,14 @@ providerAccounts
       const lines = result.accounts.map((account) => {
         const detail = account.email ?? account.homePath ?? account.codexHomePath ?? "-";
         const plan = account.planType ? ` (${account.planType})` : "";
-        return `${account.instanceId}\t${account.label}\t${account.enabled ? "enabled" : "disabled"}\t${detail}${plan}\t${account.model ?? "-"}`;
+        // A gated Antigravity account is disabled by the off-by-default
+        // setting, not by the user's own toggle: the reason says how to fix it.
+        const state = account.disabledReason !== undefined && account.disabledReason !== null
+          ? `disabled - ${account.disabledReason}`
+          : account.enabled
+            ? "enabled"
+            : "disabled";
+        return `${account.instanceId}\t${account.label}\t${state}\t${detail}${plan}\t${account.model ?? "-"}`;
       });
       writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No configured accounts.");
     }),

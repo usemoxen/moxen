@@ -379,6 +379,7 @@ export const es: Catalog = {
   "quit.confirm": " Salir (intro / ctrl+c otra vez) ",
   "toast.ctrlCAgain": "ctrl-c otra vez si quieres salir",
   "settings.title": "Ajustes",
+  "settings.antigravityUnsupportedUseOn": "El uso no admitido de Antigravity está activado: delegación, mensajes automáticos y varias cuentas. Google no lo admite en los planes de consumo y puede suspender la cuenta de Antigravity.",
   "settings.reading": "Leyendo los ajustes…",
   "settings.none": "No hay ajustes disponibles.",
   "settings.notCreated": "{path} (todavía no existe)",

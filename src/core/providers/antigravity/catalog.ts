@@ -11,7 +11,7 @@ import path from "node:path";
 import type { ModelSummary, ProviderSummary } from "../../catalog/summary.js";
 import { CliError } from "../../errors.js";
 import { binaryOnPath } from "../../infra/process.js";
-import { accountInstanceId, type AntigravityAccountConfig, type AntigravityProviderConfig } from "../../types.js";
+import { accountInstanceId, antigravityAccountBlockedReason, type AntigravityAccountConfig, type AntigravityProviderConfig } from "../../types.js";
 import { AcpDriver } from "../acp/driver.js";
 import type { AcpTransport } from "../acp/transport.js";
 import { ANTIGRAVITY_DEFAULT_MODEL_SLUG, antigravityAccountEnv, antigravityLaunchSpec } from "./config.js";
@@ -152,6 +152,28 @@ export async function antigravityProvider(
   const displayName = account
     ? `Antigravity (${account.label?.trim() || account.id})`
     : "Antigravity";
+  // Eligibility is decided before anything else touches the account: while
+  // a gated account is disabled, no executable or path in its home is
+  // checked (not even whether `agy` is installed there), and the reason is
+  // reported independently of installation status rather than overrun by
+  // "not installed".
+  const blockedReason = antigravityAccountBlockedReason(config, instanceId);
+  if (blockedReason !== null) {
+    return {
+      instanceId,
+      driver: "antigravity",
+      displayName,
+      installed: false,
+      enabled: false,
+      status: blockedReason,
+      authStatus: null,
+      models: [],
+      supportedRuntimeModes: null,
+      usageLimits: null,
+      skills: [],
+      disabledReason: blockedReason,
+    };
+  }
   const mergedConfig: AntigravityProviderConfig | undefined = account
     ? {
         ...(config ?? {}),
@@ -179,13 +201,19 @@ export async function antigravityProvider(
     displayName,
     installed,
     enabled: false,
-    status: !installed ? "not installed" : disabled ? "disabled" : null,
+    status: !installed
+      ? "not installed"
+      : disabled
+        ? "disabled"
+        : null,
     authStatus: null,
     models: [],
     supportedRuntimeModes: null,
     usageLimits: null,
     skills: [],
   };
+  // A gated account is disabled with the reason and never launched or
+  // probed: the driver (and so `agy`) is not constructed.
   if (!installed || disabled) return base;
 
   const now = (options.now ?? Date.now)();
