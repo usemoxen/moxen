@@ -15,6 +15,16 @@ pub enum Currency {
     Usd,
 }
 
+impl Currency {
+    /// The wire/JSON name, identical to the serde rename.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Currency::Eur => "EUR",
+            Currency::Usd => "USD",
+        }
+    }
+}
+
 pub const CURRENCIES: [Currency; 2] = [Currency::Eur, Currency::Usd];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -25,6 +35,18 @@ pub enum Frequency {
     Monthly,
     Quarterly,
     Annual,
+}
+
+impl Frequency {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Frequency::Once => "once",
+            Frequency::Weekly => "weekly",
+            Frequency::Monthly => "monthly",
+            Frequency::Quarterly => "quarterly",
+            Frequency::Annual => "annual",
+        }
+    }
 }
 
 pub fn frequency_label(frequency: Frequency) -> &'static str {
@@ -46,6 +68,17 @@ pub enum SubscriptionStatus {
     Finished,
 }
 
+impl SubscriptionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SubscriptionStatus::Active => "active",
+            SubscriptionStatus::Paused => "paused",
+            SubscriptionStatus::Cancelled => "cancelled",
+            SubscriptionStatus::Finished => "finished",
+        }
+    }
+}
+
 pub fn subscription_status_label(status: SubscriptionStatus) -> &'static str {
     match status {
         SubscriptionStatus::Active => "Activa",
@@ -64,12 +97,31 @@ pub enum ExpenseStatus {
     Done,
 }
 
+impl ExpenseStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExpenseStatus::Planned => "planned",
+            ExpenseStatus::Pending => "pending",
+            ExpenseStatus::Done => "done",
+        }
+    }
+}
+
 /// Estado de un ingreso: previsto o recibido.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IncomeStatus {
     Expected,
     Received,
+}
+
+impl IncomeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IncomeStatus::Expected => "expected",
+            IncomeStatus::Received => "received",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
