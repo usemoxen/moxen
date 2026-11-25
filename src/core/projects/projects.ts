@@ -124,16 +124,6 @@ export async function resolveStoredProject(root: string, workspaceRoot: string):
 }
 
 /**
- * First project keyed by the workspace root, removed ones included: a
- * revival keeps the removed row's id, so a preview that means to promise the
- * registration must name it (and not a synthesized one).
- */
-export async function findStoredProject(root: string, workspaceRoot: string): Promise<StoredProject | null> {
-  const projects = await loadAll(root);
-  return projects.find((project) => workspaceRootsEqual(project.workspaceRoot, workspaceRoot)) ?? null;
-}
-
-/**
  * Registry mutations serialize on one chain: a mutation is a read, a
  * transform and a whole-file rename, so two interleaved ones could each
  * acknowledge their write yet keep only the last. This makes mutations safe
@@ -175,11 +165,6 @@ export interface EnsureProjectInput {
 export interface EnsureProjectResult {
   readonly project: StoredProject;
   readonly created: boolean;
-  /**
-   * A removed project came back with its id (and the threads keyed under
-   * it); never with `created`, which says a new row was written.
-   */
-  readonly revived?: true;
   /**
    * Synthesized `project.create` command (envelope compat; applied
    * synchronously, so `dispatch` stays null). Null when the project
@@ -250,7 +235,7 @@ async function ensureStoredProjectLocked(root: string, input: EnsureProjectInput
       root,
       all.map((entry) => (entry.id === deleted.id ? revived : entry)),
     );
-    return { project: revived, created: false, revived: true, command: null };
+    return { project: revived, created: false, command: null };
   }
   const now = input.now ?? (() => new Date().toISOString());
   const createdAt = now();

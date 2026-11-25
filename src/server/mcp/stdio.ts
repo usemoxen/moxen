@@ -25,7 +25,7 @@ export const MOXEN_MCP_INSTRUCTIONS =
   "task_ask checks on a task you delegated without disturbing it: its provider answers a side question on a copy of the task's thread, with no tools and nothing added there. " +
   "message_queue queues or schedules a message on your own thread (or a task you delegated) through the user's queue: at takes an ISO time or HH:MM, conditions wait for an allowance reset or another thread; with neither it runs after the current turn. A protected thread keeps it waiting. " +
   "thread_search and thread_read find and read other threads, a step at a time. " +
-  "project_list lists Moxen's registered projects and project_resolve resolves a folder to one; project_register registers a folder as a project under the configured projectPolicy setting (never bypassing it), and only the orchestrator's own thread has it — a real registration also needs the thread running in Auto or Full access; a dry run never does. " +
+  "project_list lists Moxen's registered projects and project_resolve resolves a folder to one; registering a folder stays the user's (`moxen projects ensure`), never an agent's. " +
   "The models tool lists the providers, models and efforts you can delegate to. " +
   "usage_status reports the user's current shared provider usage, fresh rather than the hours-old figures models carries: call it before fanning work out. " +
   "context_usage reports how full your own context window is, from the latest reading Moxen recorded. " +

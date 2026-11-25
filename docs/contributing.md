@@ -57,9 +57,9 @@ exceptions.
   server process; `mcp/` is the `moxen` MCP server provider sessions get,
   over `ClientApi`: the delegation tools (`delegate`, `task_status`, `models`,
   `task_cancel`, `task_settle`, `task_send`, `task_ask`, `message_queue`,
-  `thread_search`, `thread_read`, `image_gen`, `thread_continue`) plus project
-  (`project_list`, `project_resolve`, `project_register` — the two reads for
-  every session, register never for a delegated one), thread,
+  `thread_search`, `thread_read`, `image_gen`, `thread_continue`) plus the
+  project registry reads (`project_list`, `project_resolve`, for every
+  session; writing the registry is never an agent's), thread,
   memory and utility tools — not every session gets all of them (a delegated
   task gets none of the delegation tools; research, web-fetch, memory,
   image-generation, hand-off and checklist tools are offered per session;

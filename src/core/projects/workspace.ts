@@ -17,7 +17,10 @@ async function gitOutput(cwd: string, args: readonly string[]): Promise<string |
     () => null,
   );
   if (!result || result.exitCode !== 0) return null;
-  const value = result.stdout.trim();
+  // Only the output's line terminator, never the name itself: a repository
+  // root may end in a space, which a trim would fold onto the different
+  // folder beside it.
+  const value = result.stdout.replace(/[\r\n]+$/, "");
   return value.length > 0 ? value : null;
 }
 

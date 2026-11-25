@@ -459,19 +459,16 @@ export const THREAD_TOOLS: readonly McpTool[] = [
 
 /**
  * Moxen's own projects registry (`core/projects/`), as a session sees it
- * (MXN-415): list and resolve are reads every session gets, register is a
- * registry write only the orchestrator's own thread has, live — a delegated
- * task (and a provider with orchestration switched off, which shares the
- * same `delegated` flag), a research run, and outside a dry run any thread
- * not running in Auto or Full access are refused when they call
- * (`registryWriteBarred`).
+ * (MXN-415): reads only. No agent path writes the registry — registering a
+ * folder is the user's (`moxen projects ensure`), per the store's
+ * `projectPolicy`.
  */
 export const PROJECT_TOOLS: readonly McpTool[] = [
   {
     name: "project_list",
     description:
       "List the projects registered with Moxen, one line each: project id, the folder it is keyed by (workspace root) and its title — what `moxen projects list` shows. " +
-      "Projects are how Moxen groups threads and defaults per folder. Read-only; register a folder with project_register.",
+      "Projects are how Moxen groups threads and defaults per folder. Read-only.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
@@ -480,30 +477,11 @@ export const PROJECT_TOOLS: readonly McpTool[] = [
     description:
       "Resolve one folder on the machine Moxen runs on to the project it belongs to, as `moxen projects resolve` does: the workspace root Moxen keys the folder by " +
       "(the Git repository root in repo workspace mode, the canonical folder itself otherwise, per the server's workspaceMode setting), whether it is a repository, its branch, and the project — or no project. " +
-      "The folder must exist and be a directory; pass an absolute path (it is not resolved against your working directory).",
+      "The folder must exist and be a directory; pass a fully qualified absolute path (on Windows, with its volume): it is not resolved against your working directory.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
-      properties: { cwd: { type: "string", description: "The folder to resolve, an absolute path on the machine Moxen runs on." } },
-      required: ["cwd"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "project_register",
-    description:
-      "Register a folder on the machine Moxen runs on as a Moxen project, the agent's `moxen projects ensure`: threads for that folder then live under the project, with its per-project settings and memory. " +
-      "The folder must exist and be a directory (nothing is created); the project takes its folder's name as its title. " +
-      "The registered `projectPolicy` setting decides what a folder without a project does, and is honoured, never bypassed: `existing` refuses with PROJECT_NOT_FOUND, `create` registers it. " +
-      "Pass dryRun: true to report what would be registered without changing anything. " +
-      "Registering a folder back after it was removed revives its original project and threads. " +
-      "Only the orchestrator's own thread — never a delegated task, a research run's lead or one of its roles — and, outside a dry run, only running in Auto or Full access: the write has no approval of its own, and in a lower mode a provider that never asks would register silently. Every refusal says what the user can do instead.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        cwd: { type: "string", description: "The folder to register, an absolute path on the machine Moxen runs on." },
-        dryRun: { type: "boolean", description: "Report what would be registered without writing." },
-      },
+      properties: { cwd: { type: "string", description: "The folder to resolve, a fully qualified absolute path on the machine Moxen runs on." } },
       required: ["cwd"],
       additionalProperties: false,
     },
@@ -670,11 +648,6 @@ export interface MoxenToolOptions {
 /** Whether a session with these options may call `name`: hidden tools are refused too, since a client can call a tool it was never shown. */
 function offered(name: string, options: MoxenToolOptions): boolean {
   if (options.delegated === true && DELEGATION_TOOLS.has(name)) return false;
-  // Registration is a registry write the orchestrator's thread owns: a
-  // delegated task (or a provider with orchestration switched off, which
-  // shares this flag) works inside the project it was started in and never
-  // registers another.
-  if (options.delegated === true && name === "project_register") return false;
   // A research run's lead and roles continue only through the run, never by starting a new thread.
   if (options.researchMember === true && name === "thread_continue") return false;
   if (options.webFetch === false && name === "web_fetch") return false;
@@ -902,9 +875,6 @@ export async function callMoxenTool(
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
   if (options.delegated === true && DELEGATION_TOOLS.has(name)) return { text: `${name} is not available in a delegated task: do the task yourself.`, isError: true };
-  if (options.delegated === true && name === "project_register") {
-    return { text: "project_register is not available in a delegated task: registration is the orchestrator's call. Say what needs registering in your report.", isError: true };
-  }
   if (options.webFetch === false && name === "web_fetch") return { text: "web_fetch is switched off for this provider.", isError: true };
   if (!offered(name, options) && name.startsWith("memory_")) {
     return { text: options.memory === "read" ? `${name} is not available in a delegated task: put what is worth remembering in your report.` : "Moxen memory is switched off here.", isError: true };
@@ -970,32 +940,6 @@ export async function callMoxenTool(
         return await projectListTool(api);
       case "project_resolve":
         return ok(await projectResolveTool(api, args));
-      case "project_register": {
-        if (args.dryRun !== undefined && typeof args.dryRun !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "dryRun must be true or false.");
-        const dryRun = args.dryRun === true;
-        const barred = await registryWriteBarred(api, parentThreadId, options, dryRun);
-        if (barred !== null) return barred;
-        // No `projectPolicy` of its own: the server takes the configured
-        // setting, so a policy that refuses creation is honoured, never
-        // bypassed (a refusal surfaces as this tool's error).
-        const ensured = await api.dispatch({ type: "project.ensure", cwd: argFolder(args), ...(dryRun ? { dryRun: true } : {}) });
-        return ok({
-          project: { id: ensured.project.id, title: ensured.project.title, workspaceRoot: ensured.project.workspaceRoot, createdAt: ensured.project.createdAt },
-          workspaceRoot: ensured.workspace.workspaceRoot,
-          created: ensured.created,
-          ...("revived" in ensured && ensured.revived === true ? { revived: true } : {}),
-          ...(dryRun ? { dryRun: true } : {}),
-          note: dryRun
-            ? ensured.revived === true
-              ? "Dry run: nothing was written. Registering this folder would revive its original project with the id shown, and its threads with it."
-              : "Dry run: nothing was written. Call project_register again without dryRun to register the folder."
-            : ensured.revived === true
-              ? "Revived: the folder's removed project came back with its id, its threads and its per-project settings."
-              : ensured.created
-                ? "Registered: threads for this folder now live under this project, which appears in the user's project list."
-                : "This folder already has a project; nothing was changed.",
-        });
-      }
       case "memory_search": {
         const found = await api.query({
           type: "memory.search",
@@ -1160,64 +1104,15 @@ function argFolder(args: Record<string, unknown>, key = "cwd"): string {
 }
 
 /**
- * Absolute for the server's own platform, and on Windows fully qualified:
- * `path.isAbsolute("/folder")` is true there without a volume, and paths
- * like `C:folder` are drive-relative — neither names a folder safely, so
- * only a drive path (`C:\` or `C:/`) or a UNC one (`\\server\share`) passes.
+ * Fully qualified for the server's own platform: on Windows a complete
+ * volume or UNC share — a drive with its separator (`C:\folder`, `c:/`), or
+ * `\\server\share` with both parts — passes; `path.isAbsolute("/folder")`
+ * is true there without a volume, `C:folder` is drive-relative and
+ * `\\server` names no share, so none of those may name a folder.
  */
 export function fullyQualifiedFolder(value: string, platform: NodeJS.Platform = process.platform): boolean {
-  if (platform === "win32") return /^([A-Za-z]:[\\/]|\\\\)/.test(value);
+  if (platform === "win32") return /^([A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/.test(value);
   return value.startsWith("/");
-}
-
-/**
- * Who may write the projects registry: the orchestrator's own thread, live.
- * The flags a session was started with are advice, not authority — a thread
- * that became a research lead mid-life can call a tool it was never shown,
- * and some providers run MCP tools against a registry write without asking
- * the user anything (OpenCode's default allows MCP tools). So the write
- * answers for the thread as the server sees it now: a delegated task and an
- * active research run (its lead and every role) refuse, and outside a dry
- * run the thread must be running in Auto or Full access — Moxen shows no
- * approval of its own for an MCP tool, so the user's say is the mode they
- * run the thread in (or registering the folder themselves). A thread whose
- * mode cannot be read refuses rather than answering as anyone.
- */
-async function registryWriteBarred(
-  api: ClientApi,
-  parentThreadId: string,
-  options: { readonly delegated?: boolean },
-  dryRun: boolean,
-): Promise<ToolResult | null> {
-  if (options.delegated === true) {
-    return { text: "project_register is not available in a delegated task: registration is the orchestrator's call. Say what needs registering in your report.", isError: true };
-  }
-  const run = await api.query({ type: "research.run", threadId: parentThreadId }).catch(() => null);
-  if (run !== null && (isResearchRunActive(run) || run.leadThreadId !== parentThreadId)) {
-    return {
-      text:
-        run.leadThreadId === parentThreadId
-          ? "project_register is not available while a research run is active: the lead registers nothing mid-run. Name the folder and what it is for in the run's report; the user can also register it with `moxen projects ensure --cwd <folder>`."
-          : "project_register is not available in a research run: its roles register nothing. Name the folder and what it is for in your report.",
-      isError: true,
-    };
-  }
-  if (dryRun) return null;
-  const inspected = await api.query({ type: "thread.inspect", threadId: parentThreadId }).catch(() => null);
-  const mode = inspected?.thread.runtimeMode;
-  if (mode === "auto" || mode === "full-access") return null;
-  if (mode == null) {
-    return {
-      text: "project_register needs the thread's permission mode, and it could not be read here, so the registration is refused rather than answered as anyone. The user can register the folder themselves with `moxen projects ensure --cwd <folder>`; dryRun: true still previews what would be registered.",
-      isError: true,
-    };
-  }
-  return {
-    text:
-      `project_register writes the projects registry with no approval of its own, so the thread must be running in Auto or Full access: this one runs in ${mode}, ` +
-      "where a provider that never asks (OpenCode allows MCP tools by default) would register silently. The user can register the folder themselves (`moxen projects ensure --cwd <folder>`), switch the thread's permission mode, or ask with dryRun: true to preview first.",
-    isError: true,
-  };
 }
 
 /**
@@ -1228,7 +1123,7 @@ async function registryWriteBarred(
 async function projectListTool(api: ClientApi): Promise<ToolResult> {
   const { projects } = await api.query({ type: "projects.list" });
   const rows = projects.filter((project) => project.scratch !== true);
-  if (rows.length === 0) return { text: "No registered projects. Register a folder with project_register.", isError: false };
+  if (rows.length === 0) return { text: "No registered projects. Registering a folder is the user's (`moxen projects ensure`).", isError: false };
   const lines = rows.map((project) => `- ${project.id} · ${project.workspaceRoot} · ${project.title}`);
   return { text: `${rows.length === 1 ? "One registered project" : `${rows.length} registered projects`}:\n${lines.join("\n")}`, isError: false };
 }
@@ -1240,7 +1135,7 @@ async function projectResolveTool(api: ClientApi, args: Record<string, unknown>)
     workspace: resolved.workspace,
     project: resolved.project,
     ...(resolved.project === null
-      ? { note: `No project for ${resolved.workspace.workspaceRoot}. project_register registers the folder when the configured project policy allows.` }
+      ? { note: `No project for ${resolved.workspace.workspaceRoot}. Registering a folder is the user's (\`moxen projects ensure\`).` }
       : {}),
   };
 }
