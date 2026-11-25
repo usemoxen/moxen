@@ -6261,7 +6261,7 @@ mod tests {
                                             ],
                                         },
                                         "cost": {
-                                            "totalUsd": 13.07, "partial": true, "pricedTurns": 11, "unpricedTurns": 2,
+                                            "totalUsd": 13.07, "pricedTurns": 11, "unpricedTurns": 2,
                                             "reported": true, "estimated": true,
                                             "byModel": [
                                                 {"model": "claude-opus-5", "costUsd": 11.63, "turns": 8, "unpricedTurns": 0},
@@ -7791,7 +7791,7 @@ mod tests {
         assert_eq!(breakdown.provider_cost[0].model, "claude-opus-5");
         let cost = context.cost.as_ref().expect("cost");
         assert_eq!(cost.total, Some(13.07));
-        assert!(cost.partial && cost.reported && cost.estimated);
+        assert!(cost.partial() && cost.reported && cost.estimated);
         assert_eq!(cost.by_model.len(), 3);
         assert_eq!(
             cost.by_model[2].cost, None,

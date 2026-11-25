@@ -165,7 +165,7 @@ fn fixture_context() -> ContextData {
         breakdown,
         reading: None,
         cost: crate::usage::ThreadCost::from_json(&json!({
-            "totalUsd": 13.07, "partial": false, "pricedTurns": 12, "unpricedTurns": 0,
+            "totalUsd": 13.07, "pricedTurns": 12, "unpricedTurns": 0,
             "reported": true, "estimated": false,
             "byModel": [
                 {"model": "claude-opus-5", "costUsd": 11.63, "turns": 9, "unpricedTurns": 0},
