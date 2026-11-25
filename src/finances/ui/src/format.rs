@@ -10,6 +10,17 @@ pub fn money(amount: Money) -> String {
     format_amount(amount.minor, amount.currency, false)
 }
 
+/// "2026-11-25": the text a date field shows and parses back.
+pub fn iso_date(date: NaiveDate) -> String {
+    date.format("%Y-%m-%d").to_string()
+}
+
+/// "12.99": the text an amount field shows and parses back (always a dot,
+/// whatever the interface language, so the form is unambiguous).
+pub fn amount_text(minor: i64) -> String {
+    format!("{:.2}", minor as f64 / 100.)
+}
+
 pub fn signed_money(amount: Money) -> String {
     format_amount(amount.minor, amount.currency, true)
 }
@@ -71,6 +82,38 @@ pub fn short_date(date: NaiveDate) -> String {
     }
 }
 
+/// "Nov 25" / "25 nov", for the chart axes.
+pub fn day_month(date: NaiveDate) -> String {
+    let month = language::months_short()[(date.month() - 1) as usize];
+    if language::spanish() {
+        format!("{} {month}", date.day())
+    } else {
+        format!("{month} {}", date.day())
+    }
+}
+
+/// "Nov 2026" / "nov 2026", for axes spanning about a year or more.
+pub fn month_year_short(date: NaiveDate) -> String {
+    let month = language::months_short()[(date.month() - 1) as usize];
+    format!("{month} {}", date.year())
+}
+
+/// The projection table's day cell, short enough never to be cut: "Nov 27 ·
+/// In 2 days" near today, the date alone further away (with its year once it
+/// is another one).
+pub fn table_day(date: NaiveDate, today: NaiveDate) -> String {
+    let day = if date.year() == today.year() {
+        day_month(date)
+    } else {
+        short_date(date)
+    };
+    // With a year in it there is no room for the relative day as well.
+    if date.year() == today.year() && (date - today).num_days().abs() <= 30 {
+        return format!("{day} · {}", relative_day_label(date, today));
+    }
+    day
+}
+
 /// "November 2026" / "noviembre 2026".
 pub fn month_label(year: i32, month: u32) -> String {
     format!("{} {year}", language::months_long()[(month - 1) as usize])
@@ -80,6 +123,15 @@ pub fn month_label(year: i32, month: u32) -> String {
 pub fn short_month_label(year: i32, month: u32) -> String {
     let _ = year;
     language::months_short()[(month - 1) as usize].to_string()
+}
+
+/// The amount without its decimals ("€10,000" / "10.000 €"), for axes.
+pub fn whole_money(amount: Money) -> String {
+    let full = money(Money {
+        minor: amount.minor / 100 * 100,
+        ..amount
+    });
+    full.replace(if language::spanish() { ",00" } else { ".00" }, "")
 }
 
 /// The abbreviated amount for tight spots like calendar cells: under 10,000
@@ -191,6 +243,27 @@ mod tests {
         assert_eq!(short_date(date), "25 nov 2026");
         assert_eq!(month_label(2026, 11), "noviembre 2026");
         apply(None);
+    }
+
+    #[test]
+    fn axis_amounts_drop_the_decimals() {
+        apply(Some("en"));
+        assert_eq!(whole_money(Money::eur(1_000_000)), "€10,000");
+        assert_eq!(whole_money(Money::eur(-100_000)), "-€1,000");
+        apply(Some("es-ES"));
+        assert_eq!(whole_money(Money::eur(1_000_000)), "10.000 €");
+        apply(Some("en"));
+    }
+
+    #[test]
+    fn the_projection_table_day_never_repeats_the_date() {
+        apply(Some("es-ES"));
+        let today = NaiveDate::from_ymd_opt(2026, 11, 25).expect("a date");
+        let at = |days| table_day(today + chrono::Duration::days(days), today);
+        assert!(at(2).starts_with("27 nov · "), "{}", at(2));
+        assert_eq!(at(31), "26 dic");
+        assert_eq!(at(60), "24 ene 2027");
+        apply(Some("en"));
     }
 
     #[test]

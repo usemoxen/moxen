@@ -29,7 +29,7 @@ pub fn render(
         Page::Projection => projection::render(app, window, cx),
         Page::Calendar => calendar::render(app, window, cx),
         Page::Analysis => analysis::render(app, window, cx),
-        Page::Settings => settings::render(app, cx).into_any_element(),
+        Page::Settings => settings::render(app, window, cx).into_any_element(),
     };
     div()
         .id("content")
@@ -63,9 +63,9 @@ pub fn page_header(app: &FinancesApp, subtitle_key: &'static str, actions: Vec<A
                 )
                 .child(
                     div()
-                        .font_family(theme::MONO)
-                        .text_size(px(12.))
-                        .line_height(px(16.))
+                        .font_family(theme::FONT)
+                        .text_size(px(13.5))
+                        .line_height(px(19.))
                         .text_color(color("ink-2"))
                         .child(message(subtitle_key)),
                 ),
@@ -101,9 +101,9 @@ pub fn card_header(title_key: &'static str, subtitle_key: Option<&'static str>) 
         .when_some(subtitle_key, |s, key| {
             s.child(
                 div()
-                    .font_family(theme::MONO)
-                    .text_size(px(11.5))
-                    .line_height(px(15.))
+                    .font_family(theme::FONT)
+                    .text_size(px(12.5))
+                    .line_height(px(18.))
                     .text_color(color("ink-2"))
                     .child(message(key)),
             )
@@ -138,9 +138,9 @@ pub fn stat_tile(label: &str, value: String, note: Option<String>, tone: Option<
         .when_some(note, |s, note| {
             s.child(
                 div()
-                    .font_family(theme::MONO)
-                    .text_size(px(11.))
-                    .line_height(px(14.))
+                    .font_family(theme::FONT)
+                    .text_size(px(12.))
+                    .line_height(px(17.))
                     .text_color(color("ink-2"))
                     .truncate()
                     .child(note),
@@ -241,8 +241,7 @@ pub fn disabled_action(
     icon: &'static str,
     label_key: &'static str,
 ) -> Stateful<Div> {
-    kit::button(id, message(label_key).to_string())
-        .child(kit::icon(icon, "ink-2", 13.))
+    kit::icon_label_button(id, icon, message(label_key).to_string())
         .disabled(message("sub.action.disabled"))
 }
 

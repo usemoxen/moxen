@@ -34,9 +34,9 @@ fn stat(label: &str, value: String, note: Option<String>) -> Div {
         .when_some(note, |s, note| {
             s.child(
                 div()
-                    .font_family(theme::MONO)
-                    .text_size(px(11.5))
-                    .line_height(px(15.))
+                    .font_family(theme::FONT)
+                    .text_size(px(12.5))
+                    .line_height(px(18.))
                     .text_color(color("ink-2"))
                     .truncate()
                     .child(note),
@@ -57,9 +57,9 @@ fn header(app: &FinancesApp) -> Div {
         )
         .child(
             div()
-                .font_family(theme::MONO)
-                .text_size(px(12.))
-                .line_height(px(16.))
+                .font_family(theme::FONT)
+                .text_size(px(13.5))
+                .line_height(px(19.))
                 .text_color(color("ink-2"))
                 .child(format::long_date(app.data.today())),
         )
@@ -72,8 +72,8 @@ fn warning() -> Div {
         .gap(px(8.))
         .p(px(12.))
         .rounded(px(theme::radius("radius-md")))
-        .bg(color("sunk"))
-        .border_1()
+        .bg(color("raised"))
+        .border(px(theme::px_token("stroke", "stroke-rule")))
         .border_color(color("held"))
         .child(kit::icon("alert", "held", 15.))
         .child(
@@ -91,7 +91,8 @@ fn upcoming_row(charge: &crate::data::UpcomingCharge, index: usize) -> Div {
         .flex()
         .items_center()
         .gap(px(10.))
-        .h(px(36.))
+        .h(px(40.))
+        .when(index > 0, |s| s.border_t_1().border_color(color("rule")))
         .child(
             div()
                 .size(px(8.))
@@ -111,30 +112,40 @@ fn upcoming_row(charge: &crate::data::UpcomingCharge, index: usize) -> Div {
         )
         .child(
             div()
-                .font_family(theme::MONO)
-                .text_size(px(11.5))
-                .line_height(px(15.))
+                .w(px(130.))
+                .flex_shrink_0()
+                .text_right()
+                .font_family(theme::FONT)
+                .text_size(px(12.5))
+                .line_height(px(18.))
                 .text_color(color("ink-2"))
                 .child(fill(
                     "dashboard.upcoming.on",
                     &[("{date}", &format::short_date(charge.date))],
                 )),
         )
-        .child(
-            div()
-                .w(px(110.))
+        .child({
+            let cell = div()
+                .w(px(120.))
                 .flex_shrink_0()
                 .text_right()
-                .font_family(theme::MONO)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(13.))
-                .line_height(px(17.))
-                .text_color(color("ink"))
-                .child(match charge.amount {
-                    Some(amount) => format::money(amount),
-                    None => message("dashboard.upcoming.pending").to_string(),
-                }),
-        )
+                .whitespace_nowrap();
+            match charge.amount {
+                Some(amount) => cell
+                    .font_family(theme::MONO)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(13.))
+                    .line_height(px(17.))
+                    .text_color(color("ink"))
+                    .child(format::money(amount)),
+                // A word, not a figure: quieter, and never wrapped.
+                None => cell
+                    .text_size(px(12.5))
+                    .line_height(px(17.))
+                    .text_color(color("ink-2"))
+                    .child(message("dashboard.upcoming.pending")),
+            }
+        })
 }
 
 pub fn render(
@@ -178,10 +189,10 @@ pub fn render(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(24.))
+                .gap(px(16.))
                 .p(px(24.))
                 .max_w(px(1080.))
-                .child(header(app))
+                .child(header(app).mb(px(8.)))
                 .when(incomplete, |s| s.child(warning()))
                 .child(div().flex().flex_row().gap(px(12.)).children([
                     stat(
@@ -224,9 +235,9 @@ pub fn render(
                                 .child(div().flex_1())
                                 .child(
                                     div()
-                                        .font_family(theme::MONO)
-                                        .text_size(px(11.5))
-                                        .line_height(px(15.))
+                                        .font_family(theme::FONT)
+                                        .text_size(px(12.5))
+                                        .line_height(px(18.))
                                         .text_color(color("ink-2"))
                                         .child(fill(
                                             "dashboard.chart.range",
@@ -234,22 +245,22 @@ pub fn render(
                                         )),
                                 ),
                         )
-                        .child(chart::balance_chart(history))
+                        .child(chart::balance_chart(&history, data.balance().currency))
                         .child(
                             div().flex().justify_between().children([
                                 div()
-                                    .font_family(theme::MONO)
-                                    .text_size(px(11.5))
-                                    .line_height(px(15.))
+                                    .font_family(theme::FONT)
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.))
                                     .text_color(color("ink-2"))
                                     .child(fill(
                                         "dashboard.chart.low",
                                         &[("{amount}", &format::money(low))],
                                     )),
                                 div()
-                                    .font_family(theme::MONO)
-                                    .text_size(px(11.5))
-                                    .line_height(px(15.))
+                                    .font_family(theme::FONT)
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.))
                                     .text_color(color("ink-2"))
                                     .child(fill(
                                         "dashboard.chart.high",
@@ -265,18 +276,18 @@ pub fn render(
                         .p(px(16.))
                         .flex()
                         .flex_col()
-                        .gap(px(8.))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
+                                .pb(px(8.))
                                 .child(kit::caps(message("dashboard.upcoming")))
                                 .child(div().flex_1())
                                 .child(
                                     div()
-                                        .font_family(theme::MONO)
-                                        .text_size(px(11.5))
-                                        .line_height(px(15.))
+                                        .font_family(theme::FONT)
+                                        .text_size(px(12.5))
+                                        .line_height(px(18.))
                                         .text_color(color("ink-2"))
                                         .child(fill(
                                             "dashboard.upcoming.count",

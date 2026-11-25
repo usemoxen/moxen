@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_CONFIG } from "../../core/config.js";
+import { MAX_MEMORIES } from "../../core/memory/memory.js";
 import { tempDir } from "../../core/testing/tmp.js";
 import { ensureStoredProject } from "../../core/projects/projects.js";
 import { DirectConnection } from "../connection.js";
@@ -37,6 +38,19 @@ it("refuses project-scope writes for a project that opted out, and allows global
     await expect(connection.dispatch({ ...save, projectId: project.id })).rejects.toMatchObject({ code: "MEMORY_DISABLED" });
     await connection.dispatch({ ...save, scope: "global" });
     expect((await connection.query({ type: "memory.read", name: "notes", scope: "global" })).body).toBe("Body.");
+  } finally {
+    await connection.close();
+  }
+});
+
+it("lists memories with the cap one scope holds, as the Memory page shows against it", async () => {
+  const storeRoot = tempDir("moxen-memory-cap-");
+  const connection = new DirectConnection({ storeRoot, config: async () => ({ ...DEFAULT_CONFIG }) });
+  try {
+    await connection.dispatch({ ...save, scope: "global" });
+    const listed = await connection.query({ type: "memory.list" });
+    expect(listed.cap).toBe(MAX_MEMORIES);
+    expect(listed.memories).toEqual([{ name: "notes", description: "Notes", type: "project", body: "Body.", scope: "global" }]);
   } finally {
     await connection.close();
   }

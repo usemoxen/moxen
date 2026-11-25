@@ -790,8 +790,9 @@ so a change on Claude's side does not change it.
   `memory_delete` on the `moxen` MCP server. The model picks the scope.
   A delegated task gets `memory_read` and `memory_search` only.
 - **Managing:** the TUI's memory manager shows the same memories the agents
-  see: open it from Settings > Memory (Manage memories) or the command
-  palette. Memories read global first, then this project, with the same
+  see: Settings > Memory is that manager itself (the command palette opens it
+  over whatever is on screen). Memories read global first, then this project,
+  each scope with its count against the server's cap, with the same
   search agents use. One opens in full; creating and editing take a name,
   description, type, scope and body. Saving over a name that exists asks
   first, deleting asks first, and a memory another agent saved while it was

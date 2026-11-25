@@ -4,7 +4,8 @@
 //!
 //! - [`Store`] opens the file (WAL, foreign keys on, a busy timeout), runs the
 //!   forward-only migrations — refusing a database from a newer build, and
-//!   copying the file to `<name>.pre-v2.bak` before the schema-2 migration —
+//!   copying the file to `<name>.pre-v<N>.bak` before each migration that needs
+//!   it (`pre-v2` and `pre-v3`) —
 //!   and refuses a database from a newer build.
 //! - [`repo`] holds every operation the reference's repository has —
 //!   subscriptions with their effective-dated history, incomes, expenses,
@@ -29,6 +30,7 @@
 //! statistics and the clock.
 
 pub mod backup;
+pub mod banking;
 pub mod csv;
 pub mod derive;
 pub mod error;
@@ -46,6 +48,10 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 pub use backup::{BACKUP_VERSION, Backup};
+pub use banking::{
+    BankConnection, BankConnectionInput, BankImportSummary, BankMovement, ExternalAccount,
+    ExternalAccountInput, PROVIDER_ENABLE_BANKING,
+};
 pub use csv::{CsvKind, ImportSummary};
 pub use derive::TotalState;
 pub use error::{Result, StoreError};

@@ -12,12 +12,16 @@
 //! page subscriptions       # dashboard | subscriptions | movements | projection | calendar | analysis | settings
 //! lang es-ES               # en | es-ES
 //! theme light              # dark | light
+//! account all              # all | <index of the account in the selector>
+//! dialog new-subscription  # new-subscription | new-expense | new-account | transfer
 //! scenario 350.00 5 Compra puntual   # add a scenario event: amount, days ahead, label
 //! screenshot out/main.png  # draws a frame and saves it
 //! quit
 //! ```
 
 use gpui::{prelude::*, *};
+use moxen_finances_ui::data::{AccountSelection, MovementKind};
+use moxen_finances_ui::dialog::{self, Dialog};
 use moxen_finances_ui::language::Language;
 use moxen_finances_ui::shell::{FinancesApp, Page};
 use moxen_finances_ui::theme::ThemeMode;
@@ -40,6 +44,8 @@ pub enum Command {
     Page(String),
     Lang(String),
     Theme(String),
+    Account(String),
+    Dialog(String),
     Scenario(String, i64, String),
     Screenshot(PathBuf),
     Quit,
@@ -60,6 +66,8 @@ pub fn parse(script: &str) -> Result<Vec<Command>, String> {
             "page" if !rest.is_empty() => Command::Page(rest.to_string()),
             "lang" if !rest.is_empty() => Command::Lang(rest.to_string()),
             "theme" if !rest.is_empty() => Command::Theme(rest.to_string()),
+            "account" if !rest.is_empty() => Command::Account(rest.to_string()),
+            "dialog" if !rest.is_empty() => Command::Dialog(rest.to_string()),
             "scenario" => {
                 let (amount, rest) = rest
                     .split_once(' ')
@@ -169,6 +177,44 @@ async fn execute(
                 .map_err(|cause| cause.to_string())?;
             draw(cx, any_window)?;
         }
+        Command::Account(which) => {
+            draw(cx, any_window)?;
+            window
+                .update(cx, |app, _, cx| -> Result<(), String> {
+                    let selection = if which == "all" {
+                        AccountSelection::All
+                    } else {
+                        let index: usize = which
+                            .parse()
+                            .map_err(|_| format!("account <all|index>: {which}"))?;
+                        app.data
+                            .accounts()
+                            .iter()
+                            .filter(|account| !account.archived)
+                            .nth(index)
+                            .map(|account| AccountSelection::One(account.id.clone()))
+                            .ok_or_else(|| format!("no account at index {index}"))?
+                    };
+                    app.select_account(selection, cx);
+                    Ok(())
+                })
+                .map_err(|cause| cause.to_string())??;
+            draw(cx, any_window)?;
+        }
+        Command::Dialog(which) => {
+            let wanted = match which.as_str() {
+                "new-subscription" => Dialog::NewSubscription,
+                "new-expense" => Dialog::NewMovement(MovementKind::Expense),
+                "new-account" => Dialog::NewAccount,
+                "transfer" => Dialog::Transfer,
+                _ => return Err(format!("unknown dialog: {which}")),
+            };
+            draw(cx, any_window)?;
+            window
+                .update(cx, |app, _, cx| dialog::open(app, wanted, cx))
+                .map_err(|cause| cause.to_string())?;
+            draw(cx, any_window)?;
+        }
         Command::Scenario(amount, days, label) => {
             draw(cx, any_window)?;
             window
@@ -210,7 +256,7 @@ mod tests {
     #[test]
     fn reads_a_script() {
         let commands = parse(
-            "# render the dashboard in Spanish\npage dashboard\nlang es-ES\ntheme light\nwait 300\nscenario 350.00 5 Compra puntual\nscreenshot shots/a.png\nquit\n",
+            "# render the dashboard in Spanish\npage dashboard\nlang es-ES\ntheme light\naccount all\naccount 1\nwait 300\nscenario 350.00 5 Compra puntual\nscreenshot shots/a.png\nquit\n",
         )
         .expect("script");
         assert_eq!(
@@ -219,6 +265,8 @@ mod tests {
                 Command::Page("dashboard".into()),
                 Command::Lang("es-ES".into()),
                 Command::Theme("light".into()),
+                Command::Account("all".into()),
+                Command::Account("1".into()),
                 Command::Wait(300),
                 Command::Scenario("350.00".into(), 5, "Compra puntual".into()),
                 Command::Screenshot("shots/a.png".into()),

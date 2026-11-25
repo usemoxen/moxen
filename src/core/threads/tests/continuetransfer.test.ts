@@ -95,6 +95,26 @@ async function storeCheckpoint(
 }
 
 describe("a manual continue moves pending messages to the new thread's work queue", () => {
+  it("lands moved entries in their queue order, not the order they were sent in", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    // Sent second-then-third, queued the other way round (a reordered queue).
+    await sendTurn(w.store, source.id, { prompt: "Sent first, queued second", queue: parseQueuePolicy({ conditions: [], order: 20 }) });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await sendTurn(w.store, source.id, { prompt: "Sent second, queued first", queue: parseQueuePolicy({ conditions: [], order: 10 }) });
+
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+
+    const turns = await w.store.readTurns(continued.threadId);
+    const messages = await w.store.readMessages(continued.threadId);
+    expect(turns.slice(1).map((turn) => messages.find((message) => message.id === turn.messageId)?.text)).toEqual([
+      "Sent second, queued first",
+      "Sent first, queued second",
+    ]);
+  });
+
   it("moves ordinary queued messages as entries, in order, leaving no runnable copy on the source", async () => {
     const w = await world();
     const source = await w.make("solo");

@@ -768,6 +768,26 @@ export const client: ClientApi = {
     if (query.type === "store.problems") {
       return { problems: [] };
     }
+    // The Settings Memory page asks the same queries the memory manager in the
+    // command palette does: the list it shows and the switch that stands its
+    // write buttons down.
+    if (query.type === "memory.list") {
+      return {
+        projectId: "p-cli",
+        cap: 200,
+        memories: [
+          { name: "editor-font", description: "Preferred font", type: "user", body: "JetBrains Mono.", scope: "global" },
+          { name: "run-tests", description: "How tests run", type: "project", body: "Tests run with bun, never npm.", scope: "project" },
+        ],
+        index: null,
+      };
+    }
+    if (query.type === "memory.search") {
+      return { memories: [], total: 0 };
+    }
+    if (query.type === "memory.embeddings.status") {
+      return { state: "idle", phase: "idle", device: null, message: null, file: null, percent: null, validation: null, busy: false, indexed: 0 };
+    }
     if (query.type === "config.read") {
       return { path: "/mock/config.json", exists: true, config: {}, problems: [] };
     }

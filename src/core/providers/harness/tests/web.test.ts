@@ -22,6 +22,7 @@ let server: http.Server;
 let base: string;
 let routes = new Map<string, Handler>();
 const seen: Array<{ url: string; headers: http.IncomingHttpHeaders; body: string }> = [];
+let connections = 0;
 
 beforeAll(async () => {
   server = http.createServer((request, response) => {
@@ -37,6 +38,7 @@ beforeAll(async () => {
       }
     });
   });
+  server.on("connection", () => (connections += 1));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -177,6 +179,21 @@ describe("httpRequest", () => {
     const resolve = ((_name: string, _options: unknown, callback: (error: Error | null, addresses: Array<{ address: string; family: number }>) => void) => callback(null, [{ address: "10.0.0.9", family: 4 }])) as unknown as Parameters<typeof resolveAllowed>[2];
     await expect(get("http://internal.example/", { resolve })).rejects.toBeInstanceOf(WebError);
     await expect(get("http://internal.example/", { resolve })).rejects.toMatchObject({ kind: "blocked" });
+  });
+
+  it("opens a connection of its own for each request, so a socket an earlier fetch left open can never be handed to the next", async () => {
+    routes.set("/blocked", (_req, res) => {
+      res.writeHead(403, { "content-type": "text/html" });
+      res.end("<html><body>Access denied</body></html>");
+    });
+    const before = connections;
+    // Fetched one right after the other, with no idle time between them: a pool
+    // would serve the second on the first one's socket, and that idle socket is
+    // exactly what a server (or the pool's own idle timer) drops while a loaded
+    // runner is between tests, which reads as ECONNRESET instead of the page.
+    expect((await get(`${base}/blocked`)).status).toBe(403);
+    expect((await get(`${base}/blocked`)).status).toBe(403);
+    expect(connections - before).toBe(2);
   });
 });
 

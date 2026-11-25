@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use common::{APP_ID, fixture, key_pem, now};
 use moxen_finances_banking::jwt::{Claims, Header};
-use moxen_finances_banking::{JwtError, JwtSigner, PrivateKey};
+use moxen_finances_banking::text::Language;
+use moxen_finances_banking::{JwtError, JwtSigner, Localized, PrivateKey};
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::pkcs8::DecodePrivateKey;
@@ -160,7 +161,7 @@ fn an_encrypted_key_is_refused_with_its_own_error() {
         .expect_err("an encrypted key cannot be used");
     assert_eq!(error, JwtError::EncryptedKey);
     assert!(
-        error.to_string().contains("cifrada"),
+        error.localized(Language::Spanish).contains("cifrada"),
         "the message has to tell the user what to do: {error}"
     );
 }

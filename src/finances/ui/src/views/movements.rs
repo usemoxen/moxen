@@ -1,16 +1,20 @@
 //! Movements: incomes, expenses and real charges of the subscriptions, with
 //! type and status filters, text search, sorting, grouping by month or day
-//! and the month's totals. Read-only until the store is connected: the add
-//! actions stay disabled with a tooltip.
+//! and the month's totals. When the data source accepts commands (the store
+//! does), the add buttons open the form dialog and every row can be
+//! confirmed, edited or deleted; the demo keeps them disabled.
 
 use crate::data::{Movement, MovementKind, MovementStatus};
+use crate::dialog::{self, Dialog};
 use crate::format;
-use crate::kit;
+use crate::kit::{self, Control};
 use crate::language::{capitalized, fill, message};
 use crate::model::{self, GroupBy, GroupKey, KindFilter, SortOrder, StatusFilter};
 use crate::shell::FinancesApp;
 use crate::theme::{self, TypeScale, color};
-use crate::views::{self, card, disabled_action, empty_state, page_header, scroll_page, stat_tile};
+use crate::views::{
+    self, card, disabled_action, empty_state, icon_button, page_header, scroll_page, stat_tile,
+};
 use chrono::Datelike;
 use gpui::{prelude::*, *};
 
@@ -38,7 +42,14 @@ fn status_label(movement: &Movement) -> &'static str {
     }
 }
 
-fn movement_row(movement: &Movement, last: bool, today: chrono::NaiveDate) -> Div {
+fn movement_row(
+    movement: &Movement,
+    index: usize,
+    last: bool,
+    today: chrono::NaiveDate,
+    can_mutate: bool,
+    cx: &mut Context<FinancesApp>,
+) -> Div {
     let (icon, icon_token) = kind_icon(movement.kind);
     let recurring = movement.frequency != crate::data::Frequency::Once;
     let status_token = if movement.paused {
@@ -46,6 +57,9 @@ fn movement_row(movement: &Movement, last: bool, today: chrono::NaiveDate) -> Di
     } else {
         movement.status.token()
     };
+    let confirmable = model::matches_status(movement, StatusFilter::Pending);
+    let id = movement.id.clone();
+    let kind = movement.kind;
     div()
         .flex()
         .items_center()
@@ -90,9 +104,9 @@ fn movement_row(movement: &Movement, last: bool, today: chrono::NaiveDate) -> Di
                         .child(div().size(px(6.)).rounded_full().bg(color(status_token)))
                         .child(
                             div()
-                                .font_family(theme::MONO)
-                                .text_size(px(10.5))
-                                .line_height(px(14.))
+                                .font_family(theme::FONT)
+                                .text_size(px(12.))
+                                .line_height(px(17.))
                                 .text_color(color("ink-2"))
                                 .child(message(status_label(movement))),
                         )
@@ -102,9 +116,9 @@ fn movement_row(movement: &Movement, last: bool, today: chrono::NaiveDate) -> Di
                                     .flex()
                                     .items_center()
                                     .gap(px(3.))
-                                    .font_family(theme::MONO)
-                                    .text_size(px(10.5))
-                                    .line_height(px(14.))
+                                    .font_family(theme::FONT)
+                                    .text_size(px(12.))
+                                    .line_height(px(17.))
                                     .text_color(color("ink-2"))
                                     .child(kit::icon("repeat", "ink-2", 10.))
                                     .child(message(movement.frequency.key())),
@@ -114,9 +128,9 @@ fn movement_row(movement: &Movement, last: bool, today: chrono::NaiveDate) -> Di
                 .child(
                     div()
                         .truncate()
-                        .font_family(theme::MONO)
-                        .text_size(px(11.))
-                        .line_height(px(14.))
+                        .font_family(theme::FONT)
+                        .text_size(px(12.))
+                        .line_height(px(17.))
                         .text_color(color("ink-2"))
                         .child(row_subtitle(movement, today)),
                 ),
@@ -149,6 +163,49 @@ fn movement_row(movement: &Movement, last: bool, today: chrono::NaiveDate) -> Di
                     },
                 ),
         )
+        .when(can_mutate, |s| {
+            let edit_id = id.clone();
+            let delete_id = id.clone();
+            s.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .gap(px(2.))
+                    .when(confirmable, |d| {
+                        d.child(icon_button(
+                            ("mov-confirm", index),
+                            "action-check",
+                            message("movements.action.confirm").to_string(),
+                            cx,
+                            move |this, cx| this.confirm_movement(&id, kind, cx),
+                        ))
+                    })
+                    .child(icon_button(
+                        ("mov-edit", index),
+                        "action-edit",
+                        message("movements.action.edit").to_string(),
+                        cx,
+                        move |this, cx| {
+                            dialog::open(
+                                this,
+                                Dialog::EditMovement {
+                                    id: edit_id.clone(),
+                                    kind,
+                                },
+                                cx,
+                            );
+                        },
+                    ))
+                    .child(icon_button(
+                        ("mov-delete", index),
+                        "action-x",
+                        message("movements.action.delete").to_string(),
+                        cx,
+                        move |this, cx| this.delete_movement(&delete_id, kind, cx),
+                    )),
+            )
+        })
 }
 
 /// "Category · 25 nov 2026 · 18:30 · Today — notes".
@@ -186,6 +243,46 @@ fn group_label(key: &GroupKey) -> String {
     }
 }
 
+/// The header's add buttons: live dialogs when the data source accepts
+/// commands, disabled with a tooltip otherwise.
+fn movement_actions(app: &FinancesApp, cx: &mut Context<FinancesApp>) -> Vec<AnyElement> {
+    [
+        (
+            "add-income",
+            "trend-up",
+            "movements.action.income",
+            MovementKind::Income,
+        ),
+        (
+            "add-expense",
+            "plus",
+            "movements.action.expense",
+            MovementKind::Expense,
+        ),
+        (
+            "add-charge",
+            "card",
+            "movements.action.charge",
+            MovementKind::Charge,
+        ),
+    ]
+    .iter()
+    .map(|(id, icon, key, kind)| {
+        if app.can_mutate() {
+            let kind = *kind;
+            kit::icon_label_button((*id, 0usize), icon, message(key).to_string())
+                .control(message(key))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    dialog::open(this, Dialog::NewMovement(kind), cx);
+                }))
+                .into_any_element()
+        } else {
+            disabled_action((*id, 0usize), icon, key).into_any_element()
+        }
+    })
+    .collect()
+}
+
 pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesApp>) -> AnyElement {
     if !app.data.is_ready() {
         return views::loading_page(app.page);
@@ -196,6 +293,7 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
     let rate = |from, to| data.exchange_rate(from, to);
     let movements = data.movements();
     let filter = app.movements.filter.clone();
+    let can_mutate = app.can_mutate();
 
     let incomes_count = movements
         .iter()
@@ -209,8 +307,8 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
 
     // The month's totals come from the projected events, like the reference.
     let month_events = model::collect_events(
-        data.subscriptions(),
-        movements,
+        &data.subscriptions(),
+        &movements,
         account,
         &rate,
         model::start_of_month(today),
@@ -218,7 +316,7 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
     );
     let totals = model::totals_for_month(&month_events, today.year(), today.month());
 
-    let filtered = model::filter_movements(movements, &filter, account, &rate);
+    let filtered = model::filter_movements(&movements, &filter, account, &rate);
     let groups = model::group_movements(&filtered, filter.group_by);
 
     let kind_options = [
@@ -265,19 +363,7 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
     };
 
     let mut children: Vec<AnyElement> = vec![
-        page_header(
-            app,
-            "movements.subtitle",
-            vec![
-                disabled_action(("add-income", 0), "trend-up", "movements.action.income")
-                    .into_any_element(),
-                disabled_action(("add-charge", 0), "card", "movements.action.charge")
-                    .into_any_element(),
-                disabled_action(("add-expense", 0), "plus", "movements.action.expense")
-                    .into_any_element(),
-            ],
-        )
-        .into_any_element(),
+        page_header(app, "movements.subtitle", movement_actions(app, cx)).into_any_element(),
         // The month's totals.
         div()
             .flex()
@@ -331,13 +417,11 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                 Some(if totals.net >= 0 { "added" } else { "broken" }),
             ))
             .into_any_element(),
-        // The toolbar: tabs, search, status, sort and grouping.
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(8.))
-            .child(kit::segmented(
+        // The toolbar, in two rows: what is listed (kind and search), then
+        // how it is narrowed (status) and arranged (sort and grouping).
+        {
+            let row = || div().flex().flex_wrap().items_center().gap(px(8.));
+            let kind = kit::segmented(
                 "movements-kind",
                 &kind_options,
                 kind_selected,
@@ -352,16 +436,16 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         cx,
                     );
                 },
-            ))
-            .child(div().w(px(200.)).child(kit::text_field(
+            );
+            let search = div().flex_1().min_w(px(200.)).child(kit::search_field(
                 "movements-search",
                 &filter.query,
                 message("movements.search.placeholder"),
                 window,
                 cx,
                 |this, query, cx| this.set_movements_query(query, cx),
-            )))
-            .child(kit::segmented(
+            ));
+            let status = kit::segmented(
                 "movements-status",
                 &status_options,
                 status_selected,
@@ -377,8 +461,8 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         cx,
                     );
                 },
-            ))
-            .child(kit::segmented(
+            );
+            let sort = kit::segmented(
                 "movements-sort",
                 &sort_options,
                 sort_selected,
@@ -393,8 +477,8 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         cx,
                     )
                 },
-            ))
-            .child(kit::segmented(
+            );
+            let group = kit::segmented(
                 "movements-group",
                 &group_options,
                 group_selected,
@@ -405,8 +489,21 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         cx,
                     )
                 },
-            ))
-            .into_any_element(),
+            );
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(row().child(kind).child(search))
+                .child(
+                    row()
+                        .child(status)
+                        .child(div().flex_1())
+                        .child(sort)
+                        .child(group),
+                )
+                .into_any_element()
+        },
     ];
 
     if movements.is_empty() {
@@ -436,7 +533,10 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                 .items
                 .iter()
                 .enumerate()
-                .map(|(i, m)| movement_row(m, i + 1 == group.items.len(), today).into_any_element())
+                .map(|(i, m)| {
+                    movement_row(m, i, i + 1 == group.items.len(), today, can_mutate, cx)
+                        .into_any_element()
+                })
                 .collect();
             children.push(
                 div()
@@ -487,9 +587,9 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
 
     children.push(
         div()
-            .font_family(theme::MONO)
-            .text_size(px(11.))
-            .line_height(px(15.))
+            .font_family(theme::FONT)
+            .text_size(px(12.))
+            .line_height(px(17.))
             .text_color(color("ink-2"))
             .child(message("movements.footer"))
             .into_any_element(),

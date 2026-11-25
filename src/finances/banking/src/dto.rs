@@ -15,7 +15,7 @@ use crate::model::{
     BankAccount, BankBalance, BankEntry, BankRef, BankTransaction, TransactionStatus,
 };
 use crate::money;
-use crate::{BankError, model};
+use crate::{BankError, InvalidReason, model};
 
 /// The API's error body: `message` always, `code` and the textual `error` when
 /// it has them, and a free-form `detail`.
@@ -312,7 +312,7 @@ impl BalanceResource {
     pub fn to_model(&self, account_uid: &str) -> Result<BankBalance, BankError> {
         let amount_minor = money::parse(&self.balance_amount.amount, &self.balance_amount.currency)
             .map_err(|error| {
-                BankError::invalid(None, format!("un saldo del banco no se pudo leer: {error}"))
+                BankError::invalid(InvalidReason::BalanceUnreadable(error.to_string()))
             })?;
         Ok(BankBalance {
             account_uid: account_uid.to_string(),
@@ -398,17 +398,11 @@ impl Transaction {
 
         let currency = self.transaction_amount.currency.trim().to_ascii_uppercase();
         if currency.is_empty() {
-            return Err(BankError::invalid(
-                None,
-                "una transacción del banco no indica su moneda",
-            ));
+            return Err(BankError::invalid(InvalidReason::MissingCurrency));
         }
         let magnitude =
             money::parse(&self.transaction_amount.amount, &currency).map_err(|error| {
-                BankError::invalid(
-                    None,
-                    format!("un importe del banco no se pudo leer: {error}"),
-                )
+                BankError::invalid(InvalidReason::AmountUnreadable(error.to_string()))
             })?;
         // The indicator decides the sign; the amount text only says how much,
         // and a bank that already signed it is not double-negated.
@@ -429,9 +423,7 @@ impl Transaction {
             .and_then(parse_date)
             .or_else(|| self.value_date.as_deref().and_then(parse_date))
             .or_else(|| self.transaction_date.as_deref().and_then(parse_date))
-            .ok_or_else(|| {
-                BankError::invalid(None, "una transacción del banco no trae ninguna fecha")
-            })?;
+            .ok_or_else(|| BankError::invalid(InvalidReason::MissingDate))?;
         let value_date = self.value_date.as_deref().and_then(parse_date);
 
         // Who the money was with: for a debit the creditor received it, for a
