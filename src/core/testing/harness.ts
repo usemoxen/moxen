@@ -172,6 +172,8 @@ class HarnessDriver implements TurnDriver {
 
 export interface TestHarnessOptions {
   readonly drivers?: TurnDriverFactories;
+  /** A fixed clock for the store (`nowIso`): pins ledger timestamps, e.g. to prove two writes share one millisecond. */
+  readonly clock?: () => number;
   /** Turns never settle (busy/queue/timeout paths). */
   readonly leaveTurnsRunning?: boolean;
   /** `sendTurn` throws (async ledger failure). */
@@ -244,7 +246,7 @@ export async function testHarness(options: TestHarnessOptions = {}) {
   await runProcess("git", ["add", "-A"], { cwd: work });
   await runProcess("git", ["-c", "user.email=test@example.com", "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-m", "init"], { cwd: work });
 
-  const store: ThreadStore = await openThreadStore(root);
+  const store: ThreadStore = await openThreadStore(root, options.clock ? { clock: options.clock } : {});
   const config: CliConfig = {
     ...DEFAULT_CONFIG,
     openMode: "none",

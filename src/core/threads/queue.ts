@@ -30,7 +30,20 @@ export type QueueCondition =
   | { readonly type: "reset"; readonly provider: string; readonly window: "session" | "weekly" | "all"; readonly resetsAt: string | null }
   | { readonly type: "provider"; readonly provider: string; readonly state: "exhausted" | "protected"; readonly mode: "after" | "while" }
   | { readonly type: "thread"; readonly threadId: string }
-  | { readonly type: "entry"; readonly threadId: string; readonly turnId: string };
+  | {
+      readonly type: "entry";
+      readonly threadId: string;
+      readonly turnId: string;
+      /**
+       * Identifies this condition as the wait a transfer's move machinery
+       * wrote on its destination's handoff turn — the only condition a later
+       * move replaces. `parseQueuePolicy` rebuilds conditions field for field
+       * without it, so no client edit can forge it or keep it through an
+       * echo; a row written before the mark carries none and keeps whatever
+       * its entry conditions say.
+       */
+      readonly serverWait?: true;
+    };
 
 export interface QueuePolicy {
   readonly conditions: readonly QueueCondition[];
@@ -50,6 +63,47 @@ export interface QueuePolicy {
 }
 
 export interface QueueRow { readonly thread: StoredThread; readonly turns: readonly StoredTurn[] }
+
+/**
+ * A manual "Continue in a new thread" moves the source's pending ordinary
+ * messages to the destination as Work queue entries. The source turn is
+ * marked with `transfer:<source turn id>` (inert: interrupted and removed),
+ * and the destination entry carries `handoff:transfer:<source turn id>` as
+ * its queue request id — so entry conditions elsewhere that named the
+ * source turn follow the handoff to the destination, the way
+ * `entryPending` follows queue-handoff rows. Queue-selected model/stored
+ * handoffs use their own `handoff` rows and never carry this prefix.
+ */
+export const TRANSFER_REQUEST_PREFIX = "transfer:";
+
+export function transferRequestId(sourceTurnId: string): string {
+  return `${TRANSFER_REQUEST_PREFIX}${sourceTurnId}`;
+}
+
+export function transferDestinationRequestId(sourceTurnId: string): string {
+  return `handoff:${transferRequestId(sourceTurnId)}`;
+}
+
+/** Whether this turn was moved to a continuation by a manual continue (never a queue handoff). */
+export function isTransferredTurn(turn: StoredTurn): boolean {
+  return turn.handoff?.requestId?.startsWith(TRANSFER_REQUEST_PREFIX) === true;
+}
+
+/**
+ * Whether this turn's move actually landed on the destination: staged claims
+ * carry the marker without the flag, so only a completed markTransferMoved
+ * counts. Entries elsewhere that follow the handoff keep waiting on a
+ * landed move, never on a bare claim.
+ */
+export function isTransferLanded(turn: StoredTurn): boolean {
+  return isTransferredTurn(turn) && turn.handoff?.landed === true;
+}
+
+/** Whether this queue request id is a manual-continue transfer's destination entry. */
+export function isTransferDestinationRequestId(requestId: string | undefined): boolean {
+  return requestId?.startsWith(`handoff:${TRANSFER_REQUEST_PREFIX}`) === true;
+}
+
 export interface WorkQueueEntry {
   readonly threadId: string; readonly turnId: string; readonly title: string; readonly prompt: string;
   readonly provider: string; readonly status: string; readonly policy: QueuePolicy;
@@ -224,14 +278,24 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
     // queued, dated by when the user submitted it (`createdAt`), never by
     // when its turn happened to start: a scheduled message that fires late
     // does not authorize work queued behind its timer, and a scheduled or
-    // automatic turn is not consent at all.
-    const userResumed = row.turns.some((other) => other.id !== turn.id
+    // automatic turn is not consent at all. An equal timestamp is never
+    // proof of a later send on its own — the generated handoff turn and a
+    // moved entry can be stamped in one millisecond — so "later" leans on
+    // the ledger's durable append order instead: the consent turn must
+    // have been written after this entry's row (the handoff of a move is
+    // always written before the copy that waits on it, so it can never
+    // vouch for it). Timestamps take over only when the row is missing
+    // from this snapshot and there is no order to read.
+    const queuedAt = row.turns.findIndex((candidate) => candidate.id === turn.id);
+    const userResumed = row.turns.some((other, index) => other.id !== turn.id
       && (other.origin ?? origins?.get(turnOriginKey(row.thread.id, other.id))) === undefined
       && other.queue?.automatic !== true && other.queue?.wakeUp !== true
       && !other.scheduledFor
       && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"
       && (other.status === "running" || other.status === "completed")
-      && Date.parse(other.createdAt) >= Date.parse(turn.createdAt));
+      && (queuedAt < 0
+        ? Date.parse(other.createdAt) > Date.parse(turn.createdAt)
+        : index > queuedAt && Date.parse(other.createdAt) >= Date.parse(turn.createdAt)));
     if (!userResumed) blocked.push("Antigravity automatic prompts are held: turn on providers.antigravity.allowUnsupportedUse");
   }
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {

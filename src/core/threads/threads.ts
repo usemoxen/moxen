@@ -149,6 +149,15 @@ export function hiddenTurnsProblem(store: ThreadStore, threadId: string): StoreP
 }
 
 /**
+ * A problem hiding rows of the given ledger file of this thread, if one is
+ * reported. A skipped row could be the row a transfer decision is looking
+ * for, so absence on such a snapshot is unproven — never treat it as empty.
+ */
+export function hiddenLedgerProblem(store: ThreadStore, threadId: string, file: string): StoreProblem | null {
+  return store.storeProblems().find((problem) => problem.kind === "ledger-line" && problem.threadId === threadId && problem.file === file) ?? null;
+}
+
+/**
  * A THREAD_BUSY refusal raised because a manual continuation owns the
  * checkout (see `continuationInFlight`), as opposed to one raised by a busy
  * turn. Catch sites that must yield only to a handoff — the usage wrap-up,

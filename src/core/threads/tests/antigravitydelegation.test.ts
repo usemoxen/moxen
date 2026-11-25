@@ -27,6 +27,7 @@ import {
   flushTaskNotifications,
   queueAgentMessage,
   queueTaskNotification,
+  readWorkQueue,
   recoverTaskNotifications,
   runWorkQueue,
   sendTaskMessage,
@@ -35,8 +36,8 @@ import {
 } from "../operations.js";
 import { completeTurn, createThread, interruptTurn, sendTurn } from "../threads.js";
 
-async function world() {
-  const w = await testHarness();
+async function world(clock?: () => number) {
+  const w = await testHarness(clock === undefined ? {} : { clock });
   const drivers = new Map<string, TurnDriver>();
   const ctx: OperationContext = {
     store: w.store,
@@ -217,6 +218,96 @@ describe("Antigravity automatic prompts held while off", () => {
     await runWorkQueue(w.ctx);
     await settleRuns();
     expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turnId)?.status).toBe("completed");
+  });
+
+  it("holds an agent-queued message that moved with a manual continue once the gate is off again", async () => {
+    const w = await world();
+    // With the setting on, an agent message queues as ordinary traffic;
+    // while off it queues as a wake-up instead, which never moves.
+    w.allow(true);
+    const source = await w.make("antigravity", "gemini-4-neon");
+    const first = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, first.id, { text: "Done." });
+    const queued = await queueAgentMessage(w.ctx, source.id, {
+      message: "Check the logs",
+      conditions: [{ type: "entry", threadId: source.id, turnId: first.id }],
+    });
+    expect(queued.status).toBe("queued");
+    expect(queued.waitingFor.join(" ")).not.toContain("providers.antigravity.allowUnsupportedUse");
+
+    // The gate goes back off, then the user continues in a new thread: the
+    // queued agent message moves with it like any ordinary entry.
+    w.allow(false);
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    const destination = continued.threadId;
+    const moved = (await w.store.readTurns(destination)).find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"));
+    expect(moved).toBeDefined();
+    // The message's origin traveled with the move.
+    expect((await w.store.readMessages(destination)).find((message) => message.id === moved!.messageId)?.origin).toBe("agent-message");
+
+    // The handoff turn settles, but the moved entry stays queued: on an
+    // Antigravity thread the gate holds it like any queue entry.
+    await settleRuns();
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(destination)).find((turn) => turn.id === moved!.id)?.status).toBe("queued");
+    const blocked = (await readWorkQueue(w.ctx)).find((entry) => entry.turnId === moved!.id)!.blocked.join(" ");
+    expect(blocked).toContain("providers.antigravity.allowUnsupportedUse");
+
+    // Turning the setting back on releases the moved entry.
+    w.allow(true);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(destination)).find((turn) => turn.id === moved!.id)?.status).toBe("completed");
+  });
+
+  it("never reads the generated handoff of the move as fresh user consent, even stamped in the same millisecond", async () => {
+    // One fixed millisecond: the continuation writes its handoff turn and the
+    // transfer copy at the same instant, so a tie can never masquerade as a
+    // later user send. Released only when the clock and the ledger both move.
+    const instant = Date.parse("2025-06-01T12:00:00.000Z");
+    const w = await world(() => instant);
+    w.allow(true);
+    const source = await w.make("antigravity", "gemini-4-neon");
+    const first = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, first.id, { text: "Done." });
+    const queued = await queueAgentMessage(w.ctx, source.id, {
+      message: "Check the logs",
+      conditions: [{ type: "entry", threadId: source.id, turnId: first.id }],
+    });
+    expect(queued.status).toBe("queued");
+
+    // The gate goes off, then the user continues: the handoff turn and the
+    // moved agent entry are stamped in the same millisecond, and the handoff
+    // turn carries no origin of its own.
+    w.allow(false);
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    const destination = continued.threadId;
+    const afterMove = await w.store.readTurns(destination);
+    const handoffTurn = afterMove[0]!;
+    const moved = afterMove.find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))!;
+    expect(moved).toBeDefined();
+    expect(Date.parse(handoffTurn.createdAt)).toBe(Date.parse(moved.createdAt));
+    expect(handoffTurn.origin).toBeUndefined();
+
+    // No new user message: the move's own generated handoff is not consent,
+    // so the moved entry stays held once the handoff settles.
+    await settleRuns();
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(destination)).find((turn) => turn.id === moved.id)?.status).toBe("queued");
+    const entry = (await readWorkQueue(w.ctx)).find((candidate) => candidate.turnId === moved.id)!;
+    expect(entry.blocked.join(" ")).toContain("providers.antigravity.allowUnsupportedUse");
+
+    // A genuine user message still reads as fresh on the same frozen
+    // millisecond: it is appended after the held entry, and the ledger
+    // order — not the timestamp tie — proves it later.
+    const user = (await sendTurn(w.store, destination, { prompt: "Go on" })).turn;
+    expect(Date.parse(user.createdAt)).toBe(Date.parse(moved.createdAt));
+    await completeTurn(w.store, destination, user.id, { text: "Done." });
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(destination)).find((turn) => turn.id === moved.id)?.status).toBe("completed");
   });
 });
 
