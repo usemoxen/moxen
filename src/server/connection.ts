@@ -3237,11 +3237,13 @@ export class DirectConnection implements ClientApi {
             ? query.callerThreadId
             : (await agentTaskThread(ctx2, query.callerThreadId, query.taskId)).threadId;
         const store = await this.store();
+        // Live data is a bonus: with no session here (or no thread record, as a
+        // torn-down caller leaves) the recorded reading still answers.
         const [thread, turns, reading, driver] = await Promise.all([
           store.readThreadRecord(threadId).catch(() => null),
           store.readTurns(threadId).catch(() => []),
           readContextReading(store, threadId),
-          this.sessionDriver(threadId),
+          this.sessionDriver(threadId).catch(() => null),
         ]);
         const selection = [...turns].reverse().find((turn) => turn.modelSelection !== undefined)?.modelSelection ?? thread?.modelSelection ?? null;
         return {

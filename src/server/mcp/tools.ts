@@ -236,7 +236,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "Totals only. It never estimates: with no reading yet it says so, and a reading from before a compaction is marked as not current. " +
       "It also returns what fills the window by category and the heaviest tools, as the user's context panel shows them, where the provider reports them; a provider that reports totals only says so instead of having shares guessed. " +
       "And it returns what the thread has cost, by model: an API-equivalent price of the tokens, not what a subscription is charged, with unpriced turns said plainly rather than counted as zero. " +
-      "Pass taskId to read the same for a task you delegated (the same access rule as task_status). " +
+      "Pass taskId to read the same for a task you delegated (the same access rule as task_status, and only while that thread still exists in your project). " +
       "Use it before deciding to compact or hand off instead of guessing. With no taskId it is always your own thread.",
     inputSchema: {
       type: "object",
@@ -1633,30 +1633,34 @@ async function contextUsageTool(api: ClientApi, parentThreadId: string, args: Re
     ...(taskId === undefined ? {} : { taskId }),
   });
   const { reading, breakdown, cost } = context;
-  const notes: string[] = [];
-  if (reading === null) {
-    notes.push("No context reading for this thread yet. Moxen records one while a turn runs and as it ends; it never estimates.");
-  } else if (reading.compactedSince) {
-    notes.push("A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that.");
-  }
+  // `note` keeps its legacy contract exactly: it explains a missing reading and
+  // a reading from before a compaction, and says nothing otherwise. Every new
+  // explanation is a field of its own, so a reader of `note` is unaffected.
+  const note =
+    reading === null
+      ? "No context reading for this thread yet. Moxen records one while a turn runs and as it ends; it never estimates."
+      : reading.compactedSince
+        ? "A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that."
+        : null;
   const categories = breakdown?.categories ?? [];
-  if (categories.length === 0) {
-    notes.push(
-      `${context.provider ?? "This provider"} reports the window's total only, so there is no usage-by-category breakdown for this thread. Categories come from the provider where it reports them; Moxen does not invent them.`,
-    );
-  } else if (breakdown?.estimated === true) {
-    notes.push("The category shares are Moxen's estimate from the conversation, scaled to the provider's own total.");
-  }
-  if (cost.totalUsd === null) {
-    notes.push(
-      cost.unpricedTurns > 0
+  const breakdownNote =
+    categories.length === 0
+      ? `${context.provider ?? "This provider"} reports the window's total only, so there is no usage-by-category breakdown for this thread. Categories come from the provider where it reports them; Moxen does not invent them.`
+      : breakdown?.estimated === true
+        ? "The category shares are Moxen's estimate from the conversation, scaled to the provider's own total."
+        : null;
+  const costNote = [
+    cost.totalUsd === null
+      ? cost.unpricedTurns > 0
         ? "No turn of this thread could be priced (its model has no price here), so its cost is unknown rather than zero."
-        : "This thread has no turn with a reported cost or a known price yet, so its cost is unknown rather than zero.",
-    );
-  } else if (cost.unpricedTurns > 0) {
-    notes.push(`Partial: ${cost.unpricedTurns} of this thread's turns could not be priced, so the total covers only the rest.`);
-  }
-  notes.push("Cost is the API-equivalent price of these tokens, not what a subscription is charged.");
+        : "This thread has no turn with a reported cost or a known price yet, so its cost is unknown rather than zero."
+      : cost.unpricedTurns > 0
+        ? `Partial: ${cost.unpricedTurns} of this thread's turns could not be priced, so the total covers only the rest.`
+        : null,
+    "Cost is the API-equivalent price of these tokens, not what a subscription is charged.",
+  ]
+    .filter((line): line is string => line !== null)
+    .join(" ");
 
   return {
     ...(taskId === undefined ? {} : { taskId }),
@@ -1693,9 +1697,9 @@ async function contextUsageTool(api: ClientApi, parentThreadId: string, args: Re
     ...(breakdown?.costByModel === undefined || breakdown.costByModel.length === 0
       ? {}
       : { providerCostByModel: breakdown.costByModel.map((row) => ({ model: row.model, costUsd: row.costUsd })) }),
-    // One note line, as before: what is missing, what is partial, and that the
-    // figure is an API-equivalent price rather than a bill.
-    note: notes.join(" "),
+    ...(note === null ? {} : { note }),
+    ...(breakdownNote === null ? {} : { breakdownNote }),
+    costNote,
   };
 }
 

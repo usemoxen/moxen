@@ -1300,8 +1300,13 @@ its subagents made inside a turn) that split is shown instead, said to be the
 provider's. Categories and heaviest tools come from the provider where it reports
 them; one that reports the total only says so, and nothing is estimated in its
 place. A delegated task's context and cost are read with `context_usage` and a
-`taskId`, under exactly the ownership rule `task_status` uses, and its cost is
-not rolled into the delegating thread's.
+`taskId`, under exactly the ownership rule `task_status` uses — only the thread
+that delegated the task can read it, and a settled task stays readable because
+its parent already reads its report — plus one check telemetry needs and a
+status read does not: the thread it resolves to must exist, must not be
+deleted, and must be in the caller's own project, or the answer is the same
+`TASK_NOT_FOUND` a stranger gets. Its cost is not rolled into the delegating
+thread's.
 
 **Shared usage.** An agent sees every set-up provider's allowance with the
 `usage_status` tool (on the `moxen` server, a delegated task included): each

@@ -1136,6 +1136,8 @@ export const es: Catalog = {
   "side.usage_by_category_5014": "Uso por categoría",
   "side.heaviest_tools_a33c": "Herramientas que más pesan",
   "side.costByModel": "Coste por modelo",
+  "side.currentSession": "Sesión actual",
+  "side.cost": "Coste ",
   "side.apiEquivalent": "Precio de API",
   "side.providerCostSplit": "Tal como lo informa {name}, con las llamadas de subagentes.",
   "side.unpriced": "sin precio",

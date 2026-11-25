@@ -357,4 +357,41 @@ describe("threadCostSplit (MXN-412)", () => {
     const queued = storedTurn("q1", chatgpt, { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 }, "queued");
     expect(threadCostSplit({ modelSelection: chatgpt }, [queued], { providers: {} })).toEqual(emptyThreadCost());
   });
+
+  it("keeps the rows adding up to the total exactly, whatever order the turns ran in", () => {
+    // Float-hostile fixtures: costs that only add up in one order, and models
+    // interleaved so a per-turn running total and a per-model fold can differ.
+    const first = { instanceId: "chatgpt/default", model: "gpt-6.2-sol" };
+    const second = { instanceId: "codex/default", model: "gpt-6.1-sol" };
+    const cases: ReadonlyArray<ReadonlyArray<readonly [typeof first, number]>> = [
+      [
+        [first, 0.1],
+        [second, 0.1],
+        [first, 0.4],
+      ],
+      [
+        [first, 0.07],
+        [second, 0.29],
+        [first, 0.07],
+      ],
+      [
+        [first, 1.005],
+        [second, 2.005],
+      ],
+      [
+        [first, 0.1],
+        [first, 0.2],
+      ],
+    ];
+    for (const turns of cases) {
+      const stored = turns.map(([selection, costUsd], index) =>
+        storedTurn(`f${index}`, selection, { input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0, costUsd }),
+      );
+      const split = threadCostSplit({ modelSelection: first }, stored, { providers: {} });
+      const rows = split.byModel.reduce((total, row) => total + (row.costUsd ?? 0), 0);
+      expect(rows, JSON.stringify(turns.map(([, costUsd]) => costUsd))).toBe(split.totalUsd);
+      // The flat figure every other surface reads is the same number.
+      expect(threadCostUsd({ modelSelection: first }, stored, { providers: {} })).toBe(split.totalUsd);
+    }
+  });
 });

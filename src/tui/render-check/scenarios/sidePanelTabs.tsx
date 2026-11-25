@@ -158,6 +158,73 @@ export async function runSidePanelTabs(): Promise<void> {
     fail("heaviest tool bars do not end on the same column");
   }
 
+  // The thread total, the model rows and the partial state come from ONE
+  // accounting scope (the thread's turns), and the provider's own split — the
+  // live session's, which covers only what that query priced — is its own
+  // block with its own subtotal. Sol's case: $14 of priced turns plus one
+  // unpriced turn, read while the live Claude session reports a $2 native
+  // split.
+  const threadCost = {
+    totalUsd: 14,
+    pricedTurns: 3,
+    unpricedTurns: 1,
+    reported: false,
+    estimated: true,
+    byModel: [
+      { model: "claude-opus-5", costUsd: 14, turns: 3, unpricedTurns: 0 },
+      { model: "some-local-model", costUsd: null, turns: 1, unpricedTurns: 1 },
+    ],
+  };
+  const scoped = await testRender(
+    <ContextTab
+      breakdown={{
+        usedTokens: 17,
+        maxTokens: 100,
+        cachedInputTokens: null,
+        autoCompactThreshold: null,
+        compactsAutomatically: null,
+        costUsd: 2,
+        costByModel: [{ model: "claude-opus-5", costUsd: 2 }],
+        categories: [{ name: "Messages", tokens: 17, kind: "used" }],
+        estimated: false,
+      }}
+      fallback={null}
+      cost={threadCost}
+      live
+      usageLimits={null}
+      providerName="Claude"
+      width={58}
+      now={now}
+    />,
+    { width: 60, height: 20, exitOnCtrlC: false },
+  );
+  await scoped.flush();
+  const scopedFrame = scoped.captureCharFrame();
+  console.log("--- context tab: thread total beside the live session's own split ---");
+  console.log(scopedFrame);
+  for (const expected of ["17 / 100 · 17% · $14.00", "Cost by model", "unpriced", "1 turn(s) unpriced, so the total covers the rest.", "Current session", "$2.00"]) {
+    if (!scopedFrame.includes(expected)) fail(`the cost scope frame is missing "${expected}"`);
+  }
+  // The session block is not the thread total: it carries its own subtotal.
+  const sessionRow = scopedFrame.split("\n").find((row) => row.includes("Current session"))!;
+  if (!sessionRow.includes("$2.00")) fail("the session block does not carry its own subtotal");
+  scoped.renderer.destroy();
+
+  // Priced turns with no context measurement at all: the cost and its rows are
+  // known even when the window is not, so they are still drawn.
+  const pricedOnly = await testRender(
+    <ContextTab breakdown={null} fallback={null} cost={threadCost} live={false} usageLimits={null} providerName={null} width={58} now={now} />,
+    { width: 60, height: 16, exitOnCtrlC: false },
+  );
+  await pricedOnly.flush();
+  const pricedFrame = pricedOnly.captureCharFrame();
+  console.log("--- context tab: cost known, no reading ---");
+  console.log(pricedFrame);
+  for (const expected of ["No reading yet", "$14.00", "Cost by model", "unpriced"]) {
+    if (!pricedFrame.includes(expected)) fail(`the no-reading frame is missing "${expected}"`);
+  }
+  pricedOnly.renderer.destroy();
+
   // With no subagents the section is not drawn at all: Moxen blocks Claude's
   // native Agent tool, so an empty section would advertise a tool it turns off.
   function NoSubagentsHarness() {

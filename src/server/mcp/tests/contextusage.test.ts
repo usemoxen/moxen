@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import { ensureStoredProject } from "../../../core/projects/projects.js";
 import { testHarness } from "../../../core/testing/harness.js";
-import { createThread } from "../../../core/threads/threads.js";
+import { createThread, deleteThread } from "../../../core/threads/threads.js";
 import type { TurnDriver } from "../../../core/threads/execute.js";
 import { DirectConnection } from "../../connection.js";
 import { callMoxenTool, moxenToolsFor, MOXEN_TOOLS } from "../tools.js";
@@ -50,7 +50,11 @@ interface Answer {
   };
   readonly providerCostByModel?: ReadonlyArray<{ readonly model: string; readonly costUsd: number }>;
   readonly taskId?: string;
+  /** The legacy field: only a missing or stale reading explains itself here. */
   readonly note?: string;
+  /** New explanations, one per subject, so `note` stays as it was. */
+  readonly breakdownNote?: string;
+  readonly costNote?: string;
 }
 
 /** A Codex driver whose live window the test decides: categories, or totals only. */
@@ -255,7 +259,7 @@ describe("context_usage", () => {
         estimated: false,
         byModel: [{ model: "gpt-6.2-sol", costUsd: 2.5, turns: 1, unpricedTurns: 0 }],
       });
-      expect(answer.value.note).toMatch(/API-equivalent price/u);
+      expect(answer.value.costNote).toMatch(/API-equivalent price/u);
     } finally {
       await connection.close();
     }
@@ -268,7 +272,7 @@ describe("context_usage", () => {
       const answer = await ask();
       expect(answer.value.categories).toEqual([]);
       expect(answer.value.heaviestTools).toEqual([]);
-      expect(answer.value.note).toMatch(/reports the window's total only/u);
+      expect(answer.value.breakdownNote).toMatch(/reports the window's total only/u);
     } finally {
       await connection.close();
     }
@@ -287,7 +291,7 @@ describe("context_usage", () => {
         { model: "claude-opus-5", costUsd: 5, turns: 1, unpricedTurns: 0 },
         { model: "gpt-oss-120b-medium", costUsd: null, turns: 1, unpricedTurns: 1 },
       ]);
-      expect(partial.value.note).toMatch(/Partial: 1 of this thread's turns/u);
+      expect(partial.value.costNote).toMatch(/Partial: 1 of this thread's turns/u);
 
       // A thread with nothing priceable: unknown, and said so, not $0.
       const unpricedOnly = await worldNoPrice();
@@ -295,7 +299,7 @@ describe("context_usage", () => {
       const nothing = await unpricedOnly.ask();
       expect(nothing.value.cost.totalUsd).toBeNull();
       expect(nothing.value.cost.byModel).toEqual([{ model: "gpt-oss-120b-medium", costUsd: null, turns: 1, unpricedTurns: 1 }]);
-      expect(nothing.value.note).toMatch(/unknown rather than zero/u);
+      expect(nothing.value.costNote).toMatch(/unknown rather than zero/u);
       await unpricedOnly.connection.close();
     } finally {
       await connection.close();
@@ -359,4 +363,197 @@ describe("context_usage for a delegated task", () => {
       await connection.close();
     }
   }, 30_000);
+});
+
+describe("context_usage is additive for the reply it already gave", () => {
+  it("keeps the legacy note exactly, and puts every new explanation in a new field", async () => {
+    const { connection, reading, compaction, ask } = await world();
+    try {
+      await reading(84_000, 200_000, 1);
+      const current = await ask();
+      // No note at all on a current reading, as before: the field says nothing new.
+      expect(current.value.note).toBeUndefined();
+      // The new explanations are their own fields, so a reader of `note` is untouched.
+      expect(current.value.breakdownNote).toMatch(/reports the window's total only/u);
+      expect(current.value.costNote).toMatch(/API-equivalent price/u);
+
+      const missing = await world();
+      expect((await missing.ask()).value.note).toBe(
+        "No context reading for this thread yet. Moxen records one while a turn runs and as it ends; it never estimates.",
+      );
+      await missing.connection.close();
+
+      await compaction(2);
+      expect((await ask()).value.note).toBe(
+        "A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that.",
+      );
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("answers the recorded reading when the caller's own thread record is gone", async () => {
+    const { harness, connection } = await world();
+    try {
+      // A ledger with readings and no thread record behind it: the base answered
+      // from the ledger, and the live read must degrade instead of refusing.
+      await harness.store.appendLedger("ghost", "activity", {
+        id: "ghost-reading",
+        threadId: "ghost",
+        turnId: null,
+        kind: "context-window.updated",
+        summary: "",
+        payload: { usedTokens: 12_000, maxTokens: 100_000 },
+        createdAt: at(1),
+      });
+      const answer = await callMoxenTool(connection, "ghost", "context_usage", {});
+      expect(answer.isError).toBe(false);
+      const value = JSON.parse(answer.text) as Answer;
+      expect(value.reading).toMatchObject({ usedTokens: 12_000, maxTokens: 100_000, percentUsed: 12 });
+      expect(value.note).toBeUndefined();
+      // Nothing live and no turns to price: absent, not an error.
+      expect(value.categories).toEqual([]);
+      expect(value.cost.totalUsd).toBeNull();
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
+describe("context_usage for a delegated task follows the task's lifecycle", () => {
+  /** A project, an owner, a task and (optionally) the thread the task carried on in. */
+  async function taskChain(options: { readonly continuationProject?: string; readonly noContinuation?: boolean } = {}) {
+    const harness = await testHarness();
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    const { project } = await ensureStoredProject(process.env.MOXEN_STORE_ROOT!, { workspaceRoot: await realpath(harness.work) });
+    const make = (id: string, projectId = project.id) =>
+      createThread(harness.store, { id, projectId, title: id, modelSelection: CLAUDE });
+    const owner = await make("owner");
+    const task = await make("task");
+    const continuation = options.noContinuation === true ? null : await make("next", options.continuationProject ?? project.id);
+    const now = new Date().toISOString();
+    await harness.store.appendDelegation({
+      id: "d1",
+      parentThreadId: owner.id,
+      childThreadId: task.id,
+      prompt: "Do the work",
+      status: "completed",
+      notify: true,
+      createdAt: now,
+      updatedAt: now,
+      ...(continuation === null ? {} : { continuedIn: continuation.id }),
+    });
+    // The continuation's own row, as `continueThread` writes it: the chain the
+    // owner holds, and the thread a task read resolves to.
+    if (continuation !== null) {
+      await harness.store.appendDelegation({
+        id: "d2",
+        parentThreadId: owner.id,
+        childThreadId: continuation.id,
+        prompt: "Do the work",
+        status: "completed",
+        notify: true,
+        continuesTaskId: task.id,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    // The task did its work and settled: the parent already reads its report.
+    await harness.store.appendLedger(task.id, "turns", {
+      id: "t1",
+      threadId: task.id,
+      status: "completed",
+      delivery: "started",
+      messageId: "m-t1",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      modelSelection: CLAUDE,
+      parentTurnId: null,
+      error: null,
+      usage: { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0, costUsd: 3 },
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+    });
+    const ask = async (args: Record<string, unknown>, caller = "owner") => {
+      const result = await callMoxenTool(connection, caller, "context_usage", args);
+      return { ...result, value: result.isError ? null : (JSON.parse(result.text) as Answer) };
+    };
+    return { harness, connection, owner, task, continuation, ask };
+  }
+
+  it("reads a settled task, and follows the thread it carried on in", async () => {
+    const settled = await taskChain({ noContinuation: true });
+    try {
+      const answer = await settled.ask({ taskId: "task" });
+      expect(answer.isError).toBe(false);
+      expect(answer.value).toMatchObject({ taskId: "task", threadId: "task" });
+      // A settled task keeps its cost readable: the parent already reads its report.
+      expect(answer.value!.cost.totalUsd).toBe(3);
+    } finally {
+      await settled.connection.close();
+    }
+    const world = await taskChain();
+    try {
+      expect((await world.ask({ taskId: "task" })).value).toMatchObject({ threadId: "next" });
+    } finally {
+      await world.connection.close();
+    }
+  });
+
+  it("refuses a task whose continuation was deleted, instead of reading a dead thread", async () => {
+    const world = await taskChain();
+    try {
+      await deleteThread(world.harness.store, "next");
+      const refused = await world.ask({ taskId: "task" });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toMatch(/TASK_NOT_FOUND/u);
+      expect(refused.text).not.toMatch(/cost|byModel|reading/u);
+    } finally {
+      await world.connection.close();
+    }
+  });
+
+  it("refuses a task that was itself deleted", async () => {
+    const world = await taskChain({ noContinuation: true });
+    try {
+      await deleteThread(world.harness.store, "task");
+      const refused = await world.ask({ taskId: "task" });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toMatch(/TASK_NOT_FOUND/u);
+    } finally {
+      await world.connection.close();
+    }
+  });
+
+  it("refuses a chain that resolves into another project", async () => {
+    const world = await taskChain({ continuationProject: "another-project" });
+    try {
+      const refused = await world.ask({ taskId: "task" });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toMatch(/TASK_NOT_FOUND/u);
+      expect(refused.text).not.toMatch(/foreign|cost/u);
+    } finally {
+      await world.connection.close();
+    }
+  });
+
+  it("refuses a thread that is not the parent, the task reading itself, and an unknown id", async () => {
+    const world = await taskChain();
+    try {
+      for (const caller of ["stranger", "task", "next"]) {
+        await createThread(world.harness.store, { id: caller, projectId: world.owner.projectId, title: caller, modelSelection: CLAUDE }).catch(() => undefined);
+      }
+      // A task cannot read itself, nor the thread it carried on in, and a
+      // stranger learns nothing: all four are the same refusal.
+      for (const caller of ["stranger", "task", "next"]) {
+        const refused = await world.ask({ taskId: "task" }, caller);
+        expect(refused.isError, `caller ${caller}`).toBe(true);
+        expect(refused.text).toMatch(/TASK_NOT_FOUND/u);
+      }
+      expect((await world.ask({ taskId: "no-such-task" })).isError).toBe(true);
+    } finally {
+      await world.connection.close();
+    }
+  });
 });

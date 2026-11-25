@@ -279,7 +279,6 @@ export function threadCostSplit(
 ): ThreadCost {
   const previousClaude = new Map<string, TurnUsage>();
   const models = new Map<string, ModelCostAccumulator>();
-  let total: number | null = null;
   let pricedTurns = 0;
   let unpricedTurns = 0;
   let reported = false;
@@ -317,7 +316,6 @@ export function threadCostSplit(
     const bucket = bucketOf(selection);
     bucket.turns += 1;
     if (cost !== null && Number.isFinite(cost.usd)) {
-      total = (total ?? 0) + cost.usd;
       bucket.costUsd = (bucket.costUsd ?? 0) + cost.usd;
       pricedTurns += 1;
       if (cost.source === "reported") reported = true;
@@ -364,6 +362,11 @@ export function threadCostSplit(
       const rightCost = right.costUsd ?? -1;
       return rightCost - leftCost || left.model.localeCompare(right.model);
     });
+  // The total is the fold over the rows as returned, not a running sum over the
+  // turns: adding in a different order can land on a different double ($0.1 +
+  // $0.1 + $0.4 is $0.6000000000000001 turn by turn, $0.6 by model), and a
+  // client that adds the rows it was given must get the figure we printed.
+  const total = byModel.reduce<number | null>((sum, row) => (row.costUsd === null ? sum : (sum ?? 0) + row.costUsd), null);
 
   return {
     totalUsd: total,

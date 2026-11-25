@@ -518,20 +518,30 @@ export function ContextTab({
   if (absorber !== undefined && shares.reduce((total, share) => total + share.percent, 0) >= 99.5) absorber.cells = Math.max(1, absorber.cells + drift);
   const threshold = breakdown?.autoCompactThreshold ?? fallback?.autoCompactThreshold ?? null;
   const compactsAutomatically = breakdown?.compactsAutomatically ?? fallback?.compactsAutomatically ?? null;
-  // The live reading's own figure first (a provider that reports its session
-  // cost), then the thread's computed cost, which covers every provider.
-  const costUsd = breakdown?.costUsd ?? cost?.totalUsd ?? fallback?.costUsd ?? null;
+  // One accounting scope for the figure, the rows and the partial state: the
+  // thread's own turns. The live session's native split is a different scope
+  // (it prices only what its own query ran) and is drawn as its own block.
+  const costUsd = cost?.totalUsd ?? breakdown?.costUsd ?? fallback?.costUsd ?? null;
   const processed = fallback?.totalProcessedTokens ?? null;
-  const providerSplit = breakdown?.costByModel ?? [];
-  const costRows = providerSplit.length > 0 ? providerSplit : (cost?.byModel ?? []);
-  const splitFromProvider = providerSplit.length > 0;
-  const partial = splitFromProvider ? false : (cost?.unpricedTurns ?? 0) > 0;
+  const threadRows = cost?.byModel ?? [];
+  const partial = (cost?.unpricedTurns ?? 0) > 0;
+  const sessionRows = breakdown?.costByModel ?? [];
+  const sessionTotal = sessionRows.reduce((sum, row) => sum + row.costUsd, 0);
 
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
       <Heading text={t("side.context_usage_5621")} meta={live ? "live" : t("side.last_reading_d532")} />
       {used === null ? (
-        <Empty glyph="○" text={t("side.no_reading_yet_one_a155")} />
+        <>
+          <Empty glyph="○" text={t("side.no_reading_yet_one_a155")} />
+          {/* The cost is known from the turns even when the window is not measured. */}
+          {costUsd === null ? null : (
+            <box style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1 }}>
+              <text fg={COLOR.dim}>{t("side.cost")}</text>
+              <text fg={COLOR.text}>{formatUsd(costUsd)}</text>
+            </box>
+          )}
+        </>
       ) : (
         <>
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
@@ -621,17 +631,30 @@ export function ContextTab({
           )}
         </>
       )}
-      {used === null || costRows.length === 0 ? null : (
+      {threadRows.length === 0 ? null : (
         <box style={{ flexDirection: "column", flexShrink: 0 }}>
           <Heading text={t("side.costByModel")} meta={t("side.apiEquivalent")} />
-          {splitFromProvider ? <text fg={COLOR.dim} wrapMode="word">{t("side.providerCostSplit", { name: providerName ?? t("side.thisProvider") })}</text> : null}
-          {costRows.map((row) => (
+          {threadRows.map((row) => (
             <box key={row.model} style={{ width: inner, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
               <OverflowText fg={COLOR.text} width={Math.max(4, inner - 12)}>{row.model}</OverflowText>
               <text fg={row.costUsd === null ? COLOR.faint : COLOR.text}>{row.costUsd === null ? t("side.unpriced") : formatUsd(row.costUsd)}</text>
             </box>
           ))}
           {partial ? <text fg={COLOR.dim} wrapMode="word">{t("side.costPartial", { count: cost?.unpricedTurns ?? 0 })}</text> : null}
+        </box>
+      )}
+      {sessionRows.length === 0 ? null : (
+        // The live session's own accounting, which prices only what its query
+        // ran: its own subtotal, never mixed into the thread's figure above.
+        <box style={{ flexDirection: "column", flexShrink: 0 }}>
+          <Heading text={t("side.currentSession")} meta={formatUsd(sessionTotal)} />
+          <text fg={COLOR.dim} wrapMode="word">{t("side.providerCostSplit", { name: providerName ?? t("side.thisProvider") })}</text>
+          {sessionRows.map((row) => (
+            <box key={row.model} style={{ width: inner, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
+              <OverflowText fg={COLOR.text} width={Math.max(4, inner - 12)}>{row.model}</OverflowText>
+              <text fg={COLOR.text}>{formatUsd(row.costUsd)}</text>
+            </box>
+          ))}
         </box>
       )}
       <Heading text={t("side.plan_usage_48f7")} {...(providerName === null ? {} : { meta: providerName })} />

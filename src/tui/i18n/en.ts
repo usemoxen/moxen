@@ -1142,6 +1142,8 @@ export const en = {
   "side.usage_by_category_5014": "Usage by category",
   "side.heaviest_tools_a33c": "Heaviest tools",
   "side.costByModel": "Cost by model",
+  "side.currentSession": "Current session",
+  "side.cost": "Cost ",
   "side.apiEquivalent": "API-equivalent",
   "side.providerCostSplit": "As {name} reports it, subagent calls included.",
   "side.unpriced": "unpriced",

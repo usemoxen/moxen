@@ -4604,17 +4604,32 @@ export async function requireAgentTaskThread(
 /**
  * The thread an agent reads a delegated task's context and cost from
  * (`context_usage` with a task id): the task, followed to the thread it
- * carried on in, under the ownership rule `task_status` uses. A thread that
- * did not delegate it gets the same `TASK_NOT_FOUND`.
+ * carried on in, under the ownership rule `task_status` uses. On top of that
+ * rule this read validates what it resolved to, because telemetry about a
+ * thread that is gone or belongs to another project is not the caller's to
+ * read: the thread must exist, must not be deleted, and must sit in the
+ * caller's own project. Every refusal here is the same `TASK_NOT_FOUND` a
+ * thread that never delegated the task gets, so an id it may not read and an
+ * id that does not exist are indistinguishable. `task_status` keeps its own
+ * behaviour — a settled task stays readable, and it does not police a deleted
+ * one — since the parent already reads that task's report.
  */
 export async function agentTaskThread(
   ctx: OperationContext,
   rawCallerThreadId: string,
   rawTaskId: string,
 ): Promise<{ readonly threadId: string }> {
-  const { child } = await requireAgentTaskThread(ctx, rawCallerThreadId, rawTaskId);
+  const { parent, taskId, child } = await requireAgentTaskThread(ctx, rawCallerThreadId, rawTaskId);
   const live = await ownedDelegation(ctx, rawCallerThreadId, rawTaskId).catch(() => null);
-  return { threadId: live?.childThreadId ?? child.id };
+  const threadId = live?.childThreadId ?? child.id;
+  const target = await ctx.store.readThreadRecord(threadId).catch(() => null);
+  if (!target || target.deletedAt != null || target.projectId !== parent.projectId) {
+    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parent.id}.`, {
+      exitCode: 3,
+      details: { taskId, parentThreadId: parent.id },
+    });
+  }
+  return { threadId };
 }
 
 /** A delegated task by parent + task id; the task id is the child thread id. */
