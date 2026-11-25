@@ -30,7 +30,20 @@ export type QueueCondition =
   | { readonly type: "reset"; readonly provider: string; readonly window: "session" | "weekly" | "all"; readonly resetsAt: string | null }
   | { readonly type: "provider"; readonly provider: string; readonly state: "exhausted" | "protected"; readonly mode: "after" | "while" }
   | { readonly type: "thread"; readonly threadId: string }
-  | { readonly type: "entry"; readonly threadId: string; readonly turnId: string };
+  | {
+      readonly type: "entry";
+      readonly threadId: string;
+      readonly turnId: string;
+      /**
+       * Identifies this condition as the wait a transfer's move machinery
+       * wrote on its destination's handoff turn — the only condition a later
+       * move replaces. `parseQueuePolicy` rebuilds conditions field for field
+       * without it, so no client edit can forge it or keep it through an
+       * echo; a row written before the mark carries none and keeps whatever
+       * its entry conditions say.
+       */
+      readonly serverWait?: true;
+    };
 
 export interface QueuePolicy {
   readonly conditions: readonly QueueCondition[];

@@ -15,6 +15,7 @@ import {
   migrateQueuedMessages,
   queueAgentMessage,
   readWorkQueue,
+  revertThread,
   runDueScheduledTurn,
   runWorkQueue,
   stageQueuedMessages,
@@ -125,7 +126,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     // Order, per-turn overrides and the handoff-first wait travel along.
     expect(second!.queue!.order).toBeLessThan(third!.queue!.order);
     expect(third!.modelSelection).toEqual({ instanceId: "codex", model: "other-model" });
-    expect(second!.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: destination.id, turnId: handoff!.id });
+    expect(second!.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: destination.id, turnId: handoff!.id, serverWait: true });
     expect(second!.queue!.requestId).toBe(`handoff:transfer:${secondSent.turn.id}`);
     expect(third!.queue!.requestId).toBe(`handoff:transfer:${thirdSent.turn.id}`);
     // The handoff names the move but does not assign the moved messages as this turn's work.
@@ -258,7 +259,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     const [handoff, entry] = destTurns;
     expect(handoff).toMatchObject({ status: "queued", scheduledFor: continued.scheduledFor });
     expect(entry).toMatchObject({ status: "queued", scheduledFor: at });
-    expect(entry!.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: continued.threadId, turnId: handoff!.id });
+    expect(entry!.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: continued.threadId, turnId: handoff!.id, serverWait: true });
 
     // Due before the handoff, the moved entry still waits for it: no early execution.
     await vi.waitFor(() => expect(Date.now() >= Date.parse(at)).toBe(true), { timeout: 10_000, interval: 10 });
@@ -386,6 +387,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
       type: "entry",
       threadId: continued.threadId,
       turnId: (await w.store.readTurns(continued.threadId))[0]!.id,
+      serverWait: true,
     });
     // A later admission pass keeps the observed latch: it is measured
     // against the source turn's own time, not the move.
@@ -553,7 +555,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     await migrateQueuedMessages(w.ctx, source.id, destination.id);
     const moved = (await w.store.readTurns(destination.id)).find((turn) => turn.queue?.requestId === `handoff:transfer:${staged.turn.id}`);
     expect(moved?.status).toBe("queued");
-    expect(moved?.queue?.conditions.at(-1)).toEqual({ type: "entry", threadId: destination.id, turnId: handoff.turn.id });
+    expect(moved?.queue?.conditions.at(-1)).toEqual({ type: "entry", threadId: destination.id, turnId: handoff.turn.id, serverWait: true });
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)).toMatchObject({ status: "interrupted" });
     expect((await w.store.readTurns(source.id)).find((turn) => turn.id === late.turn.id)?.status).toBe("queued");
 
@@ -1009,7 +1011,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(onwardId).toEqual(expect.any(String));
     const onward = (await w.store.readTurns(onwardId))[0]!;
     expect(onward.scheduledFor).toBe(due);
-    expect(onward.queue?.conditions).toContainEqual({ type: "entry", threadId: continued.threadId, turnId: handoffId });
+    expect(onward.queue?.conditions).toContainEqual({ type: "entry", threadId: continued.threadId, turnId: handoffId, serverWait: true });
     // Not due yet: nothing starts there early.
     expect(await runDueScheduledTurn(w.ctx, onwardId)).toBe(false);
     expect(openTurn(await w.store.readTurns(onwardId))).toBeNull();
@@ -1274,7 +1276,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     // 16 client conditions plus the internal wait on the handoff turn.
     expect(moved.queue?.conditions).toHaveLength(17);
     const internal = moved.queue!.conditions.at(-1)!;
-    expect(internal).toEqual({ type: "entry", threadId: continued.threadId, turnId: (await w.store.readTurns(continued.threadId))[0]!.id });
+    expect(internal).toEqual({ type: "entry", threadId: continued.threadId, turnId: (await w.store.readTurns(continued.threadId))[0]!.id, serverWait: true });
 
     // Re-saving the same 16 client conditions plus the internal one succeeds:
     // without the strip it would exceed the 16-condition cap. The policy is
@@ -1322,7 +1324,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     const onB = (await w.store.readTurns(ab.threadId)).find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))!;
     expect(onB.queue?.conditions).toHaveLength(17);
     const priorWait = onB.queue!.conditions.at(-1)!;
-    expect(priorWait).toEqual({ type: "entry", threadId: ab.threadId, turnId: (await w.store.readTurns(ab.threadId))[0]!.id });
+    expect(priorWait).toEqual({ type: "entry", threadId: ab.threadId, turnId: (await w.store.readTurns(ab.threadId))[0]!.id, serverWait: true });
 
     // Second move while the entry is still pending (its 16 times are in the
     // future): the settled wait on B is replaced by the wait on C's handoff,
@@ -1332,7 +1334,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(onC).toBeDefined();
     expect(onC.queue?.conditions).toHaveLength(17);
     expect(onC.queue!.conditions.slice(0, 16)).toEqual(clientConditions);
-    expect(onC.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: bc.threadId, turnId: (await w.store.readTurns(bc.threadId))[0]!.id });
+    expect(onC.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: bc.threadId, turnId: (await w.store.readTurns(bc.threadId))[0]!.id, serverWait: true });
 
     // The projection hides only C's wait, and a client echoing what it sees
     // (16 client conditions) edits without hitting the 16-condition cap.
@@ -1342,6 +1344,104 @@ describe("a manual continue moves pending messages to the new thread's work queu
     const edited = (await w.store.readTurns(bc.threadId)).find((turn) => turn.id === onC.id)!;
     expect(edited.queue?.conditions).toHaveLength(17);
     expect(edited.queue!.conditions.at(-1)).toEqual(onC.queue!.conditions.at(-1));
+  });
+
+  it("never drops a client-authored sibling wait when a second move replaces its own", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const x = await sendTurn(w.store, source.id, {
+      prompt: "X work",
+      queue: { ...parseQueuePolicy({ conditions: [] }), held: true },
+    });
+    const y = await sendTurn(w.store, source.id, {
+      prompt: "Y work",
+      queue: { ...parseQueuePolicy({ conditions: [] }), held: true },
+    });
+
+    // A -> B: both move to B's Work queue, waiting on B's generated handoff.
+    const ab = await continueThread(w.ctx, { threadId: source.id });
+    await settleRuns();
+    const xOnB = (await w.store.readTurns(ab.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${x.turn.id}`)!;
+    const yOnB = (await w.store.readTurns(ab.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${y.turn.id}`)!;
+    expect(xOnB.queue?.conditions).toHaveLength(1);
+
+    // Remove both on B, revert B to zero run turns (its generated handoff is
+    // the only turn that ran, so only the two never-ran entries stay), then
+    // restore both.
+    await editWorkQueue(w.ctx, ab.threadId, xOnB.id, "remove");
+    await editWorkQueue(w.ctx, ab.threadId, yOnB.id, "remove");
+    await revertThread(w.ctx, ab.threadId, 0);
+    await editWorkQueue(w.ctx, ab.threadId, xOnB.id, "restore");
+    await editWorkQueue(w.ctx, ab.threadId, yOnB.id, "restore");
+
+    // The client makes X wait for its sibling Y: a same-thread entry
+    // condition that reads exactly like the server's own wait on disk.
+    await editWorkQueue(w.ctx, ab.threadId, xOnB.id, "edit", parseQueuePolicy({
+      conditions: [{ type: "entry", threadId: ab.threadId, turnId: yOnB.id }],
+      held: false,
+    }));
+
+    // B -> C: the move replaces its own wait, but the client's wait on Y
+    // travels along untouched.
+    const bc = await continueThread(w.ctx, { threadId: ab.threadId });
+    await settleRuns();
+    const xOnC = (await w.store.readTurns(bc.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${xOnB.id}`)!;
+    const yOnC = (await w.store.readTurns(bc.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${yOnB.id}`)!;
+    expect(xOnC).toBeDefined();
+    expect(
+      xOnC.queue?.conditions.some((condition) => condition.type === "entry" && condition.threadId === ab.threadId && condition.turnId === yOnB.id),
+    ).toBe(true);
+
+    // Only X is released: it stays queued, because it waits for Y, which
+    // is still held.
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(bc.threadId)).find((turn) => turn.id === xOnC.id)?.status).toBe("queued");
+    expect((await w.store.readTurns(bc.threadId)).find((turn) => turn.id === yOnC.id)?.status).toBe("queued");
+
+    // With Y released too, Y runs and X follows it.
+    await editWorkQueue(w.ctx, bc.threadId, yOnC.id, "release");
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(bc.threadId)).find((turn) => turn.id === yOnC.id)?.status).toBe("completed");
+    expect((await w.store.readTurns(bc.threadId)).find((turn) => turn.id === xOnC.id)?.status).toBe("completed");
+  });
+
+  it("preserves an older row's same-thread wait it cannot prove is its own", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const held = await sendTurn(w.store, source.id, {
+      prompt: "Old-row work",
+      queue: { ...parseQueuePolicy({ conditions: [] }), held: true },
+    });
+
+    // First move, then strip the ownership mark, as a row written by a
+    // build before the mark existed reads.
+    const ab = await continueThread(w.ctx, { threadId: source.id });
+    await settleRuns();
+    const moved = (await w.store.readTurns(ab.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${held.turn.id}`)!;
+    await w.store.updateTurn(ab.threadId, moved.id, {
+      queue: {
+        ...moved.queue!,
+        conditions: moved.queue!.conditions.map((condition) =>
+          condition.type === "entry" ? { type: "entry", threadId: condition.threadId, turnId: condition.turnId } : condition,
+        ),
+      },
+    });
+
+    // Second move: the unmarked wait cannot be identified as the server's,
+    // so it is preserved rather than dropped — the safe direction — beside
+    // the new destination's own marked wait.
+    const bc = await continueThread(w.ctx, { threadId: ab.threadId });
+    const onC = (await w.store.readTurns(bc.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${moved.id}`)!;
+    expect(onC.queue?.conditions).toHaveLength(2);
+    expect(onC.queue?.conditions.at(0)).toEqual({ type: "entry", threadId: ab.threadId, turnId: (await w.store.readTurns(ab.threadId))[0]!.id });
+    const lastOnC = onC.queue?.conditions.at(-1);
+    expect(lastOnC?.type === "entry" && lastOnC.serverWait === true).toBe(true);
   });
 
   it("keeps the landed transfer marker as a durable alias when a retry continue rejoins the destination", async () => {
@@ -1403,7 +1503,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     const continued = await continueThread(w.ctx, { threadId: source.id, scheduledFor: at });
     const moved = (await w.store.readTurns(continued.threadId)).find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))!;
     const handoffId = (await w.store.readTurns(continued.threadId))[0]!.id;
-    const wait = { type: "entry", threadId: continued.threadId, turnId: handoffId };
+    const wait = { type: "entry", threadId: continued.threadId, turnId: handoffId, serverWait: true as const };
     expect(moved.queue?.conditions).toHaveLength(17);
     expect(moved.queue?.conditions.at(-1)).toEqual(wait);
 

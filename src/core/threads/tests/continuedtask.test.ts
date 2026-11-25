@@ -585,7 +585,7 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     expect(await runDueScheduledTurn(blockingCtx, source.id)).toBe(false);
     const moved = (await w.store.readTurns(continued.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${later.id}`);
     expect(moved).toMatchObject({ status: "queued", scheduledFor: expect.any(String) });
-    expect(moved!.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: continued.threadId, turnId: (await w.store.readTurns(continued.threadId))[0]!.id });
+    expect(moved!.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: continued.threadId, turnId: (await w.store.readTurns(continued.threadId))[0]!.id, serverWait: true });
     await flushTurnRunners();
     for (const threadId of [source.id, continued.threadId]) {
       for (const turn of await w.store.readTurns(threadId)) {

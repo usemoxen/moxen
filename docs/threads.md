@@ -1219,8 +1219,10 @@ further moves: a landed move's marker is a durable alias, so retrying a
 continue (which rejoins the same destination) never releases a dependent
 while the work it follows is still pending; only the moved entry settling or
 being taken back ends the trail. Each new destination replaces the wait the
-move itself added, so a second move carries one server-owned wait, never
-two; the 16-condition limit counts client conditions only.
+move itself added — the one it marks as its own at creation, beyond a reach
+of a client edit — never a wait the user wrote on a sibling entry, so a
+second move carries one server-owned wait, never two; the 16-condition
+limit counts client conditions only.
 
 The source thread keeps its rows as history, but nothing moved can run there:
 each moved turn is taken back as removed, and the handoff names the move

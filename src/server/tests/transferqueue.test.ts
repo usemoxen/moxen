@@ -60,7 +60,7 @@ describe("server queue dispatch over a moved entry at the condition cap", () => 
       const continued = await continueThread(ctx, { threadId: source.id, scheduledFor: at });
       const moved = (await harness.store.readTurns(continued.threadId)).find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))!;
       const handoffId = (await harness.store.readTurns(continued.threadId))[0]!.id;
-      const wait = { type: "entry", threadId: continued.threadId, turnId: handoffId };
+      const wait = { type: "entry", threadId: continued.threadId, turnId: handoffId, serverWait: true as const };
       expect(moved.queue?.conditions).toHaveLength(17);
 
       // The queue.read projection hides the server-owned wait: 16

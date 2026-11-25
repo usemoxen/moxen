@@ -789,7 +789,13 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
         const handoffTurn = [...siblings]
           .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
           .find((candidate) => !isTransferDestinationRequestId(candidate.queue?.requestId));
-        waitsByThread.set(threadId, handoffTurn ? { type: "entry", threadId, turnId: handoffTurn.id } : null);
+        // Reattach the stored condition itself when it carries the server's
+        // ownership mark, so a reorder keeps a later move able to replace
+        // exactly that condition; an older row's wait reattaches unmarked.
+        const stored = handoffTurn
+          ? siblings.flatMap((turn) => [...(turn.queue?.conditions ?? [])]).find((condition): condition is Extract<QueueCondition, { type: "entry" }> => condition.type === "entry" && condition.threadId === threadId && condition.turnId === handoffTurn!.id && condition.serverWait === true)
+          : undefined;
+        waitsByThread.set(threadId, stored ?? (handoffTurn ? { type: "entry", threadId, turnId: handoffTurn.id } : null));
       }
       return waitsByThread.get(threadId)!;
     };
@@ -859,7 +865,11 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
           const isWait = (condition: QueueCondition): boolean =>
             condition.type === "entry" && condition.threadId === threadId && condition.turnId === handoffTurn.id;
           incoming = { ...policy, conditions: policy.conditions.filter((condition) => !isWait(condition)) };
-          internalWait = { type: "entry", threadId, turnId: handoffTurn.id };
+          // Re-attach the stored condition itself where it is marked, so the
+          // server's ownership survives the edit; an older row's unmarked
+          // wait is re-attached unmarked (a later move then preserves it).
+          const stored = turn.queue?.conditions.find((condition): condition is Extract<QueueCondition, { type: "entry" }> => isWait(condition));
+          internalWait = { type: "entry", threadId, turnId: handoffTurn.id, ...(stored?.serverWait === true ? { serverWait: true } : {}) };
         }
       }
       const parsedPolicy = incoming
@@ -1957,24 +1967,23 @@ function buildTransferEntry(
   // last condition is the server-owned one this machinery itself appends
   // (an entry condition on the source's own handoff turn — a client cannot
   // write one, the edit guard refuses self-thread conditions), it is
-  // already satisfied and would otherwise stack beside the destination's:
-  // 16 client conditions, B's stale wait, C's wait, while the projection
-  // hides only C's. Dropping it keeps the 16-condition cap honest for
-  // client conditions; it is always last (every core write re-appends it),
-  // so the latched positions before it keep their indices.
-  const last = base.conditions.at(-1);
-  // A second move (A→B→C) carries the settled wait of the first: when the
-  // last condition is the server-owned one this machinery itself appends
-  // (an entry condition on the source's own handoff turn — a client cannot
-  // write one, the edit guard refuses self-thread conditions), it is
-  // already satisfied and would otherwise stack beside the destination's:
-  // 16 client conditions, B's stale wait, C's wait, while the projection
-  // hides only C's. Dropping it keeps the 16-condition cap honest for
-  // client conditions; it is always last (every core write re-appends it),
-  // so the latched positions before it keep their indices.
+  // A second move (A→B→C) carries the wait the first move added. The
+  // server owns exactly the condition its `serverWait` mark names — a mark
+  // no client edit can forge or preserve, since parseQueuePolicy rebuilds
+  // conditions without it — so replace that condition, wherever it sits
+  // among siblings it may have been echoed or reordered beside; a
+  // client-authored wait reads the same on disk and never drops (a
+  // sibling dependency named by a same-thread entry condition is
+  // indistinguishable otherwise). That marked wait is the settled one,
+  // already satisfied, and would otherwise stack beside the destination's
+  // — 16 client conditions, B's stale wait, C's wait, while the projection
+  // hides only C's. Rows written before the mark carry none: whatever they
+  // hold is preserved, stale wait included — keeping a harmless condition is
+  // the safe direction; dropping a real dependency is not. The marked wait
+  // is always last (every core write re-appends it), so the latched
+  // positions before it keep their indices.
   const carried = sourceTurn.queue !== undefined && isTransferDestinationRequestId(sourceTurn.queue.requestId)
-    && last?.type === "entry" && last.threadId === sourceTurn.threadId
-    ? base.conditions.slice(0, -1)
+    ? base.conditions.filter((condition) => !(condition.type === "entry" && condition.serverWait === true))
     : base.conditions;
   const policy: QueuePolicy = {
     ...base,
@@ -1983,7 +1992,7 @@ function buildTransferEntry(
     // time: without the same baseline a refresh would read them as not yet
     // happened and drop the latch.
     eventAfter: base.eventAfter ?? sourceTurn.createdAt,
-    conditions: [...carried, { type: "entry", threadId: destinationId, turnId: handoffTurnId }],
+    conditions: [...carried, { type: "entry", threadId: destinationId, turnId: handoffTurnId, serverWait: true }],
   };
   const turn: StoredTurn = {
     id: store.newId(),
