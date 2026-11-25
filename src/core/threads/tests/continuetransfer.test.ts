@@ -1305,6 +1305,85 @@ describe("a manual continue moves pending messages to the new thread's work queu
     ).rejects.toMatchObject({ code: "INVALID_QUEUE" });
   });
 
+  it("replaces the settled prior transfer wait on a second move, so 16 client conditions stay editable", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const clientConditions = Array.from({ length: 16 }, (_, index) => ({
+      type: "at" as const,
+      at: new Date(Date.now() + (index + 1) * 3_600_000).toISOString(),
+    }));
+    await sendTurn(w.store, source.id, { prompt: "Second", queue: parseQueuePolicy({ conditions: clientConditions }) });
+
+    // First move: 16 client conditions plus the server's wait on B's handoff.
+    const ab = await continueThread(w.ctx, { threadId: source.id });
+    await settleRuns();
+    const onB = (await w.store.readTurns(ab.threadId)).find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))!;
+    expect(onB.queue?.conditions).toHaveLength(17);
+    const priorWait = onB.queue!.conditions.at(-1)!;
+    expect(priorWait).toEqual({ type: "entry", threadId: ab.threadId, turnId: (await w.store.readTurns(ab.threadId))[0]!.id });
+
+    // Second move while the entry is still pending (its 16 times are in the
+    // future): the settled wait on B is replaced by the wait on C's handoff,
+    // never stacked beside it.
+    const bc = await continueThread(w.ctx, { threadId: ab.threadId });
+    const onC = (await w.store.readTurns(bc.threadId)).find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))!;
+    expect(onC).toBeDefined();
+    expect(onC.queue?.conditions).toHaveLength(17);
+    expect(onC.queue!.conditions.slice(0, 16)).toEqual(clientConditions);
+    expect(onC.queue!.conditions.at(-1)).toEqual({ type: "entry", threadId: bc.threadId, turnId: (await w.store.readTurns(bc.threadId))[0]!.id });
+
+    // The projection hides only C's wait, and a client echoing what it sees
+    // (16 client conditions) edits without hitting the 16-condition cap.
+    const entry = (await readWorkQueue(w.ctx)).find((candidate) => candidate.threadId === bc.threadId && candidate.turnId === onC.id)!;
+    expect(entry.policy.conditions).toEqual(clientConditions);
+    await editWorkQueue(w.ctx, bc.threadId, onC.id, "edit", { ...onC.queue!, conditions: [...entry.policy.conditions, onC.queue!.conditions.at(-1)!] });
+    const edited = (await w.store.readTurns(bc.threadId)).find((turn) => turn.id === onC.id)!;
+    expect(edited.queue?.conditions).toHaveLength(17);
+    expect(edited.queue!.conditions.at(-1)).toEqual(onC.queue!.conditions.at(-1));
+  });
+
+  it("keeps the landed transfer marker as a durable alias when a retry continue rejoins the destination", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const follower = await w.make("follower");
+    const held = await sendTurn(w.store, source.id, {
+      prompt: "Still to do",
+      queue: { ...parseQueuePolicy({ conditions: [] }), held: true },
+    });
+    // Another thread's entry waits on the ORIGINAL source turn id.
+    const dependent = await sendTurn(w.store, follower.id, {
+      prompt: "Follows the move",
+      queue: parseQueuePolicy({ conditions: [{ type: "entry", threadId: source.id, turnId: held.turn.id }] }),
+    });
+    expect(dependent.turn.status).toBe("queued");
+
+    // A -> B, then B -> C: the held work is pending on C, and the dependent
+    // follows the marker chain.
+    const ab = await continueThread(w.ctx, { threadId: source.id });
+    await settleRuns();
+    const bc = await continueThread(w.ctx, { threadId: ab.threadId });
+    await settleRuns();
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const queuedOnC = (await w.store.readTurns(bc.threadId)).find((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"));
+    expect(queuedOnC?.status).toBe("queued");
+    expect((await w.store.readTurns(follower.id)).find((turn) => turn.id === dependent.turn.id)?.status).toBe("queued");
+
+    // A retry Continue on A rejoins B. The landed marker on A is a durable
+    // alias: the moved work on C is still the prerequisite the follower
+    // waits on, and A's own handoff still names the move, not the text.
+    const rejoined = await continueThread(w.ctx, { threadId: source.id });
+    expect(rejoined.threadId).toBe(ab.threadId);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(follower.id)).find((turn) => turn.id === dependent.turn.id)?.status).toBe("queued");
+    const original = (await w.store.readTurns(source.id)).find((turn) => turn.id === held.turn.id)!;
+    expect(original.handoff?.landed).toBe(true);
+    expect(await buildHandoff(w.store, source.id, {})).not.toContain("Still to do");
+  });
+
   it("hides the server wait from the projected policy and reattaches it on edit, preserving handoff ordering", async () => {
     const w = await world();
     const source = await w.make("solo");

@@ -1214,7 +1214,13 @@ a scheduled continuation still runs its handoff before anything that moved.
 An entry keeps its scheduled time, conditions (and latched state), user hold,
 per-turn model, runtime and interaction-mode overrides, origin and
 notification facts, and attachments. An entry condition elsewhere that names
-a moved message follows it to the new thread.
+a moved message follows it to the new thread, and keeps following it across
+further moves: a landed move's marker is a durable alias, so retrying a
+continue (which rejoins the same destination) never releases a dependent
+while the work it follows is still pending; only the moved entry settling or
+being taken back ends the trail. Each new destination replaces the wait the
+move itself added, so a second move carries one server-owned wait, never
+two; the 16-condition limit counts client conditions only.
 
 The source thread keeps its rows as history, but nothing moved can run there:
 each moved turn is taken back as removed, and the handoff names the move
@@ -1228,7 +1234,9 @@ queue-selected model/stored handoffs, keep their own semantics and never
 move this way; removed entries stay removed. A moved agent-queued message
 keeps its origin, so on an Antigravity thread with automatic prompts held it
 waits in the Work queue like any agent-queued message there until the user's
-next message or the setting turns on. The agent's `thread_continue`
+next message on the new thread or the setting turns on; the generated handoff
+of the move itself is never read as the user's message, not even when both
+are written in the same millisecond. The agent's `thread_continue`
 above is unchanged: queued work left on the old thread stays there and runs
 there.
 

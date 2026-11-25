@@ -265,14 +265,24 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
     // queued, dated by when the user submitted it (`createdAt`), never by
     // when its turn happened to start: a scheduled message that fires late
     // does not authorize work queued behind its timer, and a scheduled or
-    // automatic turn is not consent at all.
-    const userResumed = row.turns.some((other) => other.id !== turn.id
+    // automatic turn is not consent at all. An equal timestamp is never
+    // proof of a later send on its own — the generated handoff turn and a
+    // moved entry can be stamped in one millisecond — so "later" leans on
+    // the ledger's durable append order instead: the consent turn must
+    // have been written after this entry's row (the handoff of a move is
+    // always written before the copy that waits on it, so it can never
+    // vouch for it). Timestamps take over only when the row is missing
+    // from this snapshot and there is no order to read.
+    const queuedAt = row.turns.findIndex((candidate) => candidate.id === turn.id);
+    const userResumed = row.turns.some((other, index) => other.id !== turn.id
       && (other.origin ?? origins?.get(turnOriginKey(row.thread.id, other.id))) === undefined
       && other.queue?.automatic !== true && other.queue?.wakeUp !== true
       && !other.scheduledFor
       && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"
       && (other.status === "running" || other.status === "completed")
-      && Date.parse(other.createdAt) >= Date.parse(turn.createdAt));
+      && (queuedAt < 0
+        ? Date.parse(other.createdAt) > Date.parse(turn.createdAt)
+        : index > queuedAt && Date.parse(other.createdAt) >= Date.parse(turn.createdAt)));
     if (!userResumed) blocked.push("Antigravity automatic prompts are held: turn on providers.antigravity.allowUnsupportedUse");
   }
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {

@@ -1953,6 +1953,29 @@ function buildTransferEntry(
         sequential: false,
         continuation: "same-thread" as const,
       };
+  // A second move (A→B→C) carries the settled wait of the first: when the
+  // last condition is the server-owned one this machinery itself appends
+  // (an entry condition on the source's own handoff turn — a client cannot
+  // write one, the edit guard refuses self-thread conditions), it is
+  // already satisfied and would otherwise stack beside the destination's:
+  // 16 client conditions, B's stale wait, C's wait, while the projection
+  // hides only C's. Dropping it keeps the 16-condition cap honest for
+  // client conditions; it is always last (every core write re-appends it),
+  // so the latched positions before it keep their indices.
+  const last = base.conditions.at(-1);
+  // A second move (A→B→C) carries the settled wait of the first: when the
+  // last condition is the server-owned one this machinery itself appends
+  // (an entry condition on the source's own handoff turn — a client cannot
+  // write one, the edit guard refuses self-thread conditions), it is
+  // already satisfied and would otherwise stack beside the destination's:
+  // 16 client conditions, B's stale wait, C's wait, while the projection
+  // hides only C's. Dropping it keeps the 16-condition cap honest for
+  // client conditions; it is always last (every core write re-appends it),
+  // so the latched positions before it keep their indices.
+  const carried = sourceTurn.queue !== undefined && isTransferDestinationRequestId(sourceTurn.queue.requestId)
+    && last?.type === "entry" && last.threadId === sourceTurn.threadId
+    ? base.conditions.slice(0, -1)
+    : base.conditions;
   const policy: QueuePolicy = {
     ...base,
     requestId,
@@ -1960,7 +1983,7 @@ function buildTransferEntry(
     // time: without the same baseline a refresh would read them as not yet
     // happened and drop the latch.
     eventAfter: base.eventAfter ?? sourceTurn.createdAt,
-    conditions: [...base.conditions, { type: "entry", threadId: destinationId, turnId: handoffTurnId }],
+    conditions: [...carried, { type: "entry", threadId: destinationId, turnId: handoffTurnId }],
   };
   const turn: StoredTurn = {
     id: store.newId(),
@@ -2300,9 +2323,16 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
           // pass. A destination entry that is already whole and still live
           // stands: unmarking now would release cross-thread dependents
           // early, while the move is still queued ahead of them — so its
-          // marker stays until the entry settles. Everything else reads as
-          // ordinary removed history from here on, and a partial entry,
-          // which can never complete now, is taken back too.
+          // marker stays until the entry settles. The same goes for an
+          // entry that carried the work onward (A→B→C): it is a transfer
+          // row of its own now, and the marker here is the durable alias a
+          // cross-thread dependent still follows — unmarking would let the
+          // dependent run while the work is still pending (a retry continue
+          // on A rejoins B and reads B's interrupted transfer row as
+          // terminal) and would also resurrect the moved text in this
+          // thread's handoff projection. Everything else reads as ordinary
+          // removed history from here on, and a partial entry, which can
+          // never complete now, is taken back too.
           const primary = byId.get(sourceTurn.messageId);
           const requestId = transferDestinationRequestId(sourceTurn.id);
           const entry = existing.find((turn) => turn.queue?.requestId === requestId) ?? null;
@@ -2313,7 +2343,8 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
             ? transferEntryComplete(entry, destinationMessages, primary.text)
             : destinationMessages.some((message) => message.id === entry.messageId));
           const live = entry !== null && (entry.status === "running" || (entry.status === "queued" && entry.queue !== undefined && entry.queue.removed !== true));
-          if (whole && live) continue;
+          const movedOnward = entry !== null && isTransferredTurn(entry);
+          if (whole && (live || movedOnward)) continue;
           const current = await store.readTurns(sourceId);
           await store.rewriteLedger(
             sourceId,
