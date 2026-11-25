@@ -8,11 +8,15 @@ use serde::Serialize;
 
 use moxen_finances_core::types::{
     ActualCharge, Currency, ExchangeRate, Expense, ExpenseStatus, Frequency, Income, IncomeStatus,
+    Transfer,
 };
 
 use crate::Store;
 use crate::error::{Result, StoreError};
-use crate::row::{log_audit, map_charge, map_expense, map_income, map_rate, new_id, now};
+use crate::repo::{read_account_row, resolve_account_id};
+use crate::row::{
+    log_audit, map_charge, map_expense, map_income, map_rate, map_transfer, new_id, now,
+};
 
 fn read_income_row(conn: &Connection, id: &str) -> Result<Option<Income>> {
     let mut statement = conn.prepare("SELECT * FROM incomes WHERE id = ?")?;
@@ -61,6 +65,10 @@ pub struct IncomeInput {
     pub notes: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_amount_minor: Option<i64>,
+    /// LOCAL-025: the account the income lands in. Empty means the first
+    /// account, which is what the single-account reference did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl Default for IncomeInput {
@@ -77,6 +85,7 @@ impl Default for IncomeInput {
             paused: false,
             notes: String::new(),
             actual_amount_minor: None,
+            account_id: None,
         }
     }
 }
@@ -84,12 +93,13 @@ impl Default for IncomeInput {
 pub(crate) fn create_income(conn: &Connection, input: &IncomeInput) -> Result<Income> {
     let id = new_id(conn)?;
     let stamped = now();
+    let account_id = resolve_account_id(conn, input.account_id.as_deref().unwrap_or(""))?;
     let transaction = conn.unchecked_transaction()?;
     transaction.execute(
         "INSERT INTO incomes
           (id, concept, amount_minor, currency, date, time, frequency, end_date, status, paused, notes,
-           actual_amount_minor, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+           actual_amount_minor, created_at, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             id,
             input.concept,
@@ -103,7 +113,8 @@ pub(crate) fn create_income(conn: &Connection, input: &IncomeInput) -> Result<In
             input.paused,
             input.notes,
             input.actual_amount_minor,
-            stamped
+            stamped,
+            account_id
         ],
     )?;
     log_audit(&transaction, "income", &id, "create", input, &stamped)?;
@@ -126,10 +137,12 @@ pub(crate) fn update_income(
         return Ok(None);
     };
     let stamped = now();
+    let account_id = resolve_account_id(conn, input.account_id.as_deref().unwrap_or(""))?;
     let transaction = conn.unchecked_transaction()?;
     transaction.execute(
         "UPDATE incomes SET concept = ?, amount_minor = ?, currency = ?, date = ?, time = ?,
-           frequency = ?, end_date = ?, status = ?, paused = ?, notes = ?, actual_amount_minor = ?
+           frequency = ?, end_date = ?, status = ?, paused = ?, notes = ?, actual_amount_minor = ?,
+           account_id = ?
          WHERE id = ?",
         params![
             input.concept,
@@ -143,6 +156,7 @@ pub(crate) fn update_income(
             input.paused,
             input.notes,
             input.actual_amount_minor,
+            account_id,
             id
         ],
     )?;
@@ -187,6 +201,10 @@ pub struct ExpenseInput {
     pub notes: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_amount_minor: Option<i64>,
+    /// LOCAL-025: the account the expense is paid from. Empty means the
+    /// first account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl Default for ExpenseInput {
@@ -203,6 +221,7 @@ impl Default for ExpenseInput {
             status: ExpenseStatus::Planned,
             notes: String::new(),
             actual_amount_minor: None,
+            account_id: None,
         }
     }
 }
@@ -210,12 +229,13 @@ impl Default for ExpenseInput {
 pub(crate) fn create_expense(conn: &Connection, input: &ExpenseInput) -> Result<Expense> {
     let id = new_id(conn)?;
     let stamped = now();
+    let account_id = resolve_account_id(conn, input.account_id.as_deref().unwrap_or(""))?;
     let transaction = conn.unchecked_transaction()?;
     transaction.execute(
         "INSERT INTO expenses
           (id, concept, category, amount_minor, currency, date, time, frequency, end_date, status,
-           notes, actual_amount_minor, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+           notes, actual_amount_minor, created_at, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             id,
             input.concept,
@@ -229,7 +249,8 @@ pub(crate) fn create_expense(conn: &Connection, input: &ExpenseInput) -> Result<
             input.status.as_str(),
             input.notes,
             input.actual_amount_minor,
-            stamped
+            stamped,
+            account_id
         ],
     )?;
     log_audit(&transaction, "expense", &id, "create", input, &stamped)?;
@@ -252,10 +273,12 @@ pub(crate) fn update_expense(
         return Ok(None);
     };
     let stamped = now();
+    let account_id = resolve_account_id(conn, input.account_id.as_deref().unwrap_or(""))?;
     let transaction = conn.unchecked_transaction()?;
     transaction.execute(
         "UPDATE expenses SET concept = ?, category = ?, amount_minor = ?, currency = ?, date = ?,
-           time = ?, frequency = ?, end_date = ?, status = ?, notes = ?, actual_amount_minor = ?
+           time = ?, frequency = ?, end_date = ?, status = ?, notes = ?, actual_amount_minor = ?,
+           account_id = ?
          WHERE id = ?",
         params![
             input.concept,
@@ -269,6 +292,7 @@ pub(crate) fn update_expense(
             input.status.as_str(),
             input.notes,
             input.actual_amount_minor,
+            account_id,
             id
         ],
     )?;
@@ -374,17 +398,50 @@ pub struct ChargeInput {
     pub rate_scaled: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// LOCAL-025: the account the charge hit (its bank account). Empty means
+    /// the subscription's own account, which is the account that pays for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
+/// The account a charge hit: the one named, else the subscription's.
+fn charge_account_id(
+    conn: &Connection,
+    subscription_id: &str,
+    account_id: Option<&str>,
+) -> Result<String> {
+    match account_id {
+        Some(id) if !id.is_empty() => resolve_account_id(conn, id),
+        _ => {
+            let sub = conn
+                .query_row(
+                    "SELECT account_id FROM subscriptions WHERE id = ?1",
+                    [subscription_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|_| StoreError::NotFound {
+                    entity: "suscripción",
+                    id: subscription_id.to_string(),
+                })?;
+            if sub.is_empty() {
+                resolve_account_id(conn, "")
+            } else {
+                resolve_account_id(conn, &sub)
+            }
+        }
+    }
 }
 
 pub(crate) fn add_charge(conn: &Connection, input: &ChargeInput) -> Result<ActualCharge> {
     let id = new_id(conn)?;
     let stamped = now();
     let note = input.note.clone().unwrap_or_default();
+    let account_id = charge_account_id(conn, &input.subscription_id, input.account_id.as_deref())?;
     let transaction = conn.unchecked_transaction()?;
     transaction.execute(
         "INSERT INTO subscription_charges
-          (id, subscription_id, charge_date, time, amount_minor, currency, rate_scaled, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          (id, subscription_id, charge_date, time, amount_minor, currency, rate_scaled, note, created_at, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             id,
             input.subscription_id,
@@ -394,7 +451,8 @@ pub(crate) fn add_charge(conn: &Connection, input: &ChargeInput) -> Result<Actua
             input.currency.as_str(),
             input.rate_scaled,
             note,
-            stamped
+            stamped,
+            account_id
         ],
     )?;
     log_audit(
@@ -416,6 +474,7 @@ pub(crate) fn add_charge(conn: &Connection, input: &ChargeInput) -> Result<Actua
         currency: input.currency,
         rate_scaled: input.rate_scaled,
         note,
+        account_id,
         created_at: stamped,
     })
 }
@@ -430,10 +489,11 @@ pub(crate) fn update_charge(
     };
     let stamped = now();
     let note = patch.note.clone().unwrap_or_default();
+    let account_id = charge_account_id(conn, &patch.subscription_id, patch.account_id.as_deref())?;
     let transaction = conn.unchecked_transaction()?;
     transaction.execute(
         "UPDATE subscription_charges SET subscription_id = ?, charge_date = ?, time = ?,
-           amount_minor = ?, currency = ?, rate_scaled = ?, note = ? WHERE id = ?",
+           amount_minor = ?, currency = ?, rate_scaled = ?, note = ?, account_id = ? WHERE id = ?",
         params![
             patch.subscription_id,
             patch.charge_date,
@@ -442,6 +502,7 @@ pub(crate) fn update_charge(
             patch.currency.as_str(),
             patch.rate_scaled,
             note,
+            account_id,
             id
         ],
     )?;
@@ -465,6 +526,7 @@ pub(crate) fn update_charge(
         currency: patch.currency,
         rate_scaled: patch.rate_scaled,
         note,
+        account_id,
         created_at: current.created_at,
     }))
 }
@@ -484,6 +546,101 @@ pub(crate) fn delete_charge(conn: &Connection, id: &str) -> Result<bool> {
         &stamped,
     )?;
     transaction.execute("DELETE FROM subscription_charges WHERE id = ?", [id])?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Transfers (LOCAL-025)
+// ---------------------------------------------------------------------------
+
+/// What moving money between two accounts takes: a date, an amount in its
+/// own currency, and both accounts. The amount converts to each account's
+/// currency at projection time, like any other movement.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferInput {
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    pub amount_minor: i64,
+    pub currency: Currency,
+    pub from_account_id: String,
+    pub to_account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+pub(crate) fn create_transfer(conn: &Connection, input: &TransferInput) -> Result<Transfer> {
+    let from = read_account_row(conn, &input.from_account_id)?;
+    let to = read_account_row(conn, &input.to_account_id)?;
+    if from.is_none() {
+        return Err(StoreError::NotFound {
+            entity: "cuenta",
+            id: input.from_account_id.clone(),
+        });
+    }
+    if to.is_none() {
+        return Err(StoreError::NotFound {
+            entity: "cuenta",
+            id: input.to_account_id.clone(),
+        });
+    }
+    if input.from_account_id == input.to_account_id {
+        return Err(StoreError::InvalidTransfer {
+            reason: "la cuenta de origen y la de destino son la misma".to_string(),
+        });
+    }
+    let id = new_id(conn)?;
+    let stamped = now();
+    let note = input.note.clone().unwrap_or_default();
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute(
+        "INSERT INTO transfers
+          (id, date, time, amount_minor, currency, from_account_id, to_account_id, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            id,
+            input.date,
+            input.time,
+            input.amount_minor,
+            input.currency.as_str(),
+            input.from_account_id,
+            input.to_account_id,
+            note,
+            stamped
+        ],
+    )?;
+    log_audit(&transaction, "transfer", &id, "create", input, &stamped)?;
+    transaction.commit()?;
+
+    Ok(Transfer {
+        id,
+        date: input.date.clone(),
+        time: input.time.clone(),
+        amount_minor: input.amount_minor,
+        currency: input.currency,
+        from_account_id: input.from_account_id.clone(),
+        to_account_id: input.to_account_id.clone(),
+        note,
+        created_at: stamped,
+    })
+}
+
+fn read_transfer_row(conn: &Connection, id: &str) -> Result<Option<Transfer>> {
+    let mut statement = conn.prepare("SELECT * FROM transfers WHERE id = ?")?;
+    let mut rows = statement.query([id])?;
+    Ok(rows.next()?.map(map_transfer))
+}
+
+pub(crate) fn delete_transfer(conn: &Connection, id: &str) -> Result<bool> {
+    let Some(current) = read_transfer_row(conn, id)? else {
+        return Ok(false);
+    };
+    let stamped = now();
+    let transaction = conn.unchecked_transaction()?;
+    log_audit(&transaction, "transfer", id, "delete", &current, &stamped)?;
+    transaction.execute("DELETE FROM transfers WHERE id = ?", [id])?;
     transaction.commit()?;
     Ok(true)
 }
@@ -539,5 +696,15 @@ impl Store {
 
     pub fn delete_charge(&mut self, id: &str) -> Result<bool> {
         delete_charge(self.connection(), id)
+    }
+
+    /// Move money between two accounts: a movement of each one that never
+    /// changes the total.
+    pub fn create_transfer(&mut self, input: &TransferInput) -> Result<Transfer> {
+        create_transfer(self.connection(), input)
+    }
+
+    pub fn delete_transfer(&mut self, id: &str) -> Result<bool> {
+        delete_transfer(self.connection(), id)
     }
 }

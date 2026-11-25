@@ -1,0 +1,842 @@
+{
+  "totalBalance": [
+    {
+      "name": "same-currency accounts add up exactly",
+      "accounts": [
+        {
+          "id": "checking",
+          "name": "Corriente",
+          "kind": "checking",
+          "currency": "EUR",
+          "balanceMinor": 264000,
+          "balanceDate": "2026-12-01",
+          "balanceSet": true,
+          "openingBalanceMinor": 0,
+          "openingBalanceDate": null,
+          "openingBalanceSet": false,
+          "archived": false,
+          "sortOrder": 0,
+          "notes": ""
+        },
+        {
+          "id": "card",
+          "name": "Tarjeta",
+          "kind": "credit-card",
+          "currency": "EUR",
+          "balanceMinor": -5300,
+          "balanceDate": "2026-12-01",
+          "balanceSet": true,
+          "openingBalanceMinor": 0,
+          "openingBalanceDate": null,
+          "openingBalanceSet": false,
+          "archived": false,
+          "sortOrder": 1,
+          "notes": ""
+        }
+      ],
+      "targetCurrency": "EUR",
+      "rates": [],
+      "date": "2026-12-02",
+      "expected": { "totalMinor": 258700, "approximate": false }
+    },
+    {
+      "name": "a USD account converts with the rate in force and ignores archived accounts",
+      "accounts": [
+        {
+          "id": "checking",
+          "name": "Corriente",
+          "kind": "checking",
+          "currency": "EUR",
+          "balanceMinor": 100000,
+          "balanceDate": "2026-12-01",
+          "balanceSet": true,
+          "openingBalanceMinor": 0,
+          "openingBalanceDate": null,
+          "openingBalanceSet": false,
+          "archived": false,
+          "sortOrder": 0,
+          "notes": ""
+        },
+        {
+          "id": "savings",
+          "name": "Ahorro",
+          "kind": "savings",
+          "currency": "USD",
+          "balanceMinor": 10000,
+          "balanceDate": "2026-12-01",
+          "balanceSet": true,
+          "openingBalanceMinor": 0,
+          "openingBalanceDate": null,
+          "openingBalanceSet": false,
+          "archived": false,
+          "sortOrder": 1,
+          "notes": ""
+        },
+        {
+          "id": "old",
+          "name": "Vieja",
+          "kind": "cash",
+          "currency": "USD",
+          "balanceMinor": 9900,
+          "balanceDate": "2026-12-01",
+          "balanceSet": true,
+          "openingBalanceMinor": 0,
+          "openingBalanceDate": null,
+          "openingBalanceSet": false,
+          "archived": true,
+          "sortOrder": 2,
+          "notes": ""
+        }
+      ],
+      "targetCurrency": "EUR",
+      "rates": [
+        {
+          "id": "r1",
+          "fromCurrency": "USD",
+          "toCurrency": "EUR",
+          "rateScaled": 909091,
+          "effectiveFrom": "2026-11-01",
+          "source": "Test",
+          "note": "",
+          "createdAt": ""
+        }
+      ],
+      "date": "2026-12-02",
+      "expected": { "totalMinor": 109091, "approximate": false }
+    },
+    {
+      "name": "without any rate the total still exists, flagged approximate",
+      "accounts": [
+        {
+          "id": "checking",
+          "name": "Corriente",
+          "kind": "checking",
+          "currency": "EUR",
+          "balanceMinor": 100000,
+          "balanceDate": "2026-12-01",
+          "balanceSet": true,
+          "openingBalanceMinor": 0,
+          "openingBalanceDate": null,
+          "openingBalanceSet": false,
+          "archived": false,
+          "sortOrder": 0,
+          "notes": ""
+        },
+        {
+          "id": "savings",
+          "name": "Ahorro",
+          "kind": "savings",
+          "currency": "USD",
+          "balanceMinor": 10000,
+          "balanceDate": "2026-12-01",
+          "balanceSet": true,
+          "openingBalanceMinor": 0,
+          "openingBalanceDate": null,
+          "openingBalanceSet": false,
+          "archived": false,
+          "sortOrder": 1,
+          "notes": ""
+        }
+      ],
+      "targetCurrency": "EUR",
+      "rates": [],
+      "date": "2026-12-02",
+      "expected": { "totalMinor": 110000, "approximate": true }
+    }
+  ],
+  "collectEvents": [
+    {
+      "name": "the outgoing side of a transfer expenses the paying account",
+      "input": {
+        "scope": { "account": "checking" },
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [],
+        "rates": [],
+        "charges": [],
+        "transfers": [
+          {
+            "id": "t1",
+            "date": "2026-11-20",
+            "time": null,
+            "amountMinor": 30000,
+            "currency": "EUR",
+            "fromAccountId": "checking",
+            "toAccountId": "savings",
+            "note": "Aportación al ahorro",
+            "createdAt": "2026-11-20T10:00:00.000Z"
+          }
+        ],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "events": [
+          {
+            "id": "transfer:t1:out",
+            "date": "2026-11-20",
+            "type": "expense",
+            "source": "transfer",
+            "sourceId": "t1",
+            "name": "Transferencia",
+            "detail": "Aportación al ahorro",
+            "amountMinor": 30000,
+            "originalAmountMinor": 30000,
+            "originalCurrency": "EUR",
+            "rateScaled": 1000000,
+            "estimated": false,
+            "status": null,
+            "category": "Transferencias",
+            "affectsBalance": true,
+            "accountId": "checking"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "the incoming side of the same transfer is an income of the target",
+      "input": {
+        "scope": { "account": "savings" },
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [],
+        "rates": [],
+        "charges": [],
+        "transfers": [
+          {
+            "id": "t1",
+            "date": "2026-11-20",
+            "time": null,
+            "amountMinor": 30000,
+            "currency": "EUR",
+            "fromAccountId": "checking",
+            "toAccountId": "savings",
+            "note": "Aportación al ahorro",
+            "createdAt": "2026-11-20T10:00:00.000Z"
+          }
+        ],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "events": [
+          {
+            "id": "transfer:t1:in",
+            "date": "2026-11-20",
+            "type": "income",
+            "source": "transfer",
+            "sourceId": "t1",
+            "name": "Transferencia",
+            "detail": "Aportación al ahorro",
+            "amountMinor": 30000,
+            "originalAmountMinor": 30000,
+            "originalCurrency": "EUR",
+            "rateScaled": 1000000,
+            "estimated": false,
+            "status": null,
+            "category": "Transferencias",
+            "affectsBalance": true,
+            "accountId": "savings"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "under the all-accounts scope a transfer emits nothing",
+      "input": {
+        "scope": "all",
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [],
+        "rates": [],
+        "charges": [],
+        "transfers": [
+          {
+            "id": "t1",
+            "date": "2026-11-20",
+            "time": null,
+            "amountMinor": 30000,
+            "currency": "EUR",
+            "fromAccountId": "checking",
+            "toAccountId": "savings",
+            "note": "",
+            "createdAt": ""
+          }
+        ],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": { "events": [], "warnings": [] }
+    },
+    {
+      "name": "rows of another account are out of the scoped collection",
+      "input": {
+        "scope": { "account": "checking" },
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [
+          {
+            "id": "e1",
+            "concept": "Alquiler",
+            "category": "Casa",
+            "amountMinor": 80000,
+            "currency": "EUR",
+            "date": "2026-11-10",
+            "time": null,
+            "frequency": "once",
+            "endDate": null,
+            "status": "planned",
+            "notes": "",
+            "actualAmountMinor": null,
+            "accountId": "savings",
+            "createdAt": ""
+          }
+        ],
+        "rates": [],
+        "charges": [],
+        "transfers": [],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": { "events": [], "warnings": [] }
+    },
+    {
+      "name": "a subscription belongs to its paying account",
+      "input": {
+        "scope": { "account": "card" },
+        "accountCurrency": "EUR",
+        "subscriptions": [
+          {
+            "id": "sub-1",
+            "name": "Streaming",
+            "description": "suscripción de música",
+            "currency": "EUR",
+            "priceMinor": 1200,
+            "frequency": "monthly",
+            "startDate": "2026-11-05",
+            "billingDay": null,
+            "nextBillingOverride": null,
+            "endDate": null,
+            "status": "active",
+            "cancelledAt": null,
+            "plan": null,
+            "notes": "",
+            "externalPayment": false,
+            "accountId": "card",
+            "archived": false,
+            "archivedAt": null,
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:00:00.000Z",
+            "prices": [],
+            "plans": [],
+            "pauses": [],
+            "statusHistory": [],
+            "billingDays": []
+          }
+        ],
+        "incomes": [],
+        "expenses": [],
+        "rates": [],
+        "charges": [],
+        "transfers": [],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "events": [
+          {
+            "id": "sub-1:2026-11-05",
+            "date": "2026-11-05",
+            "type": "expense",
+            "source": "subscription",
+            "sourceId": "sub-1",
+            "name": "Streaming",
+            "detail": "suscripción de música",
+            "amountMinor": 1200,
+            "originalAmountMinor": 1200,
+            "originalCurrency": "EUR",
+            "rateScaled": 1000000,
+            "estimated": true,
+            "status": "active",
+            "category": "Suscripciones",
+            "affectsBalance": true,
+            "accountId": "card"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "the same subscription is invisible from the checking account",
+      "input": {
+        "scope": { "account": "checking" },
+        "accountCurrency": "EUR",
+        "subscriptions": [
+          {
+            "id": "sub-1",
+            "name": "Streaming",
+            "description": "suscripción de música",
+            "currency": "EUR",
+            "priceMinor": 1200,
+            "frequency": "monthly",
+            "startDate": "2026-11-05",
+            "billingDay": null,
+            "nextBillingOverride": null,
+            "endDate": null,
+            "status": "active",
+            "cancelledAt": null,
+            "plan": null,
+            "notes": "",
+            "externalPayment": false,
+            "accountId": "card",
+            "archived": false,
+            "archivedAt": null,
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "updatedAt": "2026-11-05T00:00:00.000Z",
+            "prices": [],
+            "plans": [],
+            "pauses": [],
+            "statusHistory": [],
+            "billingDays": []
+          }
+        ],
+        "incomes": [],
+        "expenses": [],
+        "rates": [],
+        "charges": [],
+        "transfers": [],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": { "events": [], "warnings": [] }
+    },
+    {
+      "name": "a transfer with no rate to the account's currency is warned and skipped",
+      "input": {
+        "scope": { "account": "card" },
+        "accountCurrency": "USD",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [],
+        "rates": [],
+        "charges": [],
+        "transfers": [
+          {
+            "id": "t1",
+            "date": "2026-11-20",
+            "time": null,
+            "amountMinor": 30000,
+            "currency": "EUR",
+            "fromAccountId": "checking",
+            "toAccountId": "card",
+            "note": "",
+            "createdAt": ""
+          }
+        ],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "events": [],
+        "warnings": [
+          {
+            "code": "missing-rate",
+            "message": "No hay tipo de cambio EUR → USD para el traspaso del 2026-11-20.",
+            "subscriptionId": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "the all-accounts total converts with the rate in force",
+      "input": {
+        "scope": "all",
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [
+          {
+            "id": "e1",
+            "concept": "Servidor",
+            "category": "Tecnología",
+            "amountMinor": 1200,
+            "currency": "USD",
+            "date": "2026-11-10",
+            "time": null,
+            "frequency": "once",
+            "endDate": null,
+            "status": "planned",
+            "notes": "",
+            "actualAmountMinor": null,
+            "accountId": "card",
+            "createdAt": ""
+          }
+        ],
+        "rates": [
+          {
+            "id": "r1",
+            "fromCurrency": "USD",
+            "toCurrency": "EUR",
+            "rateScaled": 909091,
+            "effectiveFrom": "2026-11-10",
+            "source": "Test",
+            "note": "",
+            "createdAt": ""
+          }
+        ],
+        "charges": [],
+        "transfers": [],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "events": [
+          {
+            "id": "e1:2026-11-10",
+            "date": "2026-11-10",
+            "type": "expense",
+            "source": "expense",
+            "sourceId": "e1",
+            "name": "Servidor",
+            "detail": "",
+            "amountMinor": 1091,
+            "originalAmountMinor": 1200,
+            "originalCurrency": "USD",
+            "rateScaled": 909091,
+            "estimated": true,
+            "status": "planned",
+            "category": "Tecnología",
+            "affectsBalance": null,
+            "accountId": "card"
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "an approximate rate warns but the total still converts",
+      "input": {
+        "scope": "all",
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [
+          {
+            "id": "e1",
+            "concept": "Servidor",
+            "category": "Tecnología",
+            "amountMinor": 1200,
+            "currency": "USD",
+            "date": "2026-11-10",
+            "time": null,
+            "frequency": "once",
+            "endDate": null,
+            "status": "planned",
+            "notes": "",
+            "actualAmountMinor": null,
+            "accountId": "card",
+            "createdAt": ""
+          }
+        ],
+        "rates": [
+          {
+            "id": "r1",
+            "fromCurrency": "USD",
+            "toCurrency": "EUR",
+            "rateScaled": 909091,
+            "effectiveFrom": "2026-11-13",
+            "source": "Test",
+            "note": "",
+            "createdAt": ""
+          }
+        ],
+        "charges": [],
+        "transfers": [],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "events": [
+          {
+            "id": "e1:2026-11-10",
+            "date": "2026-11-10",
+            "type": "expense",
+            "source": "expense",
+            "sourceId": "e1",
+            "name": "Servidor",
+            "detail": "",
+            "amountMinor": 1091,
+            "originalAmountMinor": 1200,
+            "originalCurrency": "USD",
+            "rateScaled": 909091,
+            "estimated": true,
+            "status": "planned",
+            "category": "Tecnología",
+            "affectsBalance": null,
+            "accountId": "card"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "approximate-rate",
+            "message": "El gasto «Servidor» se convierte con el tipo de cambio más reciente disponible.",
+            "subscriptionId": null
+          }
+        ]
+      }
+    }
+  ],
+  "projectBalance": [
+    {
+      "name": "one account projects only its own movements from its balance",
+      "account": {
+        "id": "checking",
+        "name": "Corriente",
+        "kind": "checking",
+        "currency": "EUR",
+        "balanceMinor": 100000,
+        "balanceDate": "2026-11-01",
+        "balanceSet": true,
+        "openingBalanceMinor": 0,
+        "openingBalanceDate": null,
+        "openingBalanceSet": false,
+        "archived": false,
+        "sortOrder": 0,
+        "notes": ""
+      },
+      "input": {
+        "scope": { "account": "checking" },
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [
+          {
+            "id": "e1",
+            "concept": "Compra",
+            "category": "Otros",
+            "amountMinor": 20000,
+            "currency": "EUR",
+            "date": "2026-11-10",
+            "time": null,
+            "frequency": "once",
+            "endDate": null,
+            "status": "planned",
+            "notes": "",
+            "actualAmountMinor": null,
+            "accountId": "checking",
+            "createdAt": ""
+          },
+          {
+            "id": "e2",
+            "concept": "Alquiler",
+            "category": "Casa",
+            "amountMinor": 80000,
+            "currency": "EUR",
+            "date": "2026-11-05",
+            "time": null,
+            "frequency": "once",
+            "endDate": null,
+            "status": "planned",
+            "notes": "",
+            "actualAmountMinor": null,
+            "accountId": "savings",
+            "createdAt": ""
+          }
+        ],
+        "rates": [],
+        "charges": [],
+        "transfers": [
+          {
+            "id": "t1",
+            "date": "2026-11-20",
+            "time": null,
+            "amountMinor": 30000,
+            "currency": "EUR",
+            "fromAccountId": "checking",
+            "toAccountId": "savings",
+            "note": "",
+            "createdAt": ""
+          }
+        ],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "startDate": "2026-11-01",
+        "endDate": "2026-11-30",
+        "startBalanceMinor": 100000,
+        "endBalanceMinor": 50000,
+        "totalIncomeMinor": 0,
+        "totalExpenseMinor": 50000,
+        "netMinor": -50000,
+        "minBalanceMinor": 50000,
+        "minBalanceDate": "2026-11-20",
+        "firstNegativeDate": null,
+        "firstNegativeDeficitMinor": null,
+        "warnings": []
+      }
+    },
+    {
+      "name": "the total across accounts never moves with transfers",
+      "account": {
+        "id": "total",
+        "name": "Total",
+        "kind": "checking",
+        "currency": "EUR",
+        "balanceMinor": 150000,
+        "balanceDate": "2026-11-01",
+        "balanceSet": true,
+        "openingBalanceMinor": 0,
+        "openingBalanceDate": null,
+        "openingBalanceSet": false,
+        "archived": false,
+        "sortOrder": 0,
+        "notes": ""
+      },
+      "input": {
+        "scope": "all",
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [
+          {
+            "id": "e1",
+            "concept": "Compra",
+            "category": "Otros",
+            "amountMinor": 20000,
+            "currency": "EUR",
+            "date": "2026-11-10",
+            "time": null,
+            "frequency": "once",
+            "endDate": null,
+            "status": "planned",
+            "notes": "",
+            "actualAmountMinor": null,
+            "accountId": "checking",
+            "createdAt": ""
+          },
+          {
+            "id": "e2",
+            "concept": "Alquiler",
+            "category": "Casa",
+            "amountMinor": 80000,
+            "currency": "EUR",
+            "date": "2026-11-05",
+            "time": null,
+            "frequency": "once",
+            "endDate": null,
+            "status": "planned",
+            "notes": "",
+            "actualAmountMinor": null,
+            "accountId": "savings",
+            "createdAt": ""
+          }
+        ],
+        "rates": [],
+        "charges": [],
+        "transfers": [
+          {
+            "id": "t1",
+            "date": "2026-11-20",
+            "time": null,
+            "amountMinor": 30000,
+            "currency": "EUR",
+            "fromAccountId": "checking",
+            "toAccountId": "savings",
+            "note": "",
+            "createdAt": ""
+          },
+          {
+            "id": "t2",
+            "date": "2026-11-25",
+            "time": null,
+            "amountMinor": 10000,
+            "currency": "EUR",
+            "fromAccountId": "savings",
+            "toAccountId": "checking",
+            "note": "",
+            "createdAt": ""
+          }
+        ],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "startDate": "2026-11-01",
+        "endDate": "2026-11-30",
+        "startBalanceMinor": 150000,
+        "endBalanceMinor": 50000,
+        "totalIncomeMinor": 0,
+        "totalExpenseMinor": 100000,
+        "netMinor": -100000,
+        "minBalanceMinor": 50000,
+        "minBalanceDate": "2026-11-10",
+        "firstNegativeDate": null,
+        "firstNegativeDeficitMinor": null,
+        "warnings": []
+      }
+    },
+    {
+      "name": "a transfer out can push its account negative on its first day",
+      "account": {
+        "id": "checking",
+        "name": "Corriente",
+        "kind": "checking",
+        "currency": "EUR",
+        "balanceMinor": 20000,
+        "balanceDate": "2026-11-01",
+        "balanceSet": true,
+        "openingBalanceMinor": 0,
+        "openingBalanceDate": null,
+        "openingBalanceSet": false,
+        "archived": false,
+        "sortOrder": 0,
+        "notes": ""
+      },
+      "input": {
+        "scope": { "account": "checking" },
+        "accountCurrency": "EUR",
+        "subscriptions": [],
+        "incomes": [],
+        "expenses": [],
+        "rates": [],
+        "charges": [],
+        "transfers": [
+          {
+            "id": "t1",
+            "date": "2026-11-03",
+            "time": null,
+            "amountMinor": 50000,
+            "currency": "EUR",
+            "fromAccountId": "checking",
+            "toAccountId": "savings",
+            "note": "",
+            "createdAt": ""
+          }
+        ],
+        "fromDate": "2026-11-01",
+        "toDate": "2026-11-30"
+      },
+      "expected": {
+        "startDate": "2026-11-01",
+        "endDate": "2026-11-30",
+        "startBalanceMinor": 20000,
+        "endBalanceMinor": -30000,
+        "totalIncomeMinor": 0,
+        "totalExpenseMinor": 50000,
+        "netMinor": -50000,
+        "minBalanceMinor": -30000,
+        "minBalanceDate": "2026-11-03",
+        "firstNegativeDate": "2026-11-03",
+        "firstNegativeDeficitMinor": 30000,
+        "warnings": []
+      }
+    }
+  ]
+}

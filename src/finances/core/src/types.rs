@@ -27,6 +27,50 @@ impl Currency {
 
 pub const CURRENCIES: [Currency; 2] = [Currency::Eur, Currency::Usd];
 
+/// El tipo de una cuenta. LOCAL-025: no existe en la referencia TypeScript
+/// (que solo tenía una cuenta), así que los nombres ser y de columna son
+/// especificación nueva.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountKind {
+    #[default]
+    Checking,
+    Savings,
+    CreditCard,
+    Cash,
+}
+
+impl AccountKind {
+    /// The wire/JSON name, identical to the serde rename.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AccountKind::Checking => "checking",
+            AccountKind::Savings => "savings",
+            AccountKind::CreditCard => "credit-card",
+            AccountKind::Cash => "cash",
+        }
+    }
+}
+
+/// A movement of money between two accounts, which changes neither the total
+/// across accounts. LOCAL-025; new specification, not ported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Transfer {
+    pub id: String,
+    pub date: String,
+    /// Hora local opcional (HH:mm) para ordenar movimientos del mismo día.
+    pub time: Option<String>,
+    pub amount_minor: i64,
+    pub currency: Currency,
+    /// La cuenta de la que sale el dinero.
+    pub from_account_id: String,
+    /// La cuenta a la que llega.
+    pub to_account_id: String,
+    pub note: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Frequency {
@@ -129,6 +173,9 @@ impl IncomeStatus {
 pub struct Account {
     pub id: String,
     pub name: String,
+    /// Tipo de cuenta; la cuenta migrada del esquema 1 toma `checking`.
+    #[serde(default)]
+    pub kind: AccountKind,
     pub currency: Currency,
     /// Saldo en unidades menores (céntimos) de la moneda de la cuenta.
     pub balance_minor: i64,
@@ -140,6 +187,13 @@ pub struct Account {
     pub opening_balance_minor: i64,
     pub opening_balance_date: Option<String>,
     pub opening_balance_set: bool,
+    /// Una cuenta archivada no se muestra ni se sincroniza, pero sus
+    /// movimientos no se pierden: archivar es la alternativa a borrar.
+    #[serde(default)]
+    pub archived: bool,
+    /// El orden de las cuentas en la interfaz.
+    #[serde(default)]
+    pub sort_order: i64,
     pub notes: String,
 }
 
@@ -169,6 +223,11 @@ pub struct Subscription {
     /// Se paga con otra cuenta/tarjeta: cuenta en estadísticas pero no en el
     /// saldo de esta cuenta.
     pub external_payment: bool,
+    /// LOCAL-025: la cuenta que paga la suscripción (`""` = sin cuenta, el
+    /// dato antiguo de la referencia). Con varias cuentas, sustituye al
+    /// significado de `external_payment`.
+    #[serde(default)]
+    pub account_id: String,
     pub archived: bool,
     /// Si está archivada, fecha a partir de la cual deja de proyectar cargos.
     pub archived_at: Option<String>,
@@ -267,6 +326,9 @@ pub struct Income {
     pub notes: String,
     /// Importe final real en la moneda de la cuenta, si difiere del estimado.
     pub actual_amount_minor: Option<i64>,
+    /// LOCAL-025: la cuenta a la que pertenece el ingreso (`""` = sin cuenta).
+    #[serde(default)]
+    pub account_id: String,
     pub created_at: String,
 }
 
@@ -286,6 +348,9 @@ pub struct Expense {
     pub status: ExpenseStatus,
     pub notes: String,
     pub actual_amount_minor: Option<i64>,
+    /// LOCAL-025: la cuenta a la que pertenece el gasto (`""` = sin cuenta).
+    #[serde(default)]
+    pub account_id: String,
     pub created_at: String,
 }
 
@@ -307,6 +372,9 @@ pub struct ActualCharge {
     /// Tipo de cambio implícito aplicado, si se conoce.
     pub rate_scaled: Option<i64>,
     pub note: String,
+    /// LOCAL-025: la cuenta cargada (`""` = sin cuenta, p.ej. el dato migrado).
+    #[serde(default)]
+    pub account_id: String,
     pub created_at: String,
 }
 
@@ -331,14 +399,23 @@ pub struct Setting {
     pub value: String,
 }
 
+/// `getAppState`: todo lo que leen las vistas. LOCAL-025 amplía el estado de
+/// una sola cuenta a varios: `accounts` es la lista (vacía en el dato de la
+/// referencia), `account` sigue siendo la primera (o la sintética por
+/// defecto cuando no hay ninguna) para no romper al lector antiguo, y
+/// `transfers` son los traspasos entre cuentas.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppState {
     pub account: Account,
+    #[serde(default)]
+    pub accounts: Vec<Account>,
     pub subscriptions: Vec<SubscriptionWithHistory>,
     pub incomes: Vec<Income>,
     pub expenses: Vec<Expense>,
     pub rates: Vec<ExchangeRate>,
     pub charges: Vec<ActualCharge>,
+    #[serde(default)]
+    pub transfers: Vec<Transfer>,
     pub settings: BTreeMap<String, String>,
 }

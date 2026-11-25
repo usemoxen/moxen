@@ -196,6 +196,54 @@ fn a_row_that_cannot_be_read_is_skipped_instead_of_failing_the_file() {
 }
 
 #[test]
+fn the_sheets_carry_the_account_of_every_row() {
+    // LOCAL-025: the trailing `cuenta` column. An income created without an
+    // account lands on the first one, and the sheet says so.
+    let mut test = TestStore::initialized();
+    let created = income(&mut test, "Nómina");
+    let _ = created;
+    let sheet = test
+        .store
+        .export_csv(CsvKind::Incomes, "2026-01-01", "2030-01-01")
+        .expect("export");
+    assert!(sheet.contains("cuenta"), "the header carries the column");
+    assert!(
+        sheet.contains("seed-account-1"),
+        "the row carries its account: {sheet}"
+    );
+
+    // Importing into another database that has the same account puts the row
+    // back on that account.
+    let mut other = TestStore::initialized();
+    let summary = other
+        .store
+        .import_csv(CsvKind::Incomes, &sheet)
+        .expect("import");
+    assert_eq!(summary.created, 1);
+    assert_eq!(summary.skipped, 0);
+    let state = other.store.account_state("seed-account-1").expect("state");
+    assert_eq!(
+        state
+            .as_ref()
+            .expect("found")
+            .incomes
+            .iter()
+            .filter(|income| income.concept == "Nómina")
+            .count(),
+        1
+    );
+    assert!(
+        other
+            .store
+            .account_state("seed-account-2")
+            .expect("state")
+            .expect("found")
+            .incomes
+            .is_empty()
+    );
+}
+
+#[test]
 fn an_empty_or_single_line_file_imports_nothing() {
     let mut test = TestStore::empty();
     assert_eq!(

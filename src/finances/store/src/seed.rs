@@ -4,6 +4,10 @@
 //! subscription is deliberately left without an amount and without a start
 //! date so the projection warns about it.
 //!
+//! LOCAL-025 gives the demo THREE fictional accounts (a checking account, a
+//! savings account and a credit card), the subscriptions spread over them,
+//! and a couple of transfers between them.
+//!
 //! Written only when the database is created empty (see
 //! [`crate::Store::initialize`]); an existing database is never reseeded.
 
@@ -11,8 +15,9 @@ use std::collections::BTreeMap;
 
 use moxen_finances_core::dates;
 use moxen_finances_core::types::{
-    Account, AppState, BillingDayEntry, Currency, ExchangeRate, Frequency, PriceHistoryEntry,
-    StatusHistoryEntry, Subscription, SubscriptionStatus, SubscriptionWithHistory,
+    Account, AccountKind, AppState, BillingDayEntry, Currency, ExchangeRate, Frequency,
+    PriceHistoryEntry, StatusHistoryEntry, Subscription, SubscriptionStatus,
+    SubscriptionWithHistory, Transfer,
 };
 
 /// The note the demo exchange rates carry, so nobody mistakes them for a
@@ -42,6 +47,9 @@ struct SeedSubscription {
     /// Known history; when it is empty a single entry is made from
     /// `price_minor`.
     price_history: &'static [SeedPrice],
+    /// LOCAL-025: the account that pays for it (`SEED_ACCOUNT_CHECKING` or
+    /// `SEED_ACCOUNT_CARD`).
+    account: &'static str,
 }
 
 macro_rules! seed_price {
@@ -55,6 +63,12 @@ macro_rules! seed_price {
     };
 }
 
+/// The ids of the three FICTIONAL demo accounts, so the assignments below can
+/// name them.
+pub const SEED_ACCOUNT_CHECKING: &str = "seed-account-1";
+pub const SEED_ACCOUNT_SAVINGS: &str = "seed-account-2";
+pub const SEED_ACCOUNT_CARD: &str = "seed-account-3";
+
 const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
     SeedSubscription {
         name: "Mobilidad urbana",
@@ -66,6 +80,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
         end: None,
         billing_day: None,
         price_history: &[],
+        account: SEED_ACCOUNT_CHECKING,
     },
     SeedSubscription {
         name: "CorreoSeguro Pro",
@@ -77,6 +92,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
         end: None,
         billing_day: None,
         price_history: &[],
+        account: SEED_ACCOUNT_CHECKING,
     },
     SeedSubscription {
         name: "Conversador IA",
@@ -88,6 +104,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
         end: None,
         billing_day: None,
         price_history: &[],
+        account: SEED_ACCOUNT_CHECKING,
     },
     SeedSubscription {
         name: "Asistentes Cloud Go",
@@ -99,6 +116,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
         end: Some("2026-11-25"),
         billing_day: None,
         price_history: &[],
+        account: SEED_ACCOUNT_CHECKING,
     },
     SeedSubscription {
         name: "Web ejemplo.dev",
@@ -110,6 +128,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
         end: None,
         billing_day: None,
         price_history: &[],
+        account: SEED_ACCOUNT_CHECKING,
     },
     SeedSubscription {
         name: "Soporte de sobremesa",
@@ -121,6 +140,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
         end: Some("2027-01-10"),
         billing_day: None,
         price_history: &[],
+        account: SEED_ACCOUNT_CARD,
     },
     SeedSubscription {
         name: "Canciones en streaming",
@@ -145,6 +165,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
                 "Importe tras la revisión de julio de 2026."
             ),
         ],
+        account: SEED_ACCOUNT_CARD,
     },
     SeedSubscription {
         name: "Almacén Nube",
@@ -156,6 +177,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
         end: None,
         billing_day: None,
         price_history: &[],
+        account: SEED_ACCOUNT_CARD,
     },
     SeedSubscription {
         name: "Nube 400 GB",
@@ -180,6 +202,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
                 "Importe tras la revisión de mayo de 2026."
             ),
         ],
+        account: SEED_ACCOUNT_CHECKING,
     },
     SeedSubscription {
         name: "Seguridad Hogar",
@@ -191,6 +214,7 @@ const SEED_SUBSCRIPTIONS: &[SeedSubscription] = &[
         end: None,
         billing_day: None,
         price_history: &[],
+        account: SEED_ACCOUNT_CHECKING,
     },
 ];
 
@@ -200,9 +224,92 @@ fn day_of(date: &str) -> Option<i64> {
     date.get(8..10)?.parse().ok()
 }
 
+/// One of the three demo accounts, before the seed gives it a balance date.
+fn seed_account(
+    id: &str,
+    name: &'static str,
+    kind: AccountKind,
+    sort_order: i64,
+    today: &str,
+) -> Account {
+    Account {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind,
+        currency: Currency::Eur,
+        balance_minor: 0,
+        balance_date: today.to_string(),
+        balance_set: false,
+        opening_balance_minor: 0,
+        opening_balance_date: None,
+        opening_balance_set: false,
+        archived: false,
+        sort_order,
+        notes: String::new(),
+    }
+}
+
+/// The demo accounts: a checking account, a savings account and a credit
+/// card, all EUR and all FICTIONAL.
+fn seed_accounts(today: &str) -> Vec<Account> {
+    vec![
+        seed_account(
+            "seed-account-1",
+            "Cuenta corriente",
+            AccountKind::Checking,
+            0,
+            today,
+        ),
+        seed_account("seed-account-2", "Ahorro", AccountKind::Savings, 1, today),
+        seed_account(
+            "seed-account-3",
+            "Tarjeta de crédito",
+            AccountKind::CreditCard,
+            2,
+            today,
+        ),
+    ]
+}
+
+/// A couple of demo transfers: a saving the checking account makes every
+/// month, and the payment of the credit card. FICTIONAL, always.
+fn seed_transfers(now_iso: &str, today: &str) -> Vec<Transfer> {
+    vec![
+        Transfer {
+            id: "seed-transfer-1".to_string(),
+            date: today.to_string(),
+            time: None,
+            // 200,00 EUR from checking to savings.
+            amount_minor: 20_000,
+            currency: Currency::Eur,
+            from_account_id: "seed-account-1".to_string(),
+            to_account_id: "seed-account-2".to_string(),
+            note: "Aportación al ahorro de ejemplo.".to_string(),
+            created_at: now_iso.to_string(),
+        },
+        Transfer {
+            id: "seed-transfer-2".to_string(),
+            date: today.to_string(),
+            time: None,
+            // 50,00 EUR from checking to the credit card.
+            amount_minor: 5_000,
+            currency: Currency::Eur,
+            from_account_id: "seed-account-1".to_string(),
+            to_account_id: "seed-account-3".to_string(),
+            note: "Pago de ejemplo de la tarjeta.".to_string(),
+            created_at: now_iso.to_string(),
+        },
+    ]
+}
+
 /// The demo state, with the timestamps and the account date given, so a test
 /// can reproduce it exactly.
 pub fn build_seed_state_at(now_iso: &str, today: &str) -> AppState {
+    let accounts = seed_accounts(today);
+    let account = accounts
+        .first()
+        .cloned()
+        .expect("the demo always has its first account");
     let subscriptions = SEED_SUBSCRIPTIONS
         .iter()
         .enumerate()
@@ -282,6 +389,7 @@ pub fn build_seed_state_at(now_iso: &str, today: &str) -> AppState {
                     plan: None,
                     notes: String::new(),
                     external_payment: false,
+                    account_id: item.account.to_string(),
                     archived: false,
                     archived_at: None,
                     created_at: now_iso.to_string(),
@@ -305,22 +413,13 @@ pub fn build_seed_state_at(now_iso: &str, today: &str) -> AppState {
     settings.insert("lastBackupAt".to_string(), String::new());
 
     AppState {
-        account: Account {
-            id: "account-primary".to_string(),
-            name: "Demo".to_string(),
-            currency: Currency::Eur,
-            balance_minor: 0,
-            balance_date: today.to_string(),
-            balance_set: false,
-            opening_balance_minor: 0,
-            opening_balance_date: None,
-            opening_balance_set: false,
-            notes: String::new(),
-        },
+        account,
+        accounts,
         subscriptions,
         incomes: Vec::new(),
         expenses: Vec::new(),
         charges: Vec::new(),
+        transfers: seed_transfers(now_iso, today),
         rates: vec![
             ExchangeRate {
                 id: "seed-rate-eur-usd".to_string(),
@@ -361,17 +460,76 @@ mod tests {
     }
 
     #[test]
-    fn the_demo_has_ten_subscriptions_and_two_example_rates() {
+    fn the_demo_has_three_accounts_two_transfers_and_ten_subscriptions() {
         let state = state();
         assert_eq!(state.subscriptions.len(), 10);
         assert_eq!(state.rates.len(), 2);
-        assert_eq!(state.account.id, "account-primary");
+        assert_eq!(state.transfers.len(), 2);
+        // The first account is the checking one.
+        assert_eq!(state.account.id, SEED_ACCOUNT_CHECKING);
         assert_eq!(state.account.balance_date, "2026-11-18");
         assert!(!state.account.balance_set);
+        assert_eq!(
+            state
+                .accounts
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Cuenta corriente", "Ahorro", "Tarjeta de crédito"]
+        );
+        assert_eq!(
+            state.accounts.iter().map(|a| a.kind).collect::<Vec<_>>(),
+            vec![
+                AccountKind::Checking,
+                AccountKind::Savings,
+                AccountKind::CreditCard
+            ]
+        );
         assert!(state.incomes.is_empty());
         assert!(state.expenses.is_empty());
         assert!(state.charges.is_empty());
         assert_eq!(state.settings.get("mainCurrency"), Some(&"EUR".to_string()));
+
+        // Both transfers leave the checking account.
+        assert!(
+            state
+                .transfers
+                .iter()
+                .all(|t| t.from_account_id == SEED_ACCOUNT_CHECKING)
+        );
+        assert!(
+            state
+                .transfers
+                .iter()
+                .any(|t| t.to_account_id == SEED_ACCOUNT_SAVINGS)
+        );
+        assert!(
+            state
+                .transfers
+                .iter()
+                .any(|t| t.to_account_id == SEED_ACCOUNT_CARD)
+        );
+    }
+
+    #[test]
+    fn the_demo_subscriptions_belong_to_their_paying_account() {
+        let state = state();
+        let when = |name: &str| {
+            state
+                .subscriptions
+                .iter()
+                .find(|sub| sub.subscription.name == name)
+                .unwrap_or_else(|| panic!("no subscription named {name}"))
+                .subscription
+                .account_id
+                .clone()
+        };
+        assert_eq!(when("CorreoSeguro Pro"), SEED_ACCOUNT_CHECKING);
+        assert_eq!(when("Seguridad Hogar"), SEED_ACCOUNT_CHECKING);
+        // The card pays three of them.
+        assert_eq!(when("Soporte de sobremesa"), SEED_ACCOUNT_CARD);
+        assert_eq!(when("Canciones en streaming"), SEED_ACCOUNT_CARD);
+        assert_eq!(when("Almacén Nube"), SEED_ACCOUNT_CARD);
     }
 
     #[test]

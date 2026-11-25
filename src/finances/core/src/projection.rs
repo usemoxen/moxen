@@ -6,6 +6,11 @@
 //! and billing days are effective-dated with the latest effective record
 //! winning on equal dates, and the projection starts from the account's
 //! real balance.
+//!
+//! LOCAL-025 adds the multi-account layer on top (new specification, not in
+//! the reference): the collection takes an [`AccountScope`] so asking for
+//! one account collects only its rows, and transfers between accounts become
+//! outgoing/incoming movements of each account while never changing a total.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::CoreError;
+use crate::accounts::AccountScope;
 use crate::dates::{add_days_iso, compare_iso_dates, diff_days, max_iso, parse_iso_date};
 use crate::exchange::{ConversionResult, convert_to_account_currency};
 use crate::money::js_round;
@@ -21,7 +27,7 @@ use crate::recurrence::{
 };
 use crate::types::{
     Account, ActualCharge, Currency, ExchangeRate, Expense, Frequency, Income, PriceHistoryEntry,
-    Subscription, SubscriptionWithHistory,
+    Subscription, SubscriptionWithHistory, Transfer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -37,6 +43,9 @@ pub enum EventSource {
     Subscription,
     Income,
     Expense,
+    /// LOCAL-025: un traspaso entre dos cuentas. New specification; the
+    /// reference's CSV and events know nothing of it.
+    Transfer,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +73,10 @@ pub struct ProjectionEvent {
     /// saldo. Absent (null) on incomes and plain expenses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affects_balance: Option<bool>,
+    /// LOCAL-025: la cuenta a la que pertenece el movimiento (`""` = sin
+    /// cuenta, el dato de la referencia).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -121,6 +134,16 @@ pub struct ProjectionResult {
 /// Everything `collect_events` needs to gather the movements of a range.
 #[derive(Debug, Clone)]
 pub struct EventCollectionInput<'a> {
+    /// LOCAL-025: the scope. `All` collects every row (and converts the
+    /// amounts to `account_currency`); `One` collects only the rows of that
+    /// account. The default leaves the reference's behavior untouched.
+    pub scope: AccountScope,
+    /// LOCAL-025: los traspasos entre cuentas. Under `One` scope each side
+    /// becomes a movement of its account; under `All` they cancel and are
+    /// not emitted (a transfer never changes the total).
+    pub transfers: &'a [Transfer],
+    /// The currency the events are converted into: the account's own under
+    /// `One` scope, the target currency of the total under `All`.
     pub account_currency: Currency,
     pub subscriptions: &'a [SubscriptionWithHistory],
     pub incomes: &'a [Income],
@@ -144,6 +167,8 @@ impl<'a> EventCollectionInput<'a> {
         to_date: &'a str,
     ) -> Self {
         Self {
+            scope: AccountScope::All,
+            transfers: &[],
             account_currency,
             subscriptions,
             incomes,
@@ -344,6 +369,9 @@ pub fn collect_events(input: &EventCollectionInput) -> Result<CollectedEvents, C
     let charges_by_subscription = group_charges(input.charges, input.from_date, input.to_date);
 
     for sub in input.subscriptions {
+        if !input.scope.in_scope(&sub.subscription.account_id) {
+            continue;
+        }
         let actual_charges = charges_by_subscription
             .get(&sub.subscription.id)
             .cloned()
@@ -403,6 +431,9 @@ pub fn collect_events(input: &EventCollectionInput) -> Result<CollectedEvents, C
     }
 
     for income in input.incomes {
+        if !input.scope.in_scope(&income.account_id) {
+            continue;
+        }
         if income.paused {
             continue;
         }
@@ -476,11 +507,15 @@ pub fn collect_events(input: &EventCollectionInput) -> Result<CollectedEvents, C
                 income.currency,
                 income.status.as_str(),
                 Some("Ingresos".to_string()),
+                &income.account_id,
             ));
         }
     }
 
     for expense in input.expenses {
+        if !input.scope.in_scope(&expense.account_id) {
+            continue;
+        }
         let occurrences = generate_occurrences(&OccurrenceOptions {
             start_date: &expense.date,
             frequency: expense.frequency,
@@ -556,12 +591,16 @@ pub fn collect_events(input: &EventCollectionInput) -> Result<CollectedEvents, C
                 expense.currency,
                 expense.status.as_str(),
                 category,
+                &expense.account_id,
             ));
         }
     }
 
+    collect_transfer_events(input, &mut events, &mut warnings);
+
     for event in input.extra_events {
-        if compare_iso_dates(&event.date, input.from_date) != Ordering::Less
+        if input.scope.in_scope(&event.account_id)
+            && compare_iso_dates(&event.date, input.from_date) != Ordering::Less
             && compare_iso_dates(&event.date, input.to_date) != Ordering::Greater
         {
             events.push(event.clone());
@@ -621,6 +660,7 @@ fn emit_subscription_events(
                 status: Some(sub.subscription.status.as_str().to_string()),
                 category: Some("Suscripciones".into()),
                 affects_balance: Some(!sub.subscription.external_payment),
+                account_id: sub.subscription.account_id.clone(),
             });
             continue;
         }
@@ -674,6 +714,7 @@ fn emit_subscription_events(
             status: Some(sub.subscription.status.as_str().to_string()),
             category: Some("Suscripciones".into()),
             affects_balance: Some(!sub.subscription.external_payment),
+            account_id: sub.subscription.account_id.clone(),
         });
     }
 
@@ -705,6 +746,97 @@ fn emit_subscription_events(
             status: Some(sub.subscription.status.as_str().to_string()),
             category: Some("Suscripciones".into()),
             affects_balance: Some(!sub.subscription.external_payment),
+            account_id: sub.subscription.account_id.clone(),
+        });
+    }
+}
+
+/// LOCAL-025: the transfers of the range, as events of the scoped account.
+/// Under `One` scope the outgoing side is an expense and the incoming side an
+/// income, converted to the account's currency like any other movement;
+/// under `All` scope nothing is emitted, because a transfer moves money
+/// between accounts without changing the total.
+fn collect_transfer_events(
+    input: &EventCollectionInput,
+    events: &mut Vec<ProjectionEvent>,
+    warnings: &mut Vec<ProjectionWarning>,
+) {
+    let AccountScope::One(account_id) = &input.scope else {
+        return;
+    };
+    for transfer in input.transfers {
+        if compare_iso_dates(&transfer.date, input.from_date) == Ordering::Less
+            || compare_iso_dates(&transfer.date, input.to_date) == Ordering::Greater
+        {
+            continue;
+        }
+        // A transfer an account makes to itself moves nothing.
+        if transfer.from_account_id == transfer.to_account_id {
+            continue;
+        }
+        let outgoing = transfer.from_account_id == *account_id;
+        let incoming = transfer.to_account_id == *account_id;
+        if !outgoing && !incoming {
+            continue;
+        }
+        let converted = convert_to_account_currency(
+            transfer.amount_minor,
+            transfer.currency,
+            input.account_currency,
+            &transfer.date,
+            input.rates,
+        );
+        if converted.rate_scaled.is_none() {
+            warn(
+                warnings,
+                ProjectionWarning {
+                    code: WarningCode::MissingRate,
+                    subscription_id: None,
+                    message: format!(
+                        "No hay tipo de cambio {} → {} para el traspaso del {}.",
+                        transfer.currency.as_str(),
+                        input.account_currency.as_str(),
+                        transfer.date
+                    ),
+                },
+            );
+            continue;
+        }
+        if converted.approximate {
+            warn(
+                warnings,
+                ProjectionWarning {
+                    code: WarningCode::ApproximateRate,
+                    subscription_id: None,
+                    message: format!(
+                        "El traspaso del {} se convierte con el tipo de cambio más reciente disponible.",
+                        transfer.date
+                    ),
+                },
+            );
+        }
+        let side = if outgoing { "out" } else { "in" };
+        events.push(ProjectionEvent {
+            id: format!("transfer:{}:{side}", transfer.id),
+            date: transfer.date.clone(),
+            kind: if outgoing {
+                EventKind::Expense
+            } else {
+                EventKind::Income
+            },
+            source: EventSource::Transfer,
+            source_id: transfer.id.clone(),
+            name: "Transferencia".to_string(),
+            detail: transfer.note.clone(),
+            amount_minor: converted.amount_minor,
+            original_amount_minor: Some(transfer.amount_minor),
+            original_currency: Some(transfer.currency),
+            rate_scaled: converted.rate_scaled,
+            estimated: false,
+            status: None,
+            category: Some("Transferencias".into()),
+            affects_balance: Some(true),
+            account_id: account_id.clone(),
         });
     }
 }
@@ -722,6 +854,7 @@ fn income_or_expense_event(
     original_currency: Currency,
     status: &str,
     category: Option<String>,
+    account_id: &str,
 ) -> ProjectionEvent {
     // actual ?? converted.amountMinor: a real amount wins over the conversion,
     // and a missing conversion falls back to the original amount.
@@ -751,6 +884,7 @@ fn income_or_expense_event(
         status: Some(status.to_string()),
         category,
         affects_balance: None,
+        account_id: account_id.to_string(),
     }
 }
 
@@ -910,6 +1044,8 @@ pub fn project_balance(input: &ProjectionInput) -> Result<ProjectionResult, Core
     let end = input.events.to_date.to_string();
 
     let collected = collect_events(&EventCollectionInput {
+        scope: input.events.scope.clone(),
+        transfers: input.events.transfers,
         account_currency: input.events.account_currency,
         subscriptions: input.events.subscriptions,
         incomes: input.events.incomes,
@@ -1087,6 +1223,7 @@ mod tests {
                 plan: None,
                 notes: String::new(),
                 external_payment: false,
+                account_id: String::new(),
                 archived: false,
                 archived_at: None,
                 created_at: String::new(),
@@ -1170,6 +1307,7 @@ mod tests {
             paused: false,
             notes: String::new(),
             actual_amount_minor: None,
+            account_id: String::new(),
             created_at: String::new(),
         }
     }
@@ -1188,6 +1326,7 @@ mod tests {
             status: ExpenseStatus::Planned,
             notes: String::new(),
             actual_amount_minor: None,
+            account_id: String::new(),
             created_at: String::new(),
         }
     }
@@ -1196,6 +1335,7 @@ mod tests {
         Account {
             id: "account".into(),
             name: "Demo".into(),
+            kind: crate::types::AccountKind::Checking,
             currency: Currency::Eur,
             balance_minor,
             balance_date: balance_date.into(),
@@ -1203,6 +1343,8 @@ mod tests {
             opening_balance_minor: 0,
             opening_balance_date: None,
             opening_balance_set: false,
+            archived: false,
+            sort_order: 0,
             notes: String::new(),
         }
     }
@@ -1313,5 +1455,217 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result.total_income_minor, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // LOCAL-025: several accounts
+    // -----------------------------------------------------------------------
+
+    fn account_of(id: &str, balance_minor: i64, balance_date: &str) -> Account {
+        Account {
+            id: id.into(),
+            name: id.into(),
+            kind: crate::types::AccountKind::Checking,
+            currency: Currency::Eur,
+            balance_minor,
+            balance_date: balance_date.into(),
+            balance_set: true,
+            opening_balance_minor: 0,
+            opening_balance_date: None,
+            opening_balance_set: false,
+            archived: false,
+            sort_order: 0,
+            notes: String::new(),
+        }
+    }
+
+    fn transfer_of(id: &str, date: &str, amount_minor: i64, from: &str, to: &str) -> Transfer {
+        Transfer {
+            id: id.into(),
+            date: date.into(),
+            time: None,
+            amount_minor,
+            currency: Currency::Eur,
+            from_account_id: from.into(),
+            to_account_id: to.into(),
+            note: String::new(),
+            created_at: String::new(),
+        }
+    }
+
+    /// A consumer subscription paid from the checking account, and rent paid
+    /// from the savings account: two rows on two different accounts.
+    fn two_accounts_events() -> (Vec<Expense>, Vec<Transfer>) {
+        let mut rent = simple_expense("rent", 80_000);
+        rent.account_id = "savings".into();
+        let mut groceries = simple_expense("groceries", 20_000);
+        groceries.account_id = "checking".into();
+        (
+            vec![rent, groceries],
+            vec![transfer_of(
+                "t1",
+                "2026-11-20",
+                30_000,
+                "checking",
+                "savings",
+            )],
+        )
+    }
+
+    #[test]
+    fn one_scope_collects_only_the_rows_of_that_account() {
+        let subs: Vec<SubscriptionWithHistory> = vec![sub_with_price(None, None)];
+        let (expenses, transfers) = two_accounts_events();
+        let events = EventCollectionInput {
+            scope: AccountScope::One("checking".to_string()),
+            transfers: &transfers,
+            ..EventCollectionInput::new(
+                Currency::Eur,
+                &subs,
+                &[],
+                &expenses,
+                &[],
+                "2026-11-01",
+                "2026-11-30",
+            )
+        };
+        let collected = collect_events(&events).unwrap();
+        // The savings rent is out of the checking scope; the transfer out and
+        // the groceries are in.
+        let names: Vec<&str> = collected
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect();
+        // Sorted by date: the groceries on the 10th, the transfer on the 20th.
+        assert_eq!(names, vec!["Gasto groceries", "Transferencia"], "{names:?}");
+        assert!(
+            collected
+                .events
+                .iter()
+                .all(|event| event.account_id == "checking")
+        );
+    }
+
+    #[test]
+    fn a_transfer_leaves_each_side_and_never_the_total() {
+        let subs: Vec<SubscriptionWithHistory> = vec![sub_with_price(None, None)];
+        let (expenses, transfers) = two_accounts_events();
+
+        // Checking: the transfer out is a real expense. Savings: it is income.
+        for (scope, expected) in [
+            ("checking", EventKind::Expense),
+            ("savings", EventKind::Income),
+        ] {
+            let events = EventCollectionInput {
+                scope: AccountScope::One(scope.to_string()),
+                transfers: &transfers,
+                ..EventCollectionInput::new(
+                    Currency::Eur,
+                    &subs,
+                    &[],
+                    &expenses,
+                    &[],
+                    "2026-11-01",
+                    "2026-11-30",
+                )
+            };
+            let collected = collect_events(&events).unwrap();
+            let transfer_event = collected
+                .events
+                .iter()
+                .find(|event| event.source == EventSource::Transfer)
+                .expect("the transfer event");
+            assert_eq!(transfer_event.kind, expected);
+            assert_eq!(transfer_event.amount_minor, 30_000);
+            assert_eq!(transfer_event.account_id, scope);
+            assert!(!transfer_event.estimated);
+        }
+
+        // Under the all-accounts scope nothing is emitted: a transfer moves
+        // money between accounts and never changes the total.
+        let events = EventCollectionInput {
+            transfers: &transfers,
+            ..EventCollectionInput::new(
+                Currency::Eur,
+                &subs,
+                &[],
+                &expenses,
+                &[],
+                "2026-11-01",
+                "2026-11-30",
+            )
+        };
+        let collected = collect_events(&events).unwrap();
+        assert!(
+            collected
+                .events
+                .iter()
+                .all(|event| event.source != EventSource::Transfer)
+        );
+    }
+
+    #[test]
+    fn one_scope_projects_only_its_account_from_its_balance() {
+        let subs: Vec<SubscriptionWithHistory> = vec![sub_with_price(None, None)];
+        let (expenses, transfers) = two_accounts_events();
+        let checking = account_of("checking", 100_000, "2026-11-01");
+        let savings = account_of("savings", 500_000, "2026-11-01");
+
+        // Checking: groceries (20 000) and the transfer out (30 000).
+        // Savings: rent (80 000) minus the transfer in (30 000).
+        for (account, expected_balance) in [(&checking, 50_000), (&savings, 450_000)] {
+            let events = EventCollectionInput {
+                scope: AccountScope::One(account.id.clone()),
+                transfers: &transfers,
+                ..EventCollectionInput::new(
+                    account.currency,
+                    &subs,
+                    &[],
+                    &expenses,
+                    &[],
+                    "2026-11-01",
+                    "2026-11-30",
+                )
+            };
+            let result = project_balance(&ProjectionInput { account, events }).unwrap();
+            assert_eq!(result.end_balance_minor, expected_balance);
+            assert_eq!(result.start_balance_minor, account.balance_minor);
+        }
+    }
+
+    #[test]
+    fn a_transfer_missing_its_rate_warns_and_is_skipped() {
+        let subs: Vec<SubscriptionWithHistory> = vec![sub_with_price(None, None)];
+        let expenses: Vec<Expense> = vec![];
+        // A transfer in EUR reaching a USD card: converting it needs a rate.
+        let card_transfer = Transfer {
+            currency: Currency::Eur,
+            ..transfer_of("t1", "2026-11-20", 30_000, "checking", "card")
+        };
+        let transfers = [card_transfer];
+        let events = EventCollectionInput {
+            scope: AccountScope::One("card".to_string()),
+            transfers: &transfers,
+            ..EventCollectionInput::new(
+                Currency::Usd,
+                &subs,
+                &[],
+                &expenses,
+                &[],
+                "2026-11-01",
+                "2026-11-30",
+            )
+        };
+        let collected = collect_events(&events).unwrap();
+        assert!(
+            collected
+                .warnings
+                .iter()
+                .any(|warning| warning.code == WarningCode::MissingRate),
+            "the missing rate is warned: {:?}",
+            collected.warnings
+        );
+        assert!(collected.events.is_empty());
     }
 }

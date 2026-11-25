@@ -17,9 +17,9 @@ use serde::Serialize;
 
 use moxen_finances_core::dates::{compare_iso_dates, today_madrid_now};
 use moxen_finances_core::types::{
-    Account, AppState, BillingDayEntry, Currency, Frequency, PauseEntry, PlanHistoryEntry,
-    PriceHistoryEntry, Setting, StatusHistoryEntry, Subscription, SubscriptionStatus,
-    SubscriptionWithHistory,
+    Account, AccountKind, AppState, BillingDayEntry, Currency, Frequency, PauseEntry,
+    PlanHistoryEntry, PriceHistoryEntry, Setting, StatusHistoryEntry, Subscription,
+    SubscriptionStatus, SubscriptionWithHistory,
 };
 
 use crate::Store;
@@ -27,7 +27,7 @@ use crate::error::{Result, StoreError};
 use crate::row::{
     AuditEntry, log_audit, map_account, map_audit, map_billing_day, map_charge, map_expense,
     map_income, map_pause, map_plan, map_price, map_rate, map_status_history, map_subscription,
-    new_id, now, text,
+    map_transfer, new_id, now, text,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,25 +119,70 @@ pub(crate) fn with_history(
     })
 }
 
-/// The account, or the reference's empty one when the table has no row.
-pub(crate) fn read_account(conn: &Connection) -> Result<Account> {
-    let mut statement = conn.prepare("SELECT * FROM account ORDER BY rowid ASC LIMIT 1")?;
-    let mut rows = statement.query([])?;
-    match rows.next()? {
-        Some(row) => Ok(map_account(row)),
-        None => Ok(Account {
-            id: "account-primary".to_string(),
-            name: "Cuenta principal".to_string(),
-            currency: Currency::Eur,
-            balance_minor: 0,
-            balance_date: "1970-01-01".to_string(),
-            balance_set: false,
-            opening_balance_minor: 0,
-            opening_balance_date: None,
-            opening_balance_set: false,
-            notes: String::new(),
-        }),
+/// The default account the store reads when the table has no row yet (the
+/// same one the reference's `getAppState` synthesized).
+pub(crate) fn default_account() -> Account {
+    Account {
+        id: "account-primary".to_string(),
+        name: "Cuenta principal".to_string(),
+        kind: AccountKind::Checking,
+        currency: Currency::Eur,
+        balance_minor: 0,
+        balance_date: "1970-01-01".to_string(),
+        balance_set: false,
+        opening_balance_minor: 0,
+        opening_balance_date: None,
+        opening_balance_set: false,
+        archived: false,
+        sort_order: 0,
+        notes: String::new(),
     }
+}
+
+/// Every account, in the order the user chose for them.
+pub(crate) fn read_accounts(conn: &Connection) -> Result<Vec<Account>> {
+    let mut statement =
+        conn.prepare("SELECT * FROM accounts ORDER BY sort_order ASC, rowid ASC")?;
+    let mut rows = statement.query([])?;
+    let mut accounts = Vec::new();
+    while let Some(row) = rows.next()? {
+        accounts.push(map_account(row));
+    }
+    Ok(accounts)
+}
+
+pub(crate) fn read_account_row(conn: &Connection, id: &str) -> Result<Option<Account>> {
+    let mut statement = conn.prepare("SELECT * FROM accounts WHERE id = ?")?;
+    let mut rows = statement.query([id])?;
+    Ok(rows.next()?.map(map_account))
+}
+
+/// The first account, or the default one when the table has no row.
+pub(crate) fn read_account(conn: &Connection) -> Result<Account> {
+    Ok(read_accounts(conn)?
+        .into_iter()
+        .next()
+        .unwrap_or_else(default_account))
+}
+
+/// The account a movement row declares: an empty id means the first account
+/// (or none at all, when the database has no account — the reference's
+/// behavior for a brand-new empty file), an unknown id is an error.
+pub(crate) fn resolve_account_id(conn: &Connection, account_id: &str) -> Result<String> {
+    let accounts = read_accounts(conn)?;
+    if !account_id.is_empty() {
+        if accounts.iter().any(|account| account.id == account_id) {
+            return Ok(account_id.to_string());
+        }
+        return Err(StoreError::NotFound {
+            entity: "cuenta",
+            id: account_id.to_string(),
+        });
+    }
+    Ok(accounts
+        .first()
+        .map(|account| account.id.clone())
+        .unwrap_or_default())
 }
 
 pub(crate) fn read_subscription_row(conn: &Connection, id: &str) -> Result<Option<Subscription>> {
@@ -146,62 +191,146 @@ pub(crate) fn read_subscription_row(conn: &Connection, id: &str) -> Result<Optio
     Ok(rows.next()?.map(map_subscription))
 }
 
-/// `getAppState`: everything the views read, in the reference's order.
+/// `getAppState` (LOCAL-025 widened): everything the views read, in the
+/// reference's order — every account, every row of every account, the
+/// transfers, the rates, the charges and the settings. `account` is the
+/// first account, so a single-account consumer still sees what it saw
+/// before.
 pub fn app_state(conn: &Connection) -> Result<AppState> {
-    let account = read_account(conn)?;
+    state_for(conn, None)
+}
 
-    let mut statement =
-        conn.prepare("SELECT * FROM subscriptions ORDER BY sort_order ASC, created_at ASC")?;
-    let mut rows = statement.query([])?;
+/// The state of one account only: its row, and its movements. `None` when
+/// the account does not exist.
+pub fn account_state(conn: &Connection, account_id: &str) -> Result<Option<AppState>> {
+    if read_account_row(conn, account_id)?.is_none() {
+        return Ok(None);
+    }
+    state_for(conn, Some(account_id)).map(Some)
+}
+
+/// The same whole-state read, narrowed to one account's rows when asked.
+fn state_for(conn: &Connection, account_id: Option<&str>) -> Result<AppState> {
+    let accounts = read_accounts(conn)?;
+    let account = match account_id {
+        Some(id) => accounts
+            .iter()
+            .find(|account| account.id == id)
+            .cloned()
+            .unwrap_or_else(default_account),
+        None => accounts.first().cloned().unwrap_or_else(default_account),
+    };
+
     let mut subscriptions = Vec::new();
-    while let Some(row) = rows.next()? {
-        subscriptions.push(with_history(conn, map_subscription(row))?);
-    }
-
-    let mut statement = conn.prepare("SELECT * FROM incomes ORDER BY date ASC, created_at ASC")?;
-    let mut rows = statement.query([])?;
     let mut incomes = Vec::new();
-    while let Some(row) = rows.next()? {
-        incomes.push(map_income(row));
-    }
-
-    let mut statement = conn.prepare("SELECT * FROM expenses ORDER BY date ASC, created_at ASC")?;
-    let mut rows = statement.query([])?;
     let mut expenses = Vec::new();
-    while let Some(row) = rows.next()? {
-        expenses.push(map_expense(row));
-    }
-
-    let mut statement =
-        conn.prepare("SELECT * FROM exchange_rates ORDER BY effective_from ASC, created_at ASC")?;
-    let mut rows = statement.query([])?;
     let mut rates = Vec::new();
-    while let Some(row) = rows.next()? {
-        rates.push(map_rate(row));
-    }
-
-    let mut statement = conn
-        .prepare("SELECT * FROM subscription_charges ORDER BY charge_date ASC, created_at ASC")?;
-    let mut rows = statement.query([])?;
     let mut charges = Vec::new();
-    while let Some(row) = rows.next()? {
-        charges.push(map_charge(row));
+    let mut transfers = Vec::new();
+    let mut settings = BTreeMap::new();
+
+    {
+        let mut statement = conn.prepare(match account_id {
+            Some(_) => "SELECT * FROM subscriptions WHERE account_id = ?1 ORDER BY sort_order ASC, created_at ASC",
+            None => "SELECT * FROM subscriptions ORDER BY sort_order ASC, created_at ASC",
+        })?;
+        let mut rows = match account_id {
+            Some(id) => statement.query(params![id])?,
+            None => statement.query([])?,
+        };
+        while let Some(row) = rows.next()? {
+            subscriptions.push(with_history(conn, map_subscription(row))?);
+        }
     }
 
-    let mut statement = conn.prepare("SELECT * FROM settings")?;
-    let mut rows = statement.query([])?;
-    let mut settings = BTreeMap::new();
-    while let Some(row) = rows.next()? {
-        settings.insert(text(row, "key", ""), text(row, "value", ""));
+    {
+        let mut statement = conn.prepare(match account_id {
+            Some(_) => {
+                "SELECT * FROM incomes WHERE account_id = ?1 ORDER BY date ASC, created_at ASC"
+            }
+            None => "SELECT * FROM incomes ORDER BY date ASC, created_at ASC",
+        })?;
+        let mut rows = match account_id {
+            Some(id) => statement.query(params![id])?,
+            None => statement.query([])?,
+        };
+        while let Some(row) = rows.next()? {
+            incomes.push(map_income(row));
+        }
+    }
+
+    {
+        let mut statement = conn.prepare(match account_id {
+            Some(_) => {
+                "SELECT * FROM expenses WHERE account_id = ?1 ORDER BY date ASC, created_at ASC"
+            }
+            None => "SELECT * FROM expenses ORDER BY date ASC, created_at ASC",
+        })?;
+        let mut rows = match account_id {
+            Some(id) => statement.query(params![id])?,
+            None => statement.query([])?,
+        };
+        while let Some(row) = rows.next()? {
+            expenses.push(map_expense(row));
+        }
+    }
+
+    {
+        let mut statement = conn
+            .prepare("SELECT * FROM exchange_rates ORDER BY effective_from ASC, created_at ASC")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            rates.push(map_rate(row));
+        }
+    }
+
+    {
+        let mut statement = conn.prepare(match account_id {
+            Some(_) => "SELECT * FROM subscription_charges WHERE account_id = ?1 ORDER BY charge_date ASC, created_at ASC",
+            None => "SELECT * FROM subscription_charges ORDER BY charge_date ASC, created_at ASC",
+        })?;
+        let mut rows = match account_id {
+            Some(id) => statement.query(params![id])?,
+            None => statement.query([])?,
+        };
+        while let Some(row) = rows.next()? {
+            charges.push(map_charge(row));
+        }
+    }
+
+    {
+        // Transfers count as movements of both sides: each appears in the
+        // state of the account it leaves or reaches.
+        let mut statement = conn.prepare(match account_id {
+            Some(_) => "SELECT * FROM transfers WHERE from_account_id = ?1 OR to_account_id = ?1 ORDER BY date ASC, created_at ASC",
+            None => "SELECT * FROM transfers ORDER BY date ASC, created_at ASC",
+        })?;
+        let mut rows = match account_id {
+            Some(id) => statement.query(params![id])?,
+            None => statement.query([])?,
+        };
+        while let Some(row) = rows.next()? {
+            transfers.push(map_transfer(row));
+        }
+    }
+
+    {
+        let mut statement = conn.prepare("SELECT * FROM settings")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            settings.insert(text(row, "key", ""), text(row, "value", ""));
+        }
     }
 
     Ok(AppState {
         account,
+        accounts,
         subscriptions,
         incomes,
         expenses,
         rates,
         charges,
+        transfers,
         settings,
     })
 }
@@ -235,27 +364,51 @@ pub(crate) fn read_audit(conn: &Connection, limit: usize) -> Result<Vec<AuditEnt
 
 /// `AccountPatch`: absent fields leave the current value alone. The nested
 /// `Option` on `opening_balance_date` is the reference's `undefined` (leave)
-/// versus `null` (clear).
+/// versus `null` (clear). LOCAL-025 adds the kind and the archived flag, and
+/// the patch can now name which account it means.
 #[derive(Debug, Clone, Default)]
 pub struct AccountPatch {
     pub name: Option<String>,
+    pub kind: Option<AccountKind>,
     pub balance_minor: Option<i64>,
     pub balance_date: Option<String>,
     pub balance_set: Option<bool>,
     pub opening_balance_minor: Option<i64>,
     pub opening_balance_date: Option<Option<String>>,
     pub opening_balance_set: Option<bool>,
+    pub archived: Option<bool>,
     pub notes: Option<String>,
 }
 
-/// `updateAccount`: the account is the one row the whole app balances from,
-/// created by the seed and only ever updated. The opening balance is what
-/// lets the projection cover months before the current balance was taken.
-pub(crate) fn update_account(conn: &Connection, patch: &AccountPatch) -> Result<Account> {
-    let current = read_account(conn)?;
+/// `AccountInput`: what creating an account takes. The balance starts unset
+/// unless an amount is given, and the opening balance is only marked as set
+/// when both its amount and its date arrive.
+#[derive(Debug, Clone, Default)]
+pub struct AccountInput {
+    pub name: String,
+    pub kind: Option<AccountKind>,
+    pub currency: Option<Currency>,
+    pub balance_minor: Option<i64>,
+    /// Used as the balance date; defaults to today.
+    pub balance_date: Option<String>,
+    pub opening_balance_minor: Option<i64>,
+    pub opening_balance_date: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// `updateAccount`, narrowed to one account row.
+pub(crate) fn update_account_row(
+    conn: &Connection,
+    id: &str,
+    patch: &AccountPatch,
+) -> Result<Option<Account>> {
+    let Some(current) = read_account_row(conn, id)? else {
+        return Ok(None);
+    };
     let next = Account {
         id: current.id.clone(),
         name: patch.name.clone().unwrap_or(current.name),
+        kind: patch.kind.unwrap_or(current.kind),
         currency: current.currency,
         balance_minor: patch.balance_minor.unwrap_or(current.balance_minor),
         balance_date: patch.balance_date.clone().unwrap_or(current.balance_date),
@@ -270,30 +423,193 @@ pub(crate) fn update_account(conn: &Connection, patch: &AccountPatch) -> Result<
         opening_balance_set: patch
             .opening_balance_set
             .unwrap_or(current.opening_balance_set),
+        archived: patch.archived.unwrap_or(current.archived),
+        sort_order: current.sort_order,
         notes: patch.notes.clone().unwrap_or(current.notes),
     };
 
     let stamped = now();
     let transaction = conn.unchecked_transaction()?;
     transaction.execute(
-        "UPDATE account SET name = ?, balance_minor = ?, balance_date = ?, balance_set = ?,
-           opening_balance_minor = ?, opening_balance_date = ?, opening_balance_set = ?, notes = ?
-         WHERE id = ?",
+        "UPDATE accounts SET name = ?, kind = ?, balance_minor = ?, balance_date = ?, balance_set = ?,
+           opening_balance_minor = ?, opening_balance_date = ?, opening_balance_set = ?,
+           archived = ?, notes = ? WHERE id = ?",
         params![
             next.name,
+            next.kind.as_str(),
             next.balance_minor,
             next.balance_date,
             next.balance_set,
             next.opening_balance_minor,
             next.opening_balance_date,
             next.opening_balance_set,
+            next.archived,
             next.notes,
             next.id
         ],
     )?;
     log_audit(&transaction, "account", &next.id, "update", &next, &stamped)?;
     transaction.commit()?;
-    Ok(next)
+    Ok(Some(next))
+}
+
+/// The account patch applied to the first account: the single-account
+/// operation the reference had.
+pub(crate) fn update_account(conn: &Connection, patch: &AccountPatch) -> Result<Account> {
+    let id = read_account(conn)?.id;
+    match update_account_row(conn, &id, patch)? {
+        Some(account) => Ok(account),
+        None => Ok(patch_applied_without_row(patch)),
+    }
+}
+
+/// A patch on an account table with no row: the same values come back, so a
+/// caller that paints the default account still sees what it wrote (the
+/// reference's `updateAccount` behaved the same way on an empty table).
+fn patch_applied_without_row(patch: &AccountPatch) -> Account {
+    let mut account = default_account();
+    account.name = patch.name.clone().unwrap_or(account.name);
+    account.kind = patch.kind.unwrap_or(account.kind);
+    account.balance_minor = patch.balance_minor.unwrap_or(account.balance_minor);
+    account.balance_date = patch.balance_date.clone().unwrap_or(account.balance_date);
+    account.balance_set = patch.balance_set.unwrap_or(account.balance_set);
+    account.opening_balance_minor = patch
+        .opening_balance_minor
+        .unwrap_or(account.opening_balance_minor);
+    account.opening_balance_date = match &patch.opening_balance_date {
+        Some(date) => date.clone(),
+        None => account.opening_balance_date,
+    };
+    account.opening_balance_set = patch
+        .opening_balance_set
+        .unwrap_or(account.opening_balance_set);
+    account.archived = patch.archived.unwrap_or(account.archived);
+    account.notes = patch.notes.clone().unwrap_or(account.notes);
+    account
+}
+
+pub(crate) fn create_account(conn: &Connection, input: &AccountInput) -> Result<Account> {
+    if input.name.trim().is_empty() {
+        return Err(StoreError::MalformedBackup(
+            "la cuenta necesita un nombre".to_string(),
+        ));
+    }
+    let stamped = now();
+    let id = new_id(conn)?;
+    let account = Account {
+        id: id.clone(),
+        name: input.name.clone(),
+        kind: input.kind.unwrap_or(AccountKind::Checking),
+        currency: input.currency.unwrap_or(Currency::Eur),
+        balance_minor: input.balance_minor.unwrap_or(0),
+        balance_date: input.balance_date.clone().unwrap_or_else(today_madrid_now),
+        balance_set: input.balance_minor.is_some(),
+        opening_balance_minor: input.opening_balance_minor.unwrap_or(0),
+        opening_balance_date: input.opening_balance_date.clone(),
+        opening_balance_set: input.opening_balance_minor.is_some()
+            && input.opening_balance_date.is_some(),
+        archived: false,
+        sort_order: 0,
+        notes: input.notes.clone().unwrap_or_default(),
+    };
+
+    let transaction = conn.unchecked_transaction()?;
+    let sort_order: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM accounts",
+        [],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO accounts
+          (id, name, kind, currency, balance_minor, balance_date, balance_set,
+           opening_balance_minor, opening_balance_date, opening_balance_set, archived, sort_order, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            id,
+            account.name,
+            account.kind.as_str(),
+            account.currency.as_str(),
+            account.balance_minor,
+            account.balance_date,
+            account.balance_set,
+            account.opening_balance_minor,
+            account.opening_balance_date,
+            account.opening_balance_set,
+            account.archived,
+            sort_order,
+            account.notes
+        ],
+    )?;
+    log_audit(&transaction, "account", &id, "create", &account, &stamped)?;
+    transaction.commit()?;
+    Ok(Account {
+        sort_order,
+        ..account
+    })
+}
+
+/// How many rows still point at the account: its movements. An account with
+/// movements cannot be deleted — archiving is the way.
+pub(crate) fn account_movement_count(conn: &Connection, id: &str) -> Result<i64> {
+    let mut total: i64 = 0;
+    for sql in [
+        "SELECT COUNT(*) FROM subscriptions WHERE account_id = ?1",
+        "SELECT COUNT(*) FROM incomes WHERE account_id = ?1",
+        "SELECT COUNT(*) FROM expenses WHERE account_id = ?1",
+        "SELECT COUNT(*) FROM subscription_charges WHERE account_id = ?1",
+        "SELECT COUNT(*) FROM transfers WHERE from_account_id = ?1 OR to_account_id = ?1",
+    ] {
+        total += conn.query_row(sql, params![id], |row| row.get::<_, i64>(0))?;
+    }
+    Ok(total)
+}
+
+pub(crate) fn delete_account(conn: &Connection, id: &str) -> Result<bool> {
+    let Some(current) = read_account_row(conn, id)? else {
+        return Ok(false);
+    };
+    if account_movement_count(conn, id)? > 0 {
+        return Err(StoreError::AccountInUse { id: id.to_string() });
+    }
+    let stamped = now();
+    let transaction = conn.unchecked_transaction()?;
+    log_audit(&transaction, "account", id, "delete", &current, &stamped)?;
+    transaction.execute("DELETE FROM accounts WHERE id = ?", [id])?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+/// The order the accounts appear in: exactly the existing ids, in their new
+/// order. A missing or repeated id is refused rather than half-applied.
+pub(crate) fn reorder_accounts(conn: &Connection, ids: &[String]) -> Result<()> {
+    let existing = read_accounts(conn)?;
+    let mut sorted = ids.to_vec();
+    sorted.sort();
+    let mut existing_ids: Vec<String> = existing.iter().map(|account| account.id.clone()).collect();
+    existing_ids.sort();
+    if sorted != existing_ids {
+        return Err(StoreError::MalformedBackup(
+            "el orden de las cuentas no coincide con las cuentas existentes".to_string(),
+        ));
+    }
+    let stamped = now();
+    let transaction = conn.unchecked_transaction()?;
+    for (position, id) in ids.iter().enumerate() {
+        transaction.execute(
+            "UPDATE accounts SET sort_order = ? WHERE id = ?",
+            params![position as i64, id],
+        )?;
+    }
+    log_audit(
+        &transaction,
+        "account",
+        "",
+        "reorder",
+        &ids.to_vec(),
+        &stamped,
+    )?;
+    transaction.commit()?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +646,10 @@ pub struct SubscriptionInput {
     pub external_payment: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<SubscriptionStatus>,
+    /// LOCAL-025: the account the subscription is paid from. Empty means
+    /// the first account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl SubscriptionInput {
@@ -337,6 +657,7 @@ impl SubscriptionInput {
     /// reference's defaults.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            account_id: None,
             name: name.into(),
             description: None,
             currency: None,
@@ -375,6 +696,9 @@ pub struct SubscriptionPatch {
     pub cancelled_at: Option<Option<String>>,
     pub archived: Option<bool>,
     pub archived_at: Option<Option<String>>,
+    /// LOCAL-025: the account the subscription is paid from. `None` leaves
+    /// it alone; `Some(id)` moves it (an empty id means the first account).
+    pub account_id: Option<String>,
 }
 
 /// `patch !== undefined ? patch : current` for a nullable field.
@@ -403,6 +727,7 @@ pub(crate) fn create_subscription(
     let billing_day = input
         .billing_day
         .or_else(|| input.start_date.as_deref().and_then(day_of));
+    let account_id = resolve_account_id(conn, input.account_id.as_deref().unwrap_or(""))?;
 
     let transaction = conn.unchecked_transaction()?;
     let sort_order: i64 =
@@ -413,8 +738,8 @@ pub(crate) fn create_subscription(
         "INSERT INTO subscriptions
           (id, name, description, currency, price_minor, frequency, start_date, billing_day,
            next_billing_override, end_date, status, cancelled_at, plan, notes, external_payment,
-           archived, archived_at, sort_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+           archived, archived_at, sort_order, created_at, updated_at, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             id,
             input.name,
@@ -435,7 +760,8 @@ pub(crate) fn create_subscription(
             None::<String>,
             sort_order,
             stamped,
-            stamped
+            stamped,
+            account_id
         ],
     )?;
 
@@ -526,6 +852,11 @@ pub(crate) fn update_subscription(
         plan: applied(&patch.plan, current.plan),
         notes: patch.notes.clone().unwrap_or(current.notes),
         external_payment: patch.external_payment.unwrap_or(current.external_payment),
+        account_id: match &patch.account_id {
+            Some(id) if id.is_empty() => current.account_id.clone(),
+            Some(id) => resolve_account_id(conn, id)?,
+            None => current.account_id.clone(),
+        },
         archived: patch.archived.unwrap_or(current.archived),
         archived_at: applied(&patch.archived_at, current.archived_at),
         updated_at: stamped.clone(),
@@ -538,7 +869,7 @@ pub(crate) fn update_subscription(
            name = ?, description = ?, currency = ?, price_minor = ?, frequency = ?,
            start_date = ?, billing_day = ?, next_billing_override = ?, end_date = ?,
            status = ?, cancelled_at = ?, plan = ?, notes = ?, external_payment = ?, archived = ?,
-           archived_at = ?, updated_at = ?
+           archived_at = ?, updated_at = ?, account_id = ?
          WHERE id = ?",
         params![
             next.name,
@@ -558,6 +889,7 @@ pub(crate) fn update_subscription(
             next.archived,
             next.archived_at,
             next.updated_at,
+            next.account_id,
             id
         ],
     )?;
@@ -1032,14 +1364,25 @@ pub(crate) fn update_setting(conn: &Connection, key: &str, value: &str) -> Resul
 // ---------------------------------------------------------------------------
 
 impl Store {
-    /// Everything the views read.
+    /// Everything the views read: every account and every movement.
     pub fn app_state(&self) -> Result<AppState> {
         app_state(self.connection())
+    }
+
+    /// The movements of one account, `None` when the account does not exist.
+    pub fn account_state(&self, account_id: &str) -> Result<Option<AppState>> {
+        account_state(self.connection(), account_id)
     }
 
     /// The account, even when the table has no row yet.
     pub fn account(&self) -> Result<Account> {
         read_account(self.connection())
+    }
+
+    /// Every account, in the user's order (archived ones included, so the
+    /// views can offer them).
+    pub fn accounts(&self) -> Result<Vec<Account>> {
+        read_accounts(self.connection())
     }
 
     /// A subscription with its whole history, `None` when the id is gone.
@@ -1060,10 +1403,37 @@ impl Store {
         read_audit(self.connection(), limit)
     }
 
-    /// Change the account: its name, its balance, its opening balance or its
-    /// notes. Absent fields keep their value.
+    /// Change the first account: its name, its balance, its opening balance
+    /// or its notes. Absent fields keep their value.
     pub fn update_account(&mut self, patch: &AccountPatch) -> Result<Account> {
         update_account(self.connection(), patch)
+    }
+
+    /// The same change, on the account named by `id`; `None` when it does
+    /// not exist.
+    pub fn update_account_by_id(
+        &mut self,
+        id: &str,
+        patch: &AccountPatch,
+    ) -> Result<Option<Account>> {
+        update_account_row(self.connection(), id, patch)
+    }
+
+    /// Create an account (checking by default, EUR by default, appended last).
+    pub fn create_account(&mut self, input: &AccountInput) -> Result<Account> {
+        create_account(self.connection(), input)
+    }
+
+    /// Remove an account that has no movements. One that has any is refused:
+    /// archiving is the way to retire it.
+    pub fn delete_account(&mut self, id: &str) -> Result<bool> {
+        delete_account(self.connection(), id)
+    }
+
+    /// The new order of every account. A list that is not exactly the
+    /// existing ids, reordered, is refused whole.
+    pub fn reorder_accounts(&mut self, ids: &[String]) -> Result<()> {
+        reorder_accounts(self.connection(), ids)
     }
 
     /// Set one setting, creating it when it is new.

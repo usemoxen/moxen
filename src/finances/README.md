@@ -16,8 +16,11 @@ no other Moxen product.
 
 The store keeps the database at `<platform data dir>/Moxen/Finances/finances.db` (the platform data
 folder, so never a hardcoded home), which `MOXEN_FINANCES_DB` overrides and an explicit path bypasses.
-Its schema is the TypeScript reference's, table for table, so a database from either app opens in the
-other; a new file gets the fictional demo seed, an existing one never does.
+Its schema grew out of the TypeScript reference's: version 1 was that schema, table for table, and
+version 2 (LOCAL-025) adds several accounts and transfers. **Version 2 is one-way: the reference no
+longer opens a database this build migrates or creates** — before migrating a file, the store copies
+it to `<name>.pre-v2.bak` next to it and refuses to migrate if the copy fails (see `store/README.md`).
+A new file gets the fictional demo seed, an existing one never does.
 
 Rules: the repository is public, so no real personal data goes in it (demo data only, `data/` and `*.db`
 are ignored). Nothing under `src/` in TypeScript imports this. `src/desktop` is not touched until the

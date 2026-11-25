@@ -6,15 +6,18 @@
 
 mod common;
 
-use moxen_finances_core::projection::{NextBillingForOptions, next_billing_for};
+use moxen_finances_core::projection::{
+    EventKind, EventSource, NextBillingForOptions, next_billing_for,
+};
 use moxen_finances_core::types::{
-    Currency, ExpenseStatus, Frequency, IncomeStatus, SubscriptionStatus,
+    AccountKind, Currency, ExpenseStatus, Frequency, IncomeStatus, SubscriptionStatus,
 };
 
 use common::TestStore;
 use moxen_finances_store::{
-    AccountPatch, ChargeInput, ExpenseInput, IncomeInput, PlanInput, PriceInput, Store,
-    SubscriptionAction, SubscriptionInput, SubscriptionPatch,
+    AccountInput, AccountPatch, ChargeInput, ExpenseInput, IncomeInput, PlanInput, PriceInput,
+    RateInput, Store, StoreError, SubscriptionAction, SubscriptionInput, SubscriptionPatch,
+    TransferInput,
 };
 
 fn by_name<'a>(
@@ -500,6 +503,7 @@ fn a_real_charge_and_the_billing_day_survive_an_export() {
             currency: Currency::Eur,
             rate_scaled: None,
             note: Some("Cambio del banco".to_string()),
+            account_id: None,
         })
         .expect("charge");
     let changed = test
@@ -554,6 +558,7 @@ fn a_charge_can_be_edited_and_deleted() {
             amount_minor: 1_299,
             currency: Currency::Usd,
             rate_scaled: Some(1_100_000),
+            account_id: None,
             note: None,
         })
         .expect("charge");
@@ -568,6 +573,7 @@ fn a_charge_can_be_edited_and_deleted() {
                 amount_minor: 1_350,
                 currency: Currency::Usd,
                 rate_scaled: None,
+                account_id: None,
                 note: Some("Cargo de corrección".to_string()),
             },
         )
@@ -608,12 +614,14 @@ fn the_account_keeps_its_opening_balance() {
         .store
         .update_account(&AccountPatch {
             name: Some("Cuenta".to_string()),
+            kind: None,
             balance_minor: Some(200_000),
             balance_date: Some("2026-11-18".to_string()),
             balance_set: Some(true),
             opening_balance_minor: Some(50_000),
             opening_balance_date: Some(Some("2026-06-01".to_string())),
             opening_balance_set: Some(true),
+            archived: None,
             notes: Some("Nota".to_string()),
         })
         .expect("account");
@@ -711,4 +719,331 @@ fn settings_are_upserted_and_listed_by_key() {
     );
     assert_eq!(settings.len(), 4);
     assert_eq!(test.store.app_state().expect("state").settings.len(), 4);
+}
+
+// ---------------------------------------------------------------------------
+// LOCAL-025: accounts, scopes and transfers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn accounts_are_created_renamed_archived_reordered_and_deleted() {
+    let mut test = TestStore::initialized();
+    let seed = test.store.accounts().expect("accounts");
+    assert_eq!(
+        seed.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        vec!["seed-account-1", "seed-account-2", "seed-account-3"]
+    );
+
+    // A new account lands last, with its kind, and no balance set yet.
+    let cash = test
+        .store
+        .create_account(&AccountInput {
+            name: "Efectivo".to_string(),
+            kind: Some(AccountKind::Cash),
+            ..Default::default()
+        })
+        .expect("create");
+    assert_eq!(cash.kind, AccountKind::Cash);
+    assert_eq!(cash.sort_order, 3);
+    assert!(!cash.balance_set);
+    let accounts = test.store.accounts().expect("accounts");
+    assert_eq!(accounts.len(), 4);
+    assert_eq!(accounts[3].id, cash.id);
+
+    // Rename and archive through the patch, by id.
+    let renamed = test
+        .store
+        .update_account_by_id(
+            &cash.id,
+            &AccountPatch {
+                name: Some("Cartera".to_string()),
+                archived: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("rename")
+        .expect("found");
+    assert_eq!(renamed.name, "Cartera");
+    assert!(renamed.archived);
+
+    // The update on the first account (`update_account`) still covers the
+    // seeded checking account.
+    let first = test
+        .store
+        .update_account(&AccountPatch {
+            name: Some("Principal".to_string()),
+            ..Default::default()
+        })
+        .expect("first account");
+    assert_eq!(first.id, "seed-account-1");
+    assert_eq!(first.name, "Principal");
+
+    // Reorder needs exactly the existing ids; a wrong list is refused.
+    let mut ids: Vec<String> = test
+        .store
+        .accounts()
+        .expect("accounts")
+        .into_iter()
+        .map(|account| account.id)
+        .collect();
+    ids.reverse();
+    test.store.reorder_accounts(&ids).expect("reorder");
+    assert_eq!(
+        test.store
+            .accounts()
+            .expect("accounts")
+            .iter()
+            .map(|account| account.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Cartera", "Tarjeta de crédito", "Ahorro", "Principal"]
+    );
+    ids.push("nope".to_string());
+    assert!(test.store.reorder_accounts(&ids).is_err());
+
+    // Deleting an account with movements is refused: archiving is the way.
+    // The empty cash account goes without a fuss.
+    assert!(matches!(
+        test.store.delete_account("seed-account-1"),
+        Err(StoreError::AccountInUse { .. })
+    ));
+    assert!(test.store.delete_account(&cash.id).expect("delete"));
+    assert_eq!(test.store.accounts().expect("accounts").len(), 3);
+    assert!(!test.store.delete_account("nope").expect("missing"));
+}
+
+#[test]
+fn movements_can_be_created_on_an_account_and_default_to_the_first() {
+    let mut test = TestStore::initialized();
+    let income = test
+        .store
+        .create_income(&IncomeInput {
+            concept: "Nómina".to_string(),
+            amount_minor: 250_000,
+            date: "2026-11-30".to_string(),
+            account_id: Some("seed-account-2".to_string()),
+            ..Default::default()
+        })
+        .expect("income");
+    assert_eq!(income.account_id, "seed-account-2");
+    let expense = test
+        .store
+        .create_expense(&ExpenseInput {
+            concept: "Cena".to_string(),
+            category: "Ocio".to_string(),
+            amount_minor: 4_500,
+            date: "2026-11-21".to_string(),
+            ..Default::default()
+        })
+        .expect("expense");
+    // No account given: the first one, which is what a single-account user
+    // has.
+    assert_eq!(expense.account_id, "seed-account-1");
+
+    // An unknown account is refused instead of landing nowhere.
+    assert!(matches!(
+        test.store.create_expense(&ExpenseInput {
+            concept: "Rara".to_string(),
+            amount_minor: 1_000,
+            date: "2026-11-21".to_string(),
+            account_id: Some("nope".to_string()),
+            ..Default::default()
+        }),
+        Err(StoreError::NotFound { .. })
+    ));
+
+    // The account state of savings holds only the savings income.
+    let savings = test
+        .store
+        .account_state("seed-account-2")
+        .expect("state")
+        .expect("found");
+    assert_eq!(savings.incomes.len(), 1);
+    assert!(savings.expenses.is_empty());
+    let checking = test
+        .store
+        .account_state("seed-account-1")
+        .expect("state")
+        .expect("found");
+    assert!(checking.incomes.is_empty());
+    assert_eq!(checking.expenses.len(), 1);
+    assert!(test.store.account_state("nope").expect("state").is_none());
+}
+
+#[test]
+fn transfers_move_money_between_accounts_without_changing_the_total() {
+    // Two clean accounts, so the numbers of the range are only the
+    // transfer's.
+    let mut test = TestStore::empty();
+    let checking_id = test
+        .store
+        .create_account(&AccountInput {
+            name: "Corriente".to_string(),
+            kind: Some(AccountKind::Checking),
+            currency: Some(Currency::Eur),
+            balance_minor: Some(100_000),
+            balance_date: Some("2026-11-18".to_string()),
+            ..Default::default()
+        })
+        .expect("checking")
+        .id;
+    let savings_id = test
+        .store
+        .create_account(&AccountInput {
+            name: "Ahorro".to_string(),
+            kind: Some(AccountKind::Savings),
+            currency: Some(Currency::Eur),
+            balance_minor: Some(50_000),
+            balance_date: Some("2026-11-18".to_string()),
+            ..Default::default()
+        })
+        .expect("savings")
+        .id;
+
+    let transfer = test
+        .store
+        .create_transfer(&TransferInput {
+            date: "2026-11-20".to_string(),
+            time: None,
+            amount_minor: 30_000,
+            currency: Currency::Eur,
+            from_account_id: checking_id.clone(),
+            to_account_id: savings_id.clone(),
+            note: Some("Ahorro extra".to_string()),
+        })
+        .expect("transfer");
+    assert_eq!(transfer.from_account_id, checking_id);
+    assert_eq!(test.store.app_state().expect("state").transfers.len(), 1);
+
+    // Same-account transfers and unknown accounts are refused.
+    assert!(matches!(
+        test.store.create_transfer(&TransferInput {
+            date: "2026-11-20".to_string(),
+            time: None,
+            amount_minor: 1_000,
+            currency: Currency::Eur,
+            from_account_id: checking_id.clone(),
+            to_account_id: checking_id.clone(),
+            note: None,
+        }),
+        Err(StoreError::InvalidTransfer { .. })
+    ));
+    assert!(matches!(
+        test.store.create_transfer(&TransferInput {
+            date: "2026-11-20".to_string(),
+            time: None,
+            amount_minor: 1_000,
+            currency: Currency::Eur,
+            from_account_id: "nope".to_string(),
+            to_account_id: savings_id.clone(),
+            note: None,
+        }),
+        Err(StoreError::NotFound { .. })
+    ));
+
+    // The transfer is an expense of the first account and an income of the
+    // second, from each one's own balance.
+    let checking = test
+        .store
+        .account_projection(&checking_id, "2026-11-18", "2026-11-30")
+        .expect("projection")
+        .expect("found");
+    assert_eq!(checking.end_balance_minor, 100_000 - 30_000);
+    assert!(checking.events.iter().any(|event| {
+        event.source == EventSource::Transfer && event.kind == EventKind::Expense
+    }));
+    let savings = test
+        .store
+        .account_projection(&savings_id, "2026-11-18", "2026-11-30")
+        .expect("projection")
+        .expect("found");
+    assert_eq!(savings.end_balance_minor, 50_000 + 30_000);
+    assert!(
+        savings.events.iter().any(|event| {
+            event.source == EventSource::Transfer && event.kind == EventKind::Income
+        })
+    );
+    // What leaves one account enters the other one-for-all.
+    assert_eq!(
+        checking.end_balance_minor + savings.end_balance_minor,
+        150_000
+    );
+
+    // The total across accounts starts from the converted sum of the
+    // balances, and no transfer ever appears in it.
+    let total_state = test.store.total_state(Currency::Eur).expect("total state");
+    assert!(!total_state.total.approximate);
+    assert_eq!(total_state.state.account.balance_minor, 150_000);
+    let total = test
+        .store
+        .total_projection(Currency::Eur, "2026-11-18", "2026-11-30")
+        .expect("total projection");
+    assert!(
+        total
+            .events
+            .iter()
+            .all(|event| event.source != EventSource::Transfer),
+        "a transfer never moves the total: {:?}",
+        total.events
+    );
+    assert_eq!(total.end_balance_minor, 150_000);
+
+    // The transfer can be deleted, and a missing one reports false.
+    assert!(test.store.delete_transfer(&transfer.id).expect("delete"));
+    assert!(!test.store.delete_transfer(&transfer.id).expect("missing"));
+    assert_eq!(test.store.app_state().expect("state").transfers.len(), 0);
+}
+
+#[test]
+fn a_mixed_currency_total_converts_and_flags_itself_approximate() {
+    let mut test = TestStore::empty();
+    test.store
+        .create_account(&AccountInput {
+            name: "Corriente".to_string(),
+            kind: Some(AccountKind::Checking),
+            currency: Some(Currency::Eur),
+            balance_minor: Some(100_000),
+            balance_date: Some("2026-12-01".to_string()),
+            ..Default::default()
+        })
+        .expect("checking");
+    test.store
+        .create_account(&AccountInput {
+            name: "Ahorro".to_string(),
+            kind: Some(AccountKind::Savings),
+            currency: Some(Currency::Usd),
+            balance_minor: Some(10_000),
+            balance_date: Some("2026-12-01".to_string()),
+            ..Default::default()
+        })
+        .expect("savings");
+
+    // Without any rate the total still exists, flagged approximate.
+    let total = test.store.total_state(Currency::Eur).expect("total");
+    assert!(total.total.approximate);
+    assert_eq!(total.total.total_minor, 110_000);
+    assert_eq!(total.state.account.id, "total");
+
+    // With a rate in force the total converts exactly, and its projection
+    // walks from the converted sum.
+    let rate = test
+        .store
+        .add_rate(&RateInput {
+            from_currency: Currency::Usd,
+            to_currency: Currency::Eur,
+            rate_scaled: 909_091,
+            effective_from: "2026-11-01".to_string(),
+            source: Some("Manual".to_string()),
+            note: None,
+        })
+        .expect("rate");
+    let _ = rate;
+    let total = test.store.total_state(Currency::Eur).expect("total");
+    assert!(!total.total.approximate);
+    assert_eq!(total.total.total_minor, 100_000 + 9_091);
+    let projection = test
+        .store
+        .total_projection(Currency::Eur, "2026-12-01", "2026-12-31")
+        .expect("projection");
+    assert_eq!(projection.start_balance_minor, 109_091);
+    assert_eq!(projection.end_balance_minor, 109_091);
 }

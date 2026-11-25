@@ -1,12 +1,14 @@
 //! The migration runner: a fresh file, a reopen, a database from a newer
-//! build, a migration that fails halfway, and a database the TypeScript
-//! reference created (which records no version at all).
+//! build, a migration that fails halfway, the schema-2 file backup, and the
+//! database the TypeScript reference created (which records no version at
+//! all) migrating to schema 2 without losing a row.
 
 mod common;
 
 use std::path::Path;
 
 use common::{TestStore, fixture};
+use moxen_finances_core::types::AppState;
 use moxen_finances_store::schema::{self, MIGRATIONS, Migration, SCHEMA_VERSION};
 use moxen_finances_store::{Store, StoreError};
 use rusqlite::Connection;
@@ -118,12 +120,13 @@ fn a_migration_that_fails_halfway_rolls_back() {
         Migration {
             version: 2,
             apply: broken,
+            prepare: None,
         },
     ];
     {
         let connection = Connection::open(&path).expect("open");
-        let error =
-            schema::migrate_with(&connection, &migrations, 2).expect_err("the migration fails");
+        let error = schema::migrate_with(&connection, &migrations, 2, Some(&path))
+            .expect_err("the migration fails");
         assert!(matches!(error, StoreError::Database(_)), "{error:?}");
     }
 
@@ -135,29 +138,150 @@ fn a_migration_that_fails_halfway_rolls_back() {
     assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
 }
 
-#[test]
-fn a_reference_database_records_no_version_and_migrates_as_a_no_op() {
+/// A fresh temp folder holding the reference's committed dump, the state it
+/// reads, and the `.pre-v2.bak` name the migration is going to use.
+fn reference_database(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("temporary folder");
-    let path = dir.path().join("reference.db");
+    let path = dir.path().join(name);
     {
         let connection = Connection::open(&path).expect("open");
         connection
             .execute_batch(&fixture("reference.sql"))
             .expect("load the reference's dump");
     }
+    (dir, path)
+}
+
+/// The state exactly as the reference reads its own dump, with the account
+/// every row gains: the state after the migration has to equal it.
+fn reference_state_on_first_account() -> AppState {
+    let mut expected: AppState =
+        serde_json::from_str(&fixture("reference-state.json")).expect("the reference's state");
+    let account_id = expected.account.id.clone();
+    for subscription in &mut expected.subscriptions {
+        subscription.subscription.account_id = account_id.clone();
+    }
+    for income in &mut expected.incomes {
+        income.account_id = account_id.clone();
+    }
+    for expense in &mut expected.expenses {
+        expense.account_id = account_id.clone();
+    }
+    for charge in &mut expected.charges {
+        charge.account_id = account_id.clone();
+    }
+    expected.accounts = vec![expected.account.clone()];
+    expected
+}
+
+#[test]
+fn a_reference_database_migrates_to_schema_2_without_losing_a_row() {
+    let (_dir, path) = reference_database("reference.db");
     assert_eq!(user_version(&path), 0);
-    let before = object_names(&path);
+
+    // The computed state of the first account **before** the migration, from
+    // the pre-migration state the reference reads, through the same pure
+    // functions. (The reference-state rows carry no account; the state above
+    // is them with the migration's assignment, so this is the same data the
+    // store will return — the vectors pin that the account-less original
+    // projects identically under the all-accounts scope.)
+    let expected = reference_state_on_first_account();
+    let before_projection =
+        moxen_finances_store::derive::projection_for(&expected, "2026-11-01", "2027-01-31", &[])
+            .expect("the before projection");
+    let before_events =
+        moxen_finances_store::derive::events_for(&expected, "2026-11-01", "2026-12-31")
+            .expect("the before events")
+            .events;
+    let before_stats =
+        moxen_finances_core::stats::totals_for_events(&before_events, "2026-11-01", "2026-12-31");
 
     let store = Store::open(&path).expect("open");
     assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
-    // The tables and indices are exactly the ones the reference made: version
-    // 1 is that schema, so migrating it adds nothing.
+
+    // Nothing changed in the rows or the computed state of the first account.
+    let state = store.app_state().expect("state");
     assert_eq!(
-        object_names(&path),
-        before,
-        "the reference's own schema is what version 1 writes"
+        state, expected,
+        "every row of the reference's database survives, on the first account"
     );
-    assert!(store.app_state().expect("state").subscriptions.len() == 10);
+    assert_eq!(
+        store
+            .projection("2026-11-01", "2027-01-31")
+            .expect("the after projection"),
+        before_projection,
+        "the projection of the first account is unchanged"
+    );
+    let after_events = store
+        .events("2026-11-01", "2026-12-31")
+        .expect("the after events")
+        .events;
+    let after_stats =
+        moxen_finances_core::stats::totals_for_events(&after_events, "2026-11-01", "2026-12-31");
+    assert_eq!(after_stats, before_stats, "the statistics are unchanged");
+}
+
+#[test]
+fn the_migration_copies_the_file_before_touching_it() {
+    let (dir, path) = reference_database("reference.db");
+    let store = Store::open(&path).expect("open the reference database");
+    let _ = store.app_state().expect("state readable");
+
+    let backup = dir.path().join("reference.db.pre-v2.bak");
+    assert!(backup.exists(), "the copy sits next to the database");
+    // The copy is the schema-1 database (migration 1, a no-op for the
+    // reference's own schema that only records the version, has already run
+    // — that is the state migration 2 protects). It remains exactly what the
+    // TypeScript app opens.
+    let connection = Connection::open(&backup).expect("open the backup");
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 1, "the copy is the pre-schema-2 state");
+    let subscriptions: i64 = connection
+        .query_row("SELECT COUNT(*) FROM subscriptions", [], |row| row.get(0))
+        .expect("the rows of the copy");
+    assert_eq!(subscriptions, 10);
+    let account_rows: i64 = connection
+        .query_row("SELECT COUNT(*) FROM account", [], |row| row.get(0))
+        .expect("the single-account table of the copy");
+    assert_eq!(account_rows, 1);
+}
+
+#[test]
+fn a_migration_whose_copy_fails_is_refused_and_touches_nothing() {
+    // A database already at version 1, like one the previous build made: its
+    // only pending migration is the schema-2 one, whose copy must come
+    // first.
+    let (_dir, path) = reference_database("reference.db");
+    {
+        let connection = Connection::open(&path).expect("open");
+        connection
+            .execute_batch("PRAGMA user_version = 1")
+            .expect("a schema-1 database");
+    }
+    let before = object_names(&path);
+    // A directory where the backup file has to go: the copy cannot be made,
+    // on every platform, without any permission trickery.
+    std::fs::create_dir(path.with_file_name("reference.db.pre-v2.bak"))
+        .expect("occupy the backup's name");
+
+    let error = match Store::open(&path) {
+        Ok(_) => panic!("the migration must be refused without its backup"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, StoreError::MigrationBackup { .. }),
+        "{error:?}"
+    );
+    // The database is exactly as it was, and still migrates once the way is
+    // clear.
+    assert_eq!(user_version(&path), 1);
+    assert_eq!(object_names(&path), before);
+    std::fs::remove_dir(path.with_file_name("reference.db.pre-v2.bak")).expect("clear the way");
+    let store = Store::open(&path).expect("open the reference database");
+    assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+    assert_eq!(store.app_state().expect("state").subscriptions.len(), 10);
 }
 
 #[test]

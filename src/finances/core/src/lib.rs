@@ -4,6 +4,7 @@
 //! The behavior is pinned to the reference by the golden test vectors
 //! under `tests/vectors/`.
 
+pub mod accounts;
 pub mod dates;
 pub mod exchange;
 pub mod money;
@@ -12,6 +13,7 @@ pub mod recurrence;
 pub mod stats;
 pub mod types;
 
+pub use accounts::*;
 pub use dates::*;
 pub use exchange::*;
 pub use money::*;

@@ -1,6 +1,9 @@
 //! Compatibility with the TypeScript reference, checked against files the
-//! reference itself produced (`tests/fixtures`, see its README): a database it
-//! created, the state it reads from it, a JSON backup, and two CSV sheets.
+//! reference itself produced (`tests/fixtures`): the schema-2 database its
+//! dump migrates into, the state it reads, a JSON backup and two CSV sheets.
+//! Schema 2 is one-way: what stays pinned here is that migrating the
+//! reference's database keeps every row and every computed value, and that
+//! its sheets and backups still import here.
 
 mod common;
 
@@ -11,8 +14,42 @@ use moxen_finances_core::types::AppState;
 use moxen_finances_store::{CsvKind, Store, csv::export_csv};
 use rusqlite::Connection;
 
+/// The state the reference reads of its own fixture, with LOCAL-025's account
+/// assignment: every row belongs to the first account, which is what
+/// migrating or restoring that data creates here.
 fn reference_state() -> AppState {
-    serde_json::from_str(&fixture("reference-state.json")).expect("the reference's state")
+    let mut expected: AppState =
+        serde_json::from_str(&fixture("reference-state.json")).expect("the reference's state");
+    let account_id = expected.account.id.clone();
+    for subscription in &mut expected.subscriptions {
+        subscription.subscription.account_id = account_id.clone();
+    }
+    for income in &mut expected.incomes {
+        income.account_id = account_id.clone();
+    }
+    for expense in &mut expected.expenses {
+        expense.account_id = account_id.clone();
+    }
+    for charge in &mut expected.charges {
+        charge.account_id = account_id.clone();
+    }
+    expected.accounts = vec![expected.account.clone()];
+    expected
+}
+
+/// The `cuenta` column LOCAL-025 appends to every collectable sheet. The
+/// reference's committed fixture has no such column, so the comparison below
+/// takes it off a line: what remains must be the reference's sheet byte for
+/// byte, and the column itself carries the row's account.
+fn without_account_column(sheet: &str) -> String {
+    sheet
+        .lines()
+        .map(|line| match line.rsplit_once(';') {
+            Some((before, _)) => before.to_string(),
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `sqlite_master` as SQLite stored it: type, name and the statement text.
@@ -29,7 +66,7 @@ fn schema_rows(path: &Path) -> Vec<(String, String, String)> {
 }
 
 #[test]
-fn a_database_the_reference_created_opens_unchanged() {
+fn a_database_the_reference_created_migrates_unchanged() {
     let dir = tempfile::tempdir().expect("temporary folder");
     let path = dir.path().join("reference.db");
     {
@@ -44,22 +81,24 @@ fn a_database_the_reference_created_opens_unchanged() {
         assert_eq!(version, 0);
     }
 
-    let store = Store::open(&path).expect("the Rust store opens it");
-    assert_eq!(store.schema_version().expect("version"), 1);
+    let store = Store::open(&path).expect("the Rust store opens and migrates it");
+    assert_eq!(store.schema_version().expect("version"), 2);
 
+    // Every row survives, on the first account, with every computed value.
     let state = store.app_state().expect("read the state");
     let expected = reference_state();
-    assert_eq!(state, expected, "the state the reference reads");
+    assert_eq!(state, expected, "the reference's state, accounts included");
     assert_eq!(state.subscriptions.len(), 10);
     assert_eq!(state.rates.len(), 2);
     assert!(!state.account.balance_set);
 }
 
 #[test]
-fn the_schema_the_reference_created_is_the_schema_this_crate_writes() {
+fn the_schema_the_reference_created_becomes_the_schema_this_crate_writes() {
     // Load the reference's dump into one file and create another from
     // scratch; SQLite keeps the statement text in `sqlite_master`, so equal
-    // rows mean a database either side can open the other's.
+    // rows mean a database either side treats the same. Both end up at
+    // schema 2: the reference dump by migrating, the fresh one by creating.
     let reference_dir = tempfile::tempdir().expect("temporary folder");
     let reference_path = reference_dir.path().join("reference.db");
     {
@@ -78,17 +117,18 @@ fn the_schema_the_reference_created_is_the_schema_this_crate_writes() {
         schema_rows(reference_store.path().expect("file")),
         schema_rows(ours.path().expect("file"))
     );
-    // 13 tables and the 8 named indices the schema declares; SQLite adds one
-    // automatic index per `TEXT PRIMARY KEY`, on both sides.
+    // 14 tables: schema 1's thirteen minus the closed single `account`,
+    // plus `accounts` and `transfers`; the named indices gained
+    // `idx_transfers_date`.
     let rows = schema_rows(&ours_path);
-    assert_eq!(rows.iter().filter(|row| row.0 == "table").count(), 13);
+    assert_eq!(rows.iter().filter(|row| row.0 == "table").count(), 14);
     assert_eq!(
         rows.iter()
             .filter(|row| row.0 == "index" && !row.1.starts_with("sqlite_autoindex_"))
             .count(),
-        8
+        9
     );
-    assert_eq!(rows.iter().filter(|row| row.0 == "index").count(), 21);
+    assert_eq!(rows.iter().filter(|row| row.0 == "index").count(), 23);
 }
 
 #[test]
@@ -104,9 +144,16 @@ fn the_subscriptions_sheet_is_byte_for_byte_the_reference_s() {
     assert!(!sheet.ends_with('\n'), "no newline after the last row");
     assert!(sheet.contains(";18,99;"), "decimal comma, not a point");
     assert!(!sheet.contains("18.99"), "no decimal point");
+    // LOCAL-025: the trailing `cuenta` column, empty for the reference's
+    // rows (they belong to no account until they are restored or migrated).
+    assert!(
+        sheet.contains("notas;cuenta"),
+        "the account column is last: {sheet:.80}"
+    );
 
+    // Without it, the sheet is still the reference's, byte for byte.
     assert_eq!(
-        normalized(&sheet),
+        normalized(&without_account_column(&sheet)),
         normalized(&fixture("reference-subscriptions.csv"))
     );
 }
@@ -116,7 +163,7 @@ fn the_movements_sheet_is_byte_for_byte_the_reference_s() {
     let state = reference_state();
     let sheet = export_csv(&state, CsvKind::Movements, "2026-11-01", "2026-12-31").expect("export");
     assert_eq!(
-        normalized(&sheet),
+        normalized(&without_account_column(&sheet)),
         normalized(&fixture("reference-movements.csv"))
     );
 }
@@ -129,13 +176,17 @@ fn a_backup_made_by_the_reference_restores_here() {
         .expect("restore the reference's backup");
 
     let expected = reference_state();
-    assert_eq!(test.store.app_state().expect("state"), expected);
+    assert_eq!(
+        test.store.app_state().expect("state"),
+        expected,
+        "the schema-1 backup restores as the first account"
+    );
 
     // Exporting again produces the same data (the version and the moment of
     // the export aside), so a database can go back and forth between the two
-    // implementations.
+    // formats.
     let exported = test.store.export_all().expect("export");
-    assert_eq!(exported.version, 1);
+    assert_eq!(exported.version, 2);
     assert_eq!(sorted(exported.state()), sorted(expected));
 }
 
