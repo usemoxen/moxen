@@ -2254,7 +2254,10 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
         const primary = byId.get(turn.messageId);
         return primary === undefined || isMovableTurnShape(turn, primary, true);
       };
-      const staged = turns.filter(isStaged).sort(order);
+      // Moved entries land in their queue order: it is what the Work queue
+      // shows and the user can reorder, and send times can collide within a
+      // millisecond.
+      const staged = turns.filter(isStaged).sort((left, right) => left.queue!.order - right.queue!.order || order(left, right));
       const stagedIds = new Set(staged.map((turn) => turn.id));
       const abandoned = turns.filter(
         (turn) => isTransferredTurn(turn) && turn.handoff?.destinationThreadId === destinationId && !stagedIds.has(turn.id),
