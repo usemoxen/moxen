@@ -321,11 +321,19 @@ export class ResponsesWsSession {
    */
   private readCancel: (() => void) | null = null;
   /**
-   * Owner whose stream is being actively cancelled (a consumer `return()`),
-   * marked BEFORE any socket is closed so close handlers classify the
-   * shutdown as cancellation, not a transport failure (LOCAL-009).
+   * Owners whose stream is being actively cancelled (a consumer `return()`):
+   * marked BEFORE any socket is closed or handshake rejected, so close and
+   * error handlers classify the shutdown as cancellation, not a transport
+   * failure, and cleared when the cancelled stream finally settles
+   * (LOCAL-009).
    */
-  private abandoning: object | null = null;
+  private readonly abandonedOwners: Set<object> = new Set();
+  /**
+   * Per-owner reject for the handshake currently awaiting its socket: an
+   * abandoned owner's `return()` fails it directly instead of waiting on a
+   * socket that may never open or dispatch close (LOCAL-009).
+   */
+  private readonly handshakeCancels: Map<object, () => void> = new Map();
   private connectedUrl: string | null = null;
   private connectedApiKey: string | undefined = undefined;
   private connectedAt = 0;
@@ -397,9 +405,15 @@ export class ResponsesWsSession {
     return this.streamOwner === owner && this.socket === socket;
   }
 
-  private async ensureOpen(url: string, apiKey: string | undefined, signal?: AbortSignal): Promise<{ readonly socket: ResponsesSocket; readonly reused: boolean }> {
+  private async ensureOpen(
+    url: string,
+    apiKey: string | undefined,
+    signal?: AbortSignal,
+    owner?: object,
+  ): Promise<{ readonly socket: ResponsesSocket; readonly reused: boolean }> {
     if (this.closed) throw abortError();
     if (signal?.aborted) throw abortError();
+    const abandoned = (): boolean => owner !== undefined && this.abandonedOwners.has(owner);
     const age = this.now() - this.connectedAt;
     if (
       this.socket !== null &&
@@ -427,7 +441,7 @@ export class ResponsesWsSession {
     // without installing a handshake, so it cannot sit until the connect
     // timeout and the failure is classified as the cancellation it is
     // (LOCAL-009).
-    if (this.closed || signal?.aborted) {
+    if (this.closed || signal?.aborted || abandoned()) {
       try {
         socket.close();
       } catch {
@@ -440,15 +454,16 @@ export class ResponsesWsSession {
     // even before the handshake continuation runs.
     this.connectingSocket = socket;
     try {
-      await this.handshake(socket, signal);
+      await this.handshake(socket, signal, owner);
     } finally {
       if (this.connectingSocket === socket) this.connectingSocket = null;
     }
 
-    // Recheck shutdown and abort between the `open` event and this
-    // continuation: close() or an abort may have run synchronously in between,
-    // and the request must not be installed on a dead session or signal.
-    if (this.closed || signal?.aborted) {
+    // Recheck shutdown, abort and owner cancellation between the `open` event
+    // and this continuation: close(), an abort, or this owner's return() may
+    // have run in between, and the request must neither be installed on a
+    // dead session nor sent on a socket a cancelled stream no longer owns.
+    if (this.closed || signal?.aborted || abandoned()) {
       try {
         socket.close();
       } catch {
@@ -464,12 +479,21 @@ export class ResponsesWsSession {
     return { socket, reused: false };
   }
 
-  private handshake(socket: ResponsesSocket, signal?: AbortSignal): Promise<void> {
+  private handshake(socket: ResponsesSocket, signal?: AbortSignal, owner?: object): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const cancelled = (): boolean =>
+        this.closed || signal?.aborted || (owner !== undefined && this.abandonedOwners.has(owner));
+      // Register this owner's direct reject: interruptOwnedRead fires it so an
+      // abandoned stream's handshake fails at once instead of waiting on a
+      // socket that may never open, error, or dispatch close (LOCAL-009).
+      const cancel = () => fail(abortError());
       const cleanup = () => {
         if (timer !== undefined) clearTimeout(timer);
+        if (owner !== undefined && this.handshakeCancels.get(owner) === cancel) {
+          this.handshakeCancels.delete(owner);
+        }
         socket.removeEventListener("open", onOpen);
         socket.removeEventListener("error", onError);
         socket.removeEventListener("close", onClose);
@@ -484,9 +508,9 @@ export class ResponsesWsSession {
         } catch {
           // Best-effort.
         }
-        // A shutdown, an abort, or an active owner cancellation during the
-        // handshake is a cancellation, not an endpoint failure.
-        reject(this.closed || signal?.aborted || this.abandoning !== null ? abortError() : err);
+        // A shutdown, an abort, or this owner's active cancellation during
+        // the handshake is a cancellation, not an endpoint failure.
+        reject(cancelled() ? abortError() : err);
       };
       const onOpen = () => {
         if (settled) return;
@@ -495,7 +519,7 @@ export class ResponsesWsSession {
         resolve();
       };
       const onError = () => {
-        if (signal?.aborted || this.closed || this.abandoning !== null) {
+        if (cancelled()) {
           fail(abortError());
           return;
         }
@@ -505,9 +529,9 @@ export class ResponsesWsSession {
       const onClose = (event: { readonly code?: number; readonly reason?: string }) => {
         // A close dispatched while the request is being cancelled (the fake
         // in the tests, and some socket implementations, dispatch
-        // synchronously) must not disable WebSockets for the session
-        // (LOCAL-009).
-        if (signal?.aborted || this.closed || this.abandoning !== null) {
+        // asynchronously, after the cancelling return() already finished)
+        // must not disable WebSockets for the session (LOCAL-009).
+        if (cancelled()) {
           fail(abortError());
           return;
         }
@@ -516,10 +540,15 @@ export class ResponsesWsSession {
       };
       const onAbort = () => fail(abortError());
       timer = setTimeout(() => {
+        if (cancelled()) {
+          fail(abortError());
+          return;
+        }
         this.disabled = true;
         fail(new ResponsesWsUpgradeError("Timed out opening Responses WebSocket connection."));
       }, this.connectTimeoutMs);
       timer.unref?.();
+      if (owner !== undefined) this.handshakeCancels.set(owner, cancel);
       socket.addEventListener("open", onOpen);
       socket.addEventListener("error", onError);
       socket.addEventListener("close", onClose);
@@ -619,23 +648,23 @@ export class ResponsesWsSession {
       yield* this.streamOwned(owner, request, buildFullBody, replayReasoning);
     } finally {
       request.signal?.removeEventListener("abort", onOwnerAbort);
-      if (this.abandoning === owner) this.abandoning = null;
+      this.abandonedOwners.delete(owner);
+      this.handshakeCancels.delete(owner);
       this.releaseStream(owner);
     }
   }
 
   /**
    * Actively interrupt the owned stream: mark the owner as being cancelled
-   * BEFORE closing anything so close handlers classify it as cancellation,
-   * reject its pending frame read, and release ownership (LOCAL-009). The
-   * cancellation mark is cleared before the queued waiters are woken, so a
-   * stream that takes over right away never misreads the old owner's
-   * shutdown as its own cancellation. Only `ResponsesWsStreamHandle` calls
-   * this, for the stream it wraps.
+   * BEFORE closing anything (per-owner, so a stream that takes over right
+   * away never misreads the old owner's shutdown as its own cancellation),
+   * reject its pending handshake and frame read, and release ownership
+   * (LOCAL-009). Only `ResponsesWsStreamHandle` calls this, for the stream
+   * it wraps.
    */
   interruptOwnedRead(owner: object): void {
     if (this.streamOwner !== owner) return;
-    this.abandoning = owner;
+    this.abandonedOwners.add(owner);
     const connecting = this.connectingSocket;
     this.resetSocket();
     this.connectingSocket = null;
@@ -646,9 +675,21 @@ export class ResponsesWsSession {
         // Best-effort.
       }
     }
+    // Fail the owner's pending handshake directly: the socket above may
+    // never dispatch open, error, or close (a wedged endpoint), and a
+    // `return()` must free the stream and its queue without waiting for
+    // the connect timeout (LOCAL-009).
+    const handshakeCancel = this.handshakeCancels.get(owner);
+    this.handshakeCancels.delete(owner);
+    handshakeCancel?.();
     const readCancel = this.readCancel;
     this.readCancel = null;
-    this.abandoning = null;
+    // The mark stays until the cancelled generator finally unwinds
+    // (runStream's finally): it is keyed to this owner only, so a stream that
+    // takes over right away never misreads the old owner's shutdown as its
+    // own cancellation, while the interrupted stream's pending continuations
+    // (a resolved-but-not-run handshake, a suspended frame read) still see
+    // their cancellation on every recheck (LOCAL-009).
     this.releaseStream(owner);
     readCancel?.();
   }
@@ -691,12 +732,12 @@ export class ResponsesWsSession {
 
     for (;;) {
       if (request.signal?.aborted) throw abortError();
-      const { socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal);
-      // The signal may have aborted, the session closed, or ownership changed
-      // between the open event and the handshake resuming: never send a
-      // request on a dead signal, a closed session, or a socket this stream no
-      // longer owns.
-      if (request.signal?.aborted || this.closed || !this.ownsStream(owner)) {
+      const { socket, reused } = await this.ensureOpen(url, request.apiKey, request.signal, owner);
+      // The signal may have aborted, the session closed, the owner returned,
+      // or ownership changed between the open event and the handshake resuming:
+      // never send a request on a dead signal, a closed session, or a socket
+      // this stream no longer owns.
+      if (request.signal?.aborted || this.closed || !this.ownsStream(owner) || this.abandonedOwners.has(owner)) {
         if (this.ownsSocket(owner, socket)) this.resetSocket();
         throw abortError();
       }
@@ -761,7 +802,7 @@ export class ResponsesWsSession {
         // abort that landed while the listeners were being attached, must not
         // leave a request pending on the socket.
         const wire = JSON.stringify(payload);
-        if (request.signal?.aborted || this.closed || !this.ownsStream(owner)) {
+        if (request.signal?.aborted || this.closed || !this.ownsStream(owner) || this.abandonedOwners.has(owner)) {
           if (this.ownsSocket(owner, socket)) this.resetSocket();
           throw abortError();
         }
@@ -788,7 +829,7 @@ export class ResponsesWsSession {
         // it triggered was this stream's own cancellation, never a transport
         // failure (LOCAL-009).
         const cancelled = (): boolean =>
-          request.signal?.aborted === true || !this.ownsStream(owner) || this.abandoning === owner;
+          request.signal?.aborted === true || !this.ownsStream(owner) || this.abandonedOwners.has(owner);
 
         while (reducer.finish === null) {
           if (cancelled()) {

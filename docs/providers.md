@@ -113,16 +113,19 @@ negotiates any other protocol version is refused loudly
 - **Context, token & plan usage**: `AcpDriver` consumes ACP `usage_update`
   notifications for live context-window readings (`contextUsage`; its `cost` is
   the session's cumulative cost per ACP v1. Each turn keeps the high-water mark
-  of the readings observed while it was open — a cached reading from a previous
-  turn is never evidence about this turn's spend — and a reading with no turn
-  open is reconciled out-of-turn: it establishes an unknown baseline (a resumed
-  session's counter origin; post-resume prompt-result costs never do) and any
-  growth above a known baseline is absorbed to no turn, never charged to an
-  arbitrary one. At settle, the turn's cost is the in-turn counter delta — the
-  spec-defined cumulative counter wins over the prompt result's vendor-specific
-  cost field — or the result cost when the counter was silent in-turn; a
-  baseline stays unknown until an out-of-turn reading, and no delta is reported
-  then. The accounted baseline advances only by spend actually booked, so the
+  of the readings observed while it was open — a snapshot equal to or below
+  everything booked before it is never evidence of zero spend (the counter can
+  lag a turn's own final charge) — and a reading with no turn open is
+  reconciled out-of-turn: it establishes the counter's origin (an unknown one
+  on a resumed session, where post-resume prompt-result costs never do; a new
+  session's origin is zero), and any growth above what the ledger booked stays
+  unattributed — it anchors the next in-turn delta but is never charged to an
+  arbitrary turn and never pushed into the accounted baseline. At settle, the
+  turn's cost is the in-turn counter delta above that anchor — the spec-defined
+  cumulative counter wins over the prompt result's vendor-specific cost field
+  — or the result cost when the counter did not move in-turn; a snapshot that
+  never moved leaves the cost undefined so token-based estimation applies. The
+  accounted baseline advances only by spend actually booked, so the
   booked turns total the counter's movement) and
   per-turn `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
   Moxen also probes `agy --print /usage --output-format json` and

@@ -1071,3 +1071,88 @@ describe("ResponsesWsSession stream ownership round 4 (LOCAL-009)", () => {
     expect(sockets[0]!.closed).toBe(true);
   });
 });
+
+describe("ResponsesWsSession stream ownership round 5 (LOCAL-009)", () => {
+  const wsQuirks = () => quirks({ chatgptOAuth: true, sendReasoning: true });
+  const transcript: TranscriptMessage[] = [{ role: "user", content: "one" }];
+  const req = (
+    wsSession: ResponsesWsSession,
+    overrides: Partial<ChatRequest> = {},
+  ) =>
+    request(() => { throw new Error("HTTP fallback should not run"); }, {
+      model: "gpt-6.2-sol",
+      transcript,
+      quirks: wsQuirks(),
+      responsesSession: wsSession,
+      ...overrides,
+    });
+  const outcomeOf = (run: Promise<unknown>, ms = 300) =>
+    Promise.race([
+      run.then(
+        () => "completed",
+        (error: unknown) => (error as Error).name ?? String(error),
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), ms)),
+    ]);
+
+  /** A socket whose close event dispatches on a later turn, like a real one. */
+  class LateCloseSocket extends FakeResponsesSocket {
+    close(code = 1000, reason = ""): void {
+      if (this.closed) return;
+      queueMicrotask(() => super.close(code, reason));
+    }
+  }
+
+  it("flags no transport failure for a close dispatched after return() cancelled the handshake (LOCAL-009)", async () => {
+    const sockets: LateCloseSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        // Never opens; its close event arrives only after a later turn.
+        const socket = new LateCloseSocket(() => {});
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = wsSession.stream(req(wsSession), () => ({ model: "gpt-6.2-sol", input: [] }), false);
+    const first = iterator.next();
+    // return() while the socket is still connecting: the handshake must be
+    // rejected directly as a cancellation, and the close its shutdown triggers
+    // — whenever the socket dispatches it — must never disable WebSockets.
+    const returned = iterator.return!();
+    expect(await outcomeOf(first)).toBe("AbortError");
+    expect(await Promise.race([
+      returned.then(() => "returned"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ])).toBe("returned");
+    expect(wsSession.isDisabled).toBe(false);
+    expect(sockets[0]!.sent).toHaveLength(0);
+    wsSession.close();
+  });
+
+  it("rejects a pending handshake directly when return() interrupts it, without waiting on its socket (LOCAL-009)", async () => {
+    const sockets: FakeResponsesSocket[] = [];
+    const wsSession = new ResponsesWsSession({
+      webSocketFactory: () => {
+        // Never opens, and its close() never dispatches anything: a wedged
+        // socket on which neither the open nor the close event ever arrives.
+        const socket = new FakeResponsesSocket(() => {});
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const iterator = wsSession.stream(req(wsSession), () => ({ model: "gpt-6.2-sol", input: [] }), false);
+    const first = iterator.next();
+    // return() must free the owner at once by rejecting the handshake itself,
+    // not by queueing behind an unresolved next() until the connect timeout.
+    const returned = await Promise.race([
+      iterator.return!().then(() => "returned"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 300)),
+    ]);
+    expect(returned).toBe("returned");
+    expect(await outcomeOf(first)).toBe("AbortError");
+    // No request was sent on the abandoned handshake's socket.
+    expect(sockets[0]!.sent).toHaveLength(0);
+    expect(wsSession.isDisabled).toBe(false);
+    wsSession.close();
+  });
+});

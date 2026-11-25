@@ -3204,3 +3204,65 @@ describe("LOCAL-009 round 4: steer reconciliation, cancelled-prompt drain, and c
     await Effect.runPromise(driver.stopAll());
   });
 });
+
+describe("LOCAL-009 round 5: counter evidence, and equal snapshots", () => {
+  it("books the prompt result's spend when the unchanged counter snapshot trails the baseline (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    // Turn 1 books $0.20 from the counter.
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.2 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const o1 = await driver.awaitTurn("thread-1", t1.turnId);
+    expect(o1.usage?.costUsd).toBeCloseTo(0.2, 9);
+    // Turn 2: the in-turn snapshot is UNCHANGED (still $0.20) and the prompt
+    // result reports $0.10. The lagging snapshot is not proof of zero spend:
+    // the known result spend is booked, not an explicit $0.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_500, size: 100_000, cost: 0.2 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(driver.liveTurnUsage("thread-1")?.costUsd).toBeUndefined();
+    server.finishPrompt("end_turn", { usage: { inputTokens: 800, outputTokens: 120, cost: 0.1 } });
+    const o2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(o2.usage?.costUsd).toBeCloseTo(0.1, 9);
+    // The counter reaches $0.30 after settlement: the growth is reconciled
+    // against amounts already booked, so nothing is booked a second time.
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_000, size: 100_000, cost: 0.3 });
+    await new Promise((r) => setTimeout(r, 10));
+    const t3 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "three" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_500, size: 100_000, cost: 0.3 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const o3 = await driver.awaitTurn("thread-1", t3.turnId);
+    expect(o3.usage?.costUsd).toBeUndefined();
+    // The booked ledger totals the counter's $0.30 movement exactly.
+    expect(o1.usage!.costUsd! + o2.usage!.costUsd!).toBeCloseTo(0.3, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("leaves the turn cost undefined when an unchanged snapshot is the only counter evidence (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const t1 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.2 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    await driver.awaitTurn("thread-1", t1.turnId);
+    // Turn 2's fresh reading equals the baseline and the result carries tokens
+    // but no cost: no spend is provable, so the cost stays undefined and the
+    // token-based estimate applies, never a reported $0.
+    const t2 = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_500, size: 100_000, cost: 0.2 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn", { usage: { inputTokens: 400, outputTokens: 60 } });
+    const o2 = await driver.awaitTurn("thread-1", t2.turnId);
+    expect(o2.usage?.input).toBe(400);
+    expect(o2.usage?.costUsd).toBeUndefined();
+    await Effect.runPromise(driver.stopAll());
+  });
+});

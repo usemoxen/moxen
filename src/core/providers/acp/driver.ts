@@ -333,16 +333,23 @@ interface AcpSession {
   title: string | null;
   context: ContextWindowUsage | null;
   /**
-   * Spend the turn ledger has actually booked, plus out-of-turn counter
-   * readings absorbed to no turn. It is the ACP session's cumulative
-   * `usage_update.cost` accounting ANCHOR: 0 for a new session, and null
-   * (unknown) on a resumed session until a real reading arrives with no turn
-   * open — post-resume prompt-result costs are recorded on their own turns
-   * and never establish or advance this baseline. It only ever advances by
-   * spend actually booked (plus absorbed out-of-turn growth) so the booked
-   * ledger totals the counter's movement, never more, never less.
+   * Spend the turn ledger has actually BOOKED (advances at settle, by the
+   * booked cost only): the ACP session's cumulative `usage_update.cost`
+   * accounted sum, from zero. Out-of-turn readings never move it, and neither
+   * do post-resume prompt-result costs before any anchor exists.
    */
-  costBaselineUsd: number | null;
+  costBaselineUsd: number;
+  /**
+   * The counter ORIGIN for delta anchoring: the high-water of cumulative
+   * `usage_update.cost` readings observed while NO turn was open — 0 for a
+   * fresh session, null on a resumed session until a pre-turn reading
+   * establishes where the provider's counter starts. Kept separate from
+   * `costBaselineUsd`: out-of-turn growth above what the ledger booked is
+   * unattributed spend — anchor material for the next in-turn delta, never
+   * booked to an arbitrary turn and never pushed into the accounted
+   * baseline (LOCAL-009).
+   */
+  preTurnCounterHighUsd: number | null;
   tier: string | null;
   readonly sessionAllowKeys: Set<string>;
   readonly transcript: AcpTranscriptTurn[];
@@ -1029,9 +1036,17 @@ export class AcpDriver implements ProviderAdapter<CliError> {
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
     this.sessions.get(threadId)?.context ?? null;
 
-  readonly liveTurnUsage = (threadId: ThreadId): TokenUsageDelta | null => {
+  readonly liveTurnUsage = (threadId: ThreadId, driverTurnId?: ThreadId): TokenUsageDelta | null => {
     const session = this.sessions.get(threadId);
-    const open = session ? this.openTurn(session) : undefined;
+    if (!session) return null;
+    // With this run's turn id: that turn's own usage, its settled outcome
+    // usage included — an interrupted run never samples whatever turn the
+    // session happens to have open (LOCAL-009).
+    if (driverTurnId !== undefined) {
+      const turn = session.transcript.find((candidate) => candidate.id === driverTurnId);
+      return turn?.usage ?? turn?.liveUsage ?? null;
+    }
+    const open = this.openTurn(session);
     if (!open) return null;
     return open.usage ?? open.liveUsage ?? null;
   };
@@ -1421,9 +1436,11 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           availableCommands: [],
           title: initialTitle,
           context: null,
-          // A resumed session's first cost reading stands for pre-resume spend;
-          // a new session's cumulative counter starts at zero.
-          costBaselineUsd: resumed ? null : 0,
+          // The booked baseline starts at zero either way; a resumed session's
+          // counter ORIGIN stays unknown until a pre-turn reading establishes
+          // it, while a new session's cumulative counter starts at zero.
+          costBaselineUsd: 0,
+          preTurnCounterHighUsd: resumed ? null : 0,
           tier,
           sessionAllowKeys: new Set(),
           transcript: [],
@@ -2346,15 +2363,14 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         }
         const prev = session.context;
         // ACP `usage_update.cost` is the session's CUMULATIVE cost (ACP v1):
-        // an out-of-turn reading is never assigned to a turn. It establishes
-        // an unknown baseline (a resumed session's counter origin), and a
-        // reading above a known baseline is out-of-turn spend, absorbed to no
-        // turn — the baseline rises so the next turn's delta excludes it, and
-        // a downward reading changes nothing (the counter never resets).
+        // an out-of-turn reading is never assigned to a turn. Observed and
+        // booked values stay separate: it sets `preTurnCounterHighUsd` (an
+        // unknown baseline's origin; above a known one, unattributed spend the
+        // next in-turn delta anchors on) and never moves the accounted
+        // `costBaselineUsd`. A downward reading changes nothing (the counter
+        // never resets).
         if (parsed.costUsd !== undefined && !activeTurn) {
-          session.costBaselineUsd = session.costBaselineUsd === null
-            ? parsed.costUsd
-            : Math.max(session.costBaselineUsd, parsed.costUsd);
+          session.preTurnCounterHighUsd = Math.max(session.preTurnCounterHighUsd ?? 0, parsed.costUsd);
         }
         session.context = {
           usedTokens: parsed.used,
@@ -2369,17 +2385,19 @@ export class AcpDriver implements ProviderAdapter<CliError> {
               : {}),
         };
         const prevLive = activeTurn?.liveUsage ?? null;
-        // Live cost delta from the per-turn high-water: a cached reading from a
-        // previous turn (no in-turn high-water yet) is not evidence about this
-        // turn, and an unknown baseline reports no delta at all.
+        const anchor = this.counterDeltaAnchor(session);
+        // Live cost delta from the per-turn high-water: only a reading
+        // STRICTLY above the anchor counts — an unchanged snapshot is not
+        // evidence of zero spend, the counter can lag the turn's own final
+        // spend — and with no anchor at all no delta is reported.
         const liveUsage: TokenUsageDelta = {
           input: parsed.used,
           cacheRead: 0,
           cacheCreate: 0,
           output: 0,
           thinking: 0,
-          ...(activeTurn?.counterHighUsd !== null && activeTurn?.counterHighUsd !== undefined && session.costBaselineUsd !== null
-            ? { costUsd: Math.max(0, activeTurn.counterHighUsd - session.costBaselineUsd) }
+          ...(anchor !== null && activeTurn !== null && activeTurn.counterHighUsd !== null && activeTurn.counterHighUsd > anchor
+            ? { costUsd: activeTurn.counterHighUsd - anchor }
             // Token-only update: retain the open turn's last known cost delta
             // and refresh the token fields independently.
             : prevLive?.costUsd !== undefined
@@ -3334,6 +3352,22 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     };
   }
 
+  /**
+   * The anchor a turn's cumulative-counter delta counts from: every reading
+   * strictly above it is that turn's spend. It is the maximum of what the
+   * ledger booked (`costBaselineUsd`, which may legitimately lead a lagging
+   * counter) and the counter ORIGIN: what was observed with no turn open
+   * (`preTurnCounterHighUsd`). Null only while the origin is unknown — a
+   * resumed session that has not seen a pre-turn reading; no counter delta is
+   * reported then, because nothing can say where the provider's counter
+   * started, so its movements cannot be attributed to any turn (LOCAL-009).
+   */
+  private counterDeltaAnchor(session: AcpSession): number | null {
+    const origin = session.preTurnCounterHighUsd;
+    if (origin === null) return null;
+    return Math.max(session.costBaselineUsd, origin);
+  }
+
   private settleTurn(
     session: AcpSession,
     turn: AcpTranscriptTurn,
@@ -3362,40 +3396,43 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     // Reconcile cost at settle (any status, including failed/interrupted turns
     // where spend was observed). Cost accounting table (LOCAL-009):
     //
-    // `costBaselineUsd` is spend the ledger booked plus out-of-turn readings
-    // absorbed to no turn — null while unknown (a resumed session until a real
-    // reading arrives with no turn open; post-resume result costs never
-    // establish it). `turn.counterHighUsd` is the high-water of cost readings
-    // observed while THIS turn was open.
+    // `costBaselineUsd` is spend the ledger actually booked from zero
+    // (advances at settle, by the booked cost only; out-of-turn readings never
+    // move it). `turn.counterHighUsd` is the high-water of cost readings
+    // observed while THIS turn was open. The anchor (`counterDeltaAnchor`)
+    // is the max of the booked sum and the counter origin — null while the
+    // origin is unknown (a resumed session that never saw a pre-turn
+    // reading) so no counter delta can be attributed.
     //
-    // | counter observed this turn? | baseline known? | prompt-result cost? | stored turn costUsd                  | baseline after settle      |
-    // | --------------------------- | --------------- | ------------------- | ------------------------------------ | -------------------------- |
-    // | no                          | either          | yes                 | result cost                          | += result cost             |
-    // | no                          | either          | no                  | none (undefined) — the estimate applies | unchanged                |
-    // | yes, high >= baseline      | yes             | either              | counter high − baseline (COUNTER WINS) | := counter high           |
-    // | yes, high < baseline       | either          | yes                 | result cost                           | += result cost             |
-    // | yes, high < baseline       | either          | no                  | none — a downward reading is not evidence of a refund | unchanged |
+    // | in-turn counter reading        | result cost? | stored turn costUsd                     | baseline after settle |
+    // | ----------------------------- | ------------ | ---------------------------------------- | ---------------------- |
+    // | none                          | yes          | result cost                              | += result cost         |
+    // | none                          | no           | none (undefined) — the estimate applies  | unchanged              |
+    // | strictly above the anchor     | yes          | max(counter delta, result cost)          | += the booked cost     |
+    // | strictly above the anchor     | no           | counter delta                            | += the booked cost     |
+    // | equal to or below the anchor  | yes          | result cost (the snapshot is not proof of zero spend) | += result cost |
+    // | equal to or below the anchor  | no           | none (undefined) — the estimate applies  | unchanged              |
     //
     // Which source wins when both report? The session counter: ACP v1 defines
     // `usage_update.cost` as the session's CUMULATIVE cost, while the prompt
     // result carries no standard cost field (a vendor-specific per-turn figure)
-    // — so the counter's measured movement is the turn's cost whenever one
-    // arrived in-turn, and a result cost only fills the gaps where the counter
-    // was silent. Invariant: booked turn costs plus absorbed out-of-turn
-    // readings total the counter's movement, because the baseline advances
-    // ONLY by spend actually booked, never to an observed high-water mark the
-    // ledger did not book.
-    const baseline = session.costBaselineUsd;
+    // — so a strictly-grown counter wins over a lower result cost, and a result
+    // cost fills the gaps where the counter was silent or has not caught up
+    // (an unchanged snapshot is not proof of zero spend; it may just lag the
+    // turn's own final spend). Invariant: the booked ledger totals the
+    // counter's movement — the baseline advances ONLY by spend actually
+    // booked, later growth reconciles against amounts already booked, and
+    // out-of-turn excess stays unattributed (never into the accounted
+    // baseline).
+    const anchor = this.counterDeltaAnchor(session);
     const resultCost = turn.usage?.costUsd;
     const counterHigh = turn.counterHighUsd;
-    let turnCost: number | undefined;
-    if (counterHigh !== null && baseline !== null && counterHigh >= baseline) {
-      turnCost = counterHigh - baseline;
-    } else {
-      turnCost = resultCost;
-    }
-    if (baseline !== null && turnCost !== undefined) {
-      session.costBaselineUsd = baseline + turnCost;
+    const counterDelta = anchor !== null && counterHigh !== null && counterHigh > anchor ? counterHigh - anchor : undefined;
+    const turnCost: number | undefined = counterDelta !== undefined
+      ? (resultCost !== undefined ? Math.max(counterDelta, resultCost) : counterDelta)
+      : resultCost;
+    if (turnCost !== undefined) {
+      session.costBaselineUsd += turnCost;
     }
     settleAndPublishTurn({
       open: turn,

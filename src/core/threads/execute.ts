@@ -106,7 +106,13 @@ export interface TurnDriver extends ProviderSessionTitles {
   /** Optional only so a test double need not implement it; all four drivers do. */
   resumeCursor?(threadId: string): string | null;
   contextUsage?(threadId: string): Promise<ContextWindowUsage | null>;
-  liveTurnUsage?(threadId: string): TurnUsage | null;
+  /**
+   * The thread's live turn usage, or — with a driver turn id — that specific
+   * turn's usage (its settled outcome usage once it terminated): an interrupted
+   * run always asks for its own turn, never whatever turn the session happens
+   * to have open (LOCAL-009).
+   */
+  liveTurnUsage?(threadId: string, driverTurnId?: string): TurnUsage | null;
   /**
    * A cheap, usage-free re-read of the provider's subscription windows for an
    * explicit freshness ask (usage.refresh, behind the usage_status tool):
@@ -1567,11 +1573,11 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   let interrupted = false;
   // Final observed usage of an interrupted run (LOCAL-009): captured at the
   // abort signal, before the driver's interrupt settles its turn and the open
-  // turn's live usage is gone. Persisted by both interruption paths so spend
-  // the ledger can still retain is never lost.
+  // turn's live usage is gone, and read by THIS run's driver turn id so
+  // another turn's usage can never stand in.
   let finalObservedUsage: TurnUsage | null = null;
   const captureFinalObservedUsage = (): void => {
-    if (finalObservedUsage === null) finalObservedUsage = driver.liveTurnUsage?.(threadId) ?? null;
+    if (finalObservedUsage === null) finalObservedUsage = driver.liveTurnUsage?.(threadId, recorder.driverTurnId ?? undefined) ?? null;
   };
   store.trackRunning(storeTurnId, () => controller.abort());
   const liveContext = setInterval(readLive, LIVE_CONTEXT_MS);
@@ -1654,18 +1660,28 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     if (cause instanceof CliError && cause.code === "TURN_ABORTED") {
       interrupted = true;
       // The abort bypassed the normal outcome path: keep the final observed
-      // usage (captured at the abort, before the driver interrupt settles it)
-      // on the stored turn so interrupted spend stays in the ledger
-      // (LOCAL-009).
-      const observed = finalObservedUsage ?? driver.liveTurnUsage?.(threadId) ?? null;
+      // usage (captured at the abort, by this run's driver turn id, before the
+      // driver interrupt settles it) on the stored turn so interrupted spend
+      // stays in the ledger (LOCAL-009).
+      const observed = finalObservedUsage ?? driver.liveTurnUsage?.(threadId, recorder.driverTurnId ?? undefined) ?? null;
       // As in `settleTurn`: the checkpoint and the context reading land
       // before the outcome, so whoever sees the turn stop sees both — but
       // bounded, so a hung checkpoint cannot hold the outcome (MXN-290 review).
       await recordPreOutcome(store, driver, args, cwd, pre);
       const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
-      const interruption = await interruptTurn(store, threadId, storeTurnId).catch(() => null);
-      if (observed !== null) {
-        await store.updateTurn(threadId, storeTurnId, { usage: observed }).catch(() => undefined);
+      const interruption = await interruptTurn(store, threadId, storeTurnId, undefined, observed === null ? {} : { usage: observed }).catch(() => null);
+      if (observed !== null && (interruption === null || interruption.interrupted === false)) {
+        // An explicit stop already committed this interruption without the
+        // usage: retain it on that row only, under the same lock, never
+        // rewriting the ledger from an older snapshot and never touching the
+        // status or a usage the stop finalized (LOCAL-009).
+        await store
+          .withThreadLock(threadId, async () => {
+            const row = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
+            if (!row || row.usage !== null || row.status !== "interrupted") return;
+            await store.updateTurn(threadId, storeTurnId, { usage: observed });
+          })
+          .catch(() => undefined);
       }
       // Already terminal: the interrupt promoted nothing, so run the copies' promotion here.
       if (interruption === null || interruption.interrupted === false) await runStrandedRedelivery(args, copies);
@@ -1876,16 +1892,28 @@ async function settleTurn(
     // A run stopped without Moxen's interrupt recording the stop first: the
     // process closed its provider sessions (a server shutdown or restart) or
     // the provider ended the turn. Record why, rather than leave an
-    // interruption nothing explains.
+    // interruption nothing explains. The driver's final observed usage (spend
+    // it booked for the interrupted turn) commits inside the same locked
+    // interruption transaction — before the interruption event and the queue
+    // promotion — so a turn admitted by the promotion is never erased, and a
+    // later priced turn cannot make this spend disappear (LOCAL-009).
     const live = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
     const reason = live?.status === "running" ? "Moxen or the provider stopped this run before it finished." : undefined;
-    await interruptTurn(store, threadId, storeTurnId, undefined, reason ? { reason } : {}).catch(() => undefined);
-    // The driver's final observed usage (spend it booked for the interrupted
-    // turn) must reach the stored turn too: the ledger sums stored turn usage,
-    // so dropping it here would make a later priced turn erase this spend
-    // (LOCAL-009).
-    if (outcome.usage) {
-      await store.updateTurn(threadId, storeTurnId, { usage: outcome.usage }).catch(() => undefined);
+    const interruption = await interruptTurn(store, threadId, storeTurnId, undefined, {
+      ...(reason ? { reason } : {}),
+      ...(outcome.usage ? { usage: outcome.usage } : {}),
+    }).catch(() => null);
+    if (outcome.usage && (interruption === null || interruption.interrupted === false)) {
+      // An explicit stop already committed the interruption without the usage:
+      // retain it on that row only, under the same lock, never rewriting the
+      // ledger from an older snapshot (LOCAL-009).
+      await store
+        .withThreadLock(threadId, async () => {
+          const row = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
+          if (!row || row.usage !== null || row.status !== "interrupted") return;
+          await store.updateTurn(threadId, storeTurnId, { usage: outcome.usage! });
+        })
+        .catch(() => undefined);
     }
   } else {
     await failTurn(store, threadId, storeTurnId, {

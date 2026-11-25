@@ -1610,4 +1610,77 @@ describe("driver event pump", () => {
     const bgTurn = (await store.readTurns(thread.id)).find((t) => t.id === limitHits[1]!.turnId);
     expect(bgTurn?.status).toBe("failed");
   });
+
+  it("keeps interrupted-usage persistence inside the locked interruption transaction so an admitted turn never disappears (LOCAL-009)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-interrupted-lock-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Interrupted lock",
+      modelSelection: { instanceId: "antigravity/default", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    // A turns rewrite that runs outside the thread lock rewrites the whole
+    // ledger from a snapshot: any turn admitted between its read and its
+    // rewrite is erased. Count every such rewrite on the store.
+    const locks = (store as unknown as { locks: Map<string, Promise<void>> }).locks;
+    const originalRewrite = store.rewriteLedger.bind(store);
+    let unlockedTurnsRewrites = 0;
+    store.rewriteLedger = async (threadId, name, rows) => {
+      if (name === "turns" && !locks.has(threadId)) unlockedTurnsRewrites += 1;
+      return await originalRewrite(threadId, name, rows);
+    };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () =>
+        ({ status: "interrupted", text: "", usage: { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 }, error: null }),
+      streamEvents: Stream.never,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    store.rewriteLedger = originalRewrite;
+    expect(unlockedTurnsRewrites).toBe(0);
+    const stored = (await store.readTurns(thread.id)).find((t) => t.id === turn.id);
+    expect(stored?.status).toBe("interrupted");
+    expect(stored?.usage?.costUsd).toBeCloseTo(0.42, 9);
+  });
+
+  it("retrieves aborted-turn usage by its driver turn id, never the session's open turn (LOCAL-009)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-aborted-turn-id-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Aborted turn id",
+      modelSelection: { instanceId: "antigravity/default", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const usageThis = { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 };
+    const usageOther = { input: 900, cacheRead: 0, cacheCreate: 0, output: 90, thinking: 0, costUsd: 0.99 };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: (_threadId, _turnId, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new CliError("TURN_ABORTED", "Interrupted before result")), { once: true });
+        }),
+      // Only a lookup by THIS run's driver turn id may return the turn's own
+      // usage; a thread-scoped sample would hand back another turn's.
+      liveTurnUsage: (_threadId, driverTurnId) => (driverTurnId === "d-1" ? usageThis : usageOther),
+      streamEvents: Stream.never,
+    };
+    const running = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    await interruptTurn(store, thread.id, turn.id);
+    await running;
+    const stored = (await store.readTurns(thread.id)).find((t) => t.id === turn.id);
+    expect(stored?.status).toBe("interrupted");
+    expect(stored?.usage?.costUsd).toBeCloseTo(0.42, 9);
+  });
 });
