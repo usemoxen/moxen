@@ -1,0 +1,32 @@
+{
+  "session_id": "fictional-session-0001",
+  "accounts": [
+    {
+      "uid": "fictional-account-uid-0001",
+      "account_id": { "iban": "ES0021000418450200051332" },
+      "all_account_ids": [
+        { "identification": "0000000011", "scheme_name": "BBAN" }
+      ],
+      "name": "Cuenta de pruebas",
+      "details": "Cuenta corriente ficticia",
+      "usage": "PRIV",
+      "cash_account_type": "CACC",
+      "product": "Cuenta Ficticia",
+      "currency": "EUR",
+      "psu_status": "ENABLED",
+      "legal_age": true,
+      "identification_hash": "fictional-identification-hash-0001",
+      "identification_hashes": ["fictional-identification-hash-0001"]
+    },
+    {
+      "uid": "fictional-account-uid-0002",
+      "account_id": { "iban": "ES0049000000000000000001" },
+      "name": "Ahorro de pruebas",
+      "cash_account_type": "SVGS",
+      "currency": "EUR"
+    }
+  ],
+  "aspsp": { "name": "Banco Ficticio", "country": "ES" },
+  "psu_type": "private",
+  "access": { "valid_until": "2026-06-01T00:00:00.000000+00:00" }
+}

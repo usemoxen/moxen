@@ -1,0 +1,36 @@
+{
+  "transactions": [
+    {
+      "entry_reference": "FICT-0001",
+      "merchant_category_code": "5411",
+      "transaction_amount": { "currency": "EUR", "amount": "12.30" },
+      "credit_debit_indicator": "DBIT",
+      "status": "BOOK",
+      "booking_date": "2026-01-05",
+      "value_date": "2026-01-06",
+      "transaction_date": "2026-01-04",
+      "creditor": {
+        "name": "Supermercado Imaginario",
+        "postal_address": {
+          "address_line": ["Avenida Inventada 22"],
+          "country": "ES",
+          "town_name": "Valencia"
+        }
+      },
+      "creditor_account": { "iban": "ES0012340000123456789012" },
+      "remittance_information": ["Compra ficticia", "Tarjeta **** 0000"],
+      "balance_after_transaction": { "currency": "EUR", "amount": "987.70" },
+      "transaction_id": "fictional-transaction-0001"
+    },
+    {
+      "transaction_amount": { "currency": "EUR", "amount": "3.10" },
+      "credit_debit_indicator": "DBIT",
+      "status": "PDNG",
+      "booking_date": "2026-01-07",
+      "creditor": { "name": "Café de Prueba" },
+      "remittance_information": ["Café"],
+      "transaction_id": "fictional-transaction-0002"
+    }
+  ],
+  "continuation_key": "ZmljdGlvbmFsLXBhZ2UtMg=="
+}

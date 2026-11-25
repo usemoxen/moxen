@@ -1,0 +1,18 @@
+{
+  "access": { "valid_until": "2026-06-01T00:00:00.000000+00:00" },
+  "accounts": [
+    "fictional-account-uid-0001",
+    "fictional-account-uid-0002"
+  ],
+  "accounts_data": [
+    {
+      "uid": "fictional-account-uid-0001",
+      "identification_hash": "fictional-identification-hash-0001"
+    }
+  ],
+  "aspsp": { "country": "ES", "name": "Banco Ficticio" },
+  "authorized": "2026-01-15T10:30:00.000000+00:00",
+  "created": "2026-01-15T10:29:00.000000+00:00",
+  "psu_type": "private",
+  "status": "AUTHORIZED"
+}
