@@ -226,8 +226,9 @@ function label(value: unknown, required: boolean): string {
   return value;
 }
 
+/** An optional label: absent, or an empty string a model wrote for "none" (`"unit":""`), is left out; any other value must be a valid label. */
 function optionalLabel(value: unknown): string | undefined {
-  return value === undefined ? undefined : label(value, true);
+  return value === undefined || value === "" ? undefined : label(value, true);
 }
 
 /** A number of something: finite, not negative. */
