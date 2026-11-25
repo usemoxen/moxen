@@ -1643,6 +1643,42 @@ describe("VibeDriver round-6 regressions", () => {
   });
 });
 
+describe("VibeDriver round-8 regressions", () => {
+  it("drops a deferred widening superseded by a HIGHER selection instead of replaying the stale write", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const writes: string[] = [];
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, (params) => {
+      const policy = (params as Record<string, unknown>)["approvalPolicy"] as string;
+      writes.push(policy);
+      // Only the obsolete accept-edits write must never be answered: if the
+      // completion-time replay wrongly sends it, it hangs, times out, and
+      // invalidates the session.
+      if (policy === "accept-edits") return new Promise(() => {});
+      return { runtime: { approvalPolicy: policy }, status: "applied" };
+    });
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } }));
+    const driver = new VibeDriver({ transport: makeTransport([server]), requestTimeoutMs: 80 });
+    await Effect.runPromise(driver.startSession({ threadId: "th-staleset", workingDirectory: "/tmp/repo", runtimeMode: "approval-required" }));
+
+    await Effect.runPromise(driver.sendTurn({ threadId: "th-staleset", prompt: "A" }));
+    driver.setRuntimeMode("th-staleset", "auto-accept-edits"); // widens; deferred while A runs
+    await sleep(30);
+    expect(writes).toEqual([]); // deferred, nothing on the wire yet
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+    // Supersedes the deferral with a HIGHER selection before the replay runs:
+    // replaying the stale accept-edits would be a write nobody selected, and
+    // a timeout on it would close the session.
+    driver.setRuntimeMode("th-staleset", "full-access");
+    await sleep(40);
+    // Exactly the latest selection's write went out; the obsolete accept-edits
+    // replay never hit the wire, so the session is still open.
+    expect(writes).toEqual(["auto-approve"]);
+    expect(await Effect.runPromise(driver.hasSession("th-staleset"))).toBe(true);
+    await Effect.runPromise(driver.stopSession("th-staleset"));
+  });
+});
+
 describe("vibe catalog launcher diagnostics", () => {
   it("surfaces an actionable status for an unsupported batch wrapper", async () => {
     forgetVibeCatalogCache();

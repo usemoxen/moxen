@@ -1813,28 +1813,36 @@ export class VibeDriver implements ProviderAdapter<CliError> {
 
   /**
    * After a turn settles, replay ONLY the widening write the live-turn check
-   * actually deferred — never a pending tightening (Vibe already applied it
+   * actually deferred, and only while it is still EXACTLY the caller's
+   * latest selection — never a pending tightening (Vibe already applied it
    * live and answered `pending`, so a replay would issue a redundant write
-   * whose failure would invalidate a healthy session) and never the caller's
-   * latest selection generally (a per-turn mode is not a completion-time
-   * write). If the caller has since selected something narrower than the
-   * deferred widening, the deferral is dropped instead of re-widening past it.
+   * whose failure would invalidate a healthy session) and never a superseded
+   * selection: the moment any newer selection exists the deferral is dropped
+   * and the newer setter's own queued write takes over — replaying the older
+   * policy would send a wire write the caller no longer wants, and a timeout
+   * on it would close a session the current selection never needed to widen.
    */
   private applySelectedModeWhenIdle(session: VibeSession): void {
     if (session.closed || session.isolation) return;
     if (this.runningTurn(session) !== undefined) return;
     const mode = session.deferredWidening;
     if (!mode) return;
-    if (policyRank(vibeApprovalPolicyForRuntimeMode(session.desiredMode))
-      < policyRank(vibeApprovalPolicyForRuntimeMode(mode))) {
+    if (session.desiredMode !== mode) {
+      // Superseded by a newer selection: drop the deferral — the newer
+      // selection's own queued write takes over, so the stale deferral is
+      // never replayed (a replay of it would be a write the caller no longer
+      // wants, and a timeout on it would close a healthy session).
       session.deferredWidening = null;
       return;
     }
     void this.enqueueAdmission(session, async () => {
       if (session.closed || session.deferredWidening !== mode) return;
-      // A newer selection outranks the deferred write unless it is narrower.
-      if (policyRank(vibeApprovalPolicyForRuntimeMode(session.desiredMode))
-        < policyRank(vibeApprovalPolicyForRuntimeMode(mode))) {
+      // The deferred selection must still be EXACTLY the latest one, not
+      // merely within its rank: any newer selection (wider or narrower)
+      // issues its own write, so replaying the stale deferral would only
+      // write a superseded policy a timeout could then close the session
+      // over.
+      if (session.desiredMode !== mode) {
         session.deferredWidening = null;
         return;
       }
