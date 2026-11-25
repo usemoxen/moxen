@@ -203,6 +203,20 @@ describe("conditional work queue", () => {
     expect(w.sent).toHaveLength(1);
   });
 
+  it("does not wait for the reset of a window the provider stopped reporting", async () => {
+    const w = await world(); const thread = await w.make(); const now = Date.now();
+    await sendTurn(w.store, thread.id, { prompt: "when the weekly allowance returns", queue: parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "weekly" }] }) });
+    await runWorkQueue(w.ctx, now);
+    expect(w.sent).toEqual([]);
+    // The provider withdrew its weekly window (Google removed the separate
+    // Argon quota): a reading that reports windows but not that kind has no
+    // reset left to wait for, so the entry stops waiting on it.
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 10, exhausted: false, resetsAt: new Date(now + 60_000).toISOString() }], now, { complete: true });
+    await runWorkQueue(w.ctx, now + 1000);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+  });
+
   it("waits for every reported window when the condition asks for all", async () => {
     const w = await world(); const thread = await w.make(); const now = Date.now();
     await sendTurn(w.store, thread.id, { prompt: "when every allowance returns", queue: parseQueuePolicy({ conditions: [{ type: "reset", provider: "codex", window: "all" }] }) });

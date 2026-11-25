@@ -3336,6 +3336,9 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         ...(this.usageInstanceId ? { instanceId: this.usageInstanceId } : {}),
         threadId: session.threadId,
         windows: snapshot.windows,
+        // `/usage` lists every bucket the plan has, so this replaces what was
+        // recorded: Google's withdrawn Argon quota stops being shown.
+        complete: true,
         ...(snapshot.credits === null ? {} : { credits: snapshot.credits }),
         ...(session.tier ? { raw: { subscriptionType: session.tier } } : {}),
       });

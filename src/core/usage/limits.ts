@@ -1,9 +1,10 @@
 /**
  * The latest subscription usage windows each provider reported (Claude's
  * session and weekly limits, OpenCode Go's five-hour, weekly and monthly
- * ones), merged from every `rate-limits.updated` event the drivers publish:
- * the start-up probe gives the full set, live events refresh one window at a
- * time.
+ * ones), kept from every `rate-limits.updated` event the drivers publish: a
+ * start-up probe or a driven refresh lists every window the account has and
+ * replaces what was recorded, while a live event refreshes one window at a
+ * time and keeps the rest.
  *
  * Kept per account, not per thread: the limits belong to the account the
  * provider CLI is logged into, so every thread on it shares them. For Claude
@@ -109,19 +110,28 @@ export function persistUsageLimits(storeRoot: string): void {
  * Merge one report into the provider's windows. A window reported without a
  * percentage (a live event that only says "allowed") keeps the last known
  * one; a window never seen with a percentage is left out.
+ *
+ * `complete` marks a report that listed every window the account has (a probe,
+ * or a driven `refreshUsage`): that report replaces the recorded list, so a
+ * window the provider stopped reporting — Google removed the separate Argon
+ * quota on 2026-11-23 — goes away instead of sitting beside the fresh numbers
+ * forever. A live event names only the windows it refreshes and keeps the
+ * rest. A complete report carrying no windows changes nothing: a probe that
+ * read nothing is no news, not "no windows".
  */
 export function recordUsageWindows(
   provider: string,
   windows: ReadonlyArray<RateLimitWindow>,
   at: number = Date.now(),
-  options?: { readonly credits?: number | null | undefined },
+  options?: { readonly credits?: number | null | undefined; readonly complete?: boolean },
 ): void {
   const existing = recorded.get(provider);
   const previous = existing?.windows ?? [];
-  const merged = new Map(previous.map((window) => [window.id, window] as const));
+  const reported = new Map(previous.map((window) => [window.id, window] as const));
+  const merged = new Map<string, RecordedWindow>(options?.complete === true && windows.length > 0 ? [] : [...reported]);
   let changed = false;
   for (const window of windows) {
-    const known = merged.get(window.id);
+    const known = reported.get(window.id);
     const usedPercent = window.usedPercent ?? (window.exhausted ? 100 : known?.usedPercent);
     if (usedPercent === undefined || usedPercent === null) continue;
     merged.set(window.id, { id: window.id, label: window.label, usedPercent, resetsAt: window.resetsAt ?? known?.resetsAt ?? null });

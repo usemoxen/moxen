@@ -41,7 +41,11 @@ belongs to that instance alone and is read from the server's experimental
 when a Go session starts and after its turns, at most once a minute. Every
 other OpenCode provider reports no plan windows; when the route has nothing
 to say — not signed in, no Go plan, an older server — usage is simply unknown,
-never an error.
+never an error. Each provider's probe or refresh lists every window the
+account has and replaces what Moxen recorded, so a quota the provider withdrew
+stops being shown (Google removed Antigravity's separate Argon quota on
+2026-11-23); an event that reports a single window — Antigravity's quota reply,
+Claude's `rate_limit_event` — refreshes that one and leaves the rest.
 
 ## Antigravity and ACP
 

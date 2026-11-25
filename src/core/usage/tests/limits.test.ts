@@ -50,6 +50,44 @@ describe("usage limits registry", () => {
     ], NOW);
     expect(standingLimit("antigravity", NOW)).toBeNull();
   });
+  it("drops a window a full read no longer reports, instead of showing it forever", () => {
+    const weekly = new Date(NOW + 24 * 3_600_000).toISOString();
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 40, exhausted: false, resetsAt: IN_2H },
+      { id: "gemini-argon-wtu-weekly", label: "Weekly – Argon", usedPercent: 90.6, exhausted: false, resetsAt: weekly },
+    ], NOW, { complete: true });
+    // Google removed the separate Argon quota: `/usage` no longer lists it, and
+    // its last number must not outlive the reading that stopped reporting it.
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 42, exhausted: false, resetsAt: IN_2H },
+    ], NOW + 60_000, { complete: true });
+    expect(usageLimitsSnapshot(NOW + 60_000).antigravity!.windows.map((window) => [window.id, window.usedPercent])).toEqual([
+      ["gemini-5h", 42],
+    ]);
+  });
+
+  it("keeps a window a live event does not mention, even after a full read", () => {
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 40, exhausted: false, resetsAt: IN_2H },
+      { id: "gemini-argon-wtu-weekly", label: "Weekly – Argon", usedPercent: 90.6, exhausted: false, resetsAt: IN_2H },
+    ], NOW, { complete: true });
+    // A live event names only the pool this turn spent (here the quota hit):
+    // it refreshes that window and leaves the others alone.
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 100, exhausted: true, resetsAt: IN_2H },
+    ], NOW + 60_000);
+    expect(usageLimitsSnapshot(NOW + 60_000).antigravity!.windows.map((window) => [window.id, window.usedPercent])).toEqual([
+      ["gemini-5h", 100],
+      ["gemini-argon-wtu-weekly", 90.6],
+    ]);
+  });
+
+  it("keeps a full read that carries no windows from emptying the record", () => {
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 30, exhausted: false, resetsAt: IN_2H }], NOW);
+    recordUsageWindows("claude", [], NOW + 60_000, { complete: true });
+    expect(usageLimitsSnapshot(NOW + 60_000).claude!.windows.map((window) => window.usedPercent)).toEqual([30]);
+  });
+
   it("keeps the probe's windows and refreshes one from a live event", () => {
     recordUsageWindows(
       "claude",

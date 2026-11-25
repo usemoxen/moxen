@@ -955,7 +955,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       .usageLimits()
       .then((windows) => {
         if (session.closed || windows === null) return;
-        this.publish({ type: "rate-limits.updated", provider: this.provider, threadId: session.threadId, windows, instanceId: OPENCODE_GO_INSTANCE });
+        // The Go usage route lists the whole plan, so it replaces the list.
+        this.publish({ type: "rate-limits.updated", provider: this.provider, threadId: session.threadId, windows, instanceId: OPENCODE_GO_INSTANCE, complete: true });
       })
       .catch(() => undefined);
   }

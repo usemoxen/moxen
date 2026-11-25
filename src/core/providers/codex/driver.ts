@@ -671,6 +671,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       ...(this.rateLimitInstanceId ? { instanceId: this.rateLimitInstanceId } : {}),
       threadId: session.threadId,
       windows,
+      // A rate-limits snapshot carries every window the plan has (primary and
+      // secondary together), so it replaces the recorded list.
+      complete: true,
       raw: { planType: inner["planType"] ?? null },
     });
     return windows;

@@ -32,6 +32,18 @@ interface Sample {
 export class UsageForecaster {
   private readonly samples = new Map<string, Sample>();
 
+  /**
+   * Forget what was learned for windows this account no longer reports: a
+   * quota the provider withdrew would otherwise keep its ratios for the
+   * process's lifetime, and greet the window's return with them.
+   */
+  retain(provider: string, windowIds: ReadonlySet<string>): void {
+    const prefix = `${provider}:`;
+    for (const key of this.samples.keys()) {
+      if (key.startsWith(prefix) && !windowIds.has(key.slice(prefix.length))) this.samples.delete(key);
+    }
+  }
+
   forecast(provider: string, window: ProviderUsageWindow, work: ForecastWork): UsageForecast {
     const key = `${provider}:${window.id}`;
     let sample = this.samples.get(key);

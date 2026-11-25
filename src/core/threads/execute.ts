@@ -459,7 +459,7 @@ function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>>
       Effect.sync(() => {
         // Plan usage belongs to the account, not the thread: recorded here,
         // once per event, whoever (if anyone) watches the thread.
-        if (event.type === "rate-limits.updated") recordUsageWindows(event.instanceId ?? event.provider, event.windows, undefined, { credits: event.credits });
+        if (event.type === "rate-limits.updated") recordUsageWindows(event.instanceId ?? event.provider, event.windows, undefined, { credits: event.credits, complete: event.complete === true });
         trackLiveText(buffers, event);
         for (const subscriber of subscribers.get("*") ?? []) deliverEvent(subscriber, event);
         for (const subscriber of subscribers.get(event.threadId) ?? []) deliverEvent(subscriber, event);

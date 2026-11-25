@@ -212,10 +212,15 @@ Subscription windows belong to the account, not the thread: Claude and
 Codex report a five-hour session window and a weekly one (Codex reports a
 monthly allowance instead on some plans), and OpenCode Go reports a 5-hour,
 a weekly and a monthly window from the server Moxen already runs. The
-process owning the sessions merges what drivers report into one record per
+process owning the sessions keeps what drivers report in one record per
 account — per provider driver, and for OpenCode per instance, so Go's plan
 shows only on `opencode/opencode-go` — persisted next to the thread store, so
-a fresh process shows the last reading before its first turn.
+a fresh process shows the last reading before its first turn. A reading that
+lists every window an account has (a probe, or a refresh) replaces that
+record, so a window the provider stops reporting goes away instead of sitting
+there forever — Google withdrew the separate Argon quota, and the row with it;
+a live event names only the window it refreshes and leaves the others at their
+last reading.
 
 ### Stats
 

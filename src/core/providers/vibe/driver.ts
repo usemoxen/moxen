@@ -1500,6 +1500,8 @@ export class VibeDriver implements ProviderAdapter<CliError> {
           provider: this.provider,
           threadId: session.threadId,
           windows,
+          // One account reading (its whole budget), so it replaces the list.
+          complete: true,
           ...(this.instanceId ? { instanceId: this.instanceId } : {}),
           raw,
         });
