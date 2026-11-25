@@ -263,6 +263,26 @@ export function assistantText(
 }
 
 /**
+ * One text block of a reply. The real CLI sends one assistant frame per
+ * content block, all sharing the message id, and its `result` keeps only the
+ * last one — so a reply's answer is often split across several of these.
+ */
+export function assistantTextBlock(
+  messageId: string,
+  text: string,
+  overrides: Record<string, unknown> = {},
+): SDKMessage {
+  return asMessage({
+    type: "assistant",
+    message: { id: messageId, content: [{ type: "text", text }], usage: { input_tokens: 10, output_tokens: 5 } },
+    parent_tool_use_id: null,
+    uuid: `${messageId}-${text.length}`,
+    session_id: "session-1",
+    ...overrides,
+  });
+}
+
+/**
  * A reply that only thought. The real CLI emits this block on its own, then
  * nudges the model once ("no visible output"), and a second thinking-only
  * reply ends the run as `success` with an empty `result` — so the whole
@@ -275,6 +295,7 @@ export function assistantThinking(
   return asMessage({
     type: "assistant",
     message: {
+      id: "msg-thinking",
       content: [{ type: "thinking", thinking, signature: "c2ln" }],
       usage: { input_tokens: 10, output_tokens: 5 },
     },
@@ -315,17 +336,6 @@ export function assistantStringText(text: string, overrides: Record<string, unkn
     uuid: "assistant-string-1",
     session_id: "session-1",
     ...overrides,
-  });
-}
-
-/** One token-level `text_delta`, the shape `includePartialMessages` turns on. */
-export function streamTextDelta(text: string, index = 0): SDKMessage {
-  return asMessage({
-    type: "stream_event",
-    event: { type: "content_block_delta", index, delta: { type: "text_delta", text } },
-    parent_tool_use_id: null,
-    uuid: `se-${index}-${text.length}`,
-    session_id: "session-1",
   });
 }
 

@@ -7,11 +7,11 @@ import {
   assistantApiError,
   assistantStringText,
   assistantText,
+  assistantTextBlock,
   assistantThinking,
   errorResult,
   FakeTransport,
   permissionCallbackOptions,
-  streamTextDelta,
   successResult,
   thinkingTokens,
 } from "./fakes.js";
@@ -114,29 +114,90 @@ describe("Claude side questions", () => {
 
   /**
    * A failed API call also arrives as `success` with `is_error: true`, and its
-   * `result` holds the error text. Returning that text answered `/btw` with
-   * "API Error: 400 …" as if the model had said it.
+   * `result` holds the raw upstream body — which can echo a credential, so it
+   * never reaches the message. The status is what the user gets.
    */
-  it("fails with the API's own error text instead of resolving to it as the answer", async () => {
-    const detail = "API Error: 400 thinking budget exceeded for this model";
-    const transport = new FakeTransport([[assistantApiError(detail), successResult(detail, 0, { is_error: true })]]);
+  it("names an API error by its status without echoing the upstream body", async () => {
+    const body = "API Error: 400 messages.0: invalid request; authorization=sk-ant-api03-AAAAsecretAAAA rejected";
+    const transport = new FakeTransport([
+      [assistantApiError(body), successResult(body, 0, { is_error: true, api_error_status: 400 })],
+    ]);
     const driver = new ClaudeDriver({ transport });
     const failure = await driver
       .sideQuestion({ cursor: "s", workingDirectory: "/w", question: "q", model: "claude-fable-5-2" })
       .catch((cause: unknown) => cause);
     expect(failure).toBeInstanceOf(CliError);
     expect((failure as CliError).code).toBe("SIDE_QUESTION_FAILED");
-    expect((failure as CliError).message).toBe(`The side question failed: ${detail}.`);
+    expect((failure as CliError).message).toBe("The side question failed: Claude reported an API error (HTTP 400).");
+    expect((failure as CliError).message).not.toContain("sk-ant");
+    expect(JSON.stringify((failure as CliError).details ?? null)).not.toContain("sk-ant");
   });
 
-  it("takes an answer the CLI only streamed token by token", async () => {
+  it("says which API error it was when the CLI names one", async () => {
     const transport = new FakeTransport([
-      [streamTextDelta("It is using ", 0), streamTextDelta("JWTs in auth.ts.", 0), successResult("")],
+      [
+        assistantApiError("API Error: 429 rate limited", { error: "rate_limit" }),
+        successResult("API Error: 429 rate limited", 0, { is_error: true, api_error_status: 429 }),
+      ],
+    ]);
+    const driver = new ClaudeDriver({ transport });
+    await expect(
+      driver.sideQuestion({ cursor: "s", workingDirectory: "/w", question: "q", model: "claude-fable-5-2" }),
+    ).rejects.toThrow("The side question failed: Claude is rate limited (HTTP 429).");
+  });
+
+  /**
+   * The CLI sends one assistant frame per content block under one message id,
+   * and its `result` keeps only the last text block — so reading `result`
+   * alone truncated the answer after the first paragraph.
+   */
+  it("takes every text block of the reply, not only the last", async () => {
+    const transport = new FakeTransport([
+      [
+        assistantThinking("First look at the auth module."),
+        assistantTextBlock("msg-1", "It is using JWTs in auth.ts, "),
+        assistantThinking("Now the token lifecycle."),
+        assistantTextBlock("msg-1", "and the refresh token rotates every hour."),
+        successResult("and the refresh token rotates every hour."),
+      ],
     ]);
     const driver = new ClaudeDriver({ transport });
     await expect(
       driver.sideQuestion({ cursor: "s", workingDirectory: "/w", question: "q" }),
-    ).resolves.toEqual({ text: "It is using JWTs in auth.ts.", withContext: true });
+    ).resolves.toEqual({
+      text: "It is using JWTs in auth.ts, \n\nand the refresh token rotates every hour.",
+      withContext: true,
+    });
+  });
+
+  it("takes only the final reply when the CLI nudges a thinking-only turn", async () => {
+    const transport = new FakeTransport([
+      [
+        assistantThinking("Thinking it over."),
+        assistantThinking("Thinking again."),
+        assistantTextBlock("msg-2", "It is using JWTs."),
+        successResult("It is using JWTs."),
+      ],
+    ]);
+    const driver = new ClaudeDriver({ transport });
+    await expect(
+      driver.sideQuestion({ cursor: "s", workingDirectory: "/w", question: "q" }),
+    ).resolves.toEqual({ text: "It is using JWTs.", withContext: true });
+  });
+
+  it("leaves out a child tool's frames and another session's", async () => {
+    const transport = new FakeTransport([
+      [
+        assistantTextBlock("msg-child", "Subagent chatter.", { parent_tool_use_id: "tu-1" }),
+        assistantTextBlock("msg-other", "Another thread's answer.", { session_id: "session-9" }),
+        assistantTextBlock("msg-1", "It is using JWTs."),
+        successResult(""),
+      ],
+    ]);
+    const driver = new ClaudeDriver({ transport });
+    await expect(
+      driver.sideQuestion({ cursor: "s", workingDirectory: "/w", question: "q" }),
+    ).resolves.toEqual({ text: "It is using JWTs.", withContext: true });
   });
 
   it("reads an answer whose content is a plain string", async () => {
@@ -155,8 +216,8 @@ describe("Claude side questions", () => {
     ).resolves.toEqual({ text: "JWTs.", withContext: true });
   });
 
-  it("takes the run's own result over an interim note before it", async () => {
-    const transport = new FakeTransport([[assistantText("Let me see."), successResult("JWTs in auth.ts.")]]);
+  it("falls back to the result when the final message carries no text at all", async () => {
+    const transport = new FakeTransport([[assistantThinking("Considering."), successResult("JWTs in auth.ts.")]]);
     const driver = new ClaudeDriver({ transport });
     await expect(
       driver.sideQuestion({ cursor: "s", workingDirectory: "/w", question: "q" }),
