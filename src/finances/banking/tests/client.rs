@@ -20,8 +20,8 @@ use chrono::NaiveDate;
 use common::{client, client_with_policy, fixture, now, ok, shared_clock, transport_error};
 use moxen_finances_banking::testing::RecordedTransport;
 use moxen_finances_banking::{
-    BankError, BankRef, ConsentEnd, HttpRequest, HttpResponse, PsuType, RetryPolicy, StartAuth,
-    TransactionStatus, TransactionWindow,
+    BankError, BankRef, ConsentEnd, HttpRequest, HttpResponse, Localized, PsuType, RetryPolicy,
+    StartAuth, TransactionStatus, TransactionWindow, text::Language,
 };
 
 fn day(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -494,7 +494,18 @@ fn a_repeated_continuation_key_does_not_loop_forever() {
         .transactions(account_uid(), &window())
         .expect_err("the same key twice cannot end");
     assert!(matches!(error, BankError::Invalid { .. }), "{error:?}");
-    assert!(error.to_string().contains("repitió"), "{error}");
+    assert!(
+        error
+            .localized(Language::Spanish)
+            .contains("repitió la clave de continuación"),
+        "{error}"
+    );
+    assert!(
+        error
+            .localized(Language::English)
+            .contains("repeated the continuation key"),
+        "and the English sentence says the same: {error}"
+    );
 }
 
 #[test]
@@ -606,7 +617,9 @@ fn an_expired_session_is_a_link_again_not_an_unauthorized() {
     );
     assert!(error.needs_link_again());
     assert!(
-        error.to_string().contains("vincula el banco de nuevo"),
+        error
+            .localized(Language::Spanish)
+            .contains("vincula el banco de nuevo"),
         "the message points at the fix: {error}"
     );
 }
@@ -837,9 +850,18 @@ fn a_bad_request_is_invalid_and_not_retried() {
         .transactions(account_uid(), &window())
         .expect_err("422");
     match error {
-        BankError::Invalid { code, message } => {
+        BankError::Invalid { code, reason } => {
             assert_eq!(code.as_deref(), Some("DATE_FROM_IN_FUTURE"));
-            assert!(message.contains("future"), "{message}");
+            assert!(
+                reason.localized(Language::English).contains("future"),
+                "{reason:?}"
+            );
+            // The service words this one itself, so it is kept verbatim in
+            // both languages instead of being translated.
+            assert_eq!(
+                reason.localized(Language::Spanish),
+                "date_from can not be in the future"
+            );
         }
         other => panic!("expected Invalid, got {other:?}"),
     }

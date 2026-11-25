@@ -92,6 +92,42 @@ pub fn segmented<E: 'static>(
     cx: &mut Context<E>,
     on_select: impl Fn(&mut E, usize, &mut Context<E>) + Clone + 'static,
 ) -> Div {
+    segmented_with_ids(
+        move |option| ElementId::NamedInteger(id.into(), option as u64),
+        options,
+        selected,
+        cx,
+        on_select,
+    )
+}
+
+/// The same control for a page that draws it once per row (one chooser per
+/// linked account, say): `row` keeps the element ids apart, which gpui requires
+/// of two elements of one kind on one page.
+pub fn segmented_at<E: 'static>(
+    id: &'static str,
+    row: usize,
+    options: &[SharedString],
+    selected: usize,
+    cx: &mut Context<E>,
+    on_select: impl Fn(&mut E, usize, &mut Context<E>) + Clone + 'static,
+) -> Div {
+    segmented_with_ids(
+        move |option| ElementId::Name(format!("{id}-{row}-{option}").into()),
+        options,
+        selected,
+        cx,
+        on_select,
+    )
+}
+
+fn segmented_with_ids<E: 'static>(
+    element_id: impl Fn(usize) -> ElementId,
+    options: &[SharedString],
+    selected: usize,
+    cx: &mut Context<E>,
+    on_select: impl Fn(&mut E, usize, &mut Context<E>) + Clone + 'static,
+) -> Div {
     div()
         .flex()
         .p(px(3.))
@@ -102,7 +138,7 @@ pub fn segmented<E: 'static>(
             let on = selected == i;
             let on_select = on_select.clone();
             div()
-                .id((id, i))
+                .id(element_id(i))
                 .h(px(24.))
                 .px(px(11.))
                 .flex()

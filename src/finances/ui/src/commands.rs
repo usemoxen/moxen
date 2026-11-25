@@ -23,6 +23,12 @@ pub enum DataErrorKind {
     Backup,
     NewerVersion,
     Io,
+    /// A bank sync failure: an unaccepted application, an expired consent, a
+    /// rate limit, a bank that did not answer. The detail is the sentence the
+    /// banking crate already localized.
+    Banking,
+    /// The data source does not offer this operation (the demo).
+    Unsupported,
     Other,
 }
 
@@ -51,6 +57,8 @@ impl DataError {
             DataErrorKind::Backup => "error.backup",
             DataErrorKind::NewerVersion => "error.newer",
             DataErrorKind::Io => "error.io",
+            DataErrorKind::Banking => "error.banking",
+            DataErrorKind::Unsupported => "error.unsupported",
             DataErrorKind::Other => "error.other",
         }
     }
@@ -187,6 +195,24 @@ impl CsvSheet {
     }
 }
 
+/// What linking a bank asks for: which country's banks to list and which one
+/// to open. The application id and the key are already stored by then.
+#[derive(Clone, Debug)]
+pub struct BankLinkDraft {
+    /// A two-letter ISO 3166 country code (`ES`), which the picker offers.
+    pub country: String,
+    /// The bank's name exactly as the picker showed it (`Revolut`).
+    pub bank_name: String,
+    /// The language the bank's own pages should use (`es`/`en`), when it
+    /// supports one.
+    pub language: Option<String>,
+}
+
+/// The periods the Settings page offers for the automatic sync, in minutes;
+/// `None` is "off".
+pub const BANK_SYNC_INTERVALS: [Option<u32>; 5] =
+    [None, Some(15), Some(60), Some(360), Some(1_440)];
+
 /// The commands the UI can run against the data. Implemented by the app's
 /// store-backed `StoreData`; `DemoData` has none, so the demo renders with
 /// its actions disabled.
@@ -226,6 +252,57 @@ pub trait FinancesMutations {
     fn restore_backup_json(&self, json: &str) -> Result<(), DataError>;
     /// One sheet as CSV text.
     fn export_csv(&self, sheet: CsvSheet) -> Result<String, DataError>;
+
+    // -- bank sync (Settings), LOCAL-031 -------------------------------------------
+    //
+    // The default implementations refuse: a data source that cannot sync says
+    // so instead of pretending. The app's store-backed adapter overrides every
+    // one of them.
+    /// Store the Enable Banking application id (public metadata, never a key).
+    fn save_bank_application(&self, _app_id: &str) -> Result<(), DataError> {
+        Err(unsupported())
+    }
+    /// Read the PEM file at `path` once, validate it, and store the key in the
+    /// OS keychain. The path is not kept anywhere.
+    fn import_bank_key(&self, _pem_path: &str) -> Result<(), DataError> {
+        Err(unsupported())
+    }
+    /// Delete the stored key from the OS keychain.
+    fn remove_bank_key(&self) -> Result<(), DataError> {
+        Err(unsupported())
+    }
+    /// Start linking a bank: opens the browser and waits on the loopback
+    /// callback in the background, so the window keeps painting.
+    fn link_bank(&self, _draft: &BankLinkDraft) -> Result<(), DataError> {
+        Err(unsupported())
+    }
+    /// Forget a linked bank (its import ledger and mappings), keeping the
+    /// movements already imported.
+    fn unlink_bank(&self, _connection_id: &str) -> Result<(), DataError> {
+        Err(unsupported())
+    }
+    /// Point one of the bank's accounts at a local account, or at none.
+    fn map_bank_account(
+        &self,
+        _connection_id: &str,
+        _external_uid: &str,
+        _account_id: &str,
+    ) -> Result<(), DataError> {
+        Err(unsupported())
+    }
+    /// Sync now: balances and booked movements, idempotently.
+    fn sync_bank_now(&self, _connection_id: &str) -> Result<(), DataError> {
+        Err(unsupported())
+    }
+    /// Set the minutes between automatic syncs, `None` for off.
+    fn set_bank_sync_interval(&self, _minutes: Option<u32>) -> Result<(), DataError> {
+        Err(unsupported())
+    }
+}
+
+/// The error a data source without bank sync answers with.
+fn unsupported() -> DataError {
+    DataError::new(DataErrorKind::Unsupported, String::new())
 }
 
 #[cfg(test)]

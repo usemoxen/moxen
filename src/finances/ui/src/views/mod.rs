@@ -29,7 +29,7 @@ pub fn render(
         Page::Projection => projection::render(app, window, cx),
         Page::Calendar => calendar::render(app, window, cx),
         Page::Analysis => analysis::render(app, window, cx),
-        Page::Settings => settings::render(app, cx).into_any_element(),
+        Page::Settings => settings::render(app, window, cx).into_any_element(),
     };
     div()
         .id("content")
