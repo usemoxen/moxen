@@ -484,7 +484,17 @@ handoff. Summary generation uses current allowance before the destination's star
 conditions are met, and is stopped after two minutes of running or a reported
 hard limit. It does not silently retry summary generation. Both paths keep original
 image paths outside transcript trimming and carry the selected entry's unsent
-request. Other queued/scheduled requests stay on the source thread. Destination
+request — and no other: a continuation that moves no queue entry (a manual or
+automatic one) carries none, and a request removed before it was ever dispatched
+is neither history nor outstanding work in the delivered record. Other
+queued/scheduled requests keep their own policy on the source thread.
+A usage-driven stored handoff — a protection hold's recovery, or a cold resume
+switched to one — is the exception: its source may never settle again once the
+hold clears, so in the same critical section that clears the hold the
+follow-ups the hold left queued move with it, through the same durable transfer
+and wait model a manual continue uses. They run on the new thread, after its
+hand-off turn, each exactly once; a send landing after the hold clears finds
+none and starts like any other. Destination
 identity is persisted before creation to avoid duplicate handoffs after restart.
 A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the
@@ -1233,7 +1243,9 @@ idle source: while one of its turns is running, it is refused with
 `THREAD_BUSY` before anything is written — no destination, note, staged
 transfer or queue edit — so the queued messages stay and run there. Usage, protection and summary traffic, and
 queue-selected model/stored handoffs, keep their own semantics and never
-move this way; removed entries stay removed. A moved agent-queued message
+move this way — except a usage-driven stored handoff, which moves the
+source's ordinary follow-ups under the lock that clears its hold, as above;
+removed entries stay removed. A moved agent-queued message
 keeps its origin, so on an Antigravity thread with automatic prompts held it
 waits in the Work queue like any agent-queued message there until the user's
 next message on the new thread or the setting turns on; the generated handoff

@@ -482,8 +482,9 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect((await w.store.readTurns(source.id)).filter((turn) => turn.status === "queued")).toHaveLength(1);
     expect((await w.store.readTurns(source.id)).some((turn) => turn.handoff !== undefined)).toBe(false);
     const prompt = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
-    // No transfer, so the queued message keeps today's treatment: embedded as this turn's work.
-    expect(prompt).toContain("Queued behind");
+    // No transfer, so the queued message stays on the source and the handoff
+    // assigns it to no one: a continue that carries no queue entry names none.
+    expect(prompt).not.toContain("Queued behind");
     await completeTurn(w.store, source.id, running.id, { text: "Wrapping up." });
     await interruptTurn(w.store, source.id);
     await runWorkQueue(w.ctx);
@@ -546,10 +547,11 @@ describe("a manual continue moves pending messages to the new thread's work queu
     const doc = await buildHandoff(w.store, source.id, { knownTurnIds: claim!.known, excludedTurnIds: [...claim!.claimed, ...claim!.restaged] });
     expect(doc).not.toContain("Late");
     expect(doc).not.toContain("Second");
-    // Without this call's exclusion the same staged claim reads as ordinary
-    // pending work: only landed moves and explicitly claimed turns are hidden.
+    // Without this call's exclusion the same staged claim reads the same
+    // way: an unlanded claim is never delivered as work, and a staged
+    // (removed) entry is excluded even when a caller carries its id.
     const undisguised = await buildHandoff(w.store, source.id, { knownTurnIds: claim!.known });
-    expect(undisguised).toContain("Second");
+    expect(undisguised).not.toContain("Second");
 
     // The migration moves only the claimed turn; the late send stays queued.
     await migrateQueuedMessages(w.ctx, source.id, destination.id);
@@ -1061,13 +1063,14 @@ describe("a manual continue moves pending messages to the new thread's work queu
     await editWorkQueue(w.ctx, source.id, staged.turn.id, "remove");
     await migrateQueuedMessages(w.ctx, source.id, destination.id);
 
-    // Unmarked: ordinary removed history, visible in later handoffs as such.
+    // Unmarked and never dispatched: an ordinary removed request is neither
+    // history nor outstanding work in later handoffs (MXN-388).
     const taken = (await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)!;
     expect(taken).toMatchObject({ status: "interrupted" });
     expect(taken.handoff).toBeUndefined();
     expect((await w.store.readTurns(destination.id))).toHaveLength(1);
     const doc = await buildHandoff(w.store, source.id);
-    expect(doc).toContain("Second");
+    expect(doc).not.toContain("Second");
   });
 
   it("unstages an abandoned claim on a non-manual continue, reading it as ordinary pending work", async () => {
@@ -1096,7 +1099,7 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(unstaged.queue?.removed).toBe(false);
     expect(unstaged.status).toBe("queued");
     const doc = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
-    expect(doc).toContain("Second");
+    expect(doc).not.toContain("Second");
     expect(doc).not.toContain("moved to the new thread's Work queue");
     expect((await w.store.readTurns(continued.threadId)).filter((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))).toEqual([]);
   });
@@ -1193,14 +1196,14 @@ describe("a manual continue moves pending messages to the new thread's work queu
     await editWorkQueue(w.ctx, source.id, staged.turn.id, "restore");
     await editWorkQueue(w.ctx, source.id, staged.turn.id, "release");
 
-    // Unmarked: the next migrate moves nothing, later handoffs read the
-    // message as ordinary work, and it still runs on the source.
+    // Unmarked: the next migrate moves nothing, and later handoffs leave the
+    // message to the source that still runs it.
     const restored = (await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)!;
     expect(restored.handoff).toBeUndefined();
     expect(restored.status).toBe("queued");
     await migrateQueuedMessages(w.ctx, source.id, destination.id);
     expect((await w.store.readTurns(destination.id))).toHaveLength(1);
-    expect(await buildHandoff(w.store, source.id)).toContain("Second");
+    expect(await buildHandoff(w.store, source.id)).not.toContain("Second");
     await runWorkQueue(w.ctx);
     await settleRuns();
     expect(w.sent.map((turn) => turn.prompt)).toContain("Second");

@@ -1064,6 +1064,57 @@ describe("usage protection", () => {
     await interruptTurn(w.store, id, (await w.store.readTurns(id)).at(-1)!.id);
   });
 
+  it("moves a plain follow-up to the new thread when the stored recovery hands off", async () => {
+    const w = await world();
+    const id = await w.make("paused handoff");
+    const turn = openTurn(await w.store.readTurns(id))!;
+    await completeTurn(w.store, id, turn.id, { text: "Stopped safely." });
+    const recovery = (await sendTurn(w.store, id, {
+      prompt: "Continue", origin: "usage-continue",
+      queue: { ...parseQueuePolicy({ conditions: [], order: 1, sequential: false, continuation: "stored" }), automatic: true, requestId: "usage:1" },
+    })).turn;
+    const thread = (await w.store.readThreadRecord(id))!;
+    await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", windows: [], phase: "waiting", resetsAt: null, order: 1, handoff: true, turnId: turn.id, recoveryTurnId: recovery.id } });
+    // A plain message a user queued while the hold stood: accepted right
+    // before the hand-off clears the pause, exactly the send that could be
+    // stranded once the source never settles again (MXN-388).
+    const plain = (await sendTurn(w.store, id, { prompt: "Then cover the edge case.", delivery: "queue" })).turn;
+    expect(plain.status).toBe("queued");
+    expect(plain.queue).toBeUndefined();
+    let destination: string | null = null;
+    try {
+      await runWorkQueue(w.ctx);
+      const prepared = (await w.store.readTurns(id)).find((candidate) => candidate.id === recovery.id)!;
+      expect(prepared.handoff?.destinationThreadId).toBeTruthy();
+      destination = prepared.handoff!.destinationThreadId!;
+      // The follow-up moved with the hand-off: taken back as removed on the
+      // source, landed on the destination waiting on its hand-off turn.
+      expect((await w.store.readTurns(id)).find((candidate) => candidate.id === plain.id)).toMatchObject({
+        status: "interrupted",
+        handoff: { destinationThreadId: destination, landed: true },
+      });
+      await settleStartedTurns(w, destination);
+      // The hand-off turn starts as a queue entry itself, so each pass
+      // admits the next waiting turn on the destination: the hand-off
+      // turn first, then the follow-up it carried.
+      let settled: string = "queued";
+      for (let pass = 0; pass < 3 && settled !== "completed"; pass += 1) {
+        await runWorkQueue(w.ctx);
+        await settleStartedTurns(w, destination);
+        settled = (await w.store.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}`)?.status ?? "queued";
+      }
+      const moved = (await w.store.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}`)!;
+      expect(moved.status).toBe("completed");
+      // It ran once, on the new thread only; the old thread never ran it.
+      expect(w.prompts.filter((prompt) => prompt.includes("Then cover the edge case."))).toHaveLength(1);
+      expect(w.sent).not.toContain(id);
+      expect((await w.store.readThreadRecord(id))?.usagePause).toBeNull();
+    } finally {
+      if (destination !== null) for (const running of (await w.store.readTurns(destination)).filter((candidate) => candidate.status === "running")) await interruptTurn(w.store, destination, running.id);
+      for (const running of (await w.store.readTurns(id)).filter((candidate) => candidate.status === "running")) await interruptTurn(w.store, id, running.id);
+    }
+  }, 20_000);
+
   it.each(["claude", "codex"] as const)("%s holds queued input across restart and wraps only one thread at a time", async (provider) => {
     const w = await world(provider);
     const first = await w.make("first");
