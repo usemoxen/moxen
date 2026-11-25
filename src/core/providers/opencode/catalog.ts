@@ -25,11 +25,11 @@
  * the pin.
  */
 import fs from "node:fs";
-import { execFile } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 
 import { appHomeDir } from "../../config.js";
-import { resolveOnPath } from "../../infra/process.js";
+import { killProcessTreeAsync, resolveOnPath } from "../../infra/process.js";
 import { OPENCODE_DEFAULT_BINARY } from "./config.js";
 
 export const MODELS_DEV_DEFAULT_URL = "https://models.opencode.ai";
@@ -258,32 +258,120 @@ export function storedAuthTypeFor(stored: Readonly<Record<string, string>>, prov
 }
 
 export const AUTH_LIST_TIMEOUT_MS = 5_000;
+/** Grace between SIGTERM and SIGKILL when a probe's child does not exit on its own. */
+export const AUTH_LIST_KILL_GRACE_MS = 250;
 export const AUTH_LIST_CACHE_TTL_MS = 15_000;
+/**
+ * How long a successful credential read may keep deciding that a provider is
+ * connected when the probe stops answering. A day is long enough that a
+ * weekend of a busy or broken `opencode auth list` does not turn a working
+ * account into an unknown one, and short enough that a credential removed
+ * without a readable reply stops reading as current. Past it — or as soon as
+ * the latest probe fails — the state is `unverified`, never silently current.
+ */
+export const OPENCODE_AUTH_TRUST_MS = 24 * 60 * 60 * 1000;
+
+/** A clock that never goes backwards, for ages that decide freshness. */
+export const defaultMonotonic = (): number => globalThis.performance?.now?.() ?? Date.now();
 
 /** Runs `opencode auth list --format json --standalone`; stdout on success, null on any failure. */
 export type AuthListRunner = (binary: string, env: NodeJS.ProcessEnv) => Promise<string | null>;
+
+export interface AuthListRunnerOptions {
+  /** How long the CLI has to answer; default `AUTH_LIST_TIMEOUT_MS`. Tests inject a short one. */
+  readonly timeoutMs?: number;
+  /** Grace between SIGTERM and SIGKILL; default `AUTH_LIST_KILL_GRACE_MS`. */
+  readonly killGraceMs?: number;
+}
 
 /**
  * `--standalone` reads the credential store directly. Without it the CLI
  * connects to the user's shared background service and starts one when none
  * is running, leaving a daemon behind. Async, so a slow CLI never blocks the
  * event loop of the server or the TUI.
+ *
+ * The deadline bounds the request itself, not just the wait: a CLI that
+ * ignores SIGTERM, or never exits, is settled as a failure at the deadline and
+ * then reaped (SIGTERM, then SIGKILL after a grace). Output that arrives after
+ * that is ignored. The output cap still applies.
  */
-function defaultAuthListRunner(binary: string, env: NodeJS.ProcessEnv): Promise<string | null> {
+export function defaultAuthListRunner(
+  binary: string,
+  env: NodeJS.ProcessEnv,
+  options: AuthListRunnerOptions = {},
+): Promise<string | null> {
+  const timeoutMs = options.timeoutMs ?? AUTH_LIST_TIMEOUT_MS;
+  const killGraceMs = options.killGraceMs ?? AUTH_LIST_KILL_GRACE_MS;
   return new Promise((resolve) => {
+    let settled = false;
+    let deadline: ReturnType<typeof setTimeout> | null = null;
+    let child: ChildProcess | null = null;
+    let output = "";
+    let overflow = false;
+    const reap = (): void => {
+      const probe = child;
+      if (probe === null) return;
+      // Off the response path: the answer is already resolved, and the reaper
+      // itself is asynchronous (taskkill child on Windows, a group signal on
+      // POSIX).
+      void killProcessTreeAsync(probe, "SIGTERM");
+      const grace = setTimeout(() => {
+        // Escalate on the group even if the leader has exited: descendants
+        // may still be alive.
+        void killProcessTreeAsync(probe, "SIGKILL");
+      }, killGraceMs);
+      // Reaping does not need to keep the process alive.
+      if (typeof grace === "object" && grace !== null && "unref" in grace) grace.unref();
+    };
+    const settle = (value: string | null): void => {
+      if (settled) return;
+      settled = true;
+      if (deadline !== null) clearTimeout(deadline);
+      // Release the parent's pipe ends and the handle: a descendant that keeps
+      // the pipe open must not hold the test or the app after the answer.
+      child?.stdout?.destroy();
+      child?.stderr?.destroy();
+      child?.unref?.();
+      resolve(value);
+    };
     try {
       // A Windows `.cmd` shim (npm installs one) cannot be started directly, only through the shell.
       const file = process.platform === "win32" && !/[\\/]/.test(binary) ? (resolveOnPath(binary, env) ?? binary) : binary;
       const shim = process.platform === "win32" && /\.(?:cmd|bat)$/i.test(file);
-      const child = execFile(
-        shim ? `"${file}"` : file,
-        ["auth", "list", "--format", "json", "--standalone"],
-        { env, encoding: "utf8", timeout: AUTH_LIST_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024, shell: shim },
-        (error, stdout) => resolve(error || typeof stdout !== "string" ? null : stdout),
-      );
+      child = spawn(shim ? `"${file}"` : file, ["auth", "list", "--format", "json", "--standalone"], {
+        env,
+        windowsHide: true,
+        shell: shim,
+        // POSIX: its own process group, so the whole group can be reaped after
+        // the leader exits. Windows uses `taskkill /T` instead.
+        detached: process.platform !== "win32",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
       child.stdin?.end();
+      // Same 4 MB cap `execFile` gave this probe.
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        if (settled) return; // late output after settlement is ignored
+        if (output.length + chunk.length > 4 * 1024 * 1024) {
+          overflow = true;
+          settle(null);
+          reap();
+          return;
+        }
+        output += chunk;
+      });
+      // Nothing reads stderr, but it must be drained so the child cannot block.
+      child.stderr?.resume();
+      child.once("error", () => settle(null));
+      // `close` waits for every stdio stream; after a deadline settlement the
+      // streams are destroyed, so a lingering descendant cannot hold it open.
+      child.once("close", () => settle(overflow ? null : output));
+      deadline = setTimeout(() => {
+        settle(null);
+        reap();
+      }, timeoutMs);
     } catch {
-      resolve(null);
+      settle(null);
     }
   });
 }
@@ -292,16 +380,93 @@ export interface ReadStoredAuthOptions {
   /** Executable to ask (the `opencode.binaryPath` setting); default `opencode`. */
   readonly binaryPath?: string | undefined;
   readonly run?: AuthListRunner | undefined;
+  /** Wall clock, for the display timestamps only. */
   readonly now?: () => number;
+  /** Monotonic clock, for the retry and trust windows; default `defaultMonotonic`. */
+  readonly monotonic?: () => number;
   /** Skip the per-process cache (tests). */
   readonly fresh?: boolean;
 }
 
-const authCache = new Map<string, { at: number; value: Record<string, string> }>();
+/**
+ * One valid reply, split by the group whose snapshot it may replace. `others`
+ * always holds every non-Go provider (empty for a full logout); `go` is null
+ * when the reply does not mention Go at all.
+ */
+interface AuthReply {
+  readonly others: Record<string, string>;
+  readonly go: Record<string, string> | null;
+}
 
-/** Drop cached auth lists (after a login, and between tests). */
+/** The newest valid reply for one provider group. */
+export interface AuthSnapshot {
+  /** Sequence of the attempt that produced it. */
+  readonly seq: number;
+  /** When that attempt started, wall-clock ms since epoch (display only). */
+  readonly verifiedAt: number;
+  /** When that attempt started, on the monotonic clock (age checks). */
+  readonly verifiedAtMono: number;
+  /** Credential type per provider id that reply listed. */
+  readonly value: Record<string, string>;
+}
+
+/** The latest started probe for one cache key. */
+export interface AuthAttempt {
+  readonly seq: number;
+  readonly outcome: "pending" | "valid" | "failed";
+  /** When it settled, wall-clock ms since epoch; null while pending (display only). */
+  readonly completedAt: number | null;
+  /** When it settled, on the monotonic clock; null while pending (the retry window). */
+  readonly completedAtMono: number | null;
+}
+
+/** What the stored-credential probe knows: the latest attempt and the newest valid snapshot per group. */
+export interface StoredAuth {
+  readonly attempt: AuthAttempt;
+  /** The newest valid reply that covered Go (a login or an explicit logout); null when none ever has. */
+  readonly go: AuthSnapshot | null;
+  /** The newest valid reply for every other provider; null when none ever has. */
+  readonly others: AuthSnapshot | null;
+}
+
+interface AuthState {
+  attempt: AuthAttempt;
+  go: AuthSnapshot | null;
+  others: AuthSnapshot | null;
+}
+
+const GO_PROVIDER = "opencode-go";
+const authStates = new Map<string, AuthState>();
+
+/** Drop cached auth state (after a login, and between tests). In-flight probes from before this publish nothing. */
 export function clearStoredAuthCache(): void {
-  authCache.clear();
+  authStates.clear();
+}
+
+function emptyAuthState(): AuthState {
+  return { attempt: { seq: 0, outcome: "pending", completedAt: null, completedAtMono: null }, go: null, others: null };
+}
+
+/**
+ * One provider's view of the stored-credential state. The snapshot only
+ * counts as *answered* when the latest started attempt is valid and is the
+ * one that produced it; a pending, failed or Go-less attempt leaves a
+ * remembered login usable but unconfirmed.
+ */
+export function authForProvider(auth: StoredAuth, providerId: string): {
+  readonly types: Record<string, string>;
+  readonly verifiedAt: number | null;
+  readonly verifiedAtMono: number | null;
+  readonly answered: boolean;
+} {
+  const snapshot = canonicalProviderId(providerId) === GO_PROVIDER ? auth.go : auth.others;
+  if (snapshot === null) return { types: {}, verifiedAt: null, verifiedAtMono: null, answered: false };
+  return {
+    types: { ...snapshot.value },
+    verifiedAt: snapshot.verifiedAt,
+    verifiedAtMono: snapshot.verifiedAtMono,
+    answered: auth.attempt.outcome === "valid" && auth.attempt.seq === snapshot.seq,
+  };
 }
 
 /**
@@ -312,23 +477,89 @@ export function clearStoredAuthCache(): void {
  * the v1 vocabulary consumers already read: `key`→`api`, `oauth`→`oauth`,
  * `env`→`env` (a key found in the environment); an unknown type passes
  * through. Several connections: `oauth` wins, then `api`, then the rest.
- * Cached per process for a short TTL, bounded by a timeout, and any failure
- * (no binary, no service, bad JSON) reads as "no stored auth", never an
- * error — listing must degrade, not fail.
+ *
+ * Each cache key keeps the latest started attempt (its sequence, outcome and
+ * when it settled) and two snapshots — Go and every other provider. A valid
+ * reply replaces the snapshot(s) it covers only when its sequence is newer;
+ * a failure replaces nothing. An attempt can only answer for a snapshot with
+ * the same sequence, so a later failure, pending probe or Go-less reply
+ * leaves a remembered login usable but `unverified`. Reads serve the same
+ * projection as completions, and for 15s after the latest attempt settles
+ * they do not probe at all, even after a failure.
+ *
+ * Validation is all-or-nothing: a malformed entry or connection, or a
+ * duplicate provider id after canonicalization, rejects the whole reply and
+ * keeps every snapshot. `[]` is an explicit logout for every provider, and a
+ * Go row with no connections is one for Go. Listing degrades, never throws.
  */
+export async function readStoredAuth(
+  env: NodeJS.ProcessEnv = process.env,
+  options: ReadStoredAuthOptions = {},
+): Promise<StoredAuth> {
+  const binary = options.binaryPath?.trim() || OPENCODE_DEFAULT_BINARY;
+  const wallNow = options.now ?? Date.now;
+  const monoNow = options.monotonic ?? defaultMonotonic;
+  const startedAt = wallNow();
+  const startedMono = monoNow();
+  const cacheKey = `${binary}\0${env.PATH ?? env.Path ?? ""}`;
+  const state = options.fresh ? emptyAuthState() : (authStates.get(cacheKey) ?? emptyAuthState());
+  // A settled attempt is served as it stands for the short TTL, including a
+  // failed one; cache hits never move a timestamp. The window is measured on
+  // the monotonic clock: a wall clock that moves backwards must never extend
+  // it, and a negative or non-finite age is expired, never fresh.
+  const retryAge = state.attempt.completedAtMono === null ? Number.NaN : startedMono - state.attempt.completedAtMono;
+  if (!options.fresh && Number.isFinite(retryAge) && retryAge >= 0 && retryAge < AUTH_LIST_CACHE_TTL_MS) {
+    return projectAuth(state);
+  }
+  const seq = state.attempt.seq + 1;
+  state.attempt = { seq, outcome: "pending", completedAt: null, completedAtMono: null };
+  if (!options.fresh) authStates.set(cacheKey, state);
+  const text = await (options.run ?? defaultAuthListRunner)(binary, env);
+  if (!options.fresh && authStates.get(cacheKey) !== state) {
+    // The cache was cleared (or replaced) while this probe ran: this
+    // completion is obsolete. Answer from the state that took its place, or
+    // unknown when there is none, and publish nothing.
+    return projectAuth(authStates.get(cacheKey) ?? emptyAuthState());
+  }
+  applyAuthReply(state, seq, startedAt, startedMono, wallNow(), monoNow(), text);
+  return projectAuth(state);
+}
+
+function projectAuth(state: AuthState): StoredAuth {
+  return { attempt: state.attempt, go: state.go, others: state.others };
+}
+
+function applyAuthReply(
+  state: AuthState,
+  seq: number,
+  startedAt: number,
+  startedMono: number,
+  completedAt: number,
+  completedAtMono: number,
+  text: string | null,
+): void {
+  const reply = text === null ? null : parseStoredAuthReply(text);
+  // Only the latest started attempt owns the outcome; an older completion
+  // never overrides a newer attempt.
+  if (state.attempt.seq === seq) {
+    state.attempt = { seq, outcome: reply === null ? "failed" : "valid", completedAt, completedAtMono };
+  }
+  if (reply === null) return;
+  if (state.others === null || seq > state.others.seq) {
+    state.others = { seq, verifiedAt: startedAt, verifiedAtMono: startedMono, value: reply.others };
+  }
+  if (reply.go !== null && (state.go === null || seq > state.go.seq)) {
+    state.go = { seq, verifiedAt: startedAt, verifiedAtMono: startedMono, value: reply.go };
+  }
+}
+
+/** The credential types alone, for callers that only need the map (`doctor`, the driver's hint). */
 export async function readStoredAuthTypes(
   env: NodeJS.ProcessEnv = process.env,
   options: ReadStoredAuthOptions = {},
 ): Promise<Record<string, string>> {
-  const binary = options.binaryPath?.trim() || OPENCODE_DEFAULT_BINARY;
-  const now = (options.now ?? Date.now)();
-  const cacheKey = `${binary}\0${env.PATH ?? env.Path ?? ""}`;
-  const cached = options.fresh ? undefined : authCache.get(cacheKey);
-  if (cached && now - cached.at < AUTH_LIST_CACHE_TTL_MS) return { ...cached.value };
-  const text = await (options.run ?? defaultAuthListRunner)(binary, env);
-  const value = text === null ? {} : authTypesOf(parseJson(text));
-  if (!options.fresh) authCache.set(cacheKey, { at: now, value });
-  return { ...value };
+  const auth = await readStoredAuth(env, options);
+  return { ...(auth.others?.value ?? {}), ...(auth.go?.value ?? {}) };
 }
 
 function defaultReadFile(filePath: string): string | null {
@@ -345,6 +576,49 @@ function parseJson(text: string): unknown {
   } catch {
     return null;
   }
+}
+
+/**
+ * The credential map from a probe's stdout, split by snapshot group, or null
+ * when the reply must not replace any snapshot: unparseable, not an array, a
+ * malformed entry or connection record, or a duplicate provider id after
+ * canonicalization. A valid `[]` is an explicit logout for every provider; a
+ * valid nonempty reply covers every other provider and covers Go only when it
+ * has a Go row (with no connections counting as Go's logout).
+ */
+function parseStoredAuthReply(text: string): AuthReply | null {
+  const parsed = parseJson(text);
+  if (!Array.isArray(parsed) || !parsed.every(isAuthEntry)) return null;
+  const rows = parsed as Array<Record<string, unknown>>;
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const id = canonicalProviderId(String(row.id));
+    // One row per provider: two rows, even agreeing ones, are not a reply we
+    // can trust to replace a snapshot.
+    if (seen.has(id)) return null;
+    seen.add(id);
+  }
+  if (rows.length === 0) return { others: {}, go: {} };
+  const all = authTypesOf(rows);
+  const goRow = rows.find((row) => canonicalProviderId(String(row.id)) === GO_PROVIDER);
+  if (goRow === undefined) return { others: all, go: null };
+  const goType = all[String(goRow.id)];
+  const others = { ...all };
+  delete others[String(goRow.id)];
+  return { others, go: goType === undefined ? {} : { [GO_PROVIDER]: goType } };
+}
+
+/** One `opencode auth list` entry: an id and its readable connection records. */
+function isAuthEntry(entry: unknown): boolean {
+  const record = asRecord(entry);
+  if (!record || typeof record.id !== "string" || record.id.trim() === "") return false;
+  if (!Array.isArray(record.connections)) return false;
+  return record.connections.every((connection) => {
+    const conn = asRecord(connection);
+    if (!conn || typeof conn.type !== "string" || conn.type.trim() === "") return false;
+    // A stored credential names its method (`key` / `oauth`); the mapper reads it.
+    return conn.type !== "credential" || (typeof conn.method === "string" && conn.method.trim() !== "");
+  });
 }
 
 const AUTH_TYPE_RANK: Readonly<Record<string, number>> = { oauth: 0, api: 1 };

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   effortValuesOf,
@@ -12,12 +12,17 @@ import {
   parseModelsDevCatalog,
   presentApiKeyEnvs,
   AUTH_LIST_CACHE_TTL_MS,
+  OPENCODE_AUTH_TRUST_MS,
+  authForProvider,
   authTypesOf,
   clearStoredAuthCache,
+  defaultAuthListRunner,
+  readStoredAuth,
   readStoredAuthTypes,
   sameProviderId,
   storedAuthTypeFor,
   resolveModelsDevUrl,
+  type AuthListRunner,
 } from "../catalog.js";
 import { tempDir } from "../../../testing/tmp.js";
 
@@ -111,8 +116,19 @@ describe("readStoredAuthTypes", () => {
     { id: "openai", name: "OpenAI", connections: [{ type: "env", name: "OPENAI_API_KEY" }, { type: "oauth" }] },
     { id: "xai", name: "xAI", connections: [{ type: "env", name: "XAI_API_KEY" }] },
     { id: "azure", name: "Azure", connections: [] },
-    { id: "odd", connections: "nope" },
   ]);
+  const GO_LOGIN = JSON.stringify([{ id: "opencode-go", name: "OpenCode Go", connections: [{ type: "credential", method: "key" }] }]);
+  const OTHER_LOGIN = JSON.stringify([{ id: "anthropic", name: "Anthropic", connections: [{ type: "key" }] }]);
+  const LOGIN = GO_LOGIN;
+  const GO_TYPES = { "opencode-go": "api" };
+  const LOGOUT = "[]";
+  const MALFORMED = "[null]";
+  const duplicateRows = (first: { id: string; type: string }, second: { id: string; type: string }) =>
+    JSON.stringify([first, second].map((row) => ({ id: row.id, name: row.id, connections: [{ type: row.type }] })));
+  const DUPLICATES = [
+    duplicateRows({ id: "opencode-go", type: "key" }, { id: "OpenCode-Go", type: "oauth" }),
+    duplicateRows({ id: "OpenCode-Go", type: "oauth" }, { id: "opencode-go", type: "key" }),
+  ];
 
   it("maps v2 connection types onto api / oauth / env", async () => {
     expect(await readStoredAuthTypes({}, { run: async () => LIST, fresh: true })).toEqual({
@@ -163,6 +179,7 @@ describe("readStoredAuthTypes", () => {
     const options = {
       binaryPath: "/opt/oc",
       now: () => clock,
+      monotonic: () => clock,
       run: async (binary: string) => {
         calls.push(binary);
         return LIST;
@@ -175,6 +192,340 @@ describe("readStoredAuthTypes", () => {
     await readStoredAuthTypes({}, options);
     expect(calls).toEqual(["/opt/oc", "/opt/oc"]);
     clearStoredAuthCache();
+  });
+
+  describe("attempts and snapshots", () => {
+    let clock = 1_000;
+    let mono = 1_000;
+    const at = () => clock;
+    const monotonic = () => mono;
+    // Wall and monotonic advance together unless a test rolls the wall back.
+    const paths = { binaryPath: "/opt/oc", monotonic } as const;
+
+    /** Deferred probes: `release(i)` finishes the i-th started call with its reply. */
+    function controlledRuns(replies: ReadonlyArray<string | null>): {
+      readonly run: AuthListRunner;
+      readonly release: (index: number) => void;
+      readonly calls: () => number;
+    } {
+      const releases: Array<() => void> = [];
+      let started = 0;
+      const run: AuthListRunner = async () => {
+        const index = started++;
+        await new Promise<void>((resolve) => {
+          releases[index] = resolve;
+        });
+        return replies[index] ?? null;
+      };
+      return {
+        run,
+        release: (index: number) => {
+          const release = releases[index];
+          if (release === undefined) throw new Error(`probe ${index} has not started`);
+          release();
+        },
+        calls: () => started,
+      };
+    }
+
+    beforeEach(() => {
+      clearStoredAuthCache();
+      clock = 1_000;
+      mono = 1_000;
+    });
+    afterEach(() => clearStoredAuthCache());
+
+    it("B logout -> A login: B's confirmed logout stays", async () => {
+      const runs = controlledRuns([LOGIN, LOGOUT]);
+      const a = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      const b = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(1);
+      expect(await b).toMatchObject({ attempt: { seq: 2, outcome: "valid", completedAt: 1_000 }, go: { seq: 2, verifiedAt: 1_000, value: {} } });
+      runs.release(0);
+      const after = await a;
+      expect(after.go).toMatchObject({ seq: 2, verifiedAt: 1_000, value: {} });
+      expect(after.attempt).toMatchObject({ seq: 2, outcome: "valid", completedAt: 1_000 });
+      expect(authForProvider(after, "opencode-go")).toMatchObject({ types: {}, verifiedAt: 1_000, answered: true });
+    });
+
+    it("B fails -> A logout: A's logout lands, answered false", async () => {
+      const runs = controlledRuns([LOGOUT, null]);
+      const a = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      const b = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(1);
+      expect(await b).toMatchObject({ attempt: { seq: 2, outcome: "failed" }, go: null });
+      runs.release(0);
+      const after = await a;
+      expect(after.go).toMatchObject({ seq: 1, verifiedAt: 1_000, value: {} });
+      expect(after.attempt).toMatchObject({ seq: 2, outcome: "failed" });
+      expect(authForProvider(after, "opencode-go")).toMatchObject({ types: {}, verifiedAt: 1_000, answered: false });
+    });
+
+    it("A login -> B fails: the TTL serves unconfirmed without probing, and a retry confirms", async () => {
+      const runs = controlledRuns([LOGIN, null, LOGIN]);
+      // A starts first and confirms a login; B starts while A is still pending
+      // and fails. A's completion cannot confirm a login under a pending B.
+      const a = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      const b = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(0);
+      const first = await a;
+      expect(first.go).toMatchObject({ seq: 1, verifiedAt: 1_000, value: GO_TYPES });
+      expect(authForProvider(first, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+      runs.release(1);
+      expect(authForProvider(await b, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+
+      // Settled a second ago: the next read inside 15s serves the projection
+      // without a probe — and it must not report the login as freshly confirmed.
+      clock += 1_000;
+      mono += 1_000;
+      const hit = await readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      expect(authForProvider(hit, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+      expect(runs.calls()).toBe(2);
+
+      // At expiry the retry can confirm again.
+      clock += AUTH_LIST_CACHE_TTL_MS;
+      mono += AUTH_LIST_CACHE_TTL_MS;
+      const retry = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      expect(runs.calls()).toBe(3);
+      runs.release(2);
+      expect(authForProvider(await retry, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: clock, answered: true });
+    });
+
+    it("B login -> C fails -> A logout: B's login stays, unconfirmed", async () => {
+      const runs = controlledRuns([LOGOUT, LOGIN, null]);
+      const a = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      const b = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      const c = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(1);
+      await b;
+      runs.release(2);
+      await c;
+      runs.release(0);
+      const after = await a;
+      expect(after.go).toMatchObject({ seq: 2, verifiedAt: 1_000, value: GO_TYPES });
+      expect(after.attempt).toMatchObject({ seq: 3, outcome: "failed" });
+      expect(authForProvider(after, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+    });
+
+    it("A login -> any unreadable reply keeps A's snapshot, and [] still clears it", async () => {
+      const login = await readStoredAuth({}, { ...paths, now: at, run: async () => GO_LOGIN });
+      expect(authForProvider(login, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: true });
+      // A failed process (null), invalid JSON, the wrong outer shape, nested
+      // arrays and entries with no id are all unanswered, not a logout.
+      const unreadable: Array<string | null> = [null, "not JSON", "{}", "[[]]", "[{}]", "[null]"];
+      for (const reply of unreadable) {
+        clock += AUTH_LIST_CACHE_TTL_MS + 1;
+        mono += AUTH_LIST_CACHE_TTL_MS + 1;
+        const after = await readStoredAuth({}, { ...paths, now: at, run: async () => reply });
+        expect(after.go).toMatchObject({ seq: 1, verifiedAt: 1_000, value: GO_TYPES });
+        expect(after.attempt.outcome, reply ?? "null").toBe("failed");
+        expect(authForProvider(after, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+      }
+      clock += AUTH_LIST_CACHE_TTL_MS + 1;
+      mono += AUTH_LIST_CACHE_TTL_MS + 1;
+      const cleared = await readStoredAuth({}, { ...paths, now: at, run: async () => LOGOUT });
+      expect(authForProvider(cleared, "opencode-go")).toMatchObject({ types: {}, verifiedAt: clock, answered: true });
+    });
+
+    it("A login -> B [null]: A's snapshot is unchanged, unconfirmed", async () => {
+      const runs = controlledRuns([LOGIN, MALFORMED]);
+      const a = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(0);
+      await a;
+      clock += AUTH_LIST_CACHE_TTL_MS;
+      mono += AUTH_LIST_CACHE_TTL_MS;
+      const b = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(1);
+      const after = await b;
+      expect(after.go).toMatchObject({ seq: 1, verifiedAt: 1_000, value: GO_TYPES });
+      expect(after.attempt).toMatchObject({ seq: 2, outcome: "failed" });
+      expect(authForProvider(after, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+    });
+
+    it.each(DUPLICATES)("rejects a reply with duplicate Go rows, either order", async (duplicate) => {
+      const runs = controlledRuns([LOGIN, duplicate]);
+      const a = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(0);
+      await a;
+      clock += AUTH_LIST_CACHE_TTL_MS;
+      mono += AUTH_LIST_CACHE_TTL_MS;
+      const b = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(1);
+      const after = await b;
+      expect(after.go).toMatchObject({ seq: 1, verifiedAt: 1_000, value: GO_TYPES });
+      expect(after.attempt).toMatchObject({ seq: 2, outcome: "failed" });
+      expect(authForProvider(after, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+    });
+
+    it("B nonempty without Go -> A Go login: keep B for others, Go lands unconfirmed", async () => {
+      const runs = controlledRuns([GO_LOGIN, OTHER_LOGIN]);
+      const a = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      const b = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(1);
+      await b;
+      runs.release(0);
+      const after = await a;
+      expect(after.others).toMatchObject({ seq: 2, verifiedAt: 1_000, value: { anthropic: "api" } });
+      expect(after.go).toMatchObject({ seq: 1, verifiedAt: 1_000, value: GO_TYPES });
+      expect(after.attempt).toMatchObject({ seq: 2, outcome: "valid" });
+      expect(authForProvider(after, "anthropic")).toMatchObject({ types: { anthropic: "api" }, verifiedAt: 1_000, answered: true });
+      expect(authForProvider(after, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+    });
+
+    it("a wall-clock rollback does not extend the retry window or revive a login", async () => {
+      const runs = controlledRuns([LOGIN, null]);
+      const first = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(0);
+      expect(authForProvider(await first, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: true });
+
+      // The wall moves back a minute while the monotonic clock passes the
+      // trust bound. A negative wall age must not count as fresh: the read
+      // probes, and it does not serve the login as confirmed.
+      clock -= 60_000;
+      mono += OPENCODE_AUTH_TRUST_MS + 1;
+      const again = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      expect(runs.calls()).toBe(2);
+      runs.release(1);
+      expect(authForProvider(await again, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+    });
+
+    it("treats a negative monotonic age as expired, never fresh", async () => {
+      const runs = controlledRuns([LOGIN, LOGIN]);
+      const first = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(0);
+      expect(authForProvider(await first, "opencode-go")).toMatchObject({ answered: true });
+      mono -= 1_000;
+      const again = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      expect(runs.calls()).toBe(2);
+      runs.release(1);
+      expect(authForProvider(await again, "opencode-go")).toMatchObject({ types: GO_TYPES, answered: true });
+    });
+
+    it("a cache clear makes an in-flight probe answer from the replacement state", async () => {
+      const runs = controlledRuns([LOGIN, LOGOUT, LOGIN]);
+      const obsolete = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      clearStoredAuthCache();
+      const logout = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(1);
+      const afterLogout = await logout;
+      expect(authForProvider(afterLogout, "opencode-go")).toMatchObject({ types: {}, answered: true });
+      runs.release(0);
+      const stale = await obsolete;
+      // The old caller sees the current state, not its pre-clear login.
+      expect(authForProvider(stale, "opencode-go")).toMatchObject({
+        types: {},
+        verifiedAt: afterLogout.go?.verifiedAt ?? null,
+        answered: true,
+      });
+
+      // Cleared with no replacement: the caller gets unknown, not its login.
+      clock += AUTH_LIST_CACHE_TTL_MS;
+      mono += AUTH_LIST_CACHE_TTL_MS;
+      const orphan = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      clearStoredAuthCache();
+      runs.release(2);
+      expect(authForProvider(await orphan, "opencode-go")).toMatchObject({ types: {}, verifiedAt: null, answered: false });
+    });
+
+    it("A login -> B fails, then past the trust bound: the login stays usable and unconfirmed", async () => {
+      const runs = controlledRuns([LOGIN, null]);
+      const a = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(0);
+      await a;
+      clock += AUTH_LIST_CACHE_TTL_MS;
+      mono += AUTH_LIST_CACHE_TTL_MS;
+      const b = readStoredAuth({}, { ...paths, now: at, run: runs.run });
+      runs.release(1);
+      await b;
+
+      clock += OPENCODE_AUTH_TRUST_MS + 1;
+      mono += OPENCODE_AUTH_TRUST_MS + 1;
+      const aged = await readStoredAuth({}, { ...paths, now: at, run: async () => null });
+      expect(aged.go).toMatchObject({ seq: 1, verifiedAt: 1_000, value: GO_TYPES });
+      expect(authForProvider(aged, "opencode-go")).toMatchObject({ types: GO_TYPES, verifiedAt: 1_000, answered: false });
+    });
+  });
+});
+
+describe("defaultAuthListRunner", () => {
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // POSIX only: the test proves the process group dies with its leader. On
+  // Windows the tree is reaped by `taskkill /T /F`, whose async launch is
+  // covered by the deadline-ordering test; the descendant/group semantics here
+  // are POSIX.
+  it.skipIf(process.platform === "win32")("answers before the group it reaps has exited, and reaps its descendants", async () => {
+    const dir = tempDir("moxen-hang-");
+    const marker = (name: string) => path.join(dir, name);
+    const bin = path.join(dir, "opencode");
+    // The leader and its descendant both ignore SIGTERM, so only the SIGKILL
+    // escalation on the group can end them. The sleep is bounded so a broken
+    // reaper cannot leave an orphan forever, and the marker says the handlers
+    // are in place and both pids are written.
+    fs.writeFileSync(
+      bin,
+      `#!/bin/sh\ntrap '' TERM\nsh -c "trap '' TERM; sleep 5" &\necho $! > "${marker("descendant.pid")}"\necho $$ > "${marker("leader.pid")}"\n: > "${marker("ready")}"\nwait\n`,
+      { mode: 0o755 },
+    );
+    const result = defaultAuthListRunner(bin, {}, { timeoutMs: 800, killGraceMs: 150 });
+    let leader: number | null = null;
+    let descendant: number | null = null;
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      // Readiness first: the pids exist and the TERM handlers are installed.
+      const readyBy = Date.now() + 3_000;
+      while (!fs.existsSync(marker("ready"))) {
+        if (Date.now() > readyBy) throw new Error("probe stub never became ready");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      leader = Number(fs.readFileSync(marker("leader.pid"), "utf8").trim());
+      descendant = Number(fs.readFileSync(marker("descendant.pid"), "utf8").trim());
+      expect(await result).toBeNull();
+      // The answer is out while both are still alive: the deadline does not
+      // wait for the reaper.
+      expect(alive(leader)).toBe(true);
+      expect(alive(descendant)).toBe(true);
+      const goneBy = Date.now() + 3_000;
+      while ((alive(leader) || alive(descendant)) && Date.now() < goneBy) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      // The SIGKILL escalation on the group reaps both.
+      expect(alive(leader)).toBe(false);
+      expect(alive(descendant)).toBe(false);
+    } finally {
+      // Whatever happened above, this test's processes must be gone: kill the
+      // group and the descendant, then prove it.
+      const kill = (pid: number, signal: NodeJS.Signals) => {
+        try {
+          process.kill(pid, signal);
+        } catch {
+          // Already gone.
+        }
+      };
+      if (leader !== null) kill(-leader, "SIGKILL");
+      if (leader !== null) kill(leader, "SIGKILL");
+      if (descendant !== null) kill(descendant, "SIGKILL");
+      const goneBy = Date.now() + 1_000;
+      while (((leader !== null && alive(leader)) || (descendant !== null && alive(descendant))) && Date.now() < goneBy) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (leader !== null) expect(alive(leader)).toBe(false);
+      if (descendant !== null) expect(alive(descendant)).toBe(false);
+    }
   });
 });
 

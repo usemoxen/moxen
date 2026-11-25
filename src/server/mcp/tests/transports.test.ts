@@ -55,13 +55,53 @@ it.each([false, true])("tells the model about keyword fallback even when results
 });
 
 describe("models tool", () => {
-  it("lists enabled, installed providers with their visible models and efforts, compactly", async () => {
-    const api = catalogApi([provider("claudeAgent"), provider("codex", { enabled: false }), provider("grok", { installed: false })]);
+  it("lists the providers an agent can delegate to, with their visible models and efforts, compactly", async () => {
+    const api = catalogApi([
+      provider("claudeAgent"),
+      // Not connected: the catalog knows no model to name.
+      provider("opencode/ollama", { enabled: false }, 0),
+      // Its CLI is not here, so nothing can route to it whatever models exist.
+      provider("codex", { enabled: false, installed: false }),
+      // An OpenCode provider whose credential probe did not answer: the catalog
+      // calls it disabled, but its models are known and delegate runs it.
+      provider("opencode/opencode-go", { enabled: false }),
+    ]);
     const result = await callMoxenTool(api, "parent", "models", {});
     expect(result.isError).toBe(false);
     expect(JSON.parse(result.text)).toEqual({
-      providers: [{ provider: "claudeAgent", name: "CLAUDEAGENT", models: [{ model: "claudeAgent-m0", name: "Model 0", efforts: ["low", "high"] }] }],
+      providers: [
+        { provider: "claudeAgent", name: "CLAUDEAGENT", authStatus: "authenticated", models: [{ model: "claudeAgent-m0", name: "Model 0", efforts: ["low", "high"] }] },
+        { provider: "opencode/opencode-go", name: "OPENCODE/OPENCODE-GO", authStatus: "authenticated", models: [{ model: "opencode/opencode-go-m0", name: "Model 0", efforts: ["low", "high"] }] },
+      ],
     });
+  });
+
+  it("lists OpenCode Go while its credential probe does not answer", async () => {
+    // The catalog marks every OpenCode provider disabled when `opencode auth
+    // list` does not answer, yet OpenCode Go's drivers keep running work on
+    // it: naming the provider must not answer PROVIDER_NOT_FOUND.
+    const api = catalogApi([provider("opencode/opencode-go", { enabled: false })]);
+    const result = await callMoxenTool(api, "parent", "models", { provider: "opencode/opencode-go" });
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.text)).toEqual({
+      providers: [{ provider: "opencode/opencode-go", name: "OPENCODE/OPENCODE-GO", authStatus: "authenticated", models: [{ model: "opencode/opencode-go-m0", name: "Model 0", efforts: ["low", "high"] }] }],
+    });
+  });
+
+  it("carries an unknown or unverified login, with a note, instead of hiding the provider", async () => {
+    const api = catalogApi([
+      provider("opencode/opencode-go", { authStatus: "unknown" }),
+      provider("opencode/opencode", { authStatus: "unverified" }),
+    ]);
+    const { providers } = JSON.parse((await callMoxenTool(api, "parent", "models", {})).text) as {
+      providers: Array<{ provider: string; authStatus?: string; authNote?: string }>;
+    };
+    expect(providers.map((row) => [row.provider, row.authStatus])).toEqual([
+      ["opencode/opencode-go", "unknown"],
+      ["opencode/opencode", "unverified"],
+    ]);
+    expect(providers[0]?.authNote).toMatch(/login is unconfirmed/i);
+    expect(providers[1]?.authNote).toMatch(/not confirmed since/i);
   });
 
   it("carries a provider's usage limits when known, and leaves the key out when not", async () => {
