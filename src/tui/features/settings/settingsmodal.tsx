@@ -1,9 +1,9 @@
 import { OverflowText } from "../../ui/overflowtext.js";
+import { prose } from "../../ui/prose.js";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { StyledText, TextAttributes, fg } from "@opentui/core";
+import { TextAttributes } from "@opentui/core";
 import { useKeyLayer } from "../../hooks/useKeyLayer.js";
-
 import { ListEditor, type Screen as EditorScreen } from "./listeditor.js";
 import { itemRows } from "../../model/listeditor.js";
 import { McpAccessEditor } from "./mcpaccess.js";
@@ -13,8 +13,8 @@ import { SkillsPanel } from "./skillspanel.js";
 import { WebOrderEditor } from "./weborder.js";
 import { HandoffModelsEditor } from "./handoffmodels.js";
 import { ModelPricesEditor } from "./modelprices.js";
-import { MemoryRuntimePanel, useMemoryRuntime } from "../memory/memoryruntime.js";
-import { MemoryManagerModal } from "../memory/memorymanager.js";
+import { useMemoryRuntime } from "../memory/memoryruntime.js";
+import { MemoryPage, type MemorySettingRow } from "./memorypage.js";
 import { UpdateModal } from "../update/updatemodal.js";
 import type { ClientApi } from "../../../server/api.js";
 import { TextField } from "./textfield.js";
@@ -31,7 +31,6 @@ import { markModalDismissed } from "../../model/modalDismiss.js";
 import type { UpdateView } from "../../model/update.js";
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE, truncate } from "../../theme.js";
-import { splitInlineCode } from "../../model/inlinecode.js";
 import { nextToggleValue, moxenVersionLine, providerVersionLine, settingControl, withModelOverride, withModelPrice, MODEL_OVERRIDE_KEY, MODEL_PRICE_KEY, settingValueLabel, updatableProviderOf, type LatestView, type MoxenVersionLine, type ProviderCheckView, type SettingControl, type SettingOption } from "../../model/settings.js";
 import type { LatestVersions, ProviderUpdateAllItem, UpdatableProvider } from "../../../core/catalog/update.js";
 import {
@@ -381,8 +380,6 @@ export function SettingsModal({
   const [editorHeading, setEditorHeading] = useState<string | null>(null);
   /** The MCP access setting whose checklist fills the right pane. */
   const [accessOpen, setAccessOpen] = useState<string | null>(null);
-  /** The memory manager above the page, opened from the Memory tab. */
-  const [managing, setManaging] = useState(false);
   /** The update screen above the page: the same screen the palette opens, over the same state. */
   const [showUpdate, setShowUpdate] = useState(false);
   /** The per-model hand-off setting whose editor fills the right pane. */
@@ -741,6 +738,35 @@ export function SettingsModal({
   };
 
   const listItem = listOpen === null ? undefined : items.find((item) => item.descriptor.key === listOpen);
+  /**
+   * The Memory page's rows below the memories: this section's own settings,
+   * each as one row that flips in place (a boolean) or steps to its next
+   * choice (the model loading enum's two). The schema table decides what
+   * shows, as on every other page; the writing is the same `onSet`.
+   */
+  const memorySettingRows: readonly MemorySettingRow[] = items.map((item) => {
+    const after = (): string | undefined => {
+      if (item.control.kind === "toggle") return nextToggleValue(item.control, item.value);
+      if (item.control.kind === "pick") {
+        const options = item.control.options.filter((entry) => entry.value !== "");
+        const current = item.value === undefined || item.value === "" ? String(item.descriptor.defaultValue ?? "") : String(item.value);
+        const at = options.findIndex((entry) => entry.value === current);
+        return options.length === 0 ? undefined : options[(at + 1 + options.length) % options.length]!.value;
+      }
+      return undefined;
+    };
+    const next = after();
+    return {
+      id: `memory-setting-${item.descriptor.key}`,
+      label: item.descriptor.label,
+      value: valueText(item),
+      description: item.descriptor.description,
+      ...(item.descriptor.appliesAt !== undefined && item.descriptor.appliesAt !== "now"
+        ? { appliesAt: tx(APPLIES_AT_TEXT[item.descriptor.appliesAt].tag) }
+        : {}),
+      ...(next === undefined ? {} : { onActivate: () => { void onSet(item.descriptor.key, next); } }),
+    };
+  });
   /** The card's way into the update screen: asking GitHub first, unless the screen already shows an update. */
   const openUpdate = () => {
     moxenUpdate?.onOpen();
@@ -751,8 +777,9 @@ export function SettingsModal({
   const pricesItem = pricesOpen === null ? undefined : items.find((item) => item.descriptor.key === pricesOpen);
 
   useKeyLayer((key) => {
-    if (managing || showUpdate) return;
-    if ((tab === "skills" || tab === "providers:overview") && key.name !== "tab") return;
+    if (showUpdate) return;
+    // The pages that are their own screen own their keys; the tab key leaves sideways.
+    if ((tab === "skills" || tab === "providers:overview" || (tab === "memory" && client !== undefined)) && key.name !== "tab") return;
     // The list editor owns every key while it is open, and one it has already acted on is not ours.
     if (listOpen !== null || accessOpen !== null || handoffOpen !== null || pricesOpen !== null || key.defaultPrevented) return;
     const escape = key.name === "escape" || key.name === "esc";
@@ -870,7 +897,7 @@ export function SettingsModal({
         ? selectedAccount !== null
           ? t("settings.providers.detailHint")
           : t("settings.providers.hint")
-        : listOpen !== null || handoffOpen !== null || pricesOpen !== null
+        : listOpen !== null || handoffOpen !== null || pricesOpen !== null || (tab === "memory" && client !== undefined)
           ? ""
           : picking === null && (updatable !== null || (tab === "general" && moxenUpdate !== undefined))
             ? t("settings.hint.update", { hint: base })
@@ -1091,6 +1118,19 @@ export function SettingsModal({
                     }
                   }}
                 />
+              ) : tab === "memory" && client !== undefined ? (
+                <MemoryPage
+                  client={client}
+                  threadId={threadId}
+                  width={paneWidth}
+                  status={memoryStatus}
+                  saving={saving === "memoryEmbeddings"}
+                  onSetup={() => { void Promise.resolve(onSet("memory", "true")).then((ok) => { if (ok !== false) return onSet("memoryEmbeddings", "true"); }); }}
+                  onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }}
+                  onKeyword={() => { void Promise.resolve(onSet("memoryEmbeddings", "false")).then((ok) => { if (ok !== false) return onSet("memory", "true"); }); }}
+                  rows={memorySettingRows}
+                  onEscapeList={() => { markModalDismissed(); onClose(); }}
+                />
               ) : handoffItem !== undefined && handoffItem.control.kind === "handoff" ? (
                 <HandoffModelsEditor
                   title={handoffItem.descriptor.label}
@@ -1274,11 +1314,6 @@ export function SettingsModal({
                       onOpen={openUpdate}
                     />
                   ) : null}
-                  {tab === "memory" && client ? <MemoryRuntimePanel status={memoryStatus} saving={saving === "memoryEmbeddings"}
-                    onSetup={() => { void Promise.resolve(onSet("memory", "true")).then((ok) => { if (ok !== false) return onSet("memoryEmbeddings", "true"); }); }}
-                    onCancel={() => { void client.dispatch({ type: "memory.embeddings.unload" }); }}
-                    onKeyword={() => { void Promise.resolve(onSet("memoryEmbeddings", "false")).then((ok) => { if (ok !== false) return onSet("memory", "true"); }); }}
-                    onManage={() => { setEditing(null); setPicking(null); setManaging(true); }} /> : null}
                 <scrollbox ref={scrollRef} style={{ flexGrow: 1 }} stickyStart="top" backgroundColor={SURFACE.raised}>
                   {activeAccount === null ? null : (
                     <ProfileAccountHeader
@@ -1467,19 +1502,6 @@ export function SettingsModal({
               <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>{hint}</OverflowText>
             </box>
           </box>
-          {managing && client ? (
-            <MemoryManagerModal
-              client={client}
-              threadId={threadId}
-              screenWidth={screenWidth}
-              screenHeight={screenHeight}
-              left={left}
-              top={top}
-              width={width}
-              height={height}
-              onClose={() => setManaging(false)}
-            />
-          ) : null}
         </>
       )}
     </ModalShell>
@@ -1497,11 +1519,6 @@ export function SettingsModal({
     ) : null}
     </>
   );
-}
-
-/** Prose whose `backticked` parts read as code: a colour of their own, and no backticks printed. */
-function prose(text: string, base: string): StyledText {
-  return new StyledText(splitInlineCode(text).map((segment) => fg(segment.code ? COLOR.command : base)(segment.text)));
 }
 
 /** Back out of a setting's choices to the list: the click twin of esc and the left arrow. */

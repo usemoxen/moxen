@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
 import { useKeyLayer } from "../../hooks/useKeyLayer.js";
@@ -9,6 +9,7 @@ import { COLOR, SURFACE } from "../../theme.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { ModalShell } from "../../ui/modalshell.js";
 import { OverflowText } from "../../ui/overflowtext.js";
+import { prose } from "../../ui/prose.js";
 import { SearchField } from "../../ui/searchfield.js";
 import { overflowColumns } from "../../model/textoverflow.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
@@ -35,7 +36,7 @@ type Searched = QueryResult<"memory.search">["memories"][number];
 interface Row {
   readonly name: string;
   readonly scope: MemoryScope;
-  readonly type: string;
+  readonly type: MemoryType;
   readonly description: string;
   readonly excerpt?: string;
 }
@@ -63,7 +64,9 @@ const messageOf = (cause: unknown): string => (cause instanceof Error ? cause.me
  * The memory manager: the user's own view over what agents save — list
  * (global, then this project), full read, create, edit, delete and the same
  * search agents use. Everything goes through the server, so a paired client
- * sees the same memories; nothing here touches the store directly.
+ * sees the same memories; nothing here touches the store directly. The modal
+ * is one shell over it (the command palette's); Settings' Memory page is
+ * another, with the runtime settings riding in its footer.
  */
 export function MemoryManagerModal({
   client,
@@ -88,6 +91,50 @@ export function MemoryManagerModal({
   onClose: () => void;
 }) {
   const inner = Math.max(20, width - 4);
+  return (
+    <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
+      <MemoryManager client={client} threadId={threadId} width={inner} onEscapeList={onClose} />
+    </ModalShell>
+  );
+}
+
+/** One row of the page's section below the memories, e.g. a setting. Enter or a click runs `onActivate`. */
+export interface MemoryFooterRow {
+  /** The row's own id, for keeping it in view and clicking it. */
+  readonly id: string;
+  readonly label: string;
+  readonly value: string;
+  /** Prose under the row (a setting's schema description). */
+  readonly description?: string | undefined;
+  /** Absent where the row shows something it cannot change from here. */
+  readonly onActivate?: (() => void) | undefined;
+}
+
+/** The Settings Memory page's section under the memories: the runtime panel and its setting rows. */
+export interface MemoryFooter {
+  readonly heading: string;
+  readonly node: ReactNode;
+  readonly rows: readonly MemoryFooterRow[];
+}
+
+export function MemoryManager({
+  client,
+  threadId,
+  width,
+  onEscapeList,
+  footer,
+}: {
+  client: ClientApi;
+  /** The open thread: its project is "this project". Null shows the global scope alone. */
+  threadId: string | null;
+  /** The content's whole width; the modal passes what its shell leaves, the page its pane. */
+  width: number;
+  /** Escape on the list: the modal closes, the page closes the settings screen. */
+  onEscapeList: () => void;
+  /** The page's runtime section, on the list under the memories; absent in the modal. */
+  footer?: MemoryFooter;
+}) {
+  const inner = Math.max(20, width);
   const rowWidth = Math.max(10, inner - 2);
 
   const [screen, setScreen] = useState<Screen>({ kind: "list" });
@@ -99,6 +146,8 @@ export function MemoryManagerModal({
   const [semanticNote, setSemanticNote] = useState<string | null>(null);
   const [memoryOff, setMemoryOff] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  /** How many memories one scope holds, as the server enforces it; null until it loads, or an older paired server never says. */
+  const [cap, setCap] = useState<number | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
   const [opened, setOpened] = useState<StoredMemory | null>(null);
@@ -141,6 +190,7 @@ export function MemoryManagerModal({
         if (cancelled) return;
         setListed(result.memories);
         setListProjectId(result.projectId);
+        setCap(typeof result.cap === "number" ? result.cap : null);
       })
       .catch((cause: unknown) => {
         if (!cancelled) setListError(messageOf(cause));
@@ -206,9 +256,19 @@ export function MemoryManagerModal({
   }, [searchingView, searched, listed]);
   const globalRows = useMemo(() => rows.filter((row) => row.scope === "global"), [rows]);
   const projectRows = useMemo(() => rows.filter((row) => row.scope === "project"), [rows]);
-  // Grouped order is the navigation order, so ↑/↓ walks rows as drawn.
+  /** A scope's header count: how much of what the server allows one scope to hold is in use. The search narrows rows, not this. */
+  const scopeCount = (scope: MemoryScope): string | undefined => {
+    if (listed === null) return undefined;
+    const used = listed.filter((entry) => entry.scope === scope).length;
+    return cap === null ? String(used) : `${used}/${cap}`;
+  };
+  // Grouped order is the navigation order, so ↑/↓ walks rows as drawn; the page's
+  // section follows the memories, so its rows are reachable on the same walk.
   const ordered = searchingView ? rows : [...globalRows, ...projectRows];
-  const safe = ordered.length === 0 ? -1 : Math.min(index, ordered.length - 1);
+  const extraRows = footer?.rows ?? [];
+  const focusCount = ordered.length + extraRows.length;
+  const safe = focusCount === 0 ? -1 : Math.min(index, focusCount - 1);
+  const activeExtra = safe >= ordered.length ? extraRows[safe - ordered.length] : undefined;
 
   const openDetail = (key: MemoryKey) => {
     setNotice(null);
@@ -343,7 +403,7 @@ export function MemoryManagerModal({
         return;
       }
       if (screen.kind === "list") {
-        onClose();
+        onEscapeList();
         return;
       }
       if (screen.kind === "detail") {
@@ -373,16 +433,17 @@ export function MemoryManagerModal({
     if (editingField !== null) return;
     if (screen.kind === "list") {
       if (key.name === "up") {
-        setIndex((current) => (ordered.length === 0 ? 0 : (current - 1 + ordered.length) % ordered.length));
+        setIndex((current) => (focusCount === 0 ? 0 : (current - 1 + focusCount) % focusCount));
         return;
       }
       if (key.name === "down") {
-        setIndex((current) => (ordered.length === 0 ? 0 : (current + 1) % ordered.length));
+        setIndex((current) => (focusCount === 0 ? 0 : (current + 1) % focusCount));
         return;
       }
       if (key.name === "return" || key.name === "kpenter") {
-        const row = ordered[safe];
+        const row = safe < ordered.length ? ordered[safe] : undefined;
         if (row !== undefined) openDetail({ name: row.name, scope: row.scope });
+        else activeExtra?.onActivate?.();
         return;
       }
       if (key.name === "n" && key.ctrl === true && key.meta !== true) {
@@ -497,9 +558,11 @@ export function MemoryManagerModal({
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   useEffect(() => {
     if (screen.kind !== "list" || safe < 0) return;
-    const timer = setTimeout(() => scrollRef.current?.scrollChildIntoView(`memory-row-${safe}`), 0);
+    const id = safe < ordered.length ? `memory-row-${safe}` : activeExtra?.id;
+    if (id === undefined) return;
+    const timer = setTimeout(() => scrollRef.current?.scrollChildIntoView(id), 0);
     return () => clearTimeout(timer);
-  }, [screen.kind, safe, rows.length]);
+  }, [screen.kind, safe, focusCount]);
 
   const hint =
     screen.kind === "list"
@@ -511,7 +574,7 @@ export function MemoryManagerModal({
           : t("mem.hintConfirm");
 
   return (
-    <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>
+    <>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between", width: inner }} backgroundColor={SURFACE.raised}>
         <text fg={COLOR.bright} bg={SURFACE.raised} selectable={false}>{screen.kind === "form" ? formTitle : t("mem.title")}</text>
         <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"esc"}</text>
@@ -543,7 +606,7 @@ export function MemoryManagerModal({
               <Fragment>
                 {globalRows.length === 0 ? null : (
                   <Fragment>
-                    <SectionHeader label={t("mem.global")} width={rowWidth} />
+                    <SectionHeader label={t("mem.global")} count={scopeCount("global")} width={rowWidth} />
                     {globalRows.map((row) => {
                       const rowIndex = ordered.indexOf(row);
                       return <MemoryRow key={`global:${row.name}`} id={`memory-row-${rowIndex}`} row={row} active={rowIndex === safe} rowWidth={rowWidth} onHover={() => setIndex(rowIndex)} onOpen={() => openDetail({ name: row.name, scope: row.scope })} />;
@@ -552,7 +615,7 @@ export function MemoryManagerModal({
                 )}
                 {projectRows.length === 0 ? null : (
                   <Fragment>
-                    <SectionHeader label={t("mem.project")} width={rowWidth} />
+                    <SectionHeader label={t("mem.project")} count={scopeCount("project")} width={rowWidth} />
                     {projectRows.map((row) => {
                       const rowIndex = ordered.indexOf(row);
                       return <MemoryRow key={`project:${row.name}`} id={`memory-row-${rowIndex}`} row={row} active={rowIndex === safe} rowWidth={rowWidth} onHover={() => setIndex(rowIndex)} onOpen={() => openDetail({ name: row.name, scope: row.scope })} />;
@@ -561,6 +624,22 @@ export function MemoryManagerModal({
                 )}
                 {listed === null || hasProject ? null : <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{threadId === null ? t("mem.noProject") : t("mem.noProjectThread")}</text>}
               </Fragment>
+            )}
+            {footer === undefined ? null : (
+              <box style={{ flexDirection: "column", width: rowWidth, flexShrink: 0 }} backgroundColor={SURFACE.raised}>
+                <SectionHeader label={footer.heading} width={rowWidth} />
+                {footer.node}
+                {footer.rows.map((row, extraIndex) => (
+                  <FooterRow
+                    key={row.id}
+                    id={row.id}
+                    row={row}
+                    active={safe === ordered.length + extraIndex}
+                    rowWidth={rowWidth}
+                    onHover={() => setIndex(ordered.length + extraIndex)}
+                  />
+                ))}
+              </box>
             )}
           </scrollbox>
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between", width: inner }} backgroundColor={SURFACE.raised}>
@@ -675,15 +754,20 @@ export function MemoryManagerModal({
             }
           }} />
       ) : null}
-    </ModalShell>
+    </>
   );
 }
 
-function SectionHeader({ label, width }: { label: string; width: number }) {
+/** A scope's heading, with its rule drawn to the width; a count, when the scope holds any, reads on the right. */
+function SectionHeader({ label, count, width }: { label: string; count?: string | undefined; width: number }) {
+  const rule = "─".repeat(Math.max(0, width - label.length - 2 - (count === undefined ? 0 : count.length + 1)));
   return (
-    <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, width }} backgroundColor={SURFACE.raised}>
-      <text fg={COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{`${label} `}</text>
-      <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"─".repeat(Math.max(0, width - label.length - 2))}</text>
+    <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between", width }} backgroundColor={SURFACE.raised}>
+      <box style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={SURFACE.raised}>
+        <text fg={COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{`${label} `}</text>
+        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{rule}</text>
+      </box>
+      {count === undefined ? null : <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{count}</text>}
     </box>
   );
 }
@@ -700,7 +784,7 @@ function MemoryRow({ id, row, active, rowWidth, onHover, onOpen }: {
   const labelFg = active ? PICK_FG : COLOR.text;
   const metaFg = active ? PICK_FG : COLOR.faint;
   const label = row.name;
-  const meta = `${row.type} · ${row.description}`;
+  const meta = `${typeLabel(row.type)} · ${row.description}`;
   const columns = overflowColumns(label, meta, rowWidth);
   return (
     <box id={id} style={{ width: rowWidth, flexDirection: "column", flexShrink: 0 }} backgroundColor={rowBg} onMouseDown={onOpen} onMouseOver={onHover}>
@@ -710,6 +794,32 @@ function MemoryRow({ id, row, active, rowWidth, onHover, onOpen }: {
       </box>
       {row.excerpt === undefined ? null : (
         <OverflowText fg={metaFg} bg={rowBg} selectable={false} width={rowWidth - 2} active={active}>{row.excerpt}</OverflowText>
+      )}
+    </box>
+  );
+}
+
+/** One row of the page's section under the memories: a setting to flip, cycle, or act on. */
+function FooterRow({ id, row, active, rowWidth, onHover }: {
+  id: string;
+  row: MemoryFooterRow;
+  active: boolean;
+  rowWidth: number;
+  onHover: () => void;
+}) {
+  const rowBg = active ? PICK_BG : SURFACE.raised;
+  const labelFg = active ? PICK_FG : COLOR.dim;
+  const valueFg = active ? PICK_FG : COLOR.text;
+  const label = `${active ? "❯ " : "  "}${row.label}: `;
+  const columns = overflowColumns(label, row.value, rowWidth);
+  return (
+    <box id={id} style={{ width: rowWidth, flexDirection: "column", flexShrink: 0 }} backgroundColor={rowBg} {...(row.onActivate === undefined ? {} : { onMouseDown: row.onActivate })} onMouseOver={onHover}>
+      <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={rowBg}>
+        <OverflowText fg={labelFg} bg={rowBg} selectable={false} width={columns.label} active={active}>{label}</OverflowText>
+        <OverflowText fg={valueFg} bg={rowBg} selectable={false} width={columns.detail} active={active}>{row.value}</OverflowText>
+      </box>
+      {row.description === undefined ? null : (
+        <text content={prose(row.description, COLOR.dim)} bg={rowBg} wrapMode="word" selectable={false} />
       )}
     </box>
   );

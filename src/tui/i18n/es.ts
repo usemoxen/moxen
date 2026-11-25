@@ -350,6 +350,7 @@ export const es: Catalog = {
   "mem.conflictBody": "Otro agente ha guardado esta memoria después de que la abrieras.",
   "mem.conflictBodyTarget": "Otro agente ha guardado {name} mientras la editabas.",
   "mem.overwrite": "Guardar igualmente",
+  "mem.runtime": "Funcionamiento",
   "mem.loading": "Cargando…",
   "mem.saving": "Guardando…",
   "guide.addMcp": "Añadir un servidor MCP",

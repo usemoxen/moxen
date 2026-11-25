@@ -46,7 +46,7 @@ function memoryClient(seeds: Seed[] = SEEDS): { api: ClientApi; dispatched: stri
       return { accepted: true };
     }) as ClientApi["dispatch"],
     query: (async (query: { type: string; name?: string; scope?: "project" | "global"; query?: string; limit?: number }) => {
-      if (query.type === "memory.list") return { projectId: "p-cli", memories: [...store.values()], index: null };
+      if (query.type === "memory.list") return { projectId: "p-cli", memories: [...store.values()], index: null, cap: 200 };
       if (query.type === "memory.read") {
         const scopes = query.scope === undefined ? (["project", "global"] as const) : [query.scope];
         for (const scope of scopes) {
@@ -331,9 +331,11 @@ export async function runMemoryManager(): Promise<void> {
     await act(async () => narrowSetup.renderer.destroy());
   }
 
-  // From Settings > Memory: the Manage memories button opens the same list.
-  // Its own store: the walkthrough above renamed and deleted the shared one.
+  // From Settings > Memory: the page IS the manager — the memories are listed
+  // right there, with the runtime settings in a section below them. Its own
+  // store: the walkthrough above renamed and deleted the shared one.
   const settingsClient = memoryClient();
+  const setCalls: string[] = [];
   function SettingsHarness() {
     return (
       <SettingsModal
@@ -344,7 +346,7 @@ export async function runMemoryManager(): Promise<void> {
         loading={false}
         saving={null}
         error={null}
-        onSet={() => true}
+        onSet={(key: string, value: string) => { setCalls.push(`${key}=${value}`); return true; }}
         onDuplicate={() => {}}
         run={null}
         onTest={() => {}}
@@ -359,33 +361,69 @@ export async function runMemoryManager(): Promise<void> {
         updating={new Set()}
         onUpdate={() => {}}
         providers={null}
-        screenWidth={100}
-        screenHeight={34}
+        screenWidth={110}
+        screenHeight={48}
         left={2}
         top={1}
-        width={96}
-        height={32}
+        width={106}
+        height={46}
         onClose={() => {}}
       />
     );
   }
-  const settingsSetup = await testRender(<SettingsHarness />, { width: 100, height: 34, exitOnCtrlC: false });
+  const settingsSetup = await testRender(<SettingsHarness />, { width: 110, height: 48, exitOnCtrlC: false });
   try {
     await settingsSetup.flush();
     await act(async () => new Promise((resolve) => setTimeout(resolve, 200)));
     await settingsSetup.flush();
-    const memory = await waitFor(settingsSetup, "Manage memories", "Settings > Memory");
-    console.log("--- settings memory tab ---");
-    console.log(memory);
-    await clickText(settingsSetup, "Manage memories");
-    await waitFor(settingsSetup, "canary-watch", "the manager from settings");
+    // The tab lists the memories itself: no Manage memories button, and the
+    // grouped rows show what each scope holds against the server's cap.
+    const page = await waitFor(settingsSetup, "canary-watch", "the Memory page");
     await settle(settingsSetup);
-    const fromSettings = settingsSetup.captureCharFrame();
-    console.log("--- memory manager: from settings ---");
-    console.log(fromSettings);
-    if (!fromSettings.includes("Memories")) fail("Manage memories did not open the memory manager");
+    const settingsList = settingsSetup.captureCharFrame();
+    console.log("--- memory page: settings tab ---");
+    console.log(settingsList);
+    if (settingsList.includes("Manage memories")) fail("the Memory page still hides the manager behind a button");
+    for (const expected of ["Memories", "Global", "This project", "editor-font", "deploy-notes", "canary-watch", "Runtime", "Memory (next session):", "Memory embeddings:", "Model loading:", "1/200", "2/200"]) {
+      if (!settingsList.includes(expected)) fail(`the Memory page is missing "${expected}"`);
+    }
+
+    // Typing filters the page's own list; clearing returns to the grouped one.
+    await typeFilter(settingsSetup, "canary", "the page's search");
+    await waitFor(settingsSetup, "Watch error rate", "the page's search results");
+    for (const char of "canary") {
+      await act(async () => settingsSetup.mockInput.pressBackspace());
+      await settingsSetup.flush();
+    }
+    await waitFor(settingsSetup, "editor-font", "the grouped list after clearing the page's search");
+
+    // A memory opens in full from the page, and escape walks back to the list.
+    await clickText(settingsSetup, "deploy-notes");
+    await waitFor(settingsSetup, "Canary first", "the memory opened from the page");
+    console.log("--- memory page: open memory ---");
+    console.log(settingsSetup.captureCharFrame());
     await act(async () => settingsSetup.mockInput.pressEscape());
     await settingsSetup.flush();
+    await waitFor(settingsSetup, "canary-watch", "the page's list after walking back");
+
+    // The runtime rows are on the same walk as the memories: the model
+    // loading enum cycles to its next choice and writes through onSet.
+    for (let step = 0; step < 5; step += 1) {
+      await act(async () => settingsSetup.mockInput.pressArrow("down"));
+      await settingsSetup.flush();
+      await settle(settingsSetup);
+      if (settingsSetup.captureCharFrame().includes("❯ Model loading:")) break;
+      if (step === 4) fail("the arrow walk never reached the Model loading row");
+    }
+    await act(async () => settingsSetup.mockInput.pressEnter());
+    await settingsSetup.flush();
+    console.log("--- memory page: runtime rows ---");
+    console.log(settingsSetup.captureCharFrame());
+    if (!setCalls.includes("memoryEmbeddingLoading=on-demand")) fail(`cycling Model loading wrote ${JSON.stringify(setCalls)}, not the next choice`);
+    await clickText(settingsSetup, "Memory embeddings");
+    await settingsSetup.flush();
+    await settle(settingsSetup);
+    if (!setCalls.includes("memoryEmbeddings=true")) fail("clicking Memory embeddings did not turn it on");
   } finally {
     await act(async () => settingsSetup.renderer.destroy());
   }
