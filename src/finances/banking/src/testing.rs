@@ -19,10 +19,13 @@ use crate::clock::Clock;
 use crate::transport::{HttpRequest, HttpResponse, Transport, TransportError};
 
 /// A transport that replays queued responses and records what it was asked.
-#[derive(Default)]
+///
+/// `Clone` shares the same queues, so a caller that builds a client per run
+/// (the app's bank runtime) keeps the one recording of what was asked.
+#[derive(Default, Clone)]
 pub struct RecordedTransport {
-    responses: Mutex<VecDeque<Result<HttpResponse, TransportError>>>,
-    requests: Mutex<Vec<HttpRequest>>,
+    responses: Arc<Mutex<VecDeque<Result<HttpResponse, TransportError>>>>,
+    requests: Arc<Mutex<Vec<HttpRequest>>>,
 }
 
 impl RecordedTransport {
@@ -142,5 +145,47 @@ impl Clock for FakeClock {
     fn sleep(&self, duration: Duration) {
         self.slept.lock().expect("recorded sleeps").push(duration);
         self.advance(duration);
+    }
+}
+
+/// The throwaway PKCS#8 key of this crate's own tests, compiled in so a caller
+/// (the app's sync tests) can wire a client without generating, reading or
+/// writing a key.
+///
+/// It is NOT a credential: it was generated for `tests/fixtures`, is registered
+/// with no service, signs nothing but the tokens these tests mint, and its
+/// public half exists nowhere upstream. No test uses it against a real API.
+pub const TEST_KEY_PEM: &str = include_str!("../tests/fixtures/test-key-pkcs8.pem");
+
+/// A signer for [`TEST_KEY_PEM`] under `app_id`, so a caller's tests can build
+/// a [`crate::Client`] over a [`RecordedTransport`]:
+///
+/// ```
+/// use moxen_finances_banking::testing::{test_signer, FakeClock, RecordedTransport};
+/// let clock = FakeClock::at(chrono::Utc::now());
+/// let client = moxen_finances_banking::Client::new(
+///     test_signer("fictional-application-id"),
+///     RecordedTransport::empty(),
+///     clock,
+/// );
+/// # let _ = client;
+/// ```
+pub fn test_signer(app_id: &str) -> crate::JwtSigner {
+    crate::JwtSigner::new(app_id, &crate::PrivateKey::new(TEST_KEY_PEM.to_string()))
+        .expect("the throwaway test key parses")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_test_key_signs_a_token_under_any_application() {
+        let signer = test_signer("fictional-application-id");
+        let clock = FakeClock::at(chrono::Utc::now());
+        let token = signer.token(clock.now()).expect("a signed token");
+        assert_eq!(token.split('.').count(), 3, "three JWT segments");
+        // The private half never renders as a key.
+        assert!(format!("{TEST_KEY_PEM:?}").contains("PRIVATE KEY"));
     }
 }

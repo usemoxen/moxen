@@ -935,18 +935,56 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       abortController: controller,
     });
     input.signal?.addEventListener("abort", abort, { once: true });
-    const parts: string[] = [];
+    // The CLI sends one assistant message per content block, all under one
+    // message id, and its `result` keeps only the last of them: a reply's
+    // answer is the whole of its final message, in block order.
+    const answers = new Map<string, string[]>();
+    let finalMessage: string | null = null;
+    let apiErrorKind: string | null = null;
+    let session: string | null = null;
     let result: string | null = null;
+    let thought = false;
+    let turns = 0;
     try {
       for await (const message of query) {
+        const frameSession = (message as { session_id?: unknown }).session_id;
         if (message.type === "assistant") {
-          for (const block of message.message.content) {
-            if (block.type === "text" && block.text.trim()) parts.push(block.text);
+          // A forked run's own session only, and never a child tool's transcript:
+          // the session is the one the run's `init` named.
+          if (session !== null && typeof frameSession === "string" && frameSession.length > 0 && frameSession !== session) continue;
+          if (message.parent_tool_use_id !== null) continue;
+          // A synthetic frame carrying the CLI's own API error is not an answer.
+          const failed = message.error !== undefined;
+          if (failed) apiErrorKind ??= typeof message.error === "string" ? message.error : null;
+          const record = message.message as unknown as { id?: unknown };
+          const id = typeof record.id === "string" ? record.id : String(message.uuid);
+          finalMessage = id;
+          for (const block of contentBlocks(record)) {
+            if (block["type"] === "thinking") thought = true;
+            if (block["type"] !== "text" || failed) continue;
+            const text = typeof block["text"] === "string" ? block["text"] : "";
+            if (!text.trim()) continue;
+            const blocks = answers.get(id);
+            if (blocks === undefined) answers.set(id, [text]);
+            else blocks.push(text);
           }
+        } else if (message.type === "system") {
+          if (message.subtype === "init") {
+            if (session === null && typeof frameSession === "string" && frameSession.length > 0) session = frameSession;
+          } else if (message.subtype === "thinking_tokens") thought = true;
         } else if (message.type === "result") {
-          if (message.subtype === "success" && typeof message.result === "string") result = message.result;
-          else if (message.subtype !== "success" && !(message.subtype === "error_max_turns" && parts.length > 0)) {
-            throw new CliError(failureCode, `${label} did not get an answer (${message.subtype}).`);
+          if (typeof message.num_turns === "number") turns = message.num_turns;
+          if (message.subtype !== "success") {
+            if (!(message.subtype === "error_max_turns" && answers.size > 0)) {
+              throw new CliError(failureCode, `${label} did not get an answer (${message.subtype}).`);
+            }
+          } else if (message.is_error === true) {
+            // A turn that died on an API error also reports `success`, with the
+            // raw upstream body in `result` — never an answer, and never shown:
+            // an error body can echo the request, a credential included.
+            throw new CliError(failureCode, `${label} failed: ${describeApiFailure(apiErrorKind, message.api_error_status)}.`);
+          } else if (typeof message.result === "string") {
+            result = message.result;
           }
           break;
         }
@@ -955,8 +993,26 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       input.signal?.removeEventListener("abort", abort);
       query.close?.();
     }
-    const text = parts.join("\n\n") || result || "";
-    if (!text.trim()) throw new CliError(failureCode, `${label} came back empty.`);
+    // A reply's blocks all belong to its final message; `result` repeats that
+    // message's last block, so a match means the whole message is the answer and
+    // anything else means the text before it was only a note on the way.
+    const blocks = finalMessage === null ? [] : (answers.get(finalMessage) ?? []);
+    const assembled = blocks.join("\n\n");
+    const last = blocks.at(-1) ?? null;
+    const earlier = [...answers.values()].at(-1)?.join("\n\n") ?? "";
+    let text: string;
+    if (result !== null && result.trim()) {
+      text = last !== null && result.trim() === last.trim() ? assembled : result;
+    } else {
+      text = assembled.trim() ? assembled : earlier;
+    }
+    if (!text.trim()) {
+      // A reply that only thought ends as a `success` result with no text at
+      // all: say which it was, instead of an empty answer nobody can act on.
+      const who = input.model ?? "the model";
+      const why = thought ? `${who} replied with thinking only and no text${turns > 1 ? ` in ${turns} turns` : ""}` : null;
+      throw new CliError(failureCode, why === null ? `${label} came back empty.` : `${label} came back empty: ${why}.`);
+    }
     // Padded file chips are part of the draft: editing replies must keep their outer spaces.
     return { text: instructions === undefined ? text.trim() : text, withContext: input.cursor !== null };
   }
@@ -2765,24 +2821,39 @@ function todoWritePlan(input: Record<string, unknown>): Array<{ step: string; st
   return items;
 }
 
+/**
+ * The error kinds the SDK documents, in words — the only ones ever shown: an
+ * API error's own body can echo the request it rejected, a credential
+ * included, so no such text leaves this process.
+ */
+const API_ERROR_REASONS: Record<string, string> = {
+  authentication_failed: "Claude could not authenticate",
+  oauth_org_not_allowed: "This organization is not allowed to use Claude Code",
+  account_on_hold: "The Claude account is on hold",
+  verification_required: "The Claude account needs verification",
+  billing_error: "Claude reported a billing problem",
+  rate_limit: "Claude is rate limited",
+  overloaded: "Claude is overloaded",
+  invalid_request: "Claude rejected the request",
+  model_not_found: "The model is not available",
+  server_error: "Claude had a server error",
+  max_output_tokens: "The reply hit the output token limit",
+  cloud_credential_error: "The cloud provider credentials failed",
+};
+
 /** A `StopFailure`'s error category and details, in words. */
 function describeStopFailure(error: string | null, details: string | null): string {
-  const reasons: Record<string, string> = {
-    authentication_failed: "Claude could not authenticate",
-    oauth_org_not_allowed: "This organization is not allowed to use Claude Code",
-    account_on_hold: "The Claude account is on hold",
-    verification_required: "The Claude account needs verification",
-    billing_error: "Claude reported a billing problem",
-    rate_limit: "Claude is rate limited",
-    overloaded: "Claude is overloaded",
-    invalid_request: "Claude rejected the request",
-    model_not_found: "The model is not available",
-    server_error: "Claude had a server error",
-    max_output_tokens: "The reply hit the output token limit",
-    cloud_credential_error: "The cloud provider credentials failed",
-  };
-  const reason = (error && reasons[error]) ?? "The run ended on an API error";
+  const reason = (error && API_ERROR_REASONS[error]) ?? "The run ended on an API error";
   return details ? `${reason}: ${details}` : `${reason}.`;
+}
+
+/**
+ * "Claude is rate limited (HTTP 429)" for a failed API call: an allowlisted
+ * kind and the status, never the error's body.
+ */
+function describeApiFailure(kind: string | null, status: unknown): string {
+  const reason = (kind !== null ? API_ERROR_REASONS[kind] : undefined) ?? "Claude reported an API error";
+  return typeof status === "number" ? `${reason} (HTTP ${status})` : reason;
 }
 
 /** A failed result's own error text; the hook's reason, then a generic line, when it carries none. */

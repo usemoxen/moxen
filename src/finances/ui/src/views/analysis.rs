@@ -192,24 +192,25 @@ pub fn render(
         .collect();
 
     let mut children: Vec<AnyElement> = vec![
-        page_header(app, "analysis.subtitle", vec![]).into_any_element(),
-        // The header action: the period choice.
-        div()
-            .flex()
-            .justify_end()
-            .mt(px(-16.))
-            .child(kit::segmented(
-                "analysis-range",
-                &range_options,
-                range_selected,
-                cx,
-                |this, i, cx| {
-                    if let Some(m) = [6usize, 12, 24].get(i) {
-                        this.set_analysis_months(*m, cx);
-                    }
-                },
-            ))
-            .into_any_element(),
+        page_header(
+            app,
+            "analysis.subtitle",
+            vec![
+                kit::segmented(
+                    "analysis-range",
+                    &range_options,
+                    range_selected,
+                    cx,
+                    |this, i, cx| {
+                        if let Some(m) = [6usize, 12, 24].get(i) {
+                            this.set_analysis_months(*m, cx);
+                        }
+                    },
+                )
+                .into_any_element(),
+            ],
+        )
+        .into_any_element(),
         // The summary stats.
         card()
             .child(
@@ -304,8 +305,21 @@ pub fn render(
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(views::chart::bars_chart(&bars, 220.))
-                    .child(div().flex().flex_row().children(labels))
+                    .child({
+                        let axis = views::chart::bars_axis(&bars);
+                        views::chart::with_axes(
+                            views::chart::bars_chart(&bars, axis.clone(), 220.),
+                            &axis,
+                            account,
+                            220.,
+                            div()
+                                .flex()
+                                .flex_row()
+                                .px(px(6.))
+                                .children(labels)
+                                .into_any_element(),
+                        )
+                    })
                     .into_any_element()
             })
             .into_any_element(),
@@ -356,13 +370,22 @@ pub fn render(
                         )
                         .into_any_element()
                     } else {
-                        views::chart::cost_chart(&cost_bars, &cost_line, 200.).into_any_element()
+                        let axis =
+                            views::chart::Axis::of(cost_bars.iter().chain(&cost_line).copied());
+                        views::chart::with_axes(
+                            views::chart::cost_chart(&cost_bars, &cost_line, axis.clone(), 200.),
+                            &axis,
+                            account,
+                            200.,
+                            div().into_any_element(),
+                        )
+                        .into_any_element()
                     })
                     .child(
                         div()
-                            .font_family(theme::MONO)
-                            .text_size(px(10.5))
-                            .line_height(px(14.))
+                            .font_family(theme::FONT)
+                            .text_size(px(12.))
+                            .line_height(px(17.))
                             .text_color(color("ink-2"))
                             .child(message("analysis.chart.cost.note")),
                     ),
@@ -500,9 +523,9 @@ pub fn render(
                     )
                     .child(
                         div()
-                            .font_family(theme::MONO)
-                            .text_size(px(10.5))
-                            .line_height(px(14.))
+                            .font_family(theme::FONT)
+                            .text_size(px(12.))
+                            .line_height(px(17.))
                             .text_color(color("ink-2"))
                             .child(fill(
                                 "analysis.period",
@@ -533,9 +556,9 @@ fn legend_dot(token: &'static str, key: &'static str) -> Div {
         .child(div().size(px(7.)).rounded_full().bg(color(token)))
         .child(
             div()
-                .font_family(theme::MONO)
-                .text_size(px(10.5))
-                .line_height(px(14.))
+                .font_family(theme::FONT)
+                .text_size(px(12.))
+                .line_height(px(17.))
                 .text_color(color("ink-2"))
                 .child(message(key)),
         )

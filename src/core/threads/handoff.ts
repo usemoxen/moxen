@@ -194,9 +194,14 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
   }));
   const carried = options.queuedTurnIds ?? [];
+  // A carried turn may hold a batch (a settle's promotion folds several
+  // queued messages into one): every eligible user message is part of the
+  // task, in dispatch order, each keeping the control-message exclusions.
   const unsent = turns
     .filter((turn) => !reached(turn) && !movedIds.has(turn.id) && !neverDispatched(turn) && !(options.preferModelSummary && turn.scheduledFor) && carried.includes(turn.id))
-    .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary"));
+    .flatMap((turn) => messages
+      .filter((message) => message.turnId === turn.id && message.role === "user" && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary")
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)));
 
   // Files the thread changed, summed across every turn's checkpoint.
   const files = new Map<string, { additions: number; deletions: number }>();

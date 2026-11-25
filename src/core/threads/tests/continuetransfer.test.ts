@@ -95,6 +95,26 @@ async function storeCheckpoint(
 }
 
 describe("a manual continue moves pending messages to the new thread's work queue", () => {
+  it("lands moved entries in their queue order, not the order they were sent in", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    // Sent second-then-third, queued the other way round (a reordered queue).
+    await sendTurn(w.store, source.id, { prompt: "Sent first, queued second", queue: parseQueuePolicy({ conditions: [], order: 20 }) });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await sendTurn(w.store, source.id, { prompt: "Sent second, queued first", queue: parseQueuePolicy({ conditions: [], order: 10 }) });
+
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+
+    const turns = await w.store.readTurns(continued.threadId);
+    const messages = await w.store.readMessages(continued.threadId);
+    expect(turns.slice(1).map((turn) => messages.find((message) => message.id === turn.messageId)?.text)).toEqual([
+      "Sent second, queued first",
+      "Sent first, queued second",
+    ]);
+  });
+
   it("moves ordinary queued messages as entries, in order, leaving no runnable copy on the source", async () => {
     const w = await world();
     const source = await w.make("solo");
@@ -611,6 +631,96 @@ describe("a manual continue moves pending messages to the new thread's work queu
     const dispatched = w.sent.find((turn) => turn.threadId === continued.threadId && turn.prompt.includes("batch"))!;
     expect(dispatched.prompt).toContain("Second of the batch\n\nThird of the batch");
     expect(w.sent.filter((turn) => turn.prompt.includes("Third of the batch"))).toHaveLength(1);
+  });
+
+  it("keeps a half-written batch on its thread when a later continue runs before the repair", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await sendTurn(w.store, source.id, { prompt: "Second of the half", delivery: "queue" });
+    await sendTurn(w.store, source.id, { prompt: "Third of the half", delivery: "queue" });
+    await completeTurn(w.store, source.id, running.id, { text: "Done." });
+    const promoted = openTurn(await w.store.readTurns(source.id))!;
+    const until = new Date(Date.now() + 1500).toISOString();
+    expect(await holdPromotedTurn(w.store, source.id, promoted.id, until)).toBe(true);
+
+    // A crash mid-move: the first batch message lands on the continuation,
+    // the second does not.
+    const append = w.store.appendLedger.bind(w.store);
+    let injected = false;
+    const fault = vi.spyOn(w.store, "appendLedger").mockImplementation((threadId, name, row) => {
+      if (!injected && name === "messages" && threadId !== source.id && (row as { text?: unknown }).text === "Third of the half") {
+        injected = true;
+        throw new Error("injected ledger failure");
+      }
+      return append(threadId, name, row);
+    });
+    await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toThrow("injected ledger failure");
+    fault.mockRestore();
+    const first = (await w.store.readActivities(source.id)).find((activity) => activity.kind === "thread.continued")?.payload?.threadId as string;
+    const partial = (await w.store.readTurns(first)).find((turn) => turn.queue?.requestId === `handoff:transfer:${promoted.id}`)!;
+    expect((await w.store.readMessages(first)).filter((message) => message.turnId === partial.id && message.role === "user").map((message) => message.text)).toEqual(["Second of the half"]);
+
+    // A restart, then a manual continue of the partial batch's own thread
+    // BEFORE any queue repair runs: the half-written entry keeps its owner —
+    // no further continue may carry only what landed so far (MXN-388).
+    const reopened = await openThreadStore(w.root);
+    const restarted: OperationContext = { ...w.ctx, store: reopened };
+    await settleRuns();
+    const onward = await continueThread(restarted, { threadId: first });
+    expect((await reopened.readTurns(onward.threadId)).filter((turn) => turn.queue?.requestId === `handoff:transfer:${partial.id}`)).toEqual([]);
+    const kept = (await reopened.readTurns(first)).find((turn) => turn.id === partial.id)!;
+    expect(kept).toMatchObject({ status: "queued" });
+    expect((await reopened.readMessages(first)).filter((message) => message.turnId === partial.id && message.role === "user").map((message) => message.text)).toEqual(["Second of the half"]);
+
+    // The queue pass repairs the batch from its own claim, lands the move
+    // and the whole batch runs once, on the thread that kept it.
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThanOrEqual(Date.parse(until)), { timeout: 10_000, interval: 25 });
+    for (let pass = 0; pass < 4; pass += 1) {
+      await runWorkQueue(restarted);
+      await settleRuns();
+      if ((await reopened.readTurns(first)).find((turn) => turn.id === partial.id)?.status === "completed") break;
+    }
+    expect((await reopened.readTurns(first)).find((turn) => turn.id === partial.id)?.status).toBe("completed");
+    expect((await reopened.readMessages(first)).filter((message) => message.turnId === partial.id && message.role === "user").map((message) => message.text)).toEqual(["Second of the half", "Third of the half"]);
+    expect((await reopened.readTurns(source.id)).find((turn) => turn.id === promoted.id)?.handoff?.landed).toBe(true);
+    const dispatched = w.sent.find((turn) => turn.prompt.includes("Second of the half"))!;
+    expect(dispatched.threadId).toBe(first);
+    expect(dispatched.prompt).toContain("Second of the half\n\nThird of the half");
+    expect(w.sent.filter((turn) => turn.prompt.includes("Third of the half"))).toHaveLength(1);
+  });
+
+  it("projects every message of a carried batched entry into its selected stored handoff", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await sendTurn(w.store, source.id, { prompt: "Second of the pair", delivery: "queue" });
+    await sendTurn(w.store, source.id, { prompt: "Third of the pair", delivery: "queue" });
+    await completeTurn(w.store, source.id, running.id, { text: "Done." });
+    const promoted = openTurn(await w.store.readTurns(source.id))!;
+    expect(await holdPromotedTurn(w.store, source.id, promoted.id, new Date(Date.now() + 1500).toISOString())).toBe(true);
+
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    const moved = (await w.store.readTurns(continued.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${promoted.id}`)!;
+    expect((await w.store.readMessages(continued.threadId)).filter((message) => message.turnId === moved.id && message.role === "user").map((message) => message.text)).toEqual(["Second of the pair", "Third of the pair"]);
+
+    // A stored handoff selected on the carried entry: every message of the
+    // batch is part of the task the handoff names, in dispatch order
+    // (MXN-388).
+    await settleRuns();
+    await editWorkQueue(w.ctx, continued.threadId, moved.id, "edit", parseQueuePolicy({ conditions: [], continuation: "stored" }));
+    await runWorkQueue(w.ctx);
+    const prepared = (await w.store.readTurns(continued.threadId)).find((turn) => turn.id === moved.id)!;
+    expect(prepared.status).toBe("completed");
+    const doc = (await w.store.readMessages(prepared.handoff!.destinationThreadId)).find((message) => message.role === "user")!.text;
+    expect(doc).toContain("never sent");
+    expect(doc).toContain("1. Second of the pair");
+    expect(doc).toContain("2. Third of the pair");
+    for (const threadId of [source.id, continued.threadId, prepared.handoff!.destinationThreadId]) {
+      for (const turn of await w.store.readTurns(threadId)) {
+        if (turn.status === "running") await interruptTurn(w.store, threadId, turn.id);
+      }
+    }
   });
 
   it("keeps a post-claim send off the destination through the real continue path", async () => {

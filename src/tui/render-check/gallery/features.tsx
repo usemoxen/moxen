@@ -3,7 +3,8 @@ import { SideQuestionModal } from "../../features/btw/sidequestionmodal.js";
 import type { SideQuestion } from "../../features/btw/useSideQuestion.js";
 import { Composer } from "../../features/composer/composer.js";
 import { MemoryRuntimePanel } from "../../features/memory/memoryruntime.js";
-import { MemoryManagerModal } from "../../features/memory/memorymanager.js";
+import { MemoryManager, MemoryManagerModal } from "../../features/memory/memorymanager.js";
+import { MemoryPage } from "../../features/settings/memorypage.js";
 import { WorkQueueModal } from "../../features/queue/queuemodal.js";
 import { CancelAutoContinueModal } from "../../features/queue/cancelmodal.js";
 import { ChoiceList, KeyButton, KeyHints } from "../../features/queue/parts.js";
@@ -52,6 +53,8 @@ import { Pager } from "../../ui/noticebanner.js";
 import { ModalShell } from "../../ui/modalshell.js";
 import { act } from "react";
 import { Caption, Stage, type GalleryEntry } from "./registry.js";
+import { settingsPage } from "./settings.js";
+import { DEFAULT_CONFIG } from "../../../core/config.js";
 
 const noop = (): void => {};
 
@@ -299,12 +302,23 @@ const MEMORY_CLIENT = {
     if (query.type === "memory.list") {
       return {
         projectId: "p-cli",
+        cap: 200,
         memories: [
           { name: "editor-font", description: "Preferred font", type: "user", body: "JetBrains Mono.", scope: "global" },
           { name: "deploy-notes", description: "How deploys go out", type: "project", body: "Ship on Fridays.", scope: "project" },
+          { name: "canary-watch", description: "What the canary checks", type: "feedback", body: "Watch the error rate for an hour.", scope: "project" },
         ],
         index: null,
       };
+    }
+    if (query.type === "memory.embeddings.status") {
+      return { state: "ready", phase: "idle", device: "webgpu", message: null, file: null, percent: null, validation: { version: "fixture", platform: "fixture", arch: "fixture", device: "webgpu", correct: 6, total: 6, queryP95Ms: 24, documentMs: 130, checkedAt: "2026-11-01" }, busy: false, indexed: 3 };
+    }
+    if (query.type === "settings.read") {
+      return { path: "config.json", exists: true, settings: [{ descriptor: { key: "memory" }, value: true }] };
+    }
+    if (query.type === "memory.search") {
+      return { memories: [], total: 0 };
     }
     return { path: "config.json", exists: true, settings: [{ descriptor: { key: "memory" }, value: true }] };
   },
@@ -846,6 +860,57 @@ export const FEATURE_GALLERY: GalleryEntry[] = [
     element: () => (
       <Stage width={100} height={30}>
         <MemoryManagerModal client={MEMORY_CLIENT} threadId="t-now" screenWidth={100} screenHeight={30} left={4} top={2} width={92} height={26} onClose={noop} />
+      </Stage>
+    ),
+  },
+  {
+    id: "memory-manager-inline",
+    group: "memory",
+    title: "MemoryManager, the page's own shape",
+    width: 96,
+    height: 30,
+    settleMs: 400,
+    element: () => (
+      <Stage width={96} height={30}>
+        <MemoryManager client={MEMORY_CLIENT} threadId="t-now" width={92} onEscapeList={noop} />
+      </Stage>
+    ),
+  },
+  {
+    id: "memory-settings-page",
+    group: "memory",
+    title: "Settings > Memory: the memories with the runtime section",
+    width: 110,
+    height: 34,
+    settleMs: 400,
+    element: () => settingsPage(34, DEFAULT_CONFIG, "memory"),
+  },
+  {
+    id: "memory-page-rows",
+    group: "memory",
+    title: "MemoryPage, the runtime rows beside the list",
+    width: 96,
+    height: 34,
+    settleMs: 400,
+    element: () => (
+      <Stage width={96} height={34}>
+        <MemoryPage
+          client={MEMORY_CLIENT}
+          threadId="t-now"
+          width={92}
+          status={{ state: "ready", phase: "idle", device: "webgpu", message: null, file: null, percent: null, validation: { version: "fixture", platform: "fixture", arch: "fixture", device: "webgpu", correct: 6, total: 6, queryP95Ms: 24, documentMs: 130, checkedAt: "2026-11-01" }, busy: false, indexed: 3 }}
+          saving={false}
+          memorySwitch
+          onSetup={noop}
+          onCancel={noop}
+          onKeyword={noop}
+          rows={[
+            { id: "memory-setting-memory", label: "Memory", value: "● On", description: "Lets agents keep what they learn across sessions, for every provider.", appliesAt: "next session", onActivate: noop },
+            { id: "memory-setting-embeddings", label: "Memory embeddings", value: "○ Off", description: "Find memories by meaning with a local model.", onActivate: noop },
+            { id: "memory-setting-loading", label: "Model loading", value: "Keep loaded  ›", description: "Keep the local memory model ready, or release it after inactivity.", onActivate: noop },
+          ]}
+          onEscapeList={noop}
+        />
       </Stage>
     ),
   },

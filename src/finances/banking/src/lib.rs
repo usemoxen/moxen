@@ -55,6 +55,7 @@ pub mod money;
 pub mod redact;
 pub mod secrets;
 pub mod testing;
+pub mod text;
 pub mod transport;
 
 use std::time::Duration;
@@ -65,12 +66,13 @@ pub use client::{
     TransactionWindow,
 };
 pub use clock::{Clock, SystemClock};
-pub use error::{BankError, ConsentEnd, Result};
+pub use error::{BankError, ConsentEnd, InvalidReason, Result};
 pub use jwt::{JwtError, JwtSigner, PrivateKey};
 pub use model::{
     BankAccount, BankBalance, BankEntry, BankLink, BankRef, BankTransaction, TransactionStatus,
 };
 pub use secrets::{KeychainStore, MemoryStore, PrivateKeyStore, SecretError};
+pub use text::{Context, Language, Localized};
 pub use transport::{HttpRequest, HttpResponse, Method, Transport, TransportError, UreqTransport};
 
 /// Every call goes here. The deprecated `api.tilisy.com` is not used.

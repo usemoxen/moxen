@@ -772,7 +772,9 @@ export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly Q
         const own = messages.filter((message) => message.turnId === turn.id && message.role === "user");
         if (!messages.some((message) => message.id === turn.messageId) || own.length < (turn.queue!.transferMessages ?? 1)) blocked.unshift("Waiting for its move to finish");
       }
-      entries.push({ threadId: row.thread.id, turnId: turn.id, title: row.thread.title, prompt: messages.find((m) => m.id === turn.messageId)?.text ?? "", provider: driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) ?? "unknown", status: turn.status, policy, blocked, scheduledFor: turn.scheduledFor ?? null });
+      // A moved entry may carry a batch: show what its turn sends, not only
+      // its first message.
+      entries.push({ threadId: row.thread.id, turnId: turn.id, title: row.thread.title, prompt: turnPrompt(messages, turn)?.text ?? "", provider: driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) ?? "unknown", status: turn.status, policy, blocked, scheduledFor: turn.scheduledFor ?? null });
     }
   }
   return entries.sort((a, b) => a.policy.order - b.policy.order || a.turnId.localeCompare(b.turnId));
@@ -1173,7 +1175,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
       const messages = await store.readMessages(threadId);
       const byId = new Map(messages.map((message) => [message.id, message]));
       const stageable = turns
-        .filter((candidate) => isTransferableQueuedTurn(candidate, byId.get(candidate.messageId)))
+        .filter((candidate) => isTransferableQueuedTurn(candidate, byId.get(candidate.messageId)) && landedBatchWhole(messages, candidate))
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
       for (const turn of stageable) {
         const queue = turn.queue ?? {
@@ -1941,6 +1943,19 @@ function isMovableTurnShape(turn: StoredTurn, primary: StoredMessage | undefined
  * just openness) matches the rest of the queue machinery: an unknown-status
  * turn blocks the world the same way a running one does.
  */
+/**
+ * Whether what this turn landed carries the whole batch it claims: entries
+ * moved by the transfer machinery record how many user messages the move
+ * must land, and one whose copy is still short is not claimable for a further
+ * move. It keeps its owner until the queue pass's repair completes it —
+ * moving it onward would carry only what landed so far and drop the rest.
+ */
+function landedBatchWhole(messages: readonly StoredMessage[], turn: StoredTurn): boolean {
+  if (!isTransferDestinationRequestId(turn.queue?.requestId)) return true;
+  const own = messages.filter((message) => message.turnId === turn.id && message.role === "user");
+  return own.length >= (turn.queue?.transferMessages ?? 1);
+}
+
 export interface StageClaim {
   readonly claimed: string[];
   /**
@@ -1962,7 +1977,7 @@ export async function stageQueuedMessages(ctx: OperationContext, sourceId: strin
       const byId = new Map(messages.map((message) => [message.id, message]));
       const claimed: string[] = [];
       for (const turn of turns
-        .filter((candidate) => isTransferableQueuedTurn(candidate, byId.get(candidate.messageId)))
+        .filter((candidate) => isTransferableQueuedTurn(candidate, byId.get(candidate.messageId)) && landedBatchWhole(messages, candidate))
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))) {
         const queue = turn.queue ?? {
           conditions: [],
@@ -2383,7 +2398,10 @@ async function migrateStagedMessages(ctx: OperationContext, sourceId: string, de
       const primary = byId.get(turn.messageId);
       return primary === undefined || isMovableTurnShape(turn, primary, true);
     };
-    const staged = turns.filter(isStaged).sort(order);
+    // Moved entries land in their queue order: it is what the Work queue
+    // shows and the user can reorder, and send times can collide within a
+    // millisecond.
+    const staged = turns.filter(isStaged).sort((left, right) => left.queue!.order - right.queue!.order || order(left, right));
     const stagedIds = new Set(staged.map((turn) => turn.id));
     const abandoned = turns.filter(
       (turn) => isTransferredTurn(turn) && turn.handoff?.destinationThreadId === destinationId && !stagedIds.has(turn.id),

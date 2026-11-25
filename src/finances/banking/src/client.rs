@@ -36,7 +36,8 @@ use crate::{API_BASE_URL, USER_AGENT};
 
 // The error enum and its result alias, re-exported from the crate root as
 // well, so a caller can name either path.
-use crate::error::{BankError, ConsentEnd, Result};
+use crate::error::{BankError, ConsentEnd, InvalidReason, Result};
+use crate::text::Context;
 
 /// The default cap on how many pages one transaction call follows. A month of
 /// a busy account fits well inside it; more means a narrower date window is
@@ -343,10 +344,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
                 .chars()
                 .all(|character| character.is_ascii_alphabetic())
         {
-            return Err(BankError::invalid(
-                None,
-                "el país tiene que ser un código ISO de dos letras, por ejemplo ES",
-            ));
+            return Err(BankError::invalid(InvalidReason::CountryCode));
         }
         let path = format!("/aspsps?country={}", encode(&country));
         let response = self.send(Method::Get, &path, None::<&()>, Scope::Application)?;
@@ -385,7 +383,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
     /// and its accounts.
     pub fn create_session(&self, code: &str) -> Result<SessionGrant> {
         if code.trim().is_empty() {
-            return Err(BankError::invalid(None, "falta el código de autorización"));
+            return Err(BankError::invalid(InvalidReason::MissingCode));
         }
         let body = SessionRequest {
             code: code.trim().to_string(),
@@ -409,7 +407,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
 
     /// `GET /sessions/{id}`: what the API still says about a link.
     pub fn get_session(&self, session_id: &str) -> Result<SessionState> {
-        let path = format!("/sessions/{}", require_id(session_id, "la sesión")?);
+        let path = format!("/sessions/{}", require_id(session_id, Context::Session)?);
         let response = self.send(Method::Get, &path, None::<&()>, Scope::Session)?;
         let parsed: GetSessionResponse = decode(response)?;
         Ok(SessionState {
@@ -428,7 +426,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
     /// `DELETE /sessions/{id}`: close the session, and with it the bank's
     /// consent when the bank allows it.
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
-        let path = format!("/sessions/{}", require_id(session_id, "la sesión")?);
+        let path = format!("/sessions/{}", require_id(session_id, Context::Session)?);
         self.send(Method::Delete, &path, None::<&()>, Scope::Session)?;
         Ok(())
     }
@@ -437,7 +435,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
     pub fn account_details(&self, account_uid: &str) -> Result<BankAccount> {
         let path = format!(
             "/accounts/{}/details",
-            require_id(account_uid, "la cuenta")?
+            require_id(account_uid, Context::Account)?
         );
         let response = self.send(Method::Get, &path, None::<&()>, Scope::Session)?;
         let parsed: crate::dto::AccountResource = decode(response)?;
@@ -448,7 +446,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
     pub fn balances(&self, account_uid: &str) -> Result<Vec<BankBalance>> {
         let path = format!(
             "/accounts/{}/balances",
-            require_id(account_uid, "la cuenta")?
+            require_id(account_uid, Context::Account)?
         );
         let response = self.send(Method::Get, &path, None::<&()>, Scope::Session)?;
         let parsed: BalancesResponse = decode(response)?;
@@ -467,12 +465,9 @@ impl<T: Transport, C: Clock> Client<T, C> {
         window: &TransactionWindow,
     ) -> Result<Vec<BankTransaction>> {
         if window.to < window.from {
-            return Err(BankError::invalid(
-                None,
-                "el periodo de movimientos termina antes de empezar",
-            ));
+            return Err(BankError::invalid(InvalidReason::PeriodBackwards));
         }
-        let account_uid = require_id(account_uid, "la cuenta")?;
+        let account_uid = require_id(account_uid, Context::Account)?;
         let mut transactions = Vec::new();
         let mut continuation: Option<String> = None;
         let mut page = 0u32;
@@ -497,20 +492,12 @@ impl<T: Transport, C: Clock> Client<T, C> {
                 None => return Ok(transactions),
                 Some(key) => {
                     if page >= window.page_cap {
-                        return Err(BankError::invalid(
-                            None,
-                            format!(
-                                "el banco tiene más de {} páginas de movimientos en este periodo; \
-                                 acorta las fechas",
-                                window.page_cap
-                            ),
-                        ));
+                        return Err(BankError::invalid(InvalidReason::PageCapExceeded(
+                            window.page_cap,
+                        )));
                     }
                     if continuation.as_deref() == Some(key.as_str()) {
-                        return Err(BankError::invalid(
-                            None,
-                            "el banco repitió la clave de continuación, así que no hay última página",
-                        ));
+                        return Err(BankError::invalid(InvalidReason::ContinuationRepeated));
                     }
                     continuation = Some(key);
                 }
@@ -534,31 +521,21 @@ impl<T: Transport, C: Clock> Client<T, C> {
     /// error rather than a 400 from the API.
     fn validate_start_auth(&self, request: &StartAuth) -> Result<()> {
         if request.state.trim().is_empty() {
-            return Err(BankError::invalid(
-                None,
-                "falta el state de la autorización",
-            ));
+            return Err(BankError::invalid(InvalidReason::MissingState));
         }
         if request.state.len() > 256 {
-            return Err(BankError::invalid(None, "el state es demasiado largo"));
+            return Err(BankError::invalid(InvalidReason::StateTooLong));
         }
         if !crate::callback::is_loopback_redirect_url(&request.redirect_url) {
-            return Err(BankError::invalid(
-                None,
-                "la vuelta del banco tiene que ser una dirección local \
-                 (http://127.0.0.1:<puerto>/callback o http://localhost:<puerto>/callback)",
-            ));
+            return Err(BankError::invalid(InvalidReason::RedirectUrl));
         }
         if request.bank.name.trim().is_empty() || request.bank.country.trim().is_empty() {
-            return Err(BankError::invalid(None, "falta el banco al que vincular"));
+            return Err(BankError::invalid(InvalidReason::MissingBank));
         }
         if let Some(valid_until) = request.valid_until
             && valid_until <= self.clock.now()
         {
-            return Err(BankError::invalid(
-                None,
-                "la fecha límite del consentimiento ya ha pasado",
-            ));
+            return Err(BankError::invalid(InvalidReason::ConsentDeadlinePassed));
         }
         if let Some(language) = &request.language {
             let language = language.trim();
@@ -567,10 +544,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
                     .chars()
                     .all(|character| character.is_ascii_alphabetic())
             {
-                return Err(BankError::invalid(
-                    None,
-                    "el idioma tiene que ser un código de dos letras, por ejemplo es",
-                ));
+                return Err(BankError::invalid(InvalidReason::LanguageCode));
             }
         }
         Ok(())
@@ -594,7 +568,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
             .with_header("User-Agent", USER_AGENT);
         if let Some(body) = body {
             let json = serde_json::to_string(body).map_err(|error| {
-                BankError::invalid(None, format!("no se pudo preparar la petición: {error}"))
+                BankError::invalid(InvalidReason::RequestUnreadable(error.to_string()))
             })?;
             request = request
                 .with_header("Content-Type", "application/json")
@@ -667,7 +641,7 @@ impl<T: Transport, C: Clock> Client<T, C> {
                 status: Some(response.status),
                 message: description,
             },
-            _ => BankError::invalid(code, description),
+            _ => BankError::invalid_api(code, &description),
         }
     }
 
@@ -697,29 +671,19 @@ impl<T: Transport, C: Clock> fmt::Debug for Client<T, C> {
 /// A request or response body as a typed shape. A body that does not parse is
 /// an `Invalid` error, never a panic and never a partially filled value.
 fn decode<R: DeserializeOwned>(response: HttpResponse) -> Result<R> {
-    serde_json::from_str(&response.body).map_err(|error| {
-        BankError::invalid(
-            None,
-            format!("la respuesta del banco no se pudo leer: {error}"),
-        )
-    })
+    serde_json::from_str(&response.body)
+        .map_err(|error| BankError::invalid(InvalidReason::ResponseUnreadable(error.to_string())))
 }
 
 /// Reject an empty id: an account uid or a session id is required, and an
 /// empty one silently turns a path into a different endpoint.
-fn require_id<'a>(id: &'a str, what: &str) -> Result<&'a str> {
+fn require_id(id: &str, context: Context) -> Result<&str> {
     let id = id.trim();
     if id.is_empty() {
-        return Err(BankError::invalid(
-            None,
-            format!("falta el identificador de {what}"),
-        ));
+        return Err(BankError::invalid(InvalidReason::MissingContext(context)));
     }
     if id.len() > 128 {
-        return Err(BankError::invalid(
-            None,
-            format!("el identificador de {what} es demasiado largo"),
-        ));
+        return Err(BankError::invalid(InvalidReason::ContextTooLong(context)));
     }
     Ok(id)
 }

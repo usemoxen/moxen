@@ -167,6 +167,19 @@ pub struct AnalysisState {
     pub months: usize,
 }
 
+/// The Settings page's bank form: the two text fields the section edits and
+/// the bank the user picked to link. Never a key: the key only ever travels
+/// from a file path into the OS keychain, through the data source.
+#[derive(Clone, Debug, Default)]
+pub struct BankFormState {
+    pub app_id: String,
+    pub key_path: String,
+    pub country: String,
+    pub bank_name: String,
+    /// Whether a repaint poll for a running link or sync is scheduled.
+    pub polling: bool,
+}
+
 pub struct FinancesApp {
     pub page: Page,
     pub theme: ThemeMode,
@@ -195,6 +208,8 @@ pub struct FinancesApp {
     pub projection: ProjectionState,
     pub calendar: CalendarState,
     pub analysis: AnalysisState,
+    /// The Settings page's bank sync form (LOCAL-031).
+    pub bank: BankFormState,
 }
 
 impl FinancesApp {
@@ -236,6 +251,7 @@ impl FinancesApp {
                 selected: Some(today),
             },
             analysis: AnalysisState { months: 12 },
+            bank: BankFormState::default(),
         }
     }
 
@@ -636,6 +652,143 @@ impl FinancesApp {
         self.analysis.months = months;
         cx.notify();
     }
+
+    // -- bank sync (Settings), LOCAL-031 ---------------------------------------
+
+    /// Stores the typed application id. It is public metadata (it names the
+    /// application in every JWT); the private key never travels this way.
+    pub fn save_bank_application(&mut self, cx: &mut Context<Self>) {
+        let app_id = self.bank.app_id.trim().to_string();
+        if app_id.is_empty() {
+            self.error = Some(language::message("settings.bank.app.empty").to_string());
+            cx.notify();
+            return;
+        }
+        if self.run_mutation(cx, |m| m.save_bank_application(&app_id)) {
+            self.notice = Some(language::message("settings.bank.key.missing").to_string());
+        }
+    }
+
+    /// Imports the PEM file at the typed path into the OS keychain, through the
+    /// data source. The field is cleared afterwards: the path is not kept.
+    pub fn import_bank_key(&mut self, cx: &mut Context<Self>) {
+        let path = self.bank.key_path.trim().to_string();
+        if path.is_empty() {
+            self.error = Some(
+                DataError::new(
+                    crate::commands::DataErrorKind::Io,
+                    language::message("dialog.error.path"),
+                )
+                .localized(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.run_mutation(cx, move |m| m.import_bank_key(&path)) {
+            self.bank.key_path.clear();
+            self.notice = Some(language::message("settings.bank.key.imported").to_string());
+        }
+    }
+
+    pub fn remove_bank_key(&mut self, cx: &mut Context<Self>) {
+        if self.run_mutation(cx, |m| m.remove_bank_key()) {
+            self.notice = Some(language::message("settings.bank.key.removed").to_string());
+        }
+    }
+
+    /// Starts linking the country and bank the form names. The data source runs
+    /// it off the render thread, so the window keeps painting; the section
+    /// shows the busy line and polls until it finishes.
+    pub fn link_bank(&mut self, cx: &mut Context<Self>) {
+        let draft = crate::commands::BankLinkDraft {
+            country: self.bank.country.trim().to_ascii_uppercase(),
+            bank_name: self.bank.bank_name.trim().to_string(),
+            language: Some(language::current().code().to_string()),
+        };
+        if draft.country.is_empty() || draft.bank_name.is_empty() {
+            self.error = Some(
+                DataError::new(
+                    crate::commands::DataErrorKind::Invalid,
+                    language::message("settings.bank.link.needs-application"),
+                )
+                .localized(),
+            );
+            cx.notify();
+            return;
+        }
+        self.run_mutation(cx, move |m| m.link_bank(&draft));
+        self.watch_bank_activity(cx);
+    }
+
+    pub fn unlink_bank(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        let connection_id = connection_id.to_string();
+        if self.run_mutation(cx, move |m| m.unlink_bank(&connection_id)) {
+            self.notice = Some(language::message("settings.bank.unlinked").to_string());
+        }
+    }
+
+    pub fn map_bank_account(
+        &mut self,
+        connection_id: &str,
+        external_uid: &str,
+        account_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let connection_id = connection_id.to_string();
+        let external_uid = external_uid.to_string();
+        let account_id = account_id.unwrap_or_default().to_string();
+        self.run_mutation(cx, move |m| {
+            m.map_bank_account(&connection_id, &external_uid, &account_id)
+        });
+    }
+
+    pub fn sync_bank_now(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        let connection_id = connection_id.to_string();
+        self.run_mutation(cx, move |m| m.sync_bank_now(&connection_id));
+        self.watch_bank_activity(cx);
+    }
+
+    pub fn set_bank_sync_interval(&mut self, minutes: Option<u32>, cx: &mut Context<Self>) {
+        self.run_mutation(cx, move |m| m.set_bank_sync_interval(minutes));
+    }
+
+    /// Repaints while a link or a sync runs, so the section's busy line and the
+    /// bank's answer appear without the user touching anything. The data
+    /// source does the work on its own thread; this only watches for the
+    /// transition and reloads the snapshot once it is done.
+    pub fn watch_bank_activity(&mut self, cx: &mut Context<Self>) {
+        if self.bank.polling || !self.data.bank_sync().is_busy() {
+            return;
+        }
+        self.bank.polling = true;
+        cx.spawn(async move |this, cx| {
+            // Five minutes of 400 ms ticks: longer than the callback's own
+            // timeout, so a link cannot outlive its watcher by much.
+            for _ in 0..750 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(400))
+                    .await;
+                let busy = this.update(cx, |this, cx| {
+                    let busy = this.data.bank_sync().is_busy();
+                    if !busy {
+                        // The last run changed the ledger: read it again.
+                        if let Some(mutations) = this.mutations.clone()
+                            && let Err(error) = mutations.refresh()
+                        {
+                            this.error = Some(error.localized());
+                        }
+                    }
+                    cx.notify();
+                    busy
+                });
+                if !matches!(busy, Ok(true)) {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, _cx| this.bank.polling = false);
+        })
+        .detach();
+    }
 }
 
 impl Render for FinancesApp {
@@ -657,7 +810,7 @@ impl Render for FinancesApp {
             .bg(color("ground"))
             .font_family(theme::FONT)
             .text_color(color("ink"))
-            .child(title_bar::render(self, cx))
+            .child(title_bar::render(self, window, cx))
             .when_some(feedback, |s, bar| s.child(bar))
             .child(
                 div()
@@ -1079,5 +1232,181 @@ mod tests {
             });
         });
         cx.run_until_parked();
+    }
+}
+
+#[cfg(all(test, feature = "render-harness"))]
+mod bank_section_tests {
+    //! The Settings page's bank section, drawn from plain DTOs: the linked
+    //! bank, its consent, its accounts and the "link again" banner. No key, no
+    //! database, no banking crate.
+
+    use super::{FinancesApp, Page};
+    use crate::data::{
+        AccountInfo, AccountKind, BalancePoint, BankActivity, BankConnectionInfo, BankConsent,
+        BankSyncState, Currency, FinancesData, LinkedBankAccount, Money, MonthSummary, Movement,
+        Subscription, UpcomingCharge,
+    };
+    use crate::demo::DemoData;
+    use crate::language::Language;
+    use chrono::{NaiveDate, Utc};
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use std::rc::Rc;
+
+    /// The demo data with a bank sync state of its own, so the section has
+    /// something to draw.
+    struct WithBank {
+        demo: DemoData,
+        state: BankSyncState,
+    }
+
+    impl FinancesData for WithBank {
+        fn today(&self) -> NaiveDate {
+            self.demo.today()
+        }
+        fn balance(&self) -> Money {
+            self.demo.balance()
+        }
+        fn balance_date(&self) -> NaiveDate {
+            self.demo.balance_date()
+        }
+        fn month_end_forecast(&self) -> Money {
+            self.demo.month_end_forecast()
+        }
+        fn month_summary(&self) -> MonthSummary {
+            self.demo.month_summary()
+        }
+        fn upcoming_charges(&self) -> Rc<[UpcomingCharge]> {
+            self.demo.upcoming_charges()
+        }
+        fn subscriptions(&self) -> Rc<[Subscription]> {
+            self.demo.subscriptions()
+        }
+        fn balance_history(&self) -> Rc<[BalancePoint]> {
+            self.demo.balance_history()
+        }
+        fn exchange_rate(&self, from: Currency, to: Currency) -> f64 {
+            self.demo.exchange_rate(from, to)
+        }
+        fn movements(&self) -> Rc<[Movement]> {
+            self.demo.movements()
+        }
+        fn accounts(&self) -> Rc<[AccountInfo]> {
+            Rc::from([AccountInfo {
+                id: "local-1".into(),
+                name: "Cuenta corriente".into(),
+                kind: AccountKind::Checking,
+                currency: Currency::Eur,
+                archived: false,
+                balance: Money::eur(0),
+            }])
+        }
+        fn bank_sync(&self) -> BankSyncState {
+            self.state.clone()
+        }
+    }
+
+    fn linked(consent: BankConsent) -> BankSyncState {
+        BankSyncState {
+            app_id: "fictional-application-id".into(),
+            key_stored: true,
+            activity: None,
+            message: None,
+            connections: Rc::from([BankConnectionInfo {
+                id: "connection-1".into(),
+                bank_name: "Banco Ficticio".into(),
+                country: "ES".into(),
+                consent,
+                consent_until: Some(NaiveDate::from_ymd_opt(2026, 6, 1).expect("a date")),
+                last_sync: Some(NaiveDate::from_ymd_opt(2026, 1, 20).expect("a date")),
+                imported: 12,
+                accounts: Rc::from([LinkedBankAccount {
+                    external_uid: "fictional-uid-1".into(),
+                    name: "Cuenta de pruebas".into(),
+                    currency: "EUR".into(),
+                    account_id: Some("local-1".into()),
+                }]),
+            }]),
+            interval: Some(60),
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    fn settings_app<'a>(
+        cx: &'a mut TestAppContext,
+        state: BankSyncState,
+        language: &str,
+    ) -> (Entity<FinancesApp>, &'a mut VisualTestContext) {
+        let (app, cx) = cx.add_window_view(|_window, _cx| {
+            FinancesApp::new(
+                Rc::new(WithBank {
+                    demo: DemoData::new(),
+                    state,
+                }),
+                Some(language),
+                None,
+            )
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| app.set_page(Page::Settings, cx));
+        });
+        cx.run_until_parked();
+        (app, cx)
+    }
+
+    #[gpui::test]
+    fn the_bank_section_draws_the_linked_bank_in_both_languages(cx: &mut TestAppContext) {
+        let (app, cx) = settings_app(cx, linked(BankConsent::Valid), "en");
+        draw(cx);
+        #[cfg(debug_assertions)]
+        {
+            assert!(cx.debug_bounds("settings").is_some());
+            assert!(cx.debug_bounds("bank-connection-0").is_some());
+        }
+        // Spanish renders the same section.
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| app.set_language(Language::Spanish, cx));
+        });
+        cx.run_until_parked();
+        draw(cx);
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("bank-connection-0").is_some());
+    }
+
+    #[gpui::test]
+    fn an_expired_consent_still_draws_its_banner(cx: &mut TestAppContext) {
+        let (_app, cx) = settings_app(cx, linked(BankConsent::Expired), "en");
+        draw(cx);
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("bank-connection-0").is_some());
+    }
+
+    #[gpui::test]
+    fn a_running_sync_draws_the_busy_line(cx: &mut TestAppContext) {
+        let mut state = linked(BankConsent::Valid);
+        state.activity = Some(BankActivity::Syncing);
+        let (_app, cx) = settings_app(cx, state, "en");
+        draw(cx);
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("settings").is_some());
+    }
+
+    #[gpui::test]
+    fn an_empty_bank_section_draws_nothing_but_its_rows(cx: &mut TestAppContext) {
+        let (_app, cx) = settings_app(cx, BankSyncState::default(), "en");
+        draw(cx);
+        #[cfg(debug_assertions)]
+        {
+            assert!(cx.debug_bounds("settings").is_some());
+            assert!(cx.debug_bounds("bank-connection-0").is_none());
+        }
+        let _ = Utc::now();
     }
 }

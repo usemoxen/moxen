@@ -7,6 +7,7 @@ import { t } from "../../i18n/index.js";
 import { markModalDismissed } from "../../model/modalDismiss.js";
 import { downloadFraction, formatMebibytes, stageRows, updateActions, type UpdateView } from "../../model/update.js";
 import { COLOR, markdownSyntaxStyle, SURFACE } from "../../theme.js";
+import { MarkdownView } from "../../ui/markdown.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
 import { ModalShell } from "../../ui/modalshell.js";
 
@@ -79,7 +80,7 @@ export function UpdateModal({ view, serverName, screenWidth, screenHeight, onIns
         <text fg={COLOR.dim} selectable={false} style={{ height: 1, flexShrink: 0 }}>{t("update.notes")}</text>
         <scrollbox ref={scroll} id="update-notes" style={{ flexGrow: 1, flexShrink: 1, minHeight: 2 }} contentOptions={{ paddingRight: 1 }}
           verticalScrollbarOptions={{ showArrows: false, trackOptions: { foregroundColor: COLOR.dim, backgroundColor: SURFACE.border } }}>
-          <markdown content={latest.notes} fg={COLOR.text} syntaxStyle={markdownSyntaxStyle()} selectable />
+          <MarkdownView content={latest.notes} fg={COLOR.text} syntaxStyle={markdownSyntaxStyle()} selectable />
         </scrollbox>
       </box>
       : <box style={{ flexGrow: 1 }} />}

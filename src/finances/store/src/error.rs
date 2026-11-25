@@ -72,9 +72,9 @@ pub enum StoreError {
     #[error("no se encontró la carpeta de datos de la aplicación para este sistema")]
     NoDataDirectory,
 
-    /// The schema-2 migration could not copy the database file to its
-    /// `.pre-v2.bak` backup, so it refused to run: the database is exactly as
-    /// it was.
+    /// The schema-2 or schema-3 migration could not copy the database file to
+    /// its `.pre-v<N>.bak` backup, so it refused to run: the database is
+    /// exactly as it was.
     #[error(
         "no se pudo copiar la base de datos a {to} antes de migrar (se necesita para no \
          perder el esquema anterior): la base de datos no se ha tocado. Motivo: {source}"
