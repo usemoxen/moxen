@@ -1111,6 +1111,29 @@ describe("usage protection", () => {
     await expect(w.guard.wrap("opencode")).rejects.toThrow("has not reported usage");
   });
 
+  it("stops forecasting a window a full read no longer reports, and with it its wrap-up", async () => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    await w.make("withdrawn");
+    const now = Date.now();
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: new Date(now + 3600_000).toISOString() },
+      { id: "weekly", label: "Weekly", usedPercent: 97, exhausted: false, resetsAt: new Date(now + 86400_000).toISOString() },
+    ], now, { complete: true });
+    await w.guard.tick(now);
+    expect(w.guard.read().forecasts.map((forecast) => forecast.windowId)).toEqual(["session", "weekly"]);
+    expect(w.guard.read().forecasts.filter((forecast) => forecast.shouldWrap).map((forecast) => forecast.windowId)).toEqual(["weekly"]);
+    // Google withdrew the separate weekly quota: the next full read omits it,
+    // so nothing forecasts it and nothing wraps up for it any more.
+    recordUsageWindows("codex", [
+      { id: "session", label: "Session", usedPercent: 22, exhausted: false, resetsAt: new Date(now + 3600_000).toISOString() },
+    ], now + 60_000, { complete: true });
+    await w.guard.tick(now + 60_000);
+    expect(w.guard.read().forecasts.map((forecast) => forecast.windowId)).toEqual(["session"]);
+    expect(w.guard.read().forecasts.some((forecast) => forecast.shouldWrap)).toBe(false);
+    w.guard.close();
+  });
+
   it("opt-out never interrupts work and held queues do not promote on completion", async () => {
     const w = await world();
     w.ctx.config.usageProtection = "off";
@@ -1169,6 +1192,23 @@ describe("usage forecasts", () => {
     // A reset can also arrive as a percentage or cost regression without a new reset timestamp.
     expect(f.forecast("codex", { ...window, id: "w", usedPercent: 2 }, { activeMs: 300_000, costUsd: 18, wrapCostUsd: 1, running: 2 }).remainingWorkMs).toBeNull();
     expect(f.forecast("codex", { ...window, id: "w", usedPercent: 3 }, { activeMs: 310_000, costUsd: 1, wrapCostUsd: 1, running: 2 }).remainingWorkMs).toBeNull();
+  });
+
+  it("forgets a withdrawn window's ratios instead of greeting its return with them", () => {
+    const forecastAt = (f: UsageForecaster, usedPercent: number, activeMs: number, costUsd: number) =>
+      f.forecast("x", { id: "w", kind: "weekly", label: "Weekly", resetsAt: "2030-01-01", usedPercent }, { activeMs, costUsd, wrapCostUsd: 1, running: 2 });
+    const kept = new UsageForecaster();
+    const dropped = new UsageForecaster();
+    for (const f of [kept, dropped]) {
+      forecastAt(f, 90, 0, 10);
+      expect(forecastAt(f, 94, 240_000, 12).remainingWorkMs).toBe(90_000);
+    }
+    // A provider that stops reporting the window takes its learned ratios with
+    // it: were they kept, a window that came back would be forecast from the
+    // six minutes per percent another quota taught.
+    dropped.retain("x", new Set(["session"]));
+    expect(forecastAt(kept, 95, 300_000, 13).remainingWorkMs).not.toBeNull();
+    expect(forecastAt(dropped, 95, 300_000, 13).remainingWorkMs).toBeNull();
   });
 
   it("prefers reported cost, charges cached input once, and never adds reasoning twice", () => {

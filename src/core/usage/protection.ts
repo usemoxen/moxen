@@ -489,6 +489,9 @@ export class UsageProtection {
         const forecast = this.forecaster.forecast(provider, window, { activeMs, costUsd, wrapCostUsd, running: running.length });
         forecasts.push(driverKindOfInstance(provider) === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" ? { ...forecast, shouldWrap: false } : forecast);
       }
+      // A window the provider stopped reporting takes its learned ratios with
+      // it: neither is it forecast any more, nor is its state kept.
+      this.forecaster.retain(provider, new Set(limits.windows.map((window) => window.id)));
     }
     this.snapshot = { forecasts, queue: rows.flatMap(({ thread }) =>
       !thread.archivedAt && thread.usagePause ? [{ ...thread.usagePause, threadId: thread.id, title: thread.title }] : []).sort((a, b) => a.order - b.order) };

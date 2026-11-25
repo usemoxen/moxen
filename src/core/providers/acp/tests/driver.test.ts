@@ -569,6 +569,9 @@ describe("ACP crash recovery & rollback", () => {
       expect(events.find((e) => e.type === "rate-limits.updated")).toMatchObject({
         provider: "antigravity",
         credits: 25,
+        // `/usage` lists every bucket, so the reading replaces the recorded
+        // list rather than merging into it.
+        complete: true,
         raw: { subscriptionType: "Google AI Pro" },
       });
       expect(await driver.refreshUsage()).toEqual({
@@ -2314,6 +2317,12 @@ describe("ACP native subagent status events (MXN-445)", () => {
       expect(raw["rateLimitType"]).toBe("gemini-5h");
       expect(raw["label"]).toBe("Session – Gemini");
       expect(typeof raw["resetsAt"]).toBe("string");
+      // The synthetic window for the pool this turn hit names one window only:
+      // it merges with what the probe reports instead of replacing it.
+      const rejected = events.find(
+        (e) => e.type === "rate-limits.updated" && (e.raw as Record<string, unknown> | undefined)?.["status"] === "rejected",
+      );
+      expect(rejected).not.toHaveProperty("complete");
       const deltaMs = Date.parse(String(raw["resetsAt"])) - beforeStart;
       expect(deltaMs).toBeGreaterThanOrEqual(17 * 60_000);
       expect(deltaMs).toBeLessThanOrEqual(17 * 60_000 + 30_000);

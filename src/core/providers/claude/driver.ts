@@ -2486,6 +2486,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         ...(this.rateLimitInstanceId ? { instanceId: this.rateLimitInstanceId } : {}),
         threadId: session.threadId,
         windows,
+        // The probe answers for every window the account has, model-scoped
+        // ones included, so it replaces the recorded list.
+        complete: true,
         raw: { subscriptionType: mapped.subscriptionType, costUsd: mapped.costUsd },
       });
       return windows;

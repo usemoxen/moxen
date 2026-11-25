@@ -243,9 +243,17 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
       else if (windows.some((w) => w.usedPercent >= 100 || 100 - w.usedPercent < condition.minimum)) blocked.push(`${condition.provider}: needs ${condition.minimum}% ${condition.window} remaining`);
     } else if (condition.type === "reset") {
       const condModel = condition.provider === provider ? model : null;
-      const resetsAt = condition.resetsAt ?? nextReset(condition.provider, condition.window, now, condModel);
-      if (resetsAt && !condition.resetsAt) conditions[index] = { ...condition, resetsAt };
-      if (!resetsAt || Date.parse(resetsAt) + QUEUE_RESET_GRACE_MS > now) blocked.push(`${condition.provider}: waiting for ${condition.window} reset`);
+      // A window kind the provider still reports nothing for is a reset that
+      // can never come: it was withdrawn (Google's separate Argon quota), and
+      // a hold keyed on it would wait forever. A provider reporting no windows
+      // at all keeps waiting — unavailable is not a reset.
+      const reported = usageWindowsForModel(condition.provider, now, condModel);
+      const withdrawn = condition.window !== "all" && reported.length > 0 && !reported.some((window) => window.kind === condition.window);
+      if (!withdrawn) {
+        const resetsAt = condition.resetsAt ?? nextReset(condition.provider, condition.window, now, condModel);
+        if (resetsAt && !condition.resetsAt) conditions[index] = { ...condition, resetsAt };
+        if (!resetsAt || Date.parse(resetsAt) + QUEUE_RESET_GRACE_MS > now) blocked.push(`${condition.provider}: waiting for ${condition.window} reset`);
+      }
     } else if (condition.type === "provider") {
       const condModel = condition.provider === provider ? model : null;
       const met = condition.state === "exhausted" ? providerExhausted(condition.provider, now, condModel)

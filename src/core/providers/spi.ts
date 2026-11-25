@@ -509,6 +509,13 @@ export type ProviderRuntimeEvent =
        * OpenCode provider). Absent means the driver's own account.
        */
       readonly instanceId?: string;
+      /**
+       * This report listed every window the account has (a probe, or a
+       * driven refresh), so it replaces the recorded list: a window it leaves
+       * out was withdrawn by the provider. Absent means it refreshed only the
+       * windows it names and the rest keep their last reading.
+       */
+      readonly complete?: boolean;
       /** Optional remaining credit balance reported alongside quota windows (e.g. Antigravity `/credits`). */
       readonly credits?: number | null;
       readonly raw?: unknown;

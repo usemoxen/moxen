@@ -1183,13 +1183,13 @@ export class DirectConnection implements ClientApi {
         if (this.probeCodexCompanionFn && companion instanceof CodexDriver) {
           const probed = await this.probeCodexCompanionFn(companion, process.cwd()).catch(() => null);
           if (!this.closed && probed && probed.rateLimits.windows.length > 0) {
-            recordUsageWindows(`chatgpt/${normalizedId}`, [...probed.rateLimits.windows]);
+            recordUsageWindows(`chatgpt/${normalizedId}`, [...probed.rateLimits.windows], undefined, { complete: true });
           }
           return;
         }
         const refreshed = await companion.refreshUsage?.({ force: options.force === true }).catch(() => null);
         if (!this.closed && refreshed && (refreshed.windows.length > 0 || typeof refreshed.credits === "number")) {
-          recordUsageWindows(`chatgpt/${normalizedId}`, refreshed.windows, undefined, { credits: refreshed.credits });
+          recordUsageWindows(`chatgpt/${normalizedId}`, refreshed.windows, undefined, { credits: refreshed.credits, complete: true });
         }
       } catch {
         // Companion probe is best-effort; keep last recorded windows.
@@ -1288,7 +1288,7 @@ export class DirectConnection implements ClientApi {
         const landed = (async () => await driver.refreshUsage?.())().then(
           (refreshed) => {
             if (refreshed && (refreshed.windows.length > 0 || typeof refreshed.credits === "number")) {
-              recordUsageWindows(refreshed.key, refreshed.windows, undefined, { credits: refreshed.credits });
+              recordUsageWindows(refreshed.key, refreshed.windows, undefined, { credits: refreshed.credits, complete: true });
             }
             return refreshed;
           },
@@ -2375,7 +2375,7 @@ export class DirectConnection implements ClientApi {
             }
             const verification = verifyCodexCompanion(bundle.identity, completion.probed.account, completion.probed.rateLimits);
             if (verification.verified && completion.probed.rateLimits.windows.length > 0) {
-              recordUsageWindows(`chatgpt/${entry.id}`, [...completion.probed.rateLimits.windows]);
+              recordUsageWindows(`chatgpt/${entry.id}`, [...completion.probed.rateLimits.windows], undefined, { complete: true });
             }
             return await this.withConfigWrite(async () => {
               const { fileConfig, path, skipped } = await this.readConfigFile();
@@ -2587,7 +2587,7 @@ export class DirectConnection implements ClientApi {
           confirmWorkspace: command.confirmWorkspace,
         });
         if (verification.verified && probed.rateLimits.windows.length > 0) {
-          recordUsageWindows(`chatgpt/${normalizedId}`, [...probed.rateLimits.windows]);
+          recordUsageWindows(`chatgpt/${normalizedId}`, [...probed.rateLimits.windows], undefined, { complete: true });
         }
         return await this.withConfigWrite(async () => {
           const { fileConfig, path, skipped } = await this.readConfigFile();
