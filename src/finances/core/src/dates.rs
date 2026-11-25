@@ -6,7 +6,7 @@
 //! `NaiveDate` is; only the years before 100 differ, where JavaScript maps
 //! years 0-99 onto 1900-1999 — real personal-finance data never goes there.
 
-use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Days, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::CoreError;
@@ -30,6 +30,26 @@ pub fn today_madrid(now: DateTime<Utc>) -> String {
         month: local.month().into(),
         day: local.day().into(),
     })
+}
+
+/// An instant formatted exactly like the reference's
+/// `new Date().toISOString()`: UTC, millisecond precision, `Z` suffix. The
+/// store stamps every `created_at`/`updated_at` with it, and formats the
+/// timestamps it keeps in a backup.
+pub fn format_instant(instant: DateTime<Utc>) -> String {
+    instant.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// The current instant, as `new Date().toISOString()` would write it. The
+/// store calls this instead of keeping a clock of its own, so chrono stays
+/// out of its dependencies.
+pub fn now_utc_iso() -> String {
+    format_instant(Utc::now())
+}
+
+/// Today's date in Europe/Madrid right now.
+pub fn today_madrid_now() -> String {
+    today_madrid(Utc::now())
 }
 
 fn to_naive(parts: IsoDateParts) -> Option<NaiveDate> {
@@ -415,6 +435,19 @@ mod tests {
             compare_iso_dates("2026-11-17", "2026-11-18"),
             std::cmp::Ordering::Less
         );
+    }
+
+    #[test]
+    fn instants_look_like_the_reference_toiso_string() {
+        let instant = DateTime::from_timestamp(1_763_478_896, 789_000_000).unwrap();
+        assert_eq!(format_instant(instant), "2025-11-18T15:14:56.789Z");
+        // The current clock keeps the same shape: UTC, millis, Z.
+        let now = now_utc_iso();
+        assert_eq!(now.len(), 24);
+        assert!(now.ends_with('Z'), "{now}");
+        assert_eq!(&now[4..5], "-");
+        assert_eq!(&now[10..11], "T");
+        assert!(is_valid_iso_date(&today_madrid_now()));
     }
 
     #[test]
