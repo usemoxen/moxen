@@ -13,7 +13,9 @@ import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeTh
 import { openThreadStore } from "../store.js";
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
-import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
+import { automaticUsageBlock, loadTurnOrigins, parseQueuePolicy, queueAdmission, type QueuePolicy, type QueueRow } from "../queue.js";
+import type { StoredMessage, StoredThread, StoredTurn } from "../types.js";
+import { DEFAULT_CONFIG } from "../../config.js";
 import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
@@ -841,5 +843,92 @@ describe("Antigravity quota-pool scoping", () => {
     } finally {
       guard.close();
     }
+  });
+});
+
+describe("Antigravity held-prompt provenance (LOCAL-006)", () => {
+  const NOW = Date.parse("2026-10-01T12:00:00.000Z");
+  const iso = (at: number) => new Date(at).toISOString();
+  const HELD = "Antigravity automatic prompts are held: turn on providers.antigravity.allowUnsupportedUse";
+  const MINUTE = 60_000;
+  const HOUR = 60 * MINUTE;
+
+  function row(...turns: Array<Record<string, unknown> & { id: string; createdAt: string }>): { row: QueueRow; turns: StoredTurn[] } {
+    const thread = {
+      id: "ag-thread",
+      projectId: "p",
+      title: "Antigravity work",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      env: { kind: "local", path: "/tmp" },
+      createdAt: iso(NOW - 2 * HOUR),
+      updatedAt: iso(NOW),
+      archivedAt: null,
+      deletedAt: null,
+      settledAt: null,
+      snoozedUntil: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+    } as unknown as StoredThread;
+    const rows = turns.map((turn) => ({
+      threadId: "ag-thread",
+      status: "queued",
+      prompt: "do work",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      scheduledFor: null,
+      queue: { conditions: [], held: false, order: 1, sequential: true, continuation: "same-thread" },
+      ...turn,
+    })) as unknown as StoredTurn[];
+    return { row: { thread, turns: rows }, turns: rows };
+  }
+
+  it("holds a due scheduled agent message whose origin lives only on its message, while off", async () => {
+    const { row: queued, turns } = row({ id: "agent-queued", createdAt: iso(NOW - 2 * HOUR), scheduledFor: iso(NOW - MINUTE) });
+    // Pre-origin rows: the message ledger says the agent queued this one, the
+    // turn row predates its own origin column and carries none.
+    const messages = [{
+      id: "m1",
+      threadId: "ag-thread",
+      turnId: "agent-queued",
+      role: "user",
+      text: "Check the logs",
+      createdAt: iso(NOW - 2 * HOUR),
+      origin: "agent-message",
+    }] as unknown as StoredMessage[];
+    const store = { readMessages: async () => messages };
+    const origins = await loadTurnOrigins(store, [queued], DEFAULT_CONFIG);
+    const admission = queueAdmission(queued, turns[0]!, [queued], DEFAULT_CONFIG, NOW, origins);
+    expect(admission.blocked).toContain(HELD);
+    // With the setting on, the same message is admitted as today.
+    const allowed = queueAdmission(queued, turns[0]!, [queued], { ...DEFAULT_CONFIG, providers: { antigravity: { allowUnsupportedUse: true } } }, NOW, origins);
+    expect(allowed.blocked).not.toContain(HELD);
+  });
+
+  it("recovers origin from the message ledger only for Antigravity turns while the gate is off", async () => {
+    const { row: queued, turns } = row({ id: "agent-queued", createdAt: iso(NOW) });
+    const messages = [{ id: "m1", threadId: "ag-thread", turnId: "agent-queued", role: "user", text: "Check", createdAt: iso(NOW), origin: "agent-message" }] as unknown as StoredMessage[];
+    const store = { readMessages: async () => messages };
+    expect([...(await loadTurnOrigins(store, [queued], DEFAULT_CONFIG)).values()]).toEqual(["agent-message"]);
+    // While the setting is on no gate consults provenance: nothing is loaded.
+    expect((await loadTurnOrigins(store, [queued], { ...DEFAULT_CONFIG, providers: { antigravity: { allowUnsupportedUse: true } } })).size).toBe(0);
+  });
+
+  it("a scheduled user message firing late does not authorize an agent-only message queued later", () => {
+    const { row: queued, turns } = row(
+      // The user scheduled a message two hours ago; its timer fired five
+      // minutes ago, after the agent-only message was queued half an hour ago.
+      { id: "scheduled-user", status: "completed", createdAt: iso(NOW - 2 * HOUR), scheduledFor: iso(NOW - 5 * MINUTE), startedAt: iso(NOW - 5 * MINUTE) },
+      { id: "agent-queued", createdAt: iso(NOW - 30 * MINUTE), origin: "agent-message" },
+    );
+    const admission = queueAdmission(queued, turns[1]!, [queued], DEFAULT_CONFIG, NOW);
+    expect(admission.blocked).toContain(HELD);
+    // A genuine fresh user turn still releases the held message.
+    const { row: withUser, turns: freshTurns } = row(
+      { id: "scheduled-user", status: "completed", createdAt: iso(NOW - 2 * HOUR), scheduledFor: iso(NOW - 5 * MINUTE), startedAt: iso(NOW - 5 * MINUTE) },
+      { id: "agent-queued", createdAt: iso(NOW - 30 * MINUTE), origin: "agent-message" },
+      { id: "fresh-user", status: "running", createdAt: iso(NOW - 10 * MINUTE) },
+    );
+    expect(queueAdmission(withUser, freshTurns[1]!, [withUser], DEFAULT_CONFIG, NOW, new Map()).blocked).not.toContain(HELD);
   });
 });

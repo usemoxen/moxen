@@ -152,6 +152,28 @@ export async function antigravityProvider(
   const displayName = account
     ? `Antigravity (${account.label?.trim() || account.id})`
     : "Antigravity";
+  // Eligibility is decided before anything else touches the account: while
+  // a gated account is disabled, no executable or path in its home is
+  // checked (not even whether `agy` is installed there), and the reason is
+  // reported independently of installation status rather than overrun by
+  // "not installed".
+  const blockedReason = antigravityAccountBlockedReason(config, instanceId);
+  if (blockedReason !== null) {
+    return {
+      instanceId,
+      driver: "antigravity",
+      displayName,
+      installed: false,
+      enabled: false,
+      status: blockedReason,
+      authStatus: null,
+      models: [],
+      supportedRuntimeModes: null,
+      usageLimits: null,
+      skills: [],
+      disabledReason: blockedReason,
+    };
+  }
   const mergedConfig: AntigravityProviderConfig | undefined = account
     ? {
         ...(config ?? {}),
@@ -173,7 +195,6 @@ export async function antigravityProvider(
     : undefined);
   const installed = transport ? true : isInstalled(spec.command, accountEnv);
   const disabled = account?.enabled === false;
-  const blockedReason = antigravityAccountBlockedReason(config, instanceId);
   const base: ProviderSummary = {
     instanceId,
     driver: "antigravity",
@@ -182,11 +203,9 @@ export async function antigravityProvider(
     enabled: false,
     status: !installed
       ? "not installed"
-      : blockedReason !== null
-        ? blockedReason
-        : disabled
-          ? "disabled"
-          : null,
+      : disabled
+        ? "disabled"
+        : null,
     authStatus: null,
     models: [],
     supportedRuntimeModes: null,
@@ -195,7 +214,7 @@ export async function antigravityProvider(
   };
   // A gated account is disabled with the reason and never launched or
   // probed: the driver (and so `agy`) is not constructed.
-  if (!installed || blockedReason !== null || disabled) return base;
+  if (!installed || disabled) return base;
 
   const now = (options.now ?? Date.now)();
   const useCache = transport === undefined || options.storeRoot !== undefined;

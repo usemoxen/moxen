@@ -122,6 +122,13 @@ export interface ProviderSummary {
   supportedRuntimeModes: RuntimeMode[] | null;
   /** Null when the driver has no notion of subscription usage at all. */
   usageLimits: ProviderUsageLimits | null;
+  /**
+   * Why this provider instance cannot run regardless of `installed` (an
+   * Antigravity account gated by the off-by-default
+   * `providers.antigravity.allowUnsupportedUse`). Reported independently of
+   * installation status; absent for provider kinds that have no such gate.
+   */
+  disabledReason?: string | null;
   /** `ServerProvider.skills` — flattened across every workspace the provider has scanned. */
   skills: SkillSummary[];
 }

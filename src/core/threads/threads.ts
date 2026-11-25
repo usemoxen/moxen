@@ -422,8 +422,10 @@ export async function sendTurn(
     // a usage hold does: queued as a wake-up for the user's next message (or
     // the setting turning on), never started on its own. Task notices are
     // held upstream in their batch file and ride the user's send, so they
-    // pass here; usage-control maintenance keeps its own exemption.
-    const autoHeld = config !== undefined && origin !== undefined && origin !== "task-notification" && input.usageControl !== true
+    // pass here. Usage-control maintenance (wrap-up, recovery) is Moxen's own
+    // prompt too, so it holds for Antigravity like any other: the usage
+    // exemption it keeps elsewhere skips usage pauses, not this gate.
+    const autoHeld = config !== undefined && origin !== undefined && origin !== "task-notification"
       && driverKindOfInstance((input.modelSelection ?? thread.modelSelection).instanceId) === "antigravity"
       && !antigravityUnsupportedUseAllowed(config);
     if (usageHeld || autoHeld) delivery = "queue";

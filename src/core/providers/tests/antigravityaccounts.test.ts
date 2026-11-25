@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_CONFIG, normalizeConfig, normalizeFileConfig } from "../../config.js";
 import { describeSettings } from "../../configschema.js";
@@ -209,5 +209,81 @@ describe("Antigravity accounts while allowUnsupportedUse is off", () => {
     expect(loaded.providers?.antigravity?.allowUnsupportedUse).toBeUndefined();
     expect(JSON.stringify(normalizeFileConfig(loaded))).not.toContain("allowUnsupportedUse");
     fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("refuses profile env overrides that select a non-host login environment while off, and keeps them once on", () => {
+    // A no-homePath profile still moves the login off the host through env:
+    // the gate names each refused key and never strips to fall back quietly.
+    for (const env of [{ HOME: "/ag/alt-home" }, { home: "/ag/alt-home" }, { USERPROFILE: "C:\\ag\\alt" }, { SSH_CONNECTION: ANTIGRAVITY_FILE_STORAGE_SSH_MARKER }] as Array<Record<string, string>>) {
+      const config: AntigravityProviderConfig = { accounts: [{ id: "default", label: "Default" }, { id: "alt", label: "Alt", env }] };
+      const refused = gated(() => resolveAntigravityAccount(config, "antigravity/alt", baseEnv));
+      expect(refused.code).toBe("ANTIGRAVITY_ACCOUNT_OFF");
+      expect(refused.message).toContain(SETTING);
+      expect(Object.keys(env).every((key) => refused.message.includes(key))).toBe(true);
+    }
+    // The account summary reports the same single reason.
+    const summary = summarizeProviderAccounts({
+      antigravity: { accounts: [{ id: "default" }, { id: "alt", env: { HOME: "/ag/alt-home" } }] },
+    } as unknown as ProvidersConfig);
+    expect(summary.find((row) => row.instanceId === "antigravity/alt")?.disabledReason ?? "").toContain("HOME");
+
+    // Once on, the same overrides do today's isolation exactly.
+    const on = resolveAntigravityAccount(
+      { allowUnsupportedUse: true, accounts: [{ id: "default" }, { id: "alt", env: { HOME: "/ag/alt-home", SSH_CONNECTION: ANTIGRAVITY_FILE_STORAGE_SSH_MARKER } }] },
+      "antigravity/alt",
+      baseEnv,
+    );
+    expect(on.env.HOME).toBe("/ag/alt-home");
+    expect(on.env.SSH_CONNECTION).toBe(ANTIGRAVITY_FILE_STORAGE_SSH_MARKER);
+  });
+
+  it("refuses --gemini-dir launch args while off — on the account and on the base config — and keeps them once on", () => {
+    for (const launchArgs of ["--gemini-dir /ag/alt/.gemini", "--gemini-dir=/ag/alt/.gemini", "--verbose --gemini-dir /ag/alt/.gemini"]) {
+      const config: AntigravityProviderConfig = { accounts: [{ id: "default", label: "Default" }, { id: "alt", label: "Alt", launchArgs }] };
+      const refused = gated(() => resolveAntigravityAccount(config, "antigravity/alt", baseEnv));
+      expect(refused.code).toBe("ANTIGRAVITY_ACCOUNT_OFF");
+      expect(refused.message).toContain(SETTING);
+      expect(refused.message).toContain("--gemini-dir");
+    }
+    // The host login's own launch config answers the same question: an
+    // argument that moves the host `agy` login off the host home is refused.
+    const host = gated(() => resolveAntigravityAccount({ launchArgs: "--gemini-dir /elsewhere/.gemini" }, "antigravity", baseEnv));
+    expect(host.code).toBe("ANTIGRAVITY_ACCOUNT_OFF");
+    // Once on, the same launch args do today's work.
+    const on = resolveAntigravityAccount(
+      { allowUnsupportedUse: true, accounts: [{ id: "default" }, { id: "alt", launchArgs: "--gemini-dir /ag/alt/.gemini" }] },
+      "antigravity/alt",
+      baseEnv,
+    );
+    expect(on.spec.args).toContain("--gemini-dir");
+    expect(on.spec.args).toContain("/ag/alt/.gemini");
+  });
+
+  it("checks the gate before the gated home's filesystem: the reason stands even when the configured binary does not exist", async () => {
+    const gatedHome = fs.mkdtempSync(path.join(os.tmpdir(), "moxen-agy-closed-"));
+    const binaryInGatedHome = path.join(gatedHome, "agy");
+    const statSpy = vi.spyOn(fs, "statSync");
+    try {
+      const account = { id: "alt", label: "Alt", homePath: gatedHome, binaryPath: binaryInGatedHome };
+      const config: AntigravityProviderConfig = { accounts: [{ id: "default" }, account] };
+      const summary = await antigravityProvider(config, baseEnv, process.cwd(), undefined, { account });
+      // Discovery never stats inside the gated home — not even to call the
+      // configured binary "not installed": the reason stands on its own.
+      for (const call of statSpy.mock.calls) {
+        expect(String(call[0])).not.toContain(gatedHome);
+      }
+      expect(summary.instanceId).toBe("antigravity/alt");
+      expect(summary.enabled).toBe(false);
+      expect(summary.status ?? "").toContain(SETTING);
+      expect(summary.status).not.toBe("not installed");
+      expect(summary.disabledReason ?? "").toContain(SETTING);
+      // Once on, the same account is discovered again as today.
+      const transport = new FakeAcpTransport({ authMethods: [{ id: "oauth", name: "Google login" }] });
+      const allowed = await antigravityProvider({ ...config, allowUnsupportedUse: true }, baseEnv, process.cwd(), transport, { account });
+      expect(allowed.enabled).toBe(true);
+    } finally {
+      statSpy.mockRestore();
+      fs.rmSync(gatedHome, { recursive: true, force: true });
+    }
   });
 });

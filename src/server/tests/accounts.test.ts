@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 
+import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_CONFIG } from "../../core/config.js";
@@ -358,6 +359,106 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
       antigravityConfig(configPath, true);
       await conn.query({ type: "usage.refresh" });
       expect(madeDrivers).toBe(1);
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it("refuses an Antigravity login that would sign in a non-host environment (env or --gemini-dir), and keeps them once on", async () => {
+    const dir = makeTempDir("moxen-agy-login-env-gate-");
+    const configPath = path.join(dir, "config.json");
+    const launched: Array<{ command: string; args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
+    const writeConfig = (account: Record<string, unknown>, allow: boolean): void => {
+      fs.writeFileSync(configPath, JSON.stringify({ providers: { antigravity: {
+        ...(allow ? { allowUnsupportedUse: true } : {}),
+        accounts: [{ id: "default", label: "Default", ...account }],
+      } } }));
+    };
+    const conn = new DirectConnection({
+      storeRoot: path.join(dir, "store"),
+      configPath,
+      builtinMcpServers: null,
+      providerAccountLoginDeps: {
+        urlWaitMs: 0,
+        ensureDir: () => {},
+        spawnChild: (command, args, options) => {
+          launched.push({ command, args, env: options.env });
+          const child = new EventEmitter() as unknown as import("node:child_process").ChildProcess;
+          (child as unknown as { stdout: EventEmitter }).stdout = new EventEmitter();
+          (child as unknown as { stderr: EventEmitter }).stderr = new EventEmitter();
+          (child as unknown as { stdin: unknown }).stdin = {
+            write: (_data: string, _enc: string, cb: (err?: Error | null) => void) => cb(null),
+          };
+          return child;
+        },
+      },
+    });
+    try {
+      // Environment overrides select a non-host login: refused while off.
+      writeConfig({ env: { HOME: "/ag/elsewhere" } }, false);
+      await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" }))
+        .rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF", message: expect.stringContaining("HOME") });
+      // A --gemini-dir launch arg does too.
+      writeConfig({ launchArgs: "--gemini-dir=/ag/elsewhere/.gemini" }, false);
+      await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" }))
+        .rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF", message: expect.stringContaining("--gemini-dir") });
+      expect(launched).toEqual([]);
+
+      // Once on, the same login keeps today's environment and arguments.
+      writeConfig({ env: { HOME: "/ag/elsewhere" }, launchArgs: "--gemini-dir=/ag/elsewhere/.gemini --verbose" }, true);
+      const allowed = await conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" });
+      expect(allowed.homePath).toBeNull();
+      expect(launched).toHaveLength(1);
+      expect(launched[0]!.command).toBe("agy");
+      expect(launched[0]!.env.HOME).toBe("/ag/elsewhere");
+      expect(launched[0]!.args).toContain("--gemini-dir=/ag/elsewhere/.gemini");
+      await conn.dispatch({ type: "provider.account.login.cancel", sessionId: allowed.sessionId });
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it("turning the setting off without a restart revokes the isolated driver, its probes, and its stored usage", async () => {
+    const dir = makeTempDir("moxen-agy-usage-revoke-");
+    const configPath = path.join(dir, "config.json");
+    antigravityConfig(configPath, true); // acquire while on
+    let refreshCalls = 0;
+    let stops = 0;
+    const driver = {
+      refreshUsage: async () => {
+        refreshCalls += 1;
+        return {
+          key: "antigravity/alt",
+          windows: [{ id: "weekly", label: "Weekly", usedPercent: 40, resetsAt: new Date(Date.now() + 86_400_000).toISOString() }],
+          credits: 5,
+        };
+      },
+      stopAll: () => {
+        stops += 1;
+        return Effect.succeed(undefined);
+      },
+    } as unknown as TurnDriver;
+    const conn = new DirectConnection({
+      storeRoot: path.join(dir, "store"),
+      configPath,
+      builtinMcpServers: null,
+      drivers: { antigravity: () => driver } as never,
+    });
+    try {
+      const on = await conn.query({ type: "usage.refresh" });
+      expect(refreshCalls).toBe(1);
+      expect(on.providers).toHaveProperty("antigravity/alt");
+
+      // The user opts out, without restarting the server.
+      antigravityConfig(configPath, false);
+      const off = await conn.query({ type: "usage.refresh" });
+      // The owned isolated driver is neither probed nor served again...
+      expect(refreshCalls).toBe(1);
+      expect(off.providers).not.toHaveProperty("antigravity/alt");
+      const limits = await conn.query({ type: "usage.limits" });
+      expect(limits.providers).not.toHaveProperty("antigravity/alt");
+      // ...and it was revoked, so no live isolated session keeps running.
+      expect(stops).toBe(1);
     } finally {
       await conn.close();
     }

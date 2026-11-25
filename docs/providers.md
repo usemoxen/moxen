@@ -63,9 +63,17 @@ negotiates any other protocol version is refused loudly
   Antigravity account (`antigravity`, `antigravity/<id>`, legacy `agy`) before
   a thread or worktree is created, holds automatic prompts on Antigravity
   threads (task notices, agent-queued messages, continues after a usage
-  limit, automatic hand-offs) in the work queue and notice batch instead of
-  starting them, and never signs in an account with its own isolated home
-  folder. They are delivered with your next message, or when you turn the
+  limit, usage-protection wrap-ups and recoveries, Moxen's own compaction
+  prompts and their post-compaction resume, automatic hand-offs) in the work
+  queue and notice batch instead of starting them, and never signs in an
+  account with its own isolated home folder. A launch or login input that
+  moves the login off the host environment — an account `env` override of
+  `HOME`, `USERPROFILE`, `SSH_CONNECTION` or the home/profile/config-dir
+  variables, or a `--gemini-dir` launch argument — is refused with
+  `ANTIGRAVITY_ACCOUNT_OFF`, never silently stripped down to the host login.
+  Stored usage and credits of a gated account are not served, and turning
+  the setting off stops that account's live driver and sessions without a
+  restart. They are delivered with your next message, or when you turn the
   setting on. What you type, queue, schedule or click always runs. Turning it
   on is your choice: Google does not support delegation, automatic prompts or
   multiple accounts on consumer plans and may suspend the Antigravity account,
@@ -78,9 +86,12 @@ negotiates any other protocol version is refused loudly
   instead of the OS keychain. While `providers.antigravity.allowUnsupportedUse`
   is off (the default), Moxen runs at most one Antigravity account: the first
   configured without a `homePath`, which shares the host `agy` login with its
-  environment untouched. Every account with a `homePath`, and every account
+  environment untouched. Every account with a `homePath` — or whose own `env`
+  or launch args move its login off the host environment — and every account
   beyond that one, is shown as disabled with the reason
-  (`moxen providers accounts list`, the settings pages), is never launched,
+  (`moxen providers accounts list`, the settings pages; the provider catalog
+  reports the reason before so much as checking whether `agy` is installed in
+  that folder), is never launched,
   probed for usage or credits, or routed to, and a request that targets it
   fails with `ANTIGRAVITY_ACCOUNT_OFF`, naming the setting and how to fix it:
   remove the account's `homePath`, or turn the setting on. Your config is

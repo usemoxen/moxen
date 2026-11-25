@@ -1,7 +1,7 @@
 import { CliError } from "../errors.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig } from "../types.js";
 import { usageKeyForInstance, usageSignal, usageWindowsForModel } from "../usage/limits.js";
-import type { StoredThread, StoredTurn } from "./types.js";
+import type { MessageOrigin, StoredMessage, StoredThread, StoredTurn } from "./types.js";
 
 export const QUEUE_RESET_GRACE_MS = 5000;
 export const QUEUE_ADMISSION_LOCK = "\0queue-admission";
@@ -148,7 +148,51 @@ function entryPending(rows: readonly QueueRow[], threadId: string, turnId: strin
   return !target || target.status === "queued" || target.status === "running";
 }
 
-export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly QueueRow[], config: CliConfig, now = Date.now()): { blocked: string[]; latched: number[]; conditions: QueueCondition[] } {
+/**
+ * The ledger key one recovered turn origin lives under (`threadId`, `turnId`).
+ */
+function turnOriginKey(threadId: string, turnId: string): string {
+  return `${threadId}\0${turnId}`;
+}
+
+/**
+ * Turn origins recovered from the message ledger, keyed as above: a turn
+ * written before the turn row carried an origin has it only on its message,
+ * and an absent turn origin there never means "the user wrote it". An entry
+ * absent from the map means "not loaded", not "human" — recovery is how the
+ * record is completed, and asking for an origin that was never loaded
+ * answers nothing.
+ */
+export type TurnOrigins = ReadonlyMap<string, MessageOrigin | undefined>;
+
+/**
+ * Load the message-ledger origins for the Antigravity turns whose turn row
+ * carries none: while automatic prompts are held (the off-by-default
+ * `providers.antigravity.allowUnsupportedUse`) admission must be able to
+ * tell an automatic turn from a user turn even for rows written before the
+ * turn kept an origin. Nothing is loaded while the setting is on (no gate
+ * consults it) or for turns that already say.
+ */
+export async function loadTurnOrigins(
+  store: { readMessages(threadId: string): Promise<readonly StoredMessage[]> },
+  rows: readonly QueueRow[],
+  config: CliConfig,
+): Promise<TurnOrigins> {
+  const out = new Map<string, MessageOrigin | undefined>();
+  if (antigravityUnsupportedUseAllowed(config)) return out;
+  for (const row of rows) {
+    const without = row.turns.filter((turn) => turn.origin === undefined
+      && driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) === "antigravity");
+    if (without.length === 0) continue;
+    const messages = await store.readMessages(row.thread.id).catch(() => [] as readonly StoredMessage[]);
+    for (const turn of without) {
+      out.set(turnOriginKey(row.thread.id, turn.id), messages.find((message) => message.turnId === turn.id && message.origin !== undefined)?.origin);
+    }
+  }
+  return out;
+}
+
+export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly QueueRow[], config: CliConfig, now = Date.now(), origins?: TurnOrigins): { blocked: string[]; latched: number[]; conditions: QueueCondition[] } {
   const policy = turn.queue;
   const blocked: string[] = [];
   const latched = [...(policy?.latched ?? [])];
@@ -165,19 +209,29 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   if (policy?.automatic || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") blocked.push(...automaticUsageBlock(provider, config, now, model));
   else if (providerExhausted(provider, now, model)) blocked.push(`${provider}: usage exhausted`);
   // Antigravity with delegation off starts no automatic prompt on its own:
-  // the entry waits for the user's next message (a user turn starting after
-  // it was queued releases it, as ending a usage hold does) or for the
+  // the entry waits for a genuine fresh user action (a user turn authored
+  // after it was queued releases it, as ending a usage hold does) or for the
   // setting turning on. Task notices are held in their batch file upstream
-  // and ride the user's send, so they are not this path.
+  // and ride the user's send, so they are not this path. Provenance comes
+  // from the turn row, made whole with the message ledger when the turn row
+  // predates its own origin: an absent turn origin is never read as human.
+  const origin = turn.origin ?? origins?.get(turnOriginKey(row.thread.id, turn.id));
   const automaticTurn = policy?.automatic === true || policy?.wakeUp === true
     || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold"
-    || (turn.origin !== undefined && turn.origin !== "task-notification");
+    || (origin !== undefined && origin !== "task-notification");
   if (automaticTurn && driverKindOfInstance(selection.instanceId) === "antigravity" && !antigravityUnsupportedUseAllowed(config)) {
-    const userResumed = row.turns.some((other) => other.id !== turn.id && other.origin === undefined
+    // Fresh consent is a manual user turn authored after this entry was
+    // queued, dated by when the user submitted it (`createdAt`), never by
+    // when its turn happened to start: a scheduled message that fires late
+    // does not authorize work queued behind its timer, and a scheduled or
+    // automatic turn is not consent at all.
+    const userResumed = row.turns.some((other) => other.id !== turn.id
+      && (other.origin ?? origins?.get(turnOriginKey(row.thread.id, other.id))) === undefined
       && other.queue?.automatic !== true && other.queue?.wakeUp !== true
+      && !other.scheduledFor
       && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"
       && (other.status === "running" || other.status === "completed")
-      && Date.parse(other.startedAt ?? other.createdAt) >= Date.parse(turn.createdAt));
+      && Date.parse(other.createdAt) >= Date.parse(turn.createdAt));
     if (!userResumed) blocked.push("Antigravity automatic prompts are held: turn on providers.antigravity.allowUnsupportedUse");
   }
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {

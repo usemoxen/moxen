@@ -7,14 +7,20 @@
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { Effect, Queue, Stream } from "effect";
+import { describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../errors.js";
 import { testHarness } from "../../testing/harness.js";
 import { settleRuns } from "../../testing/turns.js";
 import { driverKindOfInstance } from "../../types.js";
+import type { ProviderRuntimeEvent } from "../../providers/spi.js";
 import type { TurnDriver } from "../execute.js";
+import { COMPACT_PROMPT, COMPACTED_CONTINUE_PROMPT } from "../longthreads.js";
+import { parseQueuePolicy } from "../queue.js";
 import {
+  actOnLongThread,
+  compactMidTurn,
   continueOwnThread,
   continueThread,
   delegate,
@@ -27,7 +33,7 @@ import {
   startTurn,
   type OperationContext,
 } from "../operations.js";
-import { completeTurn, createThread, sendTurn } from "../threads.js";
+import { completeTurn, createThread, interruptTurn, sendTurn } from "../threads.js";
 
 async function world() {
   const w = await testHarness();
@@ -211,5 +217,201 @@ describe("Antigravity automatic prompts held while off", () => {
     await runWorkQueue(w.ctx);
     await settleRuns();
     expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turnId)?.status).toBe("completed");
+  });
+});
+
+describe("Antigravity usage recovery and compaction held while off", () => {
+  /** A context reading past every compaction line, appended as the driver reports it. */
+  async function longReading(w: Awaited<ReturnType<typeof world>>, threadId: string, turnId: string, usedTokens: number): Promise<void> {
+    await w.store.appendLedger(threadId, "activity", {
+      id: w.store.newId(),
+      threadId,
+      turnId,
+      kind: "context-window.updated",
+      summary: `${usedTokens} / 200000 tokens in context`,
+      payload: { usedTokens, maxTokens: 200_000 },
+      createdAt: w.store.nowIso(),
+    });
+  }
+
+  /** Turn Moxen's own compaction on for Antigravity (the gate itself stays off unless turned on). */
+  const compactAuto = (w: Awaited<ReturnType<typeof world>>): void => {
+    w.config.providers = { ...w.config.providers, antigravity: { ...w.config.providers?.antigravity, compaction: "auto" } };
+  };
+
+  it("holds a persisted usage-protection recovery instead of starting it while off", async () => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    // The recovery the protection coordinator resumes from its checkpoint
+    // (protection.ts): a usageControl continue, marked at its source.
+    const recovery = await sendTurn(w.store, thread.id, {
+      prompt: "The usage allowance has reset. Resume the unfinished task from your wrap-up.",
+      origin: "usage-continue",
+      usageControl: true,
+    }, w.config);
+    expect(recovery.turn.status).toBe("queued");
+    expect((await w.store.readMessages(thread.id)).find((message) => message.turnId === recovery.turn.id)?.origin).toBe("usage-continue");
+    // The setting on lets the same recovery run, as today.
+    w.allow(true);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === recovery.turn.id)?.status).toBe("completed");
+  });
+
+  it("holds the automatic /compact of a long Antigravity thread while off, instead of starting it", async () => {
+    const w = await world();
+    compactAuto(w);
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    const { turn } = await sendTurn(w.store, thread.id, { prompt: "Read everything." });
+    await longReading(w, thread.id, turn.id, 170_000);
+    await completeTurn(w.store, thread.id, turn.id, { text: "Done." });
+    expect(await actOnLongThread(w.ctx, thread.id)).toEqual({ kind: "compact", reason: "auto" });
+    // The compaction prompt Moxen authored never starts: it is held as a
+    // wake-up for the user's next message, like any automatic prompt.
+    const compact = (await w.store.readTurns(thread.id)).find((t) => t.origin === "compaction");
+    expect(compact?.status).toBe("queued");
+    expect((await w.store.readTurns(thread.id)).some((t) => t.status === "running")).toBe(false);
+    w.allow(true);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === compact?.id)?.status).not.toBe("queued");
+  });
+
+  /**
+   * A driver whose "Do a long job." turn never ends until aborted: an
+   * earlier turn settles normally (so the thread has a reply), the long one
+   * stalls, and any later turn (a /compact) completes once released.
+   */
+  function longTurnDriver(prompts: string[], hooks: { interrupt?: () => void; release?: (() => void)[] } = {}) {
+    const events = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+    const promptOf = new Map<string, string>();
+    let turns = 0;
+    let usedTokens = 60_000;
+    const setUsedTokens = (tokens: number): void => {
+      usedTokens = tokens;
+    };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input: { threadId: string; prompt: string }) =>
+        Effect.sync(() => {
+          prompts.push(input.prompt);
+          turns += 1;
+          const turnId = `driver-turn-${turns}`;
+          promptOf.set(turnId, input.prompt);
+          return { threadId: input.threadId, turnId };
+        }),
+      interruptTurn: () => {
+        hooks.interrupt?.();
+        return Effect.void;
+      },
+      awaitTurn: (async (_threadId: string, turnId: string, signal?: AbortSignal) => {
+        const prompt = promptOf.get(turnId) ?? "";
+        if (prompt === "Do a long job.") {
+          await new Promise<never>((_, reject) => {
+            const abort = () => reject(new CliError("TURN_ABORTED", "stopped", {}));
+            if (signal?.aborted === true) abort();
+            else signal?.addEventListener("abort", abort, { once: true });
+          });
+        }
+        if (prompt.includes("/compact") && hooks.release) await new Promise<void>((resolve) => hooks.release!.push(resolve));
+        return { status: "completed", text: "ok", usage: { input: 1, cacheRead: 0, cacheCreate: 0, output: 1, thinking: 0 }, error: null } as never;
+      }) as never,
+      resumeCursor: () => "cursor",
+      contextUsage: async () => ({ usedTokens, maxTokens: 200_000, costUsd: null }) as never,
+      streamEvents: Stream.fromQueue(events),
+    } as unknown as TurnDriver;
+    const report = (threadId: string) => void Effect.runSync(Queue.offer(events, { type: "token-usage.updated", provider: "antigravity", threadId, usage: {} } as never));
+    return { driver, report, setUsedTokens };
+  }
+
+  /** The harness context with Moxen compaction on for Antigravity, and a thread with one settled reply. */
+  async function compactingWorld(driver: TurnDriver, allow: boolean) {
+    const w = await testHarness({ drivers: { antigravity: () => driver, codex: () => driver } });
+    const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: () => driver };
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { compaction: "auto", ...(allow ? { allowUnsupportedUse: true } : {}) } };
+    const thread = await createThread(w.store, {
+      projectId: "p",
+      title: "Long job",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+    });
+    // A settled earlier turn, so the thread has a reply for the plan to see.
+    await startTurn(ctx, { threadId: thread.id, prompt: "Earlier work.", onEvent: () => undefined });
+    await settleRuns();
+    return { w, ctx, thread };
+  }
+
+  it("does not interrupt a running Antigravity turn for a compaction whose follow-up could not run", async () => {
+    const prompts: string[] = [];
+    let interrupts = 0;
+    const { driver } = longTurnDriver(prompts, { interrupt: () => { interrupts += 1; } });
+    const { w, ctx, thread } = await compactingWorld(driver, false);
+    const started = await startTurn(ctx, { threadId: thread.id, prompt: "Do a long job.", onEvent: () => undefined });
+    await vi.waitFor(() => expect(prompts).toContain("Do a long job."), { timeout: 10_000 });
+    // A running turn past the line is left running: the /compact and its
+    // follow-up are automatic prompts the off gate holds.
+    expect(await compactMidTurn(ctx, thread.id, { usedTokens: 170_000, maxTokens: 200_000 } as never)).toBe(false);
+    expect(interrupts).toBe(0);
+    expect((await w.store.readTurns(thread.id)).some((turn) => turn.id === started.turn.id && turn.status === "running")).toBe(true);
+    await interruptTurn(w.store, thread.id);
+    await settleRuns();
+  });
+
+  it("holds the post-compaction continuation when the setting turns off mid-flight", async () => {
+    const prompts: string[] = [];
+    const release: (() => void)[] = [];
+    const { driver, report, setUsedTokens } = longTurnDriver(prompts, { release });
+    const { w, ctx, thread } = await compactingWorld(driver, true);
+    await startTurn(ctx, { threadId: thread.id, prompt: "Do a long job.", onEvent: () => undefined });
+    await vi.waitFor(() => expect(prompts).toContain("Do a long job."), { timeout: 10_000 });
+    // While the setting is on, the mid-turn compaction runs as today: the
+    // turn is stopped, and its /compact prompt goes out.
+    setUsedTokens(170_000);
+    report(thread.id);
+    await vi.waitFor(() => expect(prompts.some((prompt) => prompt.includes(COMPACT_PROMPT))).toBe(true), { timeout: 10_000 });
+    // The user opts out while the compaction turn is still in flight.
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { compaction: "auto" } };
+    for (const resolve of release.splice(0)) resolve();
+    await settleRuns();
+    // The follow-up resume is an automatic prompt too: it is held, and the
+    // driver never sees it.
+    expect(prompts.some((prompt) => prompt.includes(COMPACTED_CONTINUE_PROMPT))).toBe(false);
+    const turns = await w.store.readTurns(thread.id);
+    expect(turns.some((turn) => turn.origin === "compaction" && turn.status === "queued")).toBe(true);
+  });
+});
+
+describe("queued Antigravity model handoffs while off", () => {
+  it("completes a user-queued model handoff on the stored summary instead of stalling, and holds an automatic one untouched", async () => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    // The user queued the handoff and chose model summarization.
+    const userHandoff = await sendTurn(w.store, thread.id, {
+      prompt: "Do the work",
+      queue: { ...parseQueuePolicy({ conditions: [], continuation: "model" }), requestId: "user-handoff" },
+    }, w.config);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const prepared = (await w.store.readTurns(thread.id)).find((t) => t.id === userHandoff.turn.id);
+    expect(prepared?.status).toBe("completed");
+    expect(prepared?.handoff?.fallback).toBe(true);
+    expect((await w.store.readTurns(thread.id)).some((t) => t.origin === "handoff-summary")).toBe(false);
+    expect(await w.store.readThreadRecord(prepared?.handoff?.destinationThreadId ?? "none")).not.toBeNull();
+
+    // An app-authored handoff on the same gate is held before preparation
+    // touches anything: no summary prompt, no destination, no handoff row.
+    const other = await w.make("antigravity", "gemini-4-neon");
+    const autoHandoff = await sendTurn(w.store, other.id, {
+      prompt: "Keep going",
+      origin: "agent-message",
+      queue: { ...parseQueuePolicy({ conditions: [], continuation: "model", automatic: true }), requestId: "auto-handoff" },
+    }, w.config);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const held = (await w.store.readTurns(other.id)).find((t) => t.id === autoHandoff.turn.id);
+    expect(held?.status).toBe("queued");
+    expect(held?.handoff).toBeUndefined();
+    expect((await w.store.readTurns(other.id)).some((t) => t.origin === "handoff-summary")).toBe(false);
   });
 });
