@@ -810,7 +810,7 @@ impl Render for FinancesApp {
             .bg(color("ground"))
             .font_family(theme::FONT)
             .text_color(color("ink"))
-            .child(title_bar::render(self, cx))
+            .child(title_bar::render(self, window, cx))
             .when_some(feedback, |s, bar| s.child(bar))
             .child(
                 div()

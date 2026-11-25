@@ -422,9 +422,9 @@ pub fn render(
                                 .items_center()
                                 .rounded_full()
                                 .bg(color("sunk"))
-                                .font_family(theme::MONO)
-                                .text_size(px(10.5))
-                                .line_height(px(14.))
+                                .font_family(theme::FONT)
+                                .text_size(px(12.))
+                                .line_height(px(17.))
                                 .text_color(color("ink-2"))
                                 .child(fill(
                                     "calendar.count",
@@ -455,9 +455,9 @@ pub fn render(
                 .child(legend_dot("broken", "calendar.legend.expense"))
                 .child(
                     div()
-                        .font_family(theme::MONO)
-                        .text_size(px(10.5))
-                        .line_height(px(14.))
+                        .font_family(theme::FONT)
+                        .text_size(px(12.))
+                        .line_height(px(17.))
                         .text_color(color("ink-2"))
                         .child(message("calendar.legend.balance")),
                 ),
@@ -656,9 +656,9 @@ pub fn render(
             .child(day_panel)
             .into_any_element(),
         div()
-            .font_family(theme::MONO)
-            .text_size(px(11.))
-            .line_height(px(15.))
+            .font_family(theme::FONT)
+            .text_size(px(12.))
+            .line_height(px(17.))
             .text_color(color("ink-2"))
             .child(message("calendar.footer"))
             .into_any_element(),
@@ -675,9 +675,9 @@ fn legend_dot(token: &'static str, key: &'static str) -> Div {
         .child(div().size(px(6.)).rounded_full().bg(color(token)))
         .child(
             div()
-                .font_family(theme::MONO)
-                .text_size(px(10.5))
-                .line_height(px(14.))
+                .font_family(theme::FONT)
+                .text_size(px(12.))
+                .line_height(px(17.))
                 .text_color(color("ink-2"))
                 .child(message(key)),
         )

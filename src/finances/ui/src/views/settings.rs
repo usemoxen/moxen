@@ -17,7 +17,7 @@ use crate::kit::{self, Control};
 use crate::language::{Language, fill, message};
 use crate::shell::FinancesApp;
 use crate::theme::{self, ThemeMode, TypeScale, color};
-use crate::views::{card, icon_button, scroll_page};
+use crate::views::{icon_button, scroll_page};
 use gpui::{prelude::*, *};
 
 fn setting_row(label: &str, description: &str, control: impl IntoElement) -> Div {
@@ -26,8 +26,6 @@ fn setting_row(label: &str, description: &str, control: impl IntoElement) -> Div
         .items_center()
         .gap(px(16.))
         .py(px(12.))
-        .border_b_1()
-        .border_color(color("rule"))
         .child(
             div()
                 .flex_1()
@@ -65,7 +63,12 @@ fn section(title_key: &'static str, children: Vec<AnyElement>) -> Div {
                 .bg(color("raised"))
                 .rounded(px(theme::radius("radius-md")))
                 .px(px(16.))
-                .children(children),
+                // A rule between two rows, never after the last one.
+                .children(children.into_iter().enumerate().map(|(i, child)| {
+                    div()
+                        .when(i > 0, |s| s.border_t_1().border_color(color("rule")))
+                        .child(child)
+                })),
         )
 }
 
@@ -184,7 +187,7 @@ fn connection_block(
                 .items_center()
                 .gap(px(12.))
                 .py(px(8.))
-                .border_b_1()
+                .border_t_1()
                 .border_color(color("rule"))
                 .child(
                     div()
@@ -203,9 +206,9 @@ fn connection_block(
                         )
                         .child(
                             div()
-                                .font_family(theme::MONO)
-                                .text_size(px(11.))
-                                .line_height(px(14.))
+                                .font_family(theme::FONT)
+                                .text_size(px(12.))
+                                .line_height(px(17.))
                                 .text_color(color("ink-2"))
                                 .child(message(match account.account_id {
                                     Some(_) => "settings.bank.account",
@@ -298,8 +301,6 @@ fn connection_block(
         .flex_col()
         .gap(px(6.))
         .py(px(12.))
-        .border_b_1()
-        .border_color(color("rule"))
         .child(
             div()
                 .flex()
@@ -326,9 +327,9 @@ fn connection_block(
                         )
                         .child(
                             div()
-                                .font_family(theme::MONO)
-                                .text_size(px(11.))
-                                .line_height(px(14.))
+                                .font_family(theme::FONT)
+                                .text_size(px(12.))
+                                .line_height(px(17.))
                                 .text_color(color("ink-2"))
                                 .child(format!("{last_sync} · {imported}")),
                         ),
@@ -361,8 +362,6 @@ fn account_row(app: &FinancesApp, index: usize, cx: &mut Context<FinancesApp>) -
         .items_center()
         .gap(px(12.))
         .py(px(10.))
-        .border_b_1()
-        .border_color(color("rule"))
         .when(archived, |s| s.opacity(0.55))
         .child(
             div()
@@ -392,8 +391,8 @@ fn account_row(app: &FinancesApp, index: usize, cx: &mut Context<FinancesApp>) -
                                     .py(px(1.))
                                     .rounded_full()
                                     .bg(color("sunk"))
-                                    .font_family(theme::MONO)
-                                    .text_size(px(10.))
+                                    .font_family(theme::FONT)
+                                    .text_size(px(11.5))
                                     .text_color(color("ink-2"))
                                     .child(message("accounts.archived")),
                             )
@@ -401,9 +400,9 @@ fn account_row(app: &FinancesApp, index: usize, cx: &mut Context<FinancesApp>) -
                 )
                 .child(
                     div()
-                        .font_family(theme::MONO)
-                        .text_size(px(11.))
-                        .line_height(px(14.))
+                        .font_family(theme::FONT)
+                        .text_size(px(12.))
+                        .line_height(px(17.))
                         .text_color(color("ink-2"))
                         .child(format!(
                             "{} · {}",
@@ -559,9 +558,9 @@ fn bank_section(
         )
         .child(
             div()
-                .font_family(theme::MONO)
-                .text_size(px(11.))
-                .line_height(px(14.))
+                .font_family(theme::FONT)
+                .text_size(px(12.))
+                .line_height(px(17.))
                 .text_color(color("ink-2"))
                 .child(key_state),
         );
@@ -650,18 +649,18 @@ fn bank_section(
                     |this, cx| this.link_bank(cx),
                 )),
         )
-        .child(
-            div()
-                .font_family(theme::MONO)
-                .text_size(px(11.))
-                .line_height(px(14.))
-                .text_color(color("ink-2"))
-                .child(message(if can_link {
-                    "settings.bank.link.description"
-                } else {
-                    "settings.bank.link.needs-application"
-                })),
-        );
+        // The row's description already says what linking does; this line is
+        // only for what is missing.
+        .when(!can_link, |s| {
+            s.child(
+                div()
+                    .font_family(theme::FONT)
+                    .text_size(px(12.))
+                    .line_height(px(17.))
+                    .text_color(color("ink-2"))
+                    .child(message("settings.bank.link.needs-application")),
+            )
+        });
     children.push(
         setting_row(
             message("settings.bank.link"),
@@ -841,7 +840,7 @@ pub fn render(
             .flex()
             .flex_row()
             .gap(px(8.))
-            .pt(px(4.))
+            .py(px(10.))
             .child(row_button(
                 ("account-new", 0usize),
                 "accounts.new",
@@ -917,7 +916,12 @@ pub fn render(
             section("settings.section.data", data_children).into_any_element(),
             section("settings.section.bank", bank_children).into_any_element(),
             section("settings.section.accounts", account_children).into_any_element(),
-            card().child(message("settings.hint")).into_any_element(),
+            div()
+                .text_size(px(12.5))
+                .line_height(px(18.))
+                .text_color(color("ink-2"))
+                .child(message("settings.hint"))
+                .into_any_element(),
         ],
     )
 }

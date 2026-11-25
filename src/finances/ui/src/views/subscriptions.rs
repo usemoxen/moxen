@@ -18,19 +18,23 @@ const LABELS: [&str; 8] = [
     "label-2", "label-6", "label-4", "label-3", "label-1", "label-5", "label-7", "label-8",
 ];
 
+/// The design system's `Chip`: a `rule` outline with a square dot in the
+/// status colour.
 fn status_chip(status: SubscriptionStatus) -> Div {
     div()
-        .h(px(20.))
-        .px(px(8.))
+        .h(px(24.))
+        .px(px(9.))
         .flex()
+        .flex_shrink_0()
         .items_center()
-        .rounded_full()
-        .bg(color(status.token()))
-        .font_family(theme::MONO)
-        .text_size(px(10.5))
-        .line_height(px(14.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(color("on-ink"))
+        .gap(px(6.))
+        .rounded(px(theme::radius("radius-sm")))
+        .border(px(theme::px_token("stroke", "stroke-rule")))
+        .border_color(color("rule"))
+        .text_size(px(12.5))
+        .line_height(px(16.))
+        .text_color(color("ink"))
+        .child(div().size(px(8.)).rounded(px(2.)).bg(color(status.token())))
         .child(message(status.key()))
 }
 
@@ -43,9 +47,10 @@ fn list_row(
     let id = sub.id.clone();
     div()
         .id(("sub", index))
-        .mx(px(8.))
-        .h(px(56.))
-        .px(px(10.))
+        .mx(px(12.))
+        .mb(px(2.))
+        .h(px(58.))
+        .px(px(12.))
         .flex()
         .items_center()
         .gap(px(10.))
@@ -79,9 +84,9 @@ fn list_row(
                 .child(
                     div()
                         .truncate()
-                        .font_family(theme::MONO)
-                        .text_size(px(11.5))
-                        .line_height(px(15.))
+                        .font_family(theme::FONT)
+                        .text_size(px(12.5))
+                        .line_height(px(18.))
                         .text_color(color("ink-2"))
                         .child(message(sub.status.key())),
                 ),
@@ -106,6 +111,8 @@ fn list_row(
 
 fn field(label: &str, value: String) -> Div {
     div()
+        .flex_1()
+        .min_w_0()
         .flex()
         .flex_col()
         .gap(px(4.))
@@ -113,9 +120,11 @@ fn field(label: &str, value: String) -> Div {
         .child(
             div()
                 .font_family(theme::MONO)
-                .text_size(px(13.))
-                .line_height(px(17.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(18.))
+                .line_height(px(24.))
                 .text_color(color("ink"))
+                .truncate()
                 .child(value),
         )
 }
@@ -131,8 +140,7 @@ fn action_button(
     on_click: impl Fn(&mut FinancesApp, &mut Context<FinancesApp>) + Clone + 'static,
 ) -> Stateful<Div> {
     if can_mutate {
-        kit::button(id, message(label_key).to_string())
-            .child(kit::icon(icon, "ink-2", 13.))
+        kit::icon_label_button(id, icon, message(label_key).to_string())
             .control(message(label_key))
             .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
     } else {
@@ -171,44 +179,53 @@ fn detail(
     div()
         .flex_1()
         .min_w_0()
+        .max_w(px(760.))
         .p(px(24.))
         .flex()
         .flex_col()
-        .gap(px(16.))
+        .gap(px(20.))
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap(px(10.))
+                .flex_col()
+                .gap(px(6.))
                 .child(
                     div()
-                        .size(px(10.))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .bg(color(LABELS[index % LABELS.len()])),
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .size(px(10.))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .bg(color(LABELS[index % LABELS.len()])),
+                        )
+                        .child(
+                            div()
+                                .type_scale("headline")
+                                .text_color(color("ink"))
+                                .child(sub.name.clone()),
+                        )
+                        .child(div().flex_1())
+                        .child(status_chip(sub.status)),
                 )
                 .child(
                     div()
-                        .type_scale("headline")
-                        .text_color(color("ink"))
-                        .child(sub.name.clone()),
-                )
-                .child(div().flex_1())
-                .child(status_chip(sub.status)),
-        )
-        .child(
-            div()
-                .text_size(px(13.5))
-                .line_height(px(18.))
-                .text_color(color("ink-2"))
-                .child(sub.description.get()),
+                        .text_size(px(13.5))
+                        .line_height(px(18.))
+                        .text_color(color("ink-2"))
+                        .child(sub.description.get()),
+                ),
         )
         .child(
             div()
                 .flex()
                 .flex_row()
-                .gap(px(24.))
-                .flex_wrap()
+                .gap(px(16.))
+                .p(px(16.))
+                .rounded(px(theme::radius("radius-md")))
+                .bg(color("raised"))
                 .child(field(
                     message("sub.price"),
                     match sub.price {
@@ -227,57 +244,67 @@ fn detail(
                         .unwrap_or_else(|| message("sub.next.none").to_string()),
                 )),
         )
-        .child(kit::caps(message("sub.actions")))
         .child(
             div()
                 .flex()
-                .flex_row()
-                .flex_wrap()
+                .flex_col()
                 .gap(px(8.))
-                .child(action_button(
-                    ("sub-primary", index),
-                    primary_icon,
-                    primary_key,
-                    can_mutate,
-                    cx,
-                    move |this, cx| this.subscription_action(&id, primary_action, cx),
-                ))
-                .when(
-                    sub.status == SubscriptionStatus::Active
-                        || sub.status == SubscriptionStatus::Paused,
-                    |s| {
-                        s.child(action_button(
-                            ("cancel", index),
-                            "action-x",
-                            "sub.action.cancel",
+                .child(kit::caps(message("sub.actions")))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(8.))
+                        .child(action_button(
+                            ("sub-primary", index),
+                            primary_icon,
+                            primary_key,
+                            can_mutate,
+                            cx,
+                            move |this, cx| this.subscription_action(&id, primary_action, cx),
+                        ))
+                        .when(
+                            sub.status == SubscriptionStatus::Active
+                                || sub.status == SubscriptionStatus::Paused,
+                            |s| {
+                                s.child(action_button(
+                                    ("cancel", index),
+                                    "action-x",
+                                    "sub.action.cancel",
+                                    can_mutate,
+                                    cx,
+                                    move |this, cx| {
+                                        this.subscription_action(
+                                            &cancel_id,
+                                            SubscriptionAction::Cancel,
+                                            cx,
+                                        )
+                                    },
+                                ))
+                            },
+                        )
+                        .child(action_button(
+                            ("edit", index),
+                            "action-edit",
+                            "sub.action.edit",
                             can_mutate,
                             cx,
                             move |this, cx| {
-                                this.subscription_action(&cancel_id, SubscriptionAction::Cancel, cx)
+                                dialog::open(this, Dialog::EditSubscription(edit_id.clone()), cx)
                             },
                         ))
-                    },
-                )
-                .child(action_button(
-                    ("edit", index),
-                    "action-edit",
-                    "sub.action.edit",
-                    can_mutate,
-                    cx,
-                    move |this, cx| {
-                        dialog::open(this, Dialog::EditSubscription(edit_id.clone()), cx)
-                    },
-                ))
-                .child(action_button(
-                    ("delete", index),
-                    "action-x",
-                    "sub.action.delete",
-                    can_mutate,
-                    cx,
-                    move |this, cx| {
-                        this.subscription_action(&delete_id, SubscriptionAction::Delete, cx)
-                    },
-                )),
+                        .child(action_button(
+                            ("delete", index),
+                            "action-x",
+                            "sub.action.delete",
+                            can_mutate,
+                            cx,
+                            move |this, cx| {
+                                this.subscription_action(&delete_id, SubscriptionAction::Delete, cx)
+                            },
+                        )),
+                ),
         )
 }
 
@@ -305,13 +332,16 @@ pub fn render(
         .position(|s| Some(s.id.as_str()) == selected_id.as_deref());
 
     let new_button = if can_mutate {
-        kit::button(("new-sub", 0usize), message("sub.new").to_string())
-            .child(kit::icon("plus", "ink-2", 13.))
-            .control(message("sub.new"))
-            .on_click(cx.listener(|this, _, _, cx| {
-                dialog::open(this, Dialog::NewSubscription, cx);
-            }))
-            .into_any_element()
+        kit::primary_button(
+            ("new-sub", 0usize),
+            Some("plus"),
+            message("sub.new").to_string(),
+        )
+        .primary_control(message("sub.new"))
+        .on_click(cx.listener(|this, _, _, cx| {
+            dialog::open(this, Dialog::NewSubscription, cx);
+        }))
+        .into_any_element()
     } else {
         disabled_action(("new-sub", 0usize), "plus", "sub.new").into_any_element()
     };
@@ -328,7 +358,7 @@ pub fn render(
                 .pb(px(16.))
                 .flex()
                 .flex_row()
-                .items_end()
+                .items_center()
                 .justify_between()
                 .gap(px(12.))
                 .child(
@@ -344,9 +374,9 @@ pub fn render(
                         )
                         .child(
                             div()
-                                .font_family(theme::MONO)
-                                .text_size(px(12.))
-                                .line_height(px(16.))
+                                .font_family(theme::FONT)
+                                .text_size(px(13.5))
+                                .line_height(px(19.))
                                 .text_color(color("ink-2"))
                                 .child(fill(
                                     "subscriptions.subtitle",
@@ -370,13 +400,13 @@ pub fn render(
                 .child(
                     div()
                         .id("sub-list")
-                        .w(px(380.))
+                        .w(px(340.))
                         .flex_shrink_0()
                         .h_full()
                         .border_r_1()
                         .border_color(color("rule"))
                         .overflow_y_scroll()
-                        .py(px(8.))
+                        .py(px(12.))
                         .when(subs.is_empty(), |s| {
                             s.child(
                                 div()

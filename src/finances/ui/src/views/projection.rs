@@ -95,9 +95,9 @@ fn event_row(event: &DayEvent, account: Currency, index: usize) -> Stateful<Div>
                 .child(
                     div()
                         .truncate()
-                        .font_family(theme::MONO)
-                        .text_size(px(10.5))
-                        .line_height(px(14.))
+                        .font_family(theme::FONT)
+                        .text_size(px(12.))
+                        .line_height(px(17.))
                         .text_color(color("ink-2"))
                         .child(format!(
                             "{} · {}",
@@ -206,9 +206,9 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                             .child(kit::caps(message("projection.period")))
                             .child(
                                 div()
-                                    .font_family(theme::MONO)
-                                    .text_size(px(11.5))
-                                    .line_height(px(15.))
+                                    .font_family(theme::FONT)
+                                    .text_size(px(12.5))
+                                    .line_height(px(18.))
                                     .text_color(color("ink-2"))
                                     .child(fill(
                                         "projection.period.range",
@@ -341,15 +341,12 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                                         .flex()
                                         .items_center()
                                         .gap(px(6.))
-                                        .child(
-                                            div()
-                                                .h(px(2.))
-                                                .w(px(14.))
-                                                .rounded_full()
-                                                .border_2()
-                                                .border_color(color("held"))
-                                                .border_dashed(),
-                                        )
+                                        // Two dashes, as the line is drawn.
+                                        .child(div().flex().gap(px(2.)).children(
+                                            (0..2).map(|_| {
+                                                div().h(px(2.)).w(px(6.)).bg(color("held"))
+                                            }),
+                                        ))
                                         .child(
                                             div()
                                                 .font_family(theme::MONO)
@@ -362,9 +359,11 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                     ),
             )
             .child(views::chart::series_chart(
+                &day_dates,
                 &values,
                 scenario_values.as_deref(),
                 selected_index,
+                account,
                 280.,
             ))
             .child(
@@ -378,9 +377,9 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                     .pt(px(10.))
                     .child(
                         div()
-                            .font_family(theme::MONO)
-                            .text_size(px(11.))
-                            .line_height(px(15.))
+                            .font_family(theme::FONT)
+                            .text_size(px(12.))
+                            .line_height(px(17.))
                             .text_color(color("ink-2"))
                             .child(message(if base.min_balance < 0 {
                                 "projection.footer.negative"
@@ -390,9 +389,9 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                     )
                     .child(
                         div()
-                            .font_family(theme::MONO)
-                            .text_size(px(11.))
-                            .line_height(px(15.))
+                            .font_family(theme::FONT)
+                            .text_size(px(12.))
+                            .line_height(px(17.))
                             .text_color(color("ink-2"))
                             .child(fill(
                                 "projection.totals",
@@ -433,15 +432,11 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         .text_size(px(11.5))
                         .line_height(px(15.))
                         .text_color(color(if is_selected { "ink" } else { "ink-2" }))
-                        .child(format!(
-                            "{} · {}",
-                            format::short_date(day.date),
-                            format::relative_day_label(day.date, today)
-                        )),
+                        .child(format::table_day(day.date, today)),
                 )
                 .child(
                     div()
-                        .w(px(76.))
+                        .w(px(72.))
                         .text_right()
                         .font_family(theme::MONO)
                         .text_size(px(11.5))
@@ -455,7 +450,7 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                 )
                 .child(
                     div()
-                        .w(px(76.))
+                        .w(px(72.))
                         .text_right()
                         .font_family(theme::MONO)
                         .text_size(px(11.5))
@@ -469,7 +464,7 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                 )
                 .child(
                     div()
-                        .w(px(96.))
+                        .w(px(88.))
                         .flex_shrink_0()
                         .text_right()
                         .font_family(theme::MONO)
@@ -590,26 +585,27 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
             div()
                 .flex()
                 .flex_row()
-                .gap(px(16.))
+                .gap(px(8.))
+                .px(px(10.))
                 .font_family(theme::MONO)
                 .text_size(px(10.5))
                 .text_color(color("ink-2"))
                 .child(div().flex_1().child(message("projection.table.date")))
                 .child(
                     div()
-                        .w(px(76.))
+                        .w(px(72.))
                         .text_right()
                         .child(message("projection.table.income")),
                 )
                 .child(
                     div()
-                        .w(px(76.))
+                        .w(px(72.))
                         .text_right()
                         .child(message("projection.table.expense")),
                 )
                 .child(
                     div()
-                        .w(px(96.))
+                        .w(px(88.))
                         .text_right()
                         .child(message("projection.table.balance")),
                 ),
