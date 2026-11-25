@@ -85,7 +85,16 @@ negotiates any other protocol version is refused loudly
   sends best-effort `session/close` on session teardown, adopts provider titles
   from `session_info_update` (`sessionTitle`), and refreshes cached agent
   profiles live when `providers.acp.agents` changes. For Antigravity, Moxen
-  wires mid-turn steering (`steerTurn` via concurrent `session/prompt`) and
+  wires mid-turn steering (`steerTurn` via concurrent `session/prompt`; the
+  main prompt's terminal outcome — success or error, with its usage and
+  carried instructions — is held while a sibling steer is pending and
+  reconciled by the last sibling to exit, whatever the order. A steer refused
+  before its acknowledgement window is handed back to the caller and the turn
+  keeps running on the main prompt, while any failure after acknowledgment
+  fails the turn and sends `session/cancel` exactly like a main prompt failure,
+  abandoning the surviving prompts so the next send drains them — bounded, so
+  a silent agent cannot hold the drain forever — and their trailing output
+  never leaks into the next turn) and
   `/compact` compaction (`session.notice: "compacted"`), merges local
   `.claude/skills` / `.agents/skills` with live `available_commands_update` in
   `skillInventory`, and computes estimated `contextBreakdown` from the live
@@ -102,8 +111,28 @@ negotiates any other protocol version is refused loudly
   5.5) carry an `(Antigravity)` suffix so they stay distinct from Claude Code's
   own models across every client.
 - **Context, token & plan usage**: `AcpDriver` consumes ACP `usage_update`
-  notifications for live context-window readings (`contextUsage`) and per-turn
-  `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
+  notifications for live context-window readings (`contextUsage`; its `cost` is
+  the session's cumulative cost per ACP v1. Each turn keeps the high-water mark
+  of the readings observed while it was open — a snapshot equal to or below the
+  baseline is never evidence of zero spend (the counter can lag a turn's own
+  final charge). The driver maintains an effective baseline in cumulative-
+  counter units, distinct from the booked turn-ledger sum: a reading with no
+  turn open raises it (and establishes an unknown one — a fresh session's
+  origin is zero, a resumed session's stays unknown until such a reading,
+  with post-resume prompt-result costs never establishing it; the first idle
+  reading initialises it to at least the result costs booked in the meantime,
+  never their sum, since the reading may already include those charges), and a
+  settled turn advances it to the counter reading it actually used, or by the
+  cost it booked when the counter was silent or lagging — so spend already
+  booked is never rebooked when the counter catches up, and unattributed
+  out-of-turn growth is never charged to an arbitrary turn. At settle, the turn's cost is
+  the in-turn counter delta above the baseline — the spec-defined cumulative
+  counter wins over the prompt result's vendor-specific cost field — or the
+  result cost when the counter did not move in-turn; a snapshot that never
+  moved leaves the cost undefined so token-based estimation applies, never a
+  reported $0 or an invented negative delta. The booked turn ledger totals
+  the counter's movement) and
+  per-turn `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
   Moxen also probes `agy --print /usage --output-format json` and
   `agy --print /credits --output-format json` (zero-turn local slash commands,
   no shell, no credential access) to report subscription quota windows and
@@ -141,7 +170,9 @@ negotiates any other protocol version is refused loudly
   `session/load` (treating Antigravity as HTTP-capable when `agy acp` omits
   `mcpCapabilities` from `initialize`, routing Antigravity's external
   non-`moxen` MCP servers through a compact per-session loopback lazy gateway
-  `moxen-mcp` with `search_tools` and `call_tool` so `agy`'s 20,000-token eager
+  `moxen-mcp` (loopback-only HTTP that validates `Origin` and `Host` as MCP
+  Streamable HTTP requires, plus a per-session bearer token) with
+  `search_tools` and `call_tool` so `agy`'s 20,000-token eager
   schema budget never evicts tools while also honoring `disabledTools`,
   restoring host `HOME`/`USERPROFILE` and clearing the synthetic
   `SSH_CONNECTION` marker on direct stdio MCP children under isolated

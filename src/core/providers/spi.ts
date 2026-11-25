@@ -594,10 +594,13 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
 
   /**
    * Tokens the currently running turn has spent so far, before it settles into
-   * the thread store. Null when no turn is running or the driver has not
+   * the thread store — or, with a driver turn id, that specific turn's usage
+   * (its settled outcome usage once it terminated), so an interrupted run can
+   * ask for its own turn and never whatever turn the session happens to have
+   * open (LOCAL-009). Null when the turn is unknown or the driver has not
    * observed any usage for it yet.
    */
-  readonly liveTurnUsage?: (threadId: ThreadId) => TokenUsageDelta | null;
+  readonly liveTurnUsage?: (threadId: ThreadId, driverTurnId?: ThreadId) => TokenUsageDelta | null;
 
   /**
    * Hand the running turn more input without interrupting it: the model

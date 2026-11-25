@@ -88,17 +88,44 @@ type PendingRequest = {
   readonly resolve: (value: unknown) => void;
   readonly reject: (cause: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
-  /** Set for idle-timeout requests: restarts the timer whenever the peer sends anything. */
+  /** Set for idle-timeout requests: restarts the timer on attributable peer messages. */
   readonly restart?: () => void;
+  /** Hard-deadline timer for idle requests; restarts never extend it. */
+  deadlineTimer?: ReturnType<typeof setTimeout>;
+  /** Caller-supplied test for which received messages count as activity for this request. */
+  readonly activityMatch?: (message: Record<string, unknown>) => boolean;
 };
+
+function clearPendingTimers(pending: PendingRequest): void {
+  clearTimeout(pending.timer);
+  if (pending.deadlineTimer !== undefined) clearTimeout(pending.deadlineTimer);
+}
+
+/** setTimeout clamps anything above 2^31-1 ms to 1 ms, so clamp before arming. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 export interface JsonRpcRequestOptions {
   /**
-   * Treat `timeoutMs` as an idle limit instead of a wall-clock one: any line
-   * received from the peer (notification, server request, other response)
-   * restarts the timer, so only a silent peer times out.
+   * Treat `timeoutMs` as an idle limit instead of a wall-clock one: a valid
+   * JSON-RPC message from the peer restarts the timer, so only a silent peer
+   * times out. Malformed or non-JSON-RPC lines (a CLI printing to stdout,
+   * say) never restart it.
    */
   readonly idle?: boolean;
+  /**
+   * Hard wall-clock cap for an idle request: attributable activity restarts
+   * the idle timer but never extends this deadline. Absent: the idle timer
+   * alone bounds the request.
+   */
+  readonly deadlineMs?: number;
+  /**
+   * Which valid JSON-RPC messages count as activity attributable to this
+   * request or its session (e.g. `params.sessionId` matching the session the
+   * request belongs to). Frames the matcher rejects — another session's
+   * update, a response to a different request, a bare unrelated id — never
+   * restart the idle timer. Absent: any valid JSON-RPC frame counts.
+   */
+  readonly activityMatch?: (message: Record<string, unknown>) => boolean;
 }
 
 export interface JsonRpcPeerOptions {
@@ -160,17 +187,34 @@ export class JsonRpcPeer {
       );
     }
     const id: JsonRpcId = `req-${this.nextId++}`;
-    const timeout = timeoutMs ?? this.options.defaultRequestTimeoutMs ?? 30_000;
+    const timeout = Math.min(timeoutMs ?? this.options.defaultRequestTimeoutMs ?? 30_000, MAX_TIMER_MS);
+    const deadline =
+      requestOptions.idle === true && requestOptions.deadlineMs !== undefined
+        ? Math.min(requestOptions.deadlineMs, MAX_TIMER_MS)
+        : undefined;
     return new Promise<T>((resolve, reject) => {
-      const onTimeout = (): void => {
+      const fail = (error: CliError): void => {
         this.pending.delete(id);
-        reject(
+        clearPendingTimers(entry);
+        reject(error);
+      };
+      const onTimeout = (): void => {
+        fail(
           new CliError(
             "PEER_REQUEST_TIMEOUT",
             requestOptions.idle
-              ? `Request ${method} timed out after ${timeout}ms without activity.`
+              ? `Request ${method} timed out after ${timeout}ms without attributable activity.`
               : `Request ${method} timed out after ${timeout}ms.`,
             { details: { method, timeoutMs: timeout, idle: requestOptions.idle === true } },
+          ),
+        );
+      };
+      const onDeadline = (): void => {
+        fail(
+          new CliError(
+            "PEER_REQUEST_TIMEOUT",
+            `Request ${method} timed out after ${deadline}ms (hard deadline; activity does not extend it).`,
+            { details: { method, timeoutMs: deadline, idle: true, deadline: true } },
           ),
         );
       };
@@ -184,6 +228,8 @@ export class JsonRpcPeer {
                 clearTimeout(entry.timer);
                 entry.timer = setTimeout(onTimeout, timeout);
               },
+              ...(deadline !== undefined ? { deadlineTimer: setTimeout(onDeadline, deadline) } : {}),
+              ...(requestOptions.activityMatch !== undefined ? { activityMatch: requestOptions.activityMatch } : {}),
             }
           : {}),
       };
@@ -224,7 +270,7 @@ export class JsonRpcPeer {
     if (this.closedFlag) return;
     this.closedFlag = true;
     for (const [, pending] of [...this.pending]) {
-      clearTimeout(pending.timer);
+      clearPendingTimers(pending);
       pending.reject(new CliError("PEER_CLOSED", "The peer closed while a request was pending."));
     }
     this.pending.clear();
@@ -270,7 +316,6 @@ export class JsonRpcPeer {
   }
 
   private onLine(line: string): void {
-    for (const pending of this.pending.values()) pending.restart?.();
     let message: unknown;
     try {
       message = JSON.parse(line) as unknown;
@@ -282,6 +327,17 @@ export class JsonRpcPeer {
     const id = message["id"];
     const hasId = id !== undefined && (typeof id === "string" || typeof id === "number");
     const method = message["method"];
+    // Only a valid JSON-RPC frame proves the peer is alive; malformed lines
+    // never restart an idle timer, and when the caller supplied a matcher only
+    // frames attributable to that request's session do — a hung request times
+    // out even while unrelated traffic flows.
+    if (typeof method === "string" || hasId) {
+      for (const pending of this.pending.values()) {
+        if (!pending.restart) continue;
+        if (pending.activityMatch && !pending.activityMatch(message)) continue;
+        pending.restart();
+      }
+    }
     // A method member means call/notification even when an id is present
     // (server→client request); id-only frames are responses.
     if (typeof method === "string") {
@@ -302,7 +358,7 @@ export class JsonRpcPeer {
     const pending = this.pending.get(id);
     if (!pending) return;
     this.pending.delete(id);
-    clearTimeout(pending.timer);
+    clearPendingTimers(pending);
     if (isRecord(message["error"])) {
       const error = message["error"] as Record<string, unknown>;
       pending.reject(
@@ -346,7 +402,7 @@ export class JsonRpcPeer {
     if (this.closedFlag) return;
     this.closedFlag = true;
     for (const [, pending] of [...this.pending]) {
-      clearTimeout(pending.timer);
+      clearPendingTimers(pending);
       pending.reject(
         new CliError("PEER_EXITED", `The peer process exited (code ${String(code)}).`, {
           details: { code },

@@ -289,10 +289,14 @@ export function threadCostUsd(
 
 /**
  * Resolve the thread's total `costUsd` for a context reading or live breakdown:
- * keeps a driver's own reported cost (Claude's live `total_cost_usd` or an ACP
- * agent's `cost`), while still combining earlier turns across restarts or
- * provider switches, and prices threads whose driver reports no cost using
- * `threadCostUsd`.
+ * keeps a driver's own reported cost while still combining earlier turns across
+ * restarts or provider switches, and prices threads whose driver reports no
+ * cost using `threadCostUsd`. The reading's reported cost means different
+ * things per provider: Claude reports a running session total; ACP's
+ * `usage_update.cost` is also cumulative for the session (ACP v1), and the
+ * driver reports only the delta past the session's baseline as the open turn's
+ * live cost — so settled turns plus the in-flight turn count the reading
+ * exactly once, and with no open turn the settled ledger stands.
  */
 export function resolveContextCostUsd(
   thread: Pick<StoredThread, "modelSelection">,
@@ -305,7 +309,8 @@ export function resolveContextCostUsd(
   if (hasReported) {
     const open = turns.find((turn) => turn.status === "running");
     const activeSelection = inFlight?.modelSelection ?? open?.modelSelection ?? thread.modelSelection;
-    if (driverKindOfInstance(activeSelection.instanceId) === "claude") {
+    const kind = driverKindOfInstance(activeSelection.instanceId);
+    if (kind === "claude") {
       const claudeInFlight: InFlightTurnUsage | null = open
         ? {
             turnId: open.id,
@@ -318,6 +323,16 @@ export function resolveContextCostUsd(
         : inFlight ?? null;
       const computed = threadCostUsd(thread, turns, config, claudeInFlight);
       return computed === null ? reportedCostUsd : Math.max(computed, reportedCostUsd);
+    }
+    if (kind === "acp" || kind === "antigravity") {
+      // ACP's reading is the session's cumulative cost, but the driver carries
+      // only the unaccounted delta as the open turn's live cost, so combining
+      // settled turns with the in-flight turn counts it exactly once. A turn
+      // that already settled keeps its stored usage (never both), and with no
+      // open turn a stale reading is not attached to a new turn — the settled
+      // ledger is the answer.
+      const computed = threadCostUsd(thread, turns, config, inFlight);
+      return computed === null ? reportedCostUsd : computed;
     }
     return reportedCostUsd;
   }

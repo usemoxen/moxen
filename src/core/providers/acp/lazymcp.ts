@@ -14,6 +14,11 @@
  * first use through Moxen's own `McpClient` (using the host environment and
  * keeping all credentials in-process, never written to disk), and `disabledTools`
  * is enforced here as well.
+ *
+ * The listener is loopback-only and, as MCP Streamable HTTP requires, validates
+ * the `Origin` header (a foreign origin gets 403 — the DNS-rebinding guard) and
+ * accepts only the expected loopback `Host` authority on top of the bearer check.
+ * Requests without an `Origin` (non-browser clients such as `agy`) still work.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -123,6 +128,9 @@ export class AcpLazyMcpGateway {
   private readonly connectFn: ConnectMcp;
   private readonly token: string;
   private readonly server: Server;
+  /** The loopback authority this gateway serves: `127.0.0.1:<port>`. */
+  private readonly authority: string;
+  private readonly port: number;
   private readonly abort = new AbortController();
   private closed = false;
   private closingPromise: Promise<void> | null = null;
@@ -137,6 +145,8 @@ export class AcpLazyMcpGateway {
     disabled: ReadonlySet<string>,
     cwd: string,
     connectFn: ConnectMcp,
+    authority: string,
+    port: number,
   ) {
     this.name = name;
     this.serverNames = serverNames;
@@ -146,6 +156,8 @@ export class AcpLazyMcpGateway {
     this.disabled = disabled;
     this.cwd = cwd;
     this.connectFn = connectFn;
+    this.authority = authority;
+    this.port = port;
     this.spec = {
       name,
       type: "http",
@@ -191,11 +203,57 @@ export class AcpLazyMcpGateway {
     const port = typeof address === "object" && address !== null ? address.port : 0;
     const url = `http://127.0.0.1:${port}/mcp`;
 
-    gateway = new AcpLazyMcpGateway(name, serverNames, url, token, server, entries, disabled, options.cwd, connectFn);
+    gateway = new AcpLazyMcpGateway(
+      name,
+      serverNames,
+      url,
+      token,
+      server,
+      entries,
+      disabled,
+      options.cwd,
+      connectFn,
+      `127.0.0.1:${port}`,
+      port,
+    );
     return gateway;
   }
 
+  /**
+   * MCP Streamable HTTP DNS-rebinding guard: a present `Origin` must be this
+   * gateway's own loopback origin (anything else gets 403), and the `Host`
+   * authority must be the expected loopback one. Requests without an `Origin`
+   * (non-browser clients) pass. Returns the status to reject with, or null.
+   */
+  private checkLoopbackRequest(request: IncomingMessage): number | null {
+    const origin = request.headers.origin;
+    if (origin !== undefined && !this.isAllowedOrigin(origin)) return 403;
+    const host = request.headers.host;
+    if (host === undefined) return 400;
+    if (host.toLowerCase() !== this.authority) return 403;
+    return null;
+  }
+
+  private isAllowedOrigin(origin: string): boolean {
+    let parsed: URL;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      return false;
+    }
+    if (parsed.protocol !== "http:") return false;
+    const hostname = parsed.hostname.toLowerCase();
+    const loopback = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]" || hostname === "::1";
+    const port = parsed.port === "" ? "80" : parsed.port;
+    return loopback && port === String(this.port);
+  }
+
   private async handleHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const rejected = this.checkLoopbackRequest(request);
+    if (rejected !== null) {
+      response.writeHead(rejected).end();
+      return;
+    }
     const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     const given = /^Bearer (.+)$/.exec(request.headers.authorization ?? "")?.[1] ?? "";
     if (pathname !== "/mcp" || !sameSecret(given, this.token)) {

@@ -712,13 +712,19 @@ async function interruptTurnLocked(
   now: string,
   usagePause?: StoredTurn["usagePause"],
   reason?: string,
+  usage?: StoredTurn["usage"],
 ): Promise<StoredTurn> {
   store.abortRunning(turn.id);
   store.untrackRunning(turn.id);
+  // The interruption and its final observed usage commit as ONE row write
+  // inside the thread lock, before the interruption event and any queue
+  // promotion: rewriting the ledger outside the lock afterwards would erase a
+  // turn admitted in between (LOCAL-009).
   const updated = await store.updateTurn(thread.id, turn.id, {
     status: "interrupted",
     ...(usagePause ? { usagePause } : {}),
     ...(reason ? { error: reason } : {}),
+    ...(usage !== undefined ? { usage } : {}),
     updatedAt: now,
     completedAt: now,
   });
@@ -1631,7 +1637,7 @@ export async function interruptTurn(
   rawThreadId: string,
   rawTurnId?: string,
   usagePause?: StoredTurn["usagePause"],
-  options: { readonly reason?: string } = {},
+  options: { readonly reason?: string; readonly usage?: StoredTurn["usage"] } = {},
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId?.trim() || undefined;
@@ -1662,7 +1668,7 @@ export async function interruptTurn(
     // it (which claims the turn below before its session starts). Read before
     // the interrupt releases the claim.
     const hasRunner = store.isTracked(target.id);
-    const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason);
+    const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason, options.usage);
     if (hasRunner) {
       await promoteQueuedLocked(store, threadId, now);
     } else {
