@@ -165,6 +165,16 @@ export async function runMemoryManager(): Promise<void> {
     console.log("--- memory manager: search ---");
     console.log(search);
     if (!search.includes("canary-watch")) fail("the memory search lost the matching memory");
+    // Type, then enter: the top result opens without an arrow first.
+    await act(async () => setup.mockInput.pressEnter());
+    await setup.flush();
+    for (let attempt = 0; setup.captureCharFrame().includes("canary▏"); attempt += 1) {
+      if (attempt >= 160) fail("enter on a search did not open its top result");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 25)));
+      await setup.flush();
+    }
+    await act(async () => setup.mockInput.pressEscape());
+    await waitFor(setup, "canary▏", "the search after leaving the opened result");
     for (let index = 0; index < "canary".length; index += 1) {
       await act(async () => setup.mockInput.pressBackspace());
       await setup.flush();

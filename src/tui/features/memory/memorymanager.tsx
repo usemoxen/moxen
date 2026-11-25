@@ -168,10 +168,9 @@ export function MemoryManager({
    * The list's selected row. A memory row by its place, a runtime row by its
    * id: what the arrows put on and Enter acts on is exactly what the user put
    * it on, and when that row goes away the selection goes with it — a change
-   * in the rows never moves it onto another (an action that just finished
+   * in the rows never moves it onto a setting (an action that just finished
    * never leaves Enter pointing at the next one). Null until something is
-   * navigated or hovered onto, so a fresh or still-loading page keeps Enter
-   * inert rather than armed at the first thing below the memories.
+   * navigated or hovered onto: the first memory is then selected, if any.
    */
   const [focus, setFocus] = useState<Focus>(null);
   const [listed, setListed] = useState<readonly Listed[] | null>(null);
@@ -310,16 +309,23 @@ export function MemoryManager({
   // is loading may yet fill the walk — its actions never take the step over.
   const extraRows = footer === undefined || searchingView || listed === null ? [] : footer.rows;
   const focusCount = ordered.length + extraRows.length;
-  /** Where the selection sits now: -1 when what it names is gone, or was never set. Never falls onto another row. */
+  /**
+   * Where the selection sits now. A memory row is the safe default (Enter only
+   * opens it), so with no selection, or one whose runtime row went away, the
+   * first memory takes it, and a memory selection past the end moves to the
+   * last. A runtime row is selected only when navigated or hovered onto, and
+   * with no memories the list answers -1: Enter does nothing.
+   */
+  const defaultAt = ordered.length > 0 ? 0 : -1;
   const focusAt = focus === null
-    ? -1
+    ? defaultAt
     : focus.kind === "row"
-      ? focus.at >= 0 && focus.at < ordered.length
-        ? focus.at
+      ? ordered.length > 0
+        ? Math.min(focus.at, ordered.length - 1)
         : -1
       : (() => {
           const at = extraRows.findIndex((row) => row.id === focus.id);
-          return at === -1 ? -1 : ordered.length + at;
+          return at === -1 ? defaultAt : ordered.length + at;
         })();
 
   const openDetail = (key: MemoryKey) => {
