@@ -148,6 +148,19 @@ export interface OpencodeServerConnection {
   /** The messages the model sees now (`session.context`: after the last compaction), oldest first. */
   sessionContext(sessionID: string): Promise<ReadonlyArray<OpencodeMessage>>;
   /**
+   * `session.inbox.list`: the session's durably enqueued work not yet
+   * delivered (user, synthetic, compaction and move items), oldest first.
+   * The server-side truth of what is still queued.
+   */
+  sessionInbox(sessionID: string): Promise<ReadonlyArray<{ readonly id: string; readonly type: string }>>;
+  /**
+   * `session.active`: whether the server still lists this session among its
+   * running ones — a dequeued compaction at work no longer sits in the
+   * inbox but shows here. An unreadable answer counts as running: a raw
+   * idle marker is only believed about a session that can be seen at rest.
+   */
+  sessionActive(sessionID: string): Promise<boolean>;
+  /**
    * Credential type per provider id (`api` | `oauth` | `env`) as this server
    * knows them (`GET /api/integration`). Connection types only, never a secret.
    */
@@ -452,6 +465,26 @@ export class LiveOpencodeServerConnection implements OpencodeServerConnection {
   async sessionContext(sessionID: string): Promise<ReadonlyArray<OpencodeMessage>> {
     const items = await request("session.context", () => this.client.session.context({ sessionID }));
     return translateTimeline(Array.isArray(items) ? items : []);
+  }
+
+  async sessionInbox(sessionID: string): Promise<ReadonlyArray<{ readonly id: string; readonly type: string }>> {
+    const result = await request("session.inbox.list", () => this.client.session.inbox.list({ sessionID }));
+    // The generated client unwraps the response's `data`; an envelope is tolerated anyway.
+    const items = Array.isArray(result) ? result : Array.isArray(asRecord(result)?.data) ? (asRecord(result)?.data as unknown[]) : [];
+    return items.flatMap((item) => {
+      const id = asString(asRecord(item)?.id);
+      const type = asString(asRecord(item)?.type);
+      return id && type ? [{ id, type }] : [];
+    });
+  }
+
+  async sessionActive(sessionID: string): Promise<boolean> {
+    const result = await request("session.active", () => this.client.session.active());
+    // The generated client unwraps the response's `data`; an envelope is tolerated anyway.
+    const record = asRecord(result);
+    const active = asRecord(record?.data) ?? record;
+    // An unreadable answer is a busy session: settling on it could end a running turn.
+    return active === null || active[sessionID] !== undefined;
   }
 
   async storedAuthTypes(): Promise<Record<string, string>> {

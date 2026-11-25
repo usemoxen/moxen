@@ -8,6 +8,7 @@
  */
 import { anthropicMessagesUrl } from "../profiles.js";
 import { anthropicTools, buildAnthropicInput } from "../normalize-anthropic.js";
+import { detectQuirkFamily } from "../quirks.js";
 import type { FinishReason, ModelEvent, ModelUsage } from "../types.js";
 import { asNumber, asRecord, ChatHttpError, failureFrom, OVERFLOW, sseData, type ChatRequest } from "./chat.js";
 
@@ -17,7 +18,7 @@ export const ANTHROPIC_DEFAULT_MAX_TOKENS = 16_000;
 
 const BUDGETS: Readonly<Record<string, number>> = { low: 2048, medium: 8192, high: 16_000, xhigh: 32_000, max: 32_000 };
 
-export function anthropicRequestBody(request: ChatRequest, replayReasoning = true): Record<string, unknown> {
+export function anthropicRequestBody(request: ChatRequest, replayReasoning = true, options?: { readonly omitAdaptiveThinking?: boolean }): Record<string, unknown> {
   const { quirks } = request;
   const { system, messages } = buildAnthropicInput(request.transcript ?? [], quirks, { replayReasoning });
   const maxTokens = request.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS;
@@ -31,7 +32,10 @@ export function anthropicRequestBody(request: ChatRequest, replayReasoning = tru
     }
   }
   if (quirks.anthropicThinking === "adaptive") {
-    body.thinking = { type: "adaptive", display: "summarized" };
+    const detected = detectQuirkFamily(request.model);
+    if (!options?.omitAdaptiveThinking && (detected === "claude" || detected === "generic")) {
+      body.thinking = { type: "adaptive", display: "summarized" };
+    }
     if (request.effort) body.output_config = { effort: request.effort };
   } else if (quirks.anthropicThinking === "budget" && maxTokens > 1024) {
     // The budget has to stay under max_tokens and is at least 1024.
@@ -69,7 +73,7 @@ interface OpenBlock {
   data: string;
 }
 
-async function* once(request: ChatRequest, replayReasoning: boolean): AsyncGenerator<ModelEvent> {
+async function* once(request: ChatRequest, replayReasoning: boolean, options?: { readonly omitAdaptiveThinking?: boolean }): AsyncGenerator<ModelEvent> {
   const doFetch = request.fetch ?? fetch;
   const headers: Record<string, string> = { "content-type": "application/json", accept: "text/event-stream", "anthropic-version": ANTHROPIC_VERSION };
   if (request.apiKey) headers["x-api-key"] = request.apiKey;
@@ -78,7 +82,7 @@ async function* once(request: ChatRequest, replayReasoning: boolean): AsyncGener
     response = await doFetch(anthropicMessagesUrl(request.baseUrl), {
       method: "POST",
       headers,
-      body: JSON.stringify(anthropicRequestBody(request, replayReasoning)),
+      body: JSON.stringify(anthropicRequestBody(request, replayReasoning, options)),
       ...(request.signal ? { signal: request.signal } : {}),
     });
   } catch (error) {
@@ -199,16 +203,13 @@ async function* once(request: ChatRequest, replayReasoning: boolean): AsyncGener
   yield { type: "finish", reason: sawCall && stopReason !== "max_tokens" ? "tool-calls" : finishFrom(stopReason) };
 }
 
-/** Whether a refused request is the server rejecting reasoning blocks it was sent (an edited history, or a different model than wrote them). */
-const THINKING_REJECTED = /thinking|signature/i;
+/** Whether a refused request is the server rejecting reasoning blocks it was sent or Claude's adaptive thinking object. */
+const THINKING_REJECTED = /thinking|signature|adaptive|display/i;
+const ADAPTIVE_THINKING_REJECTED = /adaptive|display|thinking\.type/i;
 
 export async function* streamAnthropic(request: ChatRequest): AsyncGenerator<ModelEvent> {
   const sentReasoning = (request.transcript ?? []).some((message) => message.role === "assistant" && (message.reasoningItems?.length ?? 0) > 0);
-  if (!sentReasoning) {
-    yield* once(request, true);
-    return;
-  }
-  // The server checks the signed blocks it is sent. If it refuses them (the history changed since they were made, or they came from another model), the conversation is sent again without them: the answer is a little less informed, not an error.
+  // The server checks the signed blocks it is sent, and non-Claude Anthropic gateways may reject Claude's adaptive thinking object. If refused before output, retry without the rejected thinking field or replayed blocks.
   const iterator = once(request, true);
   let first = true;
   try {
@@ -218,7 +219,8 @@ export async function* streamAnthropic(request: ChatRequest): AsyncGenerator<Mod
     }
   } catch (error) {
     if (first && error instanceof ChatHttpError && error.status === 400 && THINKING_REJECTED.test(error.message)) {
-      yield* once(request, false);
+      const omitAdaptiveThinking = !sentReasoning || ADAPTIVE_THINKING_REJECTED.test(error.message);
+      yield* once(request, false, omitAdaptiveThinking ? { omitAdaptiveThinking: true } : undefined);
       return;
     }
     throw error;

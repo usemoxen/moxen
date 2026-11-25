@@ -1,6 +1,6 @@
 import { OverflowText } from "../../ui/overflowtext.js";
 import { useState, type ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import type { ClientApi } from "../../../server/api.js";
@@ -34,6 +34,19 @@ const CHART_ROWS = 8;
 const LISTED_MODELS = 7;
 const LABEL_COLUMN = 6;
 
+const CANONICAL_PROVIDER_NAMES: Readonly<Record<string, string>> = {
+  claude: "Claude Code",
+  claudeAgent: "Claude Code",
+  codex: "Codex",
+  chatgpt: "ChatGPT",
+  antigravity: "Antigravity",
+  agy: "Antigravity",
+  vibe: "Mistral Vibe",
+  opencode: "OpenCode",
+  "opencode/opencode": "OpenCode",
+  "opencode/opencode-go": "OpenCode Go",
+};
+
 const RANGE_LABEL = (): Record<StatsRange, string> => ({ all: t("stats.range.all"), "30d": t("stats.range.30d"), "7d": t("stats.range.7d") });
 const TAB_LABEL = (): Record<StatsTab, string> => ({ overview: t("stats.tab.overview"), models: t("stats.tab.models") });
 
@@ -51,9 +64,10 @@ function shortDate(day: Date): string {
   return day.toLocaleDateString(currentLanguage(), { month: "short", day: "numeric" });
 }
 
-/** The cost of a bucket in words: a figure (with a plus where some turns reported none), or that nobody did. */
+/** The cost of a bucket in words: free, a dollar figure (with a plus where some turns reported none), or unpriced. */
 function costText(costUsd: number | null, unpricedTurns: number): string {
   if (costUsd === null) return t("stats.unpriced");
+  if (costUsd === 0 && unpricedTurns === 0) return t("stats.free");
   return unpricedTurns > 0 ? `${formatCost(costUsd)}+` : formatCost(costUsd);
 }
 
@@ -291,10 +305,13 @@ export function StatsModal({
   const [tab, setTab] = useState<StatsTab>("overview");
   const [range, setRange] = useState<StatsRange>("all");
   const { stats, all, loading, error } = useUsageStats(client, true, range);
-  const providerNames = new Map((providers ?? []).map((provider) => [provider.instanceId, provider.displayName ?? provider.instanceId] as const));
+  const providerNames = new Map<string, string>(Object.entries(CANONICAL_PROVIDER_NAMES));
+  for (const provider of providers ?? []) {
+    if (provider.displayName) providerNames.set(provider.instanceId, provider.displayName);
+  }
   const inner = Math.max(20, width - 4);
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") {
       markModalDismissed();
       onClose();
@@ -305,7 +322,7 @@ export function StatsModal({
     } else if (key.sequence === "r") {
       setRange((current) => STATS_RANGES[(STATS_RANGES.indexOf(current) + 1) % STATS_RANGES.length]!);
     }
-  });
+  }, { capture: true });
 
   let body: ReactNode;
   if (stats === null || all === null) {
@@ -355,7 +372,15 @@ export function StatsModal({
           <HoverButton label={t("stats.copyCard")} fg={COLOR.dim} hoverFg={COLOR.bright} onClick={() => onCopyCard(range)} />
           <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={Math.max(0, inner - 40)}>{` · ${t("stats.hint")}`}</OverflowText>
         </box>
-        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{loading ? t("stats.updating") : stats !== null && stats.unpricedTurns > 0 && stats.costUsd !== null ? t("stats.costNote") : ""}</text>
+        <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
+          {loading
+            ? t("stats.updating")
+            : stats !== null && stats.costUsd !== null
+              ? stats.unpricedTurns > 0
+                ? t("stats.costNote")
+                : t("stats.apiNote")
+              : ""}
+        </text>
       </box>
     </ModalShell>
   );

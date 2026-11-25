@@ -1,7 +1,15 @@
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import path from "node:path";
 
 import { selectModel, selectProvider, type ProviderSummary } from "../../core/catalog/summary.js";
-import type { CliConfig } from "../../core/types.js";
+import { CliError } from "../../core/errors.js";
+import {
+  ACCOUNT_PROVIDER_KINDS,
+  type AccountProviderKind,
+  type CliConfig,
+  type ProviderAccountSaveInput,
+} from "../../core/types.js";
 import { activeRemoteServer, cliClient, serverCwd } from "../infra/client.js";
 import { directAuth, directRuntime } from "../infra/direct.js";
 
@@ -87,5 +95,175 @@ export async function setModelHidden(
     provider: { instanceId: provider.instanceId },
     model: { slug: model.slug, name: model.name },
     hidden,
+  };
+}
+
+export function parseAccountKind(value: string): AccountProviderKind {
+  const normalized = value.trim().toLowerCase();
+  const match = ACCOUNT_PROVIDER_KINDS.find((kind) => kind === normalized);
+  if (!match) {
+    throw new CliError(
+      "INVALID_THREAD_OPTION",
+      `Provider kind must be one of ${ACCOUNT_PROVIDER_KINDS.join(", ")} (got "${value}").`,
+      { exitCode: 2 },
+    );
+  }
+  return match;
+}
+
+export function parseEnvAssignments(entries: readonly string[]): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const raw of entries) {
+    const eq = raw.indexOf("=");
+    if (eq <= 0) {
+      throw new CliError("INVALID_THREAD_OPTION", `Environment variable must be KEY=VALUE (got "${raw}").`, { exitCode: 2 });
+    }
+    const key = raw.slice(0, eq).trim();
+    if (!key) {
+      throw new CliError("INVALID_THREAD_OPTION", `Environment variable name cannot be empty (got "${raw}").`, { exitCode: 2 });
+    }
+    env[key] = raw.slice(eq + 1);
+  }
+  return env;
+}
+
+export async function listProviderAccounts(config: CliConfig) {
+  const { accounts } = await (await cliClient(config)).query({ type: "providers.accounts" });
+  return { accounts };
+}
+
+export async function saveProviderAccount(config: CliConfig, input: ProviderAccountSaveInput) {
+  const result = await (await cliClient(config)).dispatch({ type: "provider.account.save", ...input });
+  return { account: result.account, created: result.created };
+}
+
+export async function toggleProviderAccount(
+  config: CliConfig,
+  kind: AccountProviderKind,
+  id: string,
+  enabled: boolean,
+) {
+  const result = await (await cliClient(config)).dispatch({ type: "provider.account.toggle", kind, id, enabled });
+  return { account: result.account };
+}
+
+export async function removeProviderAccountCli(config: CliConfig, kind: AccountProviderKind, id: string) {
+  const result = await (await cliClient(config)).dispatch({ type: "provider.account.remove", kind, id });
+  return { removed: result.removed };
+}
+
+export async function loginProviderAccountCli(
+  config: CliConfig,
+  options: { kind: AccountProviderKind; id: string; homePath?: string; noOpen?: boolean },
+) {
+  const client = await cliClient(config);
+  const started = await client.dispatch({
+    type: "provider.account.login.start",
+    kind: options.kind,
+    id: options.id,
+    ...(options.homePath !== undefined ? { homePath: options.homePath } : {}),
+  });
+  if (started.authorizationUrl && started.openBrowser && options.noOpen !== true) {
+    openExternalUrl(started.authorizationUrl);
+  }
+  if (started.message) {
+    process.stderr.write(`${started.message}\n`);
+  }
+  if (started.authorizationUrl) {
+    process.stderr.write(`Authorization URL:\n${started.authorizationUrl}\n`);
+  }
+  let code: string | undefined;
+  if (started.needsCodeInput) {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      code = (await rl.question("Paste authorization code (or callback URL) and press Enter: ")).trim();
+    } finally {
+      rl.close();
+    }
+  }
+  const completed = await client.dispatch({
+    type: "provider.account.login.complete",
+    sessionId: started.sessionId,
+    ...(code !== undefined ? { code } : {}),
+  });
+  return {
+    account: completed.account,
+    homePath: started.homePath,
+    ...(completed.verified !== undefined ? { verified: completed.verified } : {}),
+    ...(completed.needsConfirmation !== undefined ? { needsConfirmation: completed.needsConfirmation } : {}),
+    ...(completed.reason !== undefined ? { reason: completed.reason } : {}),
+  };
+}
+
+/** Open an HTTPS URL in the user's default browser without shell-joining strings. */
+export function openExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+    const args = process.platform === "win32" ? ["/c", "start", "", parsed.toString()] : [parsed.toString()];
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function chatgptLoginCli(
+  config: CliConfig,
+  options: { accountId: string; label?: string; noOpen?: boolean; callbackUrl?: string },
+) {
+  const client = await cliClient(config);
+  const started = await client.dispatch({
+    type: "chatgpt.login.start",
+    accountId: options.accountId,
+    ...(options.label ? { label: options.label } : {}),
+  });
+  if (!options.callbackUrl && options.noOpen !== true) {
+    openExternalUrl(started.authorizationUrl);
+  }
+  if (!options.callbackUrl) {
+    process.stderr.write(`Open this URL to sign in with ChatGPT:\n${started.authorizationUrl}\nWaiting for callback on ${started.redirectUri}…\n`);
+  }
+  const completed = await client.dispatch({
+    type: "chatgpt.login.complete",
+    sessionId: started.sessionId,
+    ...(options.callbackUrl ? { callbackUrl: options.callbackUrl } : {}),
+  });
+  return { account: completed.account };
+}
+
+export async function chatgptLogoutCli(config: CliConfig, accountId: string) {
+  const result = await (await cliClient(config)).dispatch({ type: "chatgpt.logout", accountId });
+  return { account: result.account };
+}
+
+export async function chatgptPairCodexCli(
+  config: CliConfig,
+  options: {
+    accountId: string;
+    codexHomePath?: string;
+    codexBinaryPath?: string;
+    codexLaunchArgs?: string;
+    confirmWorkspace?: boolean;
+  },
+) {
+  const result = await (await cliClient(config)).dispatch({
+    type: "chatgpt.codex.pair",
+    accountId: options.accountId,
+    ...(options.codexHomePath !== undefined ? { codexHomePath: options.codexHomePath } : {}),
+    ...(options.codexBinaryPath !== undefined ? { codexBinaryPath: options.codexBinaryPath } : {}),
+    ...(options.codexLaunchArgs !== undefined ? { codexLaunchArgs: options.codexLaunchArgs } : {}),
+    ...(options.confirmWorkspace === true ? { confirmWorkspace: true } : {}),
+  });
+  return {
+    verified: result.verified,
+    needsConfirmation: result.needsConfirmation,
+    reason: result.reason,
+    account: result.account,
+    codexEmail: result.codexEmail,
+    codexPlanType: result.codexPlanType,
+    codexWorkspaceName: result.codexWorkspaceName,
   };
 }

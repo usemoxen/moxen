@@ -5,7 +5,8 @@ import type { UpdateCheck } from "../../../core/selfupdate/vocabulary.js";
 import { describeSettings, restartRequired, settingDescriptor, SETTINGS } from "../../../core/configschema.js";
 import { DEFAULT_CONFIG, normalizeConfig } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
-import { uiFromSnapshot } from "../../features/settings/useSettings.js";
+import { snapshotFromMutation, uiFromSnapshot } from "../../features/settings/useSettings.js";
+import { pickOptionColumns } from "../../features/settings/settingsmodal.js";
 import { configuredDefaultModel, defaultLabel, modelOverrideEntries, nextToggleValue, handoffStops, handoffTokensLabel, moxenVersionLine, providerVersionLine, settingControl, settingValueLabel, updatableProviderOf, withModelOverride, type ProviderCheckView } from "../settings.js";
 import type { UpdateView } from "../update.js";
 
@@ -319,6 +320,18 @@ describe("a provider's own tools and web preference on its page", () => {
     expect(native.tools.find((tool) => tool.name === "apply_patch")).toMatchObject({ enabledWhenLocked: true, locked: expect.stringContaining("no independent removal control") });
   });
 
+  it("keeps a stored Claude Agent entry off without offering it back", () => {
+    // Both subagent names left the catalogue when Moxen started blocking them
+    // always: stored entries still count as off and round-trip, but have no row.
+    const settings = describeSettings(normalizeConfig({ providers: { claude: { disabledNativeTools: "Agent,Task,WebSearch" } } }));
+    const claude = settings.find((entry) => entry.descriptor.key === "providers.claude.disabledNativeTools")!.descriptor;
+    const control = settingControl(claude, "Agent,Task,WebSearch", settings, null);
+    expect(control.kind === "tools" && control.tools.map((tool) => tool.name)).not.toContain("Agent");
+    expect(control.kind === "tools" && control.tools.map((tool) => tool.name)).not.toContain("Task");
+    expect(control.kind === "tools" && control.excluded).toEqual(["Agent", "Task", "WebSearch"]);
+    expect(settingValueLabel(claude, "Agent,Task,WebSearch", control)).toBe("3 off");
+  });
+
   it("greys each web order out until a tool it could rank is available to the provider, and says what it covers", () => {
     const search = "providers.claude.webSearchOrder";
     const fetch = "providers.claude.webFetchOrder";
@@ -480,5 +493,172 @@ describe("uiFromSnapshot", () => {
     const config = normalizeConfig({ ui: { backdrop: "off", modelScenes: false, hideBinaryDiffs: false, defaultSidePanel: "git" } });
     const ui = uiFromSnapshot({ settings: describeSettings(config) } as never);
     expect(ui).toMatchObject({ backdrop: "off", modelScenes: false, hideBinaryDiffs: false, defaultSidePanel: "git" });
+  });
+});
+
+describe("snapshotFromMutation", () => {
+  it("preserves per-account settings and accounts so provider tabs stay populated after saving a setting", () => {
+    const settings = describeSettings(DEFAULT_CONFIG);
+    const accountSettings = { "chatgpt/default": settings };
+    const accounts = [{ kind: "claude" as const, id: "default", instanceId: "claude/default", label: "Default", enabled: true, env: {}, model: null, thinkingEffort: null, homePath: null, binaryPath: null, launchArgs: null, email: "a@example.com", workspaceName: null, planType: null, signedIn: true, codexHomePath: null, codexBinaryPath: null, codexLaunchArgs: null, codexVerified: false }];
+    const next = snapshotFromMutation({ path: "/tmp/config.json", exists: true, settings, accountSettings, accounts });
+    expect(next.accountSettings).toBe(accountSettings);
+    expect(next.accounts).toBe(accounts);
+  });
+});
+
+describe("pickOptionColumns", () => {
+  it("ignores the Default fallback row's prose description so model rows stay right-aligned", () => {
+    const cols = pickOptionColumns(
+      [
+        { value: "", label: "Default", description: "claude-sonnet-5-5, from 'Model' on the Defaults tab" },
+        { value: "claude-opus-5-5", label: "Claude Opus 5.5", badge: "default", description: "low–max" },
+        { value: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", description: "low–max" },
+      ],
+      60,
+    );
+    expect(cols).toEqual({ badge: 7, detail: 7 });
+  });
+
+  it("clamps detail column width on narrow panes so labels never collide with badges", () => {
+    const cols = pickOptionColumns(
+      [
+        { value: "a", label: "Very Long Model Name Here", badge: "default", description: "very-long-effort-range-description" },
+      ],
+      45,
+    );
+    expect(cols).toEqual({ badge: 7, detail: 5 });
+  });
+});
+
+describe("Antigravity and ACP settings controls", () => {
+  it("lists efforts for the active Antigravity model and supports MCP access on Antigravity and ACP", () => {
+    const providers = [
+      {
+        instanceId: "antigravity",
+        driver: "antigravity" as const,
+        displayName: "Antigravity",
+        enabled: true,
+        installed: true,
+        status: null,
+        authStatus: "oauth",
+        models: [
+          {
+            slug: "gemini-4-neon",
+            name: "Gemini 4 Neon",
+            isCustom: false,
+            isDefault: true,
+            isHidden: false,
+            efforts: [
+              {
+                id: "effort",
+                label: "Effort",
+                currentValue: "high",
+                choices: [
+                  { id: "low", label: "Low", isDefault: false },
+                  { id: "medium", label: "Medium", isDefault: false },
+                  { id: "high", label: "High", isDefault: true },
+                  { id: "xhigh", label: "Extra", isDefault: false },
+                ],
+              },
+            ],
+          },
+          {
+            slug: "gemini-pro-orchestrator-neon",
+            name: "Orchestrator (Neon)",
+            isCustom: false,
+            isDefault: false,
+            isHidden: false,
+            efforts: [],
+          },
+        ],
+        supportedRuntimeModes: null,
+        usageLimits: null,
+        skills: [],
+      },
+    ];
+    const baseSettings = describeSettings(DEFAULT_CONFIG);
+    const effortDesc = settingDescriptor("providers.antigravity.thinkingEffort")!;
+    const neonControl = settingControl(effortDesc, undefined, baseSettings, providers);
+    expect(neonControl.kind).toBe("pick");
+    if (neonControl.kind === "pick") {
+      expect(neonControl.options.map((o) => o.value)).toEqual(["", "low", "medium", "high", "xhigh"]);
+      expect(neonControl.options.find((o) => o.value === "xhigh")?.label).toBe("Extra");
+    }
+
+    const orchestratorSettings = describeSettings(normalizeConfig({ providers: { antigravity: { model: "gemini-pro-orchestrator-neon" } } }));
+    const orchestratorControl = settingControl(effortDesc, undefined, orchestratorSettings, providers);
+    expect(orchestratorControl.kind).toBe("pick");
+    if (orchestratorControl.kind === "pick") {
+      expect(orchestratorControl.options.map((o) => o.value)).toEqual([""]);
+    }
+
+    const withMcp = describeSettings(normalizeConfig({ mcpServers: { fs: { command: "npx" } } }));
+    const agyMcp = settingControl(settingDescriptor("providers.antigravity.mcpExclude")!, undefined, withMcp, providers);
+    const acpMcp = settingControl(settingDescriptor("providers.acp.mcpExclude")!, undefined, withMcp, providers);
+    expect(agyMcp.kind === "servers" && agyMcp.servers.map((s) => s.name)).toEqual(["fs"]);
+    expect(acpMcp.kind === "servers" && acpMcp.servers.map((s) => s.name)).toEqual(["fs"]);
+  });
+});
+
+describe("per-model prices control", () => {
+  it("lists catalog models with shipped and custom prices, keeps non-offered configured slugs, and formats clean summaries", async () => {
+    const { parseUsdInput, withModelPrice } = await import("../settings.js");
+    expect(parseUsdInput("")).toEqual({ ok: true, value: null });
+    expect(parseUsdInput("$2.5")).toEqual({ ok: true, value: 2.5 });
+    expect(parseUsdInput("0")).toEqual({ ok: true, value: 0 });
+    expect(parseUsdInput("-1")).toEqual({ ok: false });
+    expect(parseUsdInput("abc")).toEqual({ ok: false });
+    expect(withModelPrice("a=1, b=2", "b", 3.5)).toBe("a=1, b=3.5");
+    expect(withModelPrice("a=1, b=2", "a", null)).toBe("b=2");
+
+    const providers = [
+      {
+        instanceId: "claudeAgent",
+        driver: "claudeAgent" as const,
+        displayName: "Claude",
+        enabled: true,
+        installed: true,
+        status: null,
+        authStatus: null,
+        models: [
+          { slug: "claude-opus-5", name: "Claude Opus 5", isCustom: false, isDefault: true, isHidden: false, efforts: [] },
+          { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", isCustom: false, isDefault: false, isHidden: false, efforts: [] },
+          { slug: "claude-hidden", name: "Hidden", isCustom: false, isDefault: false, isHidden: true, efforts: [] },
+        ],
+        supportedRuntimeModes: null,
+        usageLimits: null,
+        skills: [],
+      },
+    ];
+    const priceDesc = settingDescriptor("providers.claude.modelInputPrices")!;
+    const emptySettings = describeSettings(DEFAULT_CONFIG);
+    const emptyControl = settingControl(priceDesc, undefined, emptySettings, providers);
+    expect(emptyControl.kind).toBe("prices");
+    expect(settingValueLabel(priceDesc, undefined, emptyControl)).toBe("Shipped prices");
+
+    const configured = normalizeConfig({
+      providers: {
+        claude: {
+          modelInputPrices: { "claude-opus-5": 6, "old-model": 1 },
+          modelOutputPrices: { "claude-opus-5": 30 },
+        },
+      },
+    });
+    const settings = describeSettings(configured);
+    const value = settings.find((v) => v.descriptor.key === priceDesc.key)!.value;
+    const control = settingControl(priceDesc, value, settings, providers);
+    expect(control.kind).toBe("prices");
+    expect(settingValueLabel(priceDesc, value, control)).toBe("2 models");
+    if (control.kind === "prices") {
+      expect(control.models.map((m) => m.slug)).toEqual(["claude-opus-5", "claude-sonnet-5-5", "old-model"]);
+      expect(control.models[0]).toMatchObject({
+        slug: "claude-opus-5",
+        custom: { input: 6, output: 30, cacheRead: null, cacheWrite: null },
+        shipped: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+      });
+      expect(control.models[1]?.shipped).toMatchObject({ input: 2, output: 10 });
+      expect(control.models[2]).toMatchObject({ slug: "old-model", name: "old-model (not offered)", offered: false });
+    }
   });
 });

@@ -13,11 +13,12 @@ import {
   composeCells,
   createCells,
   createFrame,
+  scenePointerFor,
+  sceneWindowFor,
   type Cells,
   type Frame,
   type Pointer,
   type SceneEngine,
-  type SceneWindow,
 } from "./raster.js";
 
 /**
@@ -322,26 +323,31 @@ export class ModelSceneRenderable extends FrameBufferRenderable {
       this.frameTo = createFrame(width, height);
       this.cells = createCells(width, height);
     }
-    const win: SceneWindow = { x: this.x, y: this.y, width, height, fieldWidth: this.ctx.width, fieldHeight: this.ctx.height };
+    const layerId = this.layer!.id;
+    const winTo = sceneWindowFor(layerId, this.x, this.y, width, height, this.ctx.width, this.ctx.height);
+    const ptrTo = scenePointerFor(layerId, this.pointer, this.x, this.y);
     const p = this.progress();
     if (this.leaving !== null && p < 1) {
+      const leavingId = this.leaving.id;
+      const winFrom = sceneWindowFor(leavingId, this.x, this.y, width, height, this.ctx.width, this.ctx.height);
+      const ptrFrom = scenePointerFor(leavingId, this.pointer, this.x, this.y);
       clearFrame(this.frameFrom);
       clearFrame(this.frameTo);
-      this.leaving.engine.paint(this.frameFrom, win, this.t, this.pointer);
-      this.layer!.engine.paint(this.frameTo, win, this.t, this.pointer);
+      this.leaving.engine.paint(this.frameFrom, winFrom, this.t, ptrFrom);
+      this.layer!.engine.paint(this.frameTo, winTo, this.t, ptrTo);
       if (this.journey !== null) {
         // The scenery travels, the composer does not: the well goes on after.
         journeyFrames(this.frameFrom, this.frameTo, this.frame, p, this.journey);
-        this.applyWellTo(this.frame, this.layer!.id);
+        this.applyWellTo(this.frame, layerId);
       } else {
-        this.applyWellTo(this.frameFrom, this.leaving.id);
-        this.applyWellTo(this.frameTo, this.layer!.id);
+        this.applyWellTo(this.frameFrom, leavingId);
+        this.applyWellTo(this.frameTo, layerId);
         blendFrames(this.frameFrom, this.frameTo, this.frame, p);
       }
     } else {
       clearFrame(this.frame);
-      this.layer!.engine.paint(this.frame, win, this.t, this.pointer);
-      this.applyWellTo(this.frame, this.layer!.id);
+      this.layer!.engine.paint(this.frame, winTo, this.t, ptrTo);
+      this.applyWellTo(this.frame, layerId);
     }
     composeCells(this.frame, this.baseRgb, this.gain, this.cells);
     const { ch, fg, bg } = this.cells;

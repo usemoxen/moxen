@@ -1,0 +1,196 @@
+/**
+ * ACP catalog discovery: probes configured ACP agents (built-in `agy` preset
+ * plus custom `providers.acp.agents`) via `initialize` without creating an
+ * empty session or reading provider credentials.
+ */
+import fs from "node:fs";
+import path from "node:path";
+
+import type { ProviderSummary } from "../../catalog/summary.js";
+import { CliError } from "../../errors.js";
+import { binaryOnPath } from "../../infra/process.js";
+import type { AcpProviderConfig } from "../../types.js";
+import { ACP_DEFAULT_MODEL_SLUG, resolveAcpAgents, type ResolvedAcpAgent } from "./config.js";
+import { AcpDriver } from "./driver.js";
+import { resolveRegistryLaunchSpec, type AcpRegistryAgent } from "./registry.js";
+import type { AcpTransport } from "./transport.js";
+
+function isCommandInstalled(command: string, env: NodeJS.ProcessEnv): boolean {
+  if (path.isAbsolute(command)) {
+    try {
+      return fs.statSync(command).isFile();
+    } catch {
+      return false;
+    }
+  }
+  return binaryOnPath(command, env);
+}
+
+function defaultModelsFor(agent: ResolvedAcpAgent): ProviderSummary["models"] {
+  const displayName = agent.name ?? agent.id;
+  const models: ProviderSummary["models"] = [
+    {
+      slug: ACP_DEFAULT_MODEL_SLUG,
+      name: `${displayName} (default)`,
+      isCustom: false,
+      isHidden: false,
+      isDefault: !agent.defaultModel,
+      efforts: [],
+    },
+  ];
+  if (agent.defaultModel && agent.defaultModel !== ACP_DEFAULT_MODEL_SLUG) {
+    models.push({
+      slug: agent.defaultModel,
+      name: agent.defaultModel,
+      isCustom: true,
+      isHidden: false,
+      isDefault: true,
+      efforts: [],
+    });
+  }
+  return models;
+}
+
+export async function acpProviderFor(
+  agent: ResolvedAcpAgent,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  transport?: AcpTransport,
+): Promise<ProviderSummary> {
+  const instanceId = `acp/${agent.id}`;
+  const displayName = agent.name ?? agent.id;
+  const installed = transport ? true : isCommandInstalled(agent.command, env);
+  const base: ProviderSummary = {
+    instanceId,
+    driver: "acp",
+    displayName,
+    installed,
+    enabled: false,
+    status: installed ? null : "not installed",
+    authStatus: null,
+    models: [],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  };
+  if (!installed) return base;
+
+  const driver = new AcpDriver({
+    agents: { [agent.id]: agent },
+    env,
+    ...(transport ? { transport } : {}),
+    initializeTimeoutMs: 5_000,
+  });
+  try {
+    const { init, models: discovered } = await driver.probeAgentCatalog(instanceId, cwd);
+    const title = init.agentInfo.title ?? init.agentInfo.name ?? displayName;
+    const authStatus = init.authMethods.length > 0 ? init.authMethods[0]!.id : "ready";
+    let models: ProviderSummary["models"];
+    if (discovered.length > 0) {
+      if (agent.defaultModel && agent.defaultModel !== ACP_DEFAULT_MODEL_SLUG) {
+        const hasPinned = discovered.some((m) => m.slug === agent.defaultModel);
+        models = hasPinned
+          ? discovered.map((m) => ({ ...m, isDefault: m.slug === agent.defaultModel }))
+          : [
+              ...discovered.map((m) => ({ ...m, isDefault: false })),
+              {
+                slug: agent.defaultModel,
+                name: agent.defaultModel,
+                isCustom: true,
+                isHidden: false,
+                isDefault: true,
+                efforts: [],
+              },
+            ];
+      } else {
+        models = discovered;
+      }
+    } else {
+      models = defaultModelsFor(agent);
+    }
+    return {
+      ...base,
+      displayName: title,
+      enabled: true,
+      status: null,
+      authStatus,
+      models,
+    };
+  } catch (cause) {
+    if (cause instanceof CliError && cause.code === "ACP_PROTOCOL_VERSION_UNSUPPORTED") {
+      return { ...base, status: cause.message };
+    }
+    return {
+      ...base,
+      status: `Could not query ${displayName}; check its executable and login.`,
+    };
+  }
+}
+
+function registryProviderSummary(
+  agent: AcpRegistryAgent,
+  env: NodeJS.ProcessEnv,
+): ProviderSummary {
+  const launch = resolveRegistryLaunchSpec(agent, { env });
+  const instanceId = `acp/${agent.id}`;
+  if (launch.ok) {
+    return {
+      instanceId,
+      driver: "acp",
+      displayName: agent.name,
+      installed: true,
+      enabled: true,
+      status: null,
+      authStatus: null,
+      models: [
+        {
+          slug: ACP_DEFAULT_MODEL_SLUG,
+          name: `${agent.name} (default)`,
+          isCustom: false,
+          isHidden: false,
+          isDefault: true,
+          efforts: [],
+        },
+      ],
+      supportedRuntimeModes: null,
+      usageLimits: null,
+      skills: [],
+    };
+  }
+  return {
+    instanceId,
+    driver: "acp",
+    displayName: agent.name,
+    installed: false,
+    enabled: false,
+    status: launch.message,
+    authStatus: null,
+    models: [],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  };
+}
+
+export async function acpProviders(
+  config: AcpProviderConfig | undefined,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  transport?: AcpTransport,
+  registry: readonly AcpRegistryAgent[] = [],
+): Promise<ProviderSummary[]> {
+  const configured = resolveAcpAgents(config);
+  const configuredIds = new Set(configured.map((agent) => agent.id));
+  const disabledIds = new Set(
+    (config?.agents ?? [])
+      .filter((entry) => entry.enabled === false)
+      .map((entry) => entry.id.trim().toLowerCase()),
+  );
+  const probed = await Promise.all(
+    configured.map((agent) => acpProviderFor(agent, env, cwd, transport)),
+  );
+  const fromRegistry = registry
+    .filter((entry) => !configuredIds.has(entry.id) && !disabledIds.has(entry.id))
+    .map((entry) => registryProviderSummary(entry, env));
+  return [...probed, ...fromRegistry];
+}

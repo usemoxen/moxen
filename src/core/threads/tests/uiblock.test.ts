@@ -86,6 +86,19 @@ describe("parseUiBlock", () => {
     expect(parseUiBlock(block({ type: "progress", label: "x".repeat(UI_BLOCK_LIMITS.label + 1), value: 0.5 }))).toBeNull();
   });
 
+  it("leaves out an optional label written as an empty string, but still needs a required one", () => {
+    // A model often writes `"unit":""` for "none"; that must not turn the whole block into raw JSON.
+    expect(parseUiBlock(block({ type: "chart", kind: "bar", title: "", unit: "", bars: [{ label: "a", value: 1 }] }))?.root).toEqual({
+      type: "chart",
+      kind: "bar",
+      bars: [{ label: "a", value: 1 }],
+    });
+    expect(parseUiBlock(block({ type: "progress", label: "Tests", value: 0.5, text: "" }))?.root).not.toHaveProperty("text");
+    expect(parseUiBlock(block({ type: "status", rows: [{ label: "build", state: "live", note: "" }] }))?.root).toMatchObject({ rows: [{ label: "build", state: "live" }] });
+    expect(parseUiBlock(block({ type: "chart", kind: "bar", bars: [{ label: "", value: 1 }] }))).toBeNull();
+    expect(parseUiBlock(block({ type: "progress", label: "", value: 0.5 }))).toBeNull();
+  });
+
   it("ignores fields it does not know, so a later version can add one", () => {
     expect(parseUiBlock(block(image("/a.png", { future: true }), { note: "x" }))?.root).toMatchObject({ type: "image", src: "/a.png" });
   });

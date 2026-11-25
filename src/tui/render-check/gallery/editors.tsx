@@ -1,5 +1,6 @@
 import { describeSettings } from "../../../core/configschema.js";
 import { HandoffModelsEditor } from "../../features/settings/handoffmodels.js";
+import { ModelPricesEditor } from "../../features/settings/modelprices.js";
 import { ListEditor } from "../../features/settings/listeditor.js";
 import { McpAccessEditor } from "../../features/settings/mcpaccess.js";
 import { WebOrderEditor } from "../../features/settings/weborder.js";
@@ -130,6 +131,48 @@ export const EDITOR_GALLERY: GalleryEntry[] = [
           description="Long-thread behaviour for one model; blank follows the provider."
           models={MODELS}
           compaction={{ choices: [{ value: "auto", label: "Automatic" }, { value: "off", label: "Off" }], unavailable: null }}
+          width={WIDTH}
+          catalogReady
+          onChange={noop}
+          onExit={noop}
+        />
+      </Stage>
+    ),
+  },
+  {
+    id: "model-prices-editor",
+    group: "settings",
+    title: "ModelPricesEditor",
+    width: WIDTH,
+    height: 18,
+    element: () => (
+      <Stage width={WIDTH} height={18}>
+        <ModelPricesEditor
+          title="Prices per model"
+          description="What one million tokens cost per model in USD; blank uses Moxen's shipped prices."
+          models={[
+            {
+              slug: "claude-opus-5",
+              name: "Claude Opus 5",
+              offered: true,
+              custom: { input: 6, output: 30, cacheRead: null, cacheWrite: null },
+              shipped: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+            },
+            {
+              slug: "claude-sonnet-5-5",
+              name: "Claude Sonnet 5.5",
+              offered: true,
+              custom: { input: null, output: null, cacheRead: null, cacheWrite: null },
+              shipped: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+            },
+            {
+              slug: "gemini-4-neon",
+              name: "Gemini 4 Neon",
+              offered: true,
+              custom: { input: null, output: null, cacheRead: null, cacheWrite: null },
+              shipped: { input: null, output: null, cacheRead: null, cacheWrite: null },
+            },
+          ]}
           width={WIDTH}
           catalogReady
           onChange={noop}

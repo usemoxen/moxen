@@ -53,106 +53,7 @@ export function agentThreads(
     });
 }
 
-export interface NativeSubagentRow {
-  agentId: string;
-  agentType: string;
-  /** What it was asked to do: the `description` of the Agent call that spawned it. */
-  description: string | null;
-  running: boolean;
-  lastMessage: string | null;
-  /** When it started. */
-  at: string;
-  /** When it stopped, once it has. */
-  stoppedAt: string | null;
-}
-
-/** Claude's Agent tool (once Task), and OpenCode's `subagent`. */
-const AGENT_TOOLS = new Set(["Agent", "Task", "subagent"]);
-
-/**
- * The provider's own subagents in this thread (Claude's Agent tool,
- * OpenCode's `subagent`), latest state per agent, newest first. OpenCode
- * names the description as the subagent starts; Claude's is paired below.
- *
- * The start hook names the agent type but not the call that spawned it, so
- * each subagent is paired with the Agent calls of its turn and type in
- * order: the first Explore started in a turn is that turn's first Explore
- * call. That is where its description comes from. A background subagent
- * is also a background task under the same id, whose start names the call
- * exactly and whose end is a second word on when it stopped — the stop
- * hook's row was lost for any agent that outlived its turn before the
- * session watcher recorded it.
- */
-export function nativeSubagents(activities: readonly ActivityEnvelope[]): NativeSubagentRow[] {
-  const byAgent = new Map<string, NativeSubagentRow>();
-  // Agent calls per `turn|type`, oldest first, by call id — a call writes a
-  // row as it starts and again as it ends, and counts once.
-  const calls = new Map<string, Map<string, string | null>>();
-  const claimed = new Map<string, number>();
-  const descriptions = new Map<string, string | null>();
-  const taskCalls = new Map<string, string>();
-  const taskEnds = new Map<string, { at: string; summary: string | null }>();
-  for (const activity of activities) {
-    const payload = (activity.payload ?? {}) as Record<string, unknown>;
-    if (activity.kind.startsWith("background.") && typeof payload.taskId === "string") {
-      if (activity.kind === "background.started" && typeof payload.toolUseId === "string") taskCalls.set(payload.taskId, payload.toolUseId);
-      if (activity.kind === "background.completed" || activity.kind === "background.failed" || activity.kind === "background.stopped") {
-        taskEnds.set(payload.taskId, { at: activity.createdAt, summary: typeof payload.summary === "string" && payload.summary.trim() ? payload.summary.trim() : null });
-      }
-      continue;
-    }
-    if (activity.kind !== "subagent") {
-      const data = (payload.data ?? {}) as Record<string, unknown>;
-      if (typeof data.tool !== "string" || !AGENT_TOOLS.has(data.tool) || typeof payload.toolCallId !== "string") continue;
-      const input = (((data.state ?? {}) as Record<string, unknown>).input ?? {}) as Record<string, unknown>;
-      const named = typeof input.subagent_type === "string" && input.subagent_type ? input.subagent_type : typeof input.agent === "string" && input.agent ? input.agent : null;
-      const type = named ?? "general-purpose";
-      const key = `${activity.turnId ?? ""}|${type}`;
-      const byCall = calls.get(key) ?? new Map<string, string | null>();
-      const description = typeof input.description === "string" && input.description.trim() ? input.description.trim() : null;
-      byCall.set(payload.toolCallId, description);
-      calls.set(key, byCall);
-      descriptions.set(payload.toolCallId, description);
-      continue;
-    }
-    const agentId = typeof payload.agentId === "string" ? payload.agentId : null;
-    if (agentId === null) continue;
-    const previous = byAgent.get(agentId);
-    // Every spawned subagent starts. A stop with no start is one of Claude
-    // Code's internal agents (a prompt suggestion, `/btw`), recorded before
-    // the driver learned to drop them.
-    if (previous === undefined && payload.status !== "started") continue;
-    const agentType = typeof payload.agentType === "string" ? payload.agentType : (previous?.agentType ?? "agent");
-    let description = previous?.description ?? (typeof payload.description === "string" && payload.description.trim() ? payload.description.trim() : null);
-    if (previous === undefined && description === null) {
-      const key = `${activity.turnId ?? ""}|${agentType}`;
-      const index = claimed.get(key) ?? 0;
-      claimed.set(key, index + 1);
-      description = [...(calls.get(key)?.values() ?? [])][index] ?? null;
-    }
-    const running = payload.status !== "stopped";
-    byAgent.set(agentId, {
-      agentId,
-      agentType,
-      description,
-      running,
-      lastMessage: typeof payload.lastMessage === "string" ? payload.lastMessage : (previous?.lastMessage ?? null),
-      at: previous?.at ?? activity.createdAt,
-      stoppedAt: running ? null : activity.createdAt,
-    });
-  }
-  for (const [agentId, row] of byAgent) {
-    const call = taskCalls.get(agentId);
-    const exact = call === undefined ? undefined : descriptions.get(call);
-    const end = row.running ? taskEnds.get(agentId) : undefined;
-    byAgent.set(agentId, {
-      ...row,
-      ...(exact ? { description: exact } : {}),
-      ...(end === undefined ? {} : { running: false, stoppedAt: end.at, lastMessage: row.lastMessage ?? end.summary }),
-    });
-  }
-  return [...byAgent.values()].sort((left, right) => right.at.localeCompare(left.at));
-}
+export { nativeSubagents, type NativeSubagentRow } from "../../server/subagentrows.js";
 
 export interface ContextShare {
   name: string;
@@ -305,10 +206,81 @@ export function effectiveContextBreakdown(
 
 const SHORT_BY_KIND: Record<string, string> = { session: "5h", weekly: "wk", monthly: "mo" };
 
+function isClaudeGptWindow(window: { id: string; label: string }): boolean {
+  return window.id.startsWith("claude-gpt") || window.id.startsWith("3p-") || /\bClaude\s*&\s*GPT\b/iu.test(window.label);
+}
+
+function windowSuffix(label: string): string | null {
+  const parts = label.split(/\s+[–-]\s+/u);
+  if (parts.length < 2) return null;
+  const suffix = parts.at(-1)?.trim() ?? "";
+  return suffix.length > 0 ? suffix : null;
+}
+
+export interface PlanUsageGroup<W extends { id: string; kind: string; label: string }> {
+  title: string | null;
+  rows: Array<{ window: W; label: string }>;
+}
+
+/**
+ * Group plan-usage windows into subcategories when a provider reports
+ * multiple model-family pools (Antigravity's `Gemini` and `Claude & GPT`),
+ * shortening inner row labels to `5h`, `Weekly` and per-model names (`Argon`).
+ * Single-pool providers keep a single untitled group with their original labels.
+ */
+export function planUsageGroups<W extends { id: string; kind: string; label: string }>(
+  windows: ReadonlyArray<W>,
+): PlanUsageGroup<W>[] {
+  if (windows.length === 0) return [];
+  const families: string[] = [];
+  const addFamily = (name: string): void => {
+    if (!families.includes(name)) families.push(name);
+  };
+  for (const window of windows) {
+    if (window.kind === "session") {
+      const suffix = windowSuffix(window.label);
+      if (suffix !== null) addFamily(suffix);
+    }
+    if (window.id.startsWith("gemini-")) addFamily("Gemini");
+    if (window.id.startsWith("claude-gpt-") || window.id.startsWith("3p-")) addFamily("Claude & GPT");
+  }
+  if (families.length === 0) {
+    return [{ title: null, rows: windows.map((window) => ({ window, label: window.label })) }];
+  }
+  const byFamily = new Map<string, Array<{ window: W; label: string }>>(families.map((family) => [family, []]));
+  for (const window of windows) {
+    const suffix = windowSuffix(window.label);
+    const family =
+      window.id.startsWith("gemini-") && byFamily.has("Gemini")
+        ? "Gemini"
+        : (window.id.startsWith("claude-gpt-") || window.id.startsWith("3p-")) && byFamily.has("Claude & GPT")
+          ? "Claude & GPT"
+          : suffix !== null && byFamily.has(suffix)
+            ? suffix
+            : families[0]!;
+    const label =
+      suffix !== null && suffix !== family
+        ? suffix
+        : window.kind === "session"
+          ? "5h"
+          : window.kind === "weekly"
+            ? "Weekly"
+            : window.kind === "monthly"
+              ? "Monthly"
+              : window.label;
+    byFamily.get(family)!.push({ window, label });
+  }
+  return [...byFamily.entries()]
+    .filter(([, rows]) => rows.length > 0)
+    .map(([title, rows]) => ({ title, rows }));
+}
+
 /**
  * The footer's compact reading of a provider's plan usage: the session
  * window and the main weekly one always, any other window (a per-model
  * weekly limit) only once it is past 70% — the point where it can bite.
+ * Antigravity's secondary `Claude & GPT` pool is omitted here and shown
+ * only in the extended Context panel.
  */
 export function planUsageGauges(
   limits: { windows: ReadonlyArray<{ id: string; kind: string; label: string; usedPercent: number }> } | null | undefined,
@@ -317,6 +289,7 @@ export function planUsageGauges(
   const gauges: PlanUsageGauge[] = [];
   const seenKinds = new Set<string>();
   for (const window of limits.windows) {
+    if (isClaudeGptWindow(window)) continue;
     const main = !seenKinds.has(window.kind) && SHORT_BY_KIND[window.kind] !== undefined;
     if (main) {
       seenKinds.add(window.kind);
@@ -328,6 +301,69 @@ export function planUsageGauges(
     }
   }
   return gauges;
+}
+
+export interface CompactPlanUsageSummary {
+  readonly text: string;
+  readonly tone: "normal" | "warn" | "danger";
+}
+
+/**
+ * Resolve the live usage limits for a specific provider instance, without
+ * bleeding driver-level legacy buckets across multi-account instances
+ * (`claude/work`, `chatgpt/personal`, `antigravity/work`).
+ */
+export function providerUsageLimitsFor<
+  L extends { windows: ReadonlyArray<{ id: string; kind: string; label: string; usedPercent: number; resetsAt?: string | null }>; credits?: number | null },
+>(
+  planUsage: Readonly<Record<string, L>> | null | undefined,
+  provider: { readonly instanceId: string; readonly driver?: string; readonly usageLimits?: L | null } | null | undefined,
+): L | null {
+  if (!provider) return null;
+  const exact = planUsage?.[provider.instanceId];
+  if (exact !== undefined) return exact;
+  const lower = provider.instanceId.trim().toLowerCase();
+  const isMultiAccount =
+    lower.startsWith("claude/") ||
+    lower.startsWith("chatgpt/") ||
+    lower.startsWith("antigravity/") ||
+    lower.startsWith("codex/");
+  if (!isMultiAccount && provider.driver) {
+    const byDriver = planUsage?.[provider.driver];
+    if (byDriver !== undefined) return byDriver;
+  }
+  return provider.usageLimits ?? null;
+}
+
+/**
+ * Single-line compact usage summary for model picker headers and account rows
+ * (e.g. `5h 18% · wk 42%` or `5h 100% ↻ 45m`). Returns null when no usage
+ * windows or credits have been reported.
+ */
+export function compactPlanUsage(
+  limits: {
+    readonly windows: ReadonlyArray<{ readonly id: string; readonly kind: string; readonly label: string; readonly usedPercent: number; readonly resetsAt?: string | null }>;
+    readonly credits?: number | null;
+  } | null | undefined,
+  formatReset?: (resetsAt: string) => string | null,
+): CompactPlanUsageSummary | null {
+  if (!limits) return null;
+  const gauges = planUsageGauges(limits);
+  if (gauges.length === 0) {
+    if (typeof limits.credits === "number") {
+      return { text: `${limits.credits.toLocaleString()} cr`, tone: "normal" };
+    }
+    return null;
+  }
+  const maxPct = Math.max(...gauges.map((g) => g.percent));
+  const tone: "normal" | "warn" | "danger" = maxPct >= 90 ? "danger" : maxPct >= 70 ? "warn" : "normal";
+  const parts = gauges.slice(0, 2).map((g) => `${g.short} ${Math.round(g.percent)}%`);
+  if (maxPct >= 90 && formatReset) {
+    const hot = limits.windows.find((w) => w.usedPercent >= 90 && w.resetsAt);
+    const reset = hot?.resetsAt ? formatReset(hot.resetsAt) : null;
+    if (reset) parts.push(reset);
+  }
+  return { text: parts.join(" · "), tone };
 }
 
 /**

@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { normalizeConfig } from "../../config.js";
 import { describeSettings, parseSettingValue, readSetting, settingDescriptor, writeSetting } from "../../configschema.js";
 import { autoCompactThreshold, loopCompactThreshold } from "../../providers/harness/compactsettings.js";
-import { resolveCompactionSettings } from "../../providers/harness/profiles.js";
+import {
+  recordChatGptContextWindows,
+  resetChatGptContextWindowsForTests,
+  resolveCompactionSettings,
+} from "../../providers/harness/profiles.js";
 import type { CliConfig, HarnessProfileConfig } from "../../types.js";
 import {
+  chatgptHarnessConfigFor,
   compactionModeFor,
   compactLineFor,
   driverProviders,
@@ -286,6 +291,88 @@ describe("the Moxen Harness on ask", () => {
     expect(autoCompactThreshold(200_000, settings)).toBe(140_000);
     expect(loopCompactThreshold(200_000, settings)).toBe(170_000);
     expect(loopCompactThreshold(200_000, { ...settings, ask: false })).toBe(140_000);
+  });
+});
+
+describe("Sign in with ChatGPT compaction", () => {
+  afterEach(() => {
+    resetChatGptContextWindowsForTests();
+  });
+
+  const synthProfile: HarnessProfileConfig = {
+    id: "default",
+    baseUrl: "https://api.openai.com/v1",
+    apiFormat: "responses",
+    models: [{ id: "gpt-6.2-sol", contextWindow: 872_000 }],
+  };
+
+  it("uses its own per-account compaction settings instead of inheriting providers.harness", () => {
+    const config: Config = {
+      providers: {
+        harness: {
+          compaction: "off",
+          compactAt: "50%",
+          slots: 4,
+          profiles: [{ id: "local", baseUrl: "http://localhost:1234/v1", apiFormat: "chat", apiKeyEnv: "LOCAL_KEY", models: [{ id: "m" }] }],
+        },
+        chatgpt: {
+          accounts: [
+            { id: "default", compaction: "ask", compactAt: "60%", compactAtModels: { "gpt-6.2-astra": 150_000 } },
+            { id: "trial", compaction: "off" },
+          ],
+        },
+      },
+    };
+    const resolved = driverProviders(config);
+    const defaultCfg = chatgptHarnessConfigFor(resolved, "chatgpt/default");
+    const trialCfg = chatgptHarnessConfigFor(resolved, "chatgpt/trial");
+
+    // Keeps shared non-compaction fields (profiles for secret-env stripping, slots) while isolating compaction.
+    expect(defaultCfg.profiles?.[0]?.apiKeyEnv).toBe("LOCAL_KEY");
+    expect(defaultCfg.slots).toBe(4);
+
+    const solSettings = resolveCompactionSettings(defaultCfg, synthProfile, "gpt-6.2-sol");
+    expect(solSettings).toMatchObject({ auto: true, ask: true, fraction: 0.6, tokens: null });
+    expect(autoCompactThreshold(872_000, solSettings)).toBe(523_200);
+
+    const astraSettings = resolveCompactionSettings(defaultCfg, synthProfile, "gpt-6.2-astra");
+    expect(astraSettings).toMatchObject({ auto: true, ask: true, tokens: 150_000 });
+
+    const trialSettings = resolveCompactionSettings(trialCfg, synthProfile, "gpt-6.2-sol");
+    expect(trialSettings.auto).toBe(false);
+    expect(longThreadPolicy(config, "chatgpt/trial", "gpt-6.2-sol").compact).toBeNull();
+    expect(longThreadPolicy(config, "chatgpt/default", "gpt-6.2-sol").compact).toEqual({ mode: "ask", line: { tokens: 523_200 } });
+    expect(longThreadPolicy(config, "chatgpt/default", "gpt-6.2-astra").compact).toEqual({ mode: "ask", line: { tokens: 150_000 } });
+  });
+
+  it("defaults ChatGPT auto-compaction to 80% of the model's max context window and lets lower settings override it", () => {
+    // Unset: 80% of the model's largest window inside HarnessDriver; external policy stays null on auto.
+    expect(compactLineFor({}, "chatgpt")).toEqual({ value: { percent: 80 }, key: null });
+    expect(longThreadPolicy({}, "chatgpt/default", "gpt-6.2-sol").compact).toBeNull();
+    expect(planLongThreadAction({}, snapshot({ instanceId: "chatgpt/default", model: "gpt-6.2-sol", usedTokens: 700_000, maxTokens: 872_000 }))).toBeNull();
+
+    const defaultCfg = chatgptHarnessConfigFor(driverProviders({ providers: { chatgpt: { accounts: [{ id: "default" }] } } }), "chatgpt/default");
+    const defaultSettings = resolveCompactionSettings(defaultCfg, synthProfile, "gpt-6.2-sol");
+    expect(defaultSettings).toMatchObject({ auto: true, ask: false, fraction: 0.8, tokens: null });
+    expect(autoCompactThreshold(872_000, defaultSettings)).toBe(697_600);
+
+    // Discovered max window (e.g. 1.05M) flows into ask-mode thresholds at 80% when compactAt is unset.
+    recordChatGptContextWindows("default", [{ id: "gpt-6.2-sol", contextWindow: 1_050_000 }]);
+    const askUnset: Config = { providers: { chatgpt: { accounts: [{ id: "default", compaction: "ask" }] } } };
+    expect(longThreadPolicy(askUnset, "chatgpt/default", "gpt-6.2-sol").compact).toEqual({ mode: "ask", line: { tokens: 840_000 } });
+
+    // Global longThreads settings reach ChatGPT accounts that don't override them.
+    const globalAsk: Config = {
+      longThreads: { compaction: "ask", compactAt: "55%" },
+      providers: { chatgpt: { accounts: [{ id: "default" }] } },
+    };
+    const cfg = chatgptHarnessConfigFor(driverProviders(globalAsk), "chatgpt/default");
+    const settings = resolveCompactionSettings(cfg, synthProfile, "gpt-6.2-sol");
+    expect(settings).toMatchObject({ auto: true, ask: true, fraction: 0.55 });
+    expect(longThreadPolicy(globalAsk, "chatgpt/default", "gpt-6.2-sol").compact).toEqual({ mode: "ask", line: { tokens: 577_500 } });
+    // Settings label shows the 80% default when unset.
+    const view = describeSettings(normalizeConfig({})).find((entry) => entry.descriptor.key === "providers.chatgpt.compactAt")!;
+    expect(view.effective?.label).toBe("80% of the window");
   });
 });
 

@@ -49,6 +49,9 @@ describe("harness profiles", () => {
     const unlisted = resolveHarnessTarget(config, "harness/colab", "mistral-small");
     expect(unlisted.model).toEqual({ id: "mistral-small" });
     expect(unlisted.quirks.assistantAfterToolResult).toBe(true);
+    const anthropicConfig = normalizeHarnessConfig({ profiles: [{ ...profile, id: "ant", apiFormat: "anthropic" }] });
+    expect(resolveHarnessTarget(anthropicConfig, "harness/ant", "my-proxy-model").quirks.images).toBe("native");
+    expect(resolveHarnessTarget(anthropicConfig, "harness/ant", "qwen4-max-preview").quirks).toMatchObject({ effortParam: "reasoning_effort", images: "native" });
     expect(() => resolveHarnessTarget(config, "harness/other", "x")).toThrow(/No harness profile "other"/);
   });
 

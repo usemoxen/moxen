@@ -37,6 +37,8 @@ import { APP_NAME } from "../config.js";
 import { CliError } from "../errors.js";
 import { storedInteractionMode } from "../interactionmode.js";
 import { disabledNativeToolNames, effectiveDisabledNativeTools } from "../nativetools.js";
+import { codexImageGenDisabledTools } from "../providers/chatgpt/companion.js";
+import { resolveProfileProviderConfig } from "../providers/accounts.js";
 import { moxenToolsOf, outOfProcess, parseNameList, resolveMcpServers, routeMcpServers, type McpServerEntry, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
 import { runProcess } from "../infra/process.js";
 import { renameReplacing, writeAtomic } from "../infra/atomic.js";
@@ -62,14 +64,14 @@ import type {
   WorkspaceResolution,
 } from "../types.js";
 import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
-import { driverKindOfInstance } from "../types.js";
+import { antigravityUnsupportedUseAllowed, driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
 import { modeChange, withModeChange } from "./modes.js";
-import { toThreadEnvelope } from "./project.js";
+import { ranTurns, toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
 import { readThread, threadStatus } from "./threads.js";
 import {
@@ -108,7 +110,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, queueAdmission, parseQueuePolicy, providerExhausted, transferDestinationRequestId, transferRequestId, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
@@ -321,7 +323,7 @@ async function sessionSetup(
   const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
   const delegation = await delegationOf(ctx.store, thread.id);
   const kind = driverKindOfInstance(instanceId);
-  const providerConfig = kind === null ? undefined : ctx.config.providers?.[kind];
+  const providerConfig = resolveProfileProviderConfig(ctx.config, instanceId);
   // A delegated thread gets Moxen's tools less the ones that delegate (it does not delegate again), and so does a provider
   // the user turned orchestration off for; `web_fetch` is switched on its own. With both off, the server is left out.
   const reach = moxenToolsOf(providerConfig);
@@ -357,9 +359,9 @@ async function sessionSetup(
   });
   // Servers switched off, or not offered to this provider, drop out; tools switched off are hidden by the driver.
   const { servers: mcpServers, disabledTools: disabledMcpTools } = kind === null ? { servers: merged, disabledTools: [] } : routeMcpServers(merged, kind, providerConfig?.mcpExclude);
-  // Only Claude Code and OpenCode ship tools to switch off or tips to give; the Harness has its own.
-  const nativeKind = kind === "codex" || kind === "claude" || kind === "opencode" ? kind : null;
-  const nativeConfig = nativeKind === null ? undefined : ctx.config.providers?.[nativeKind];
+  // Providers that ship built-in tools to switch off or web-tool order guidance; the Harness has its own.
+  const nativeKind = kind === "codex" || kind === "claude" || kind === "opencode" || kind === "vibe" ? kind : null;
+  const nativeConfig = nativeKind === null ? undefined : (providerConfig as { readonly disabledNativeTools?: string; readonly webSearchOrder?: string; readonly webFetchOrder?: string } | undefined);
   // Global, then this provider's, then the project's (a Harness profile's own come after, in its driver).
   const user = [ctx.config.instructions, providerConfig?.instructions, fromProject].filter((entry): entry is string => Boolean(entry?.trim()));
   const running = runningModelOf(thread.modelSelection, instanceId);
@@ -396,10 +398,18 @@ async function sessionSetup(
   };
   const recorded = thread.instructionState?.[key];
   if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered) await record(next);
+  const baseDisabledTools =
+    nativeKind === null
+      ? []
+      : disabledNativeToolNames(effectiveDisabledNativeTools(nativeKind, nativeConfig?.disabledNativeTools));
+  const disabledNativeTools =
+    thread.hidden === true && nativeKind === "codex"
+      ? [...new Set([...baseDisabledTools, ...codexImageGenDisabledTools(true)])]
+      : baseDisabledTools;
   return {
     mcpServers,
     disabledMcpTools,
-    disabledNativeTools: nativeKind === null ? [] : disabledNativeToolNames(effectiveDisabledNativeTools(nativeKind, nativeConfig?.disabledNativeTools)),
+    disabledNativeTools,
     // OpenCode's own base prompt is replaced by Moxen's unless the user switched that off.
     moxenPrompt: nativeKind === "opencode" && ctx.config.providers?.opencode?.moxenPrompt !== false,
     checklist: providerConfig?.todos !== false,
@@ -407,7 +417,7 @@ async function sessionSetup(
     // So the session is watched between turns (background turns and tasks).
     store: ctx.store,
     delegated: delegation !== null,
-    idleTtlMs: sessionTtlFor(ctx.config, kind),
+    idleTtlMs: sessionTtlFor(ctx.config, instanceId),
     moxenMemory: memory !== "off",
     instructionsUpdate:
       plan.update === null
@@ -448,7 +458,7 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
   // twice. They queue behind the promoted turn's run when there is one, and
   // run after it; with nothing promoted the first copy is run here, or the
   // copies would sit running with no runner and never heal in-process.
-  const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id).catch(() => [] as string[]);
+  const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id, ctx.config).catch(() => [] as string[]);
   if (result.promoted && ctx.store.claimRun(result.promoted.id)) {
     await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
     return true;
@@ -504,7 +514,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // same provider conversation with the request-scoped submission tool.
       if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
       setup = await sessionSetup(ctx, turnThread, selection.instanceId);
-      await ensureDriverSession(driver, turnThread, { modelSelection: selection, ...sessionStart(setup), ...longThreadHook(ctx, threadId) });
+      await ensureDriverSession(driver, turnThread, { modelSelection: selection, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, threadId), ...usageLimitHook(ctx, threadId, selection.instanceId) });
       await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
       // Config or rule files changed while the session sat idle: a live session
       // takes them now, like a fresh send does — never a reason to fail the resume.
@@ -533,6 +543,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       interactionMode: turn.interactionMode,
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
+      config: ctx.config,
       workingDirectory: thread.env.path,
       ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
       ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
@@ -592,6 +603,10 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
   }
   const row = rows.find((r) => r.thread.id === threadId);
   if (!row) return false;
+  // Provenance the admission pass reads: a turn whose origin lives only on
+  // its message (pre-origin rows) is an automatic prompt when the ledger
+  // says so, not a fresh user send.
+  const origins = await loadTurnOrigins(ctx.store, rows, ctx.config);
   // An entry or thread condition can name a thread whose owner died
   // mid-turn: nothing there will ever settle it, so recover those threads
   // too instead of holding the waiter forever. Cheap when there is nothing
@@ -648,7 +663,7 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
       messages ??= await ctx.store.readMessages(threadId).catch(() => []);
       if (!messages.some((message) => message.id === candidate.messageId)) continue;
     }
-    const admission = queueAdmission(row, candidate, rows, ctx.config, now);
+    const admission = queueAdmission(row, candidate, rows, ctx.config, now, origins);
     if (candidate.queue && (JSON.stringify(admission.latched) !== JSON.stringify(candidate.queue.latched ?? []) || JSON.stringify(admission.conditions) !== JSON.stringify(candidate.queue.conditions))) await ctx.store.withThreadLock(threadId, () => ctx.store.updateTurn(threadId, candidate.id, { queue: { ...candidate.queue!, latched: admission.latched, conditions: admission.conditions } }));
     if (admission.blocked.length) continue;
     if (await switchColdRecovery(ctx, row, candidate, now)) continue;
@@ -727,6 +742,7 @@ export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly Q
   for (const row of rows) {
     if (!row.turns.some((turn) => turn.status === "queued" || turn.queue && turn.status !== "completed")) continue;
     const messages = await ctx.store.readMessages(row.thread.id);
+    const origins = await loadTurnOrigins(ctx.store, [row], ctx.config);
     for (const turn of row.turns) {
       if (turn.queue?.summaryFor || turn.status !== "queued" && !(turn.queue && turn.status !== "completed")) continue;
       const stopped = turn.status === "failed" || turn.status === "interrupted";
@@ -744,7 +760,7 @@ export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly Q
           policy = { ...policy, conditions: policy.conditions.slice(0, -1) };
         }
       }
-      const blocked = queueAdmission(row, turn, rows, ctx.config).blocked;
+      const blocked = queueAdmission(row, turn, rows, ctx.config, undefined, origins).blocked;
       if (stopped && !turn.queue?.removed) blocked.unshift(turn.error ?? "Stopped before completion; add back held to retry");
       if (policy.continuation !== "same-thread") blocked.unshift(turn.handoff?.fallback ? "Using stored handoff: model summary unavailable" : turn.handoff?.summary ? "Model handoff received" : policy.continuation === "model" ? "Preparing model handoff" : "Preparing stored handoff");
       if (row.thread.usagePause && row.thread.usagePause.phase !== "resuming") blocked.unshift("Waiting for usage protection");
@@ -824,6 +840,8 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
       }
       const existing = turn.queue ?? parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
       const row = rows.find((candidate) => candidate.thread.id === threadId);
+      const editThread = row?.thread ?? await ctx.store.readThreadRecord(threadId);
+      const editSelection = turn.modelSelection ?? editThread?.modelSelection;
       const observed = row ? queueAdmission(row, turn, rows, ctx.config).latched : existing.latched ?? [];
       // A moved entry carries one internal condition — the wait on the
       // destination's first turn. It is an invariant, not a user condition:
@@ -844,11 +862,14 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
           internalWait = { type: "entry", threadId, turnId: handoffTurn.id };
         }
       }
+      const parsedPolicy = incoming
+        ? (editSelection ? resolveQueueResetConditions(parseQueuePolicy(incoming, { deferReset: true }), editSelection) : parseQueuePolicy(incoming))
+        : undefined;
       const stripWait = (conditions: readonly QueueCondition[]): QueueCondition[] =>
         internalWait === undefined
           ? [...conditions]
           : conditions.filter((condition) => !(condition.type === "entry" && condition.threadId === threadId && condition.turnId === internalWait!.turnId));
-      let next: QueuePolicy = incoming ? { ...existing, ...parseQueuePolicy(incoming), eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => { const left = stripWait(existing.conditions ?? []); const right = stripWait(incoming!.conditions); return index < left.length && index < right.length && JSON.stringify(left[index]) === JSON.stringify(right[index]); }) } : existing;
+      let next: QueuePolicy = parsedPolicy ? { ...existing, ...parsedPolicy, eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => { const left = stripWait(existing.conditions ?? []); const right = stripWait(parsedPolicy.conditions); return index < left.length && index < right.length && JSON.stringify(left[index]) === JSON.stringify(right[index]); }) } : existing;
       if (internalWait) next = { ...next, conditions: [...stripWait(next.conditions), internalWait] };
       if (next.conditions.some((c) => c.type === "thread" && c.threadId === threadId || c.type === "entry" && c.threadId === threadId && c.turnId === turnId)) throw new CliError("QUEUE_DEPENDENCY_CYCLE", "An entry cannot wait for itself or its own thread.");
       if (action === "first" || action === "last") next = { ...next, order: action === "first" ? Math.min(...entries.map((e) => e.policy.order)) - 1 : Math.max(...entries.map((e) => e.policy.order)) + 1 };
@@ -908,9 +929,10 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
   await ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
     const rows = snapshot ? [...snapshot] : await queueRows(ctx);
     if (snapshot) await queueDependencies(ctx, rows);
+    const origins = await loadTurnOrigins(ctx.store, rows, ctx.config);
     for (const row of rows) for (const turn of row.turns) {
       if (turn.status !== "queued" || !turn.queue) continue;
-      const admission = queueAdmission(row, turn, rows, ctx.config, now);
+      const admission = queueAdmission(row, turn, rows, ctx.config, now, origins);
       if (JSON.stringify(admission.latched) === JSON.stringify(turn.queue.latched ?? []) && JSON.stringify(admission.conditions) === JSON.stringify(turn.queue.conditions)) continue;
       await ctx.store.withThreadLock(row.thread.id, () => ctx.store.updateTurn(row.thread.id, turn.id, { queue: { ...turn.queue!, latched: admission.latched, conditions: admission.conditions } }));
     }
@@ -971,7 +993,8 @@ const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
 export async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, turnId: string, now: number): Promise<void> {
   const store = ctx.store;
   const source = await store.readThreadRecord(threadId);
-  let turn = (await store.readTurns(threadId)).find((t) => t.id === turnId);
+  const turns = await store.readTurns(threadId);
+  let turn = turns.find((t) => t.id === turnId);
   if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
   // A moved entry's own onward handoff waits like its dispatch does: no
   // summary turn and no next destination until the destination's first
@@ -989,6 +1012,26 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
     const landed = handoffSettled && (await store.readMessages(threadId)).some((message) => message.id === entry.messageId);
     if (!landed) return;
   }
+  // The entry's provenance, made whole with the message ledger for turns
+  // written before the turn row carried an origin: an automatic handoff is
+  // one even when its turn predates the origin column.
+  const origins = await loadTurnOrigins(store, [{ thread: source, turns }], ctx.config);
+  const origin = turn.origin ?? origins.get(turnOriginKey(threadId, turn.id));
+  const userAuthorized = origin === undefined && turn.queue.automatic !== true && turn.queue.wakeUp !== true
+    && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold";
+  // A handoff into a held Antigravity is one of the automatic prompts off
+  // forbids: an automatic entry of any continuation (model or stored) is
+  // held here — before preparation creates the handoff request, starts a
+  // summary, or touches a destination thread.
+  const destinationHeld = antigravityAutoPromptsHeld(ctx.config, (turn.modelSelection ?? source.modelSelection).instanceId);
+  if (destinationHeld && !userAuthorized) return;
+  // A model summary is a prompt on the source thread, so the source's gate
+  // holds it as surely as the destination's: while the source runs on a
+  // held Antigravity the summary could only ever sit queued. A handoff the
+  // user queued themselves completes on its stored summary instead; an
+  // automatic one is held before any mutation.
+  const handoffHeldOff = turn.queue.continuation === "model" && antigravityAutoPromptsHeld(ctx.config, source.modelSelection.instanceId);
+  if (handoffHeldOff && !userAuthorized) return;
   if (!turn.handoff) {
     const handoff = { requestId: store.newId(), destinationThreadId: store.newId() };
     await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));
@@ -1013,31 +1056,52 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   if (claimBlocked) return;
   if (turn.queue!.continuation === "model" && !handoff.summary && !handoff.fallback) {
     const summaryProvider = usageKeyForInstance(source.modelSelection.instanceId);
-    const exhausted = providerExhausted(summaryProvider, now);
-    if (!handoff.summaryTurnId && !exhausted) {
-      if (openTurn(await store.readTurns(threadId))) return;
-      const sent = await sendTurn(store, threadId, {
-        prompt: `Prepare a concise handoff for the unfinished task: goal, completed work, changed files, checks/failures, next steps, outstanding requests and important images. Do not perform more task work. Deliver the summary ONLY through the Moxen submit_handoff tool with requestId ${handoff.requestId}. After the tool acknowledges it, finish with no extra prose (or just Done). If you cannot call that tool, stop; Moxen will use its stored handoff.`,
-        origin: "handoff-summary", usageControl: true,
-        queue: { ...parseQueuePolicy({ conditions: [], order: turn.queue!.order - 0.5, sequential: false }), requestId: `summary:${handoff.requestId}`, summaryFor: turnId },
+    const exhausted = providerExhausted(summaryProvider, now, source.modelSelection.model);
+    if (handoffHeldOff) {
+      // The model summary never starts while the Antigravity gate is off, so
+      // waiting on it would stall the user's handoff forever: a summary
+      // turn begun before the setting turned off is stopped, and the entry
+      // takes the stored summary now.
+      const staleSummary = handoff.summaryTurnId
+        ? (await store.readTurns(threadId)).find((candidate) => candidate.id === handoff.summaryTurnId)
+        : undefined;
+      if (staleSummary?.status === "running") {
+        await Effect.runPromise(ctx.driverFor((staleSummary.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
+        await interruptTurn(store, threadId, staleSummary.id);
+      } else if (staleSummary?.status === "queued") {
+        await interruptTurn(store, threadId, staleSummary.id);
+      }
+      await store.withThreadLock(threadId, async () => {
+        const current = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+        handoff = { ...current!.handoff!, fallback: !current!.handoff!.summary };
+        await store.updateTurn(threadId, turnId, { handoff });
       });
-      handoff = { ...handoff, summaryTurnId: sent.turn.id };
-      await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));
-      return;
+    } else {
+      if (!handoff.summaryTurnId && !exhausted) {
+        if (openTurn(await store.readTurns(threadId))) return;
+        const sent = await sendTurn(store, threadId, {
+          prompt: `Prepare a concise handoff for the unfinished task: goal, completed work, changed files, checks/failures, next steps, outstanding requests and important images. Do not perform more task work. Deliver the summary ONLY through the Moxen submit_handoff tool with requestId ${handoff.requestId}. After the tool acknowledges it, finish with no extra prose (or just Done). If you cannot call that tool, stop; Moxen will use its stored handoff.`,
+          origin: "handoff-summary", usageControl: true,
+          queue: { ...parseQueuePolicy({ conditions: [], order: turn.queue!.order - 0.5, sequential: false }), requestId: `summary:${handoff.requestId}`, summaryFor: turnId },
+        }, ctx.config);
+        handoff = { ...handoff, summaryTurnId: sent.turn.id };
+        await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));
+        return;
+      }
+      const summaryTurn = (await store.readTurns(threadId)).find((t) => t.id === handoff.summaryTurnId);
+      if (summaryTurn?.status === "queued" && !exhausted) return;
+      if (summaryTurn?.status === "running") {
+        if (now - Date.parse(summaryTurn.startedAt ?? summaryTurn.createdAt) < HANDOFF_SUMMARY_BUDGET_MS && !exhausted) return;
+        await Effect.runPromise(ctx.driverFor((summaryTurn.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
+        await interruptTurn(store, threadId, summaryTurn.id);
+      }
+      if (summaryTurn?.status === "queued") await interruptTurn(store, threadId, summaryTurn.id);
+      await store.withThreadLock(threadId, async () => {
+        const current = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+        handoff = { ...current!.handoff!, fallback: !current!.handoff!.summary };
+        await store.updateTurn(threadId, turnId, { handoff });
+      });
     }
-    const summaryTurn = (await store.readTurns(threadId)).find((t) => t.id === handoff.summaryTurnId);
-    if (summaryTurn?.status === "queued" && !exhausted) return;
-    if (summaryTurn?.status === "running") {
-      if (now - Date.parse(summaryTurn.startedAt ?? summaryTurn.createdAt) < HANDOFF_SUMMARY_BUDGET_MS && !exhausted) return;
-      await Effect.runPromise(ctx.driverFor((summaryTurn.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
-      await interruptTurn(store, threadId, summaryTurn.id);
-    }
-    if (summaryTurn?.status === "queued") await interruptTurn(store, threadId, summaryTurn.id);
-    await store.withThreadLock(threadId, async () => {
-      const current = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
-      handoff = { ...current!.handoff!, fallback: !current!.handoff!.summary };
-      await store.updateTurn(threadId, turnId, { handoff });
-    });
   }
   if (openTurn(await store.readTurns(threadId))) return;
   const policy: QueuePolicy = { ...turn.queue!, continuation: "same-thread", requestId: `handoff:${handoff.requestId}`, eventAfter: turn.queue!.eventAfter ?? turn.createdAt };
@@ -1076,10 +1140,9 @@ export async function armPendingScheduledTurns(ctx: OperationContext): Promise<v
 /** Automatic continues in a row before moxen stops trying, unless `usageLimitContinues` says otherwise (Claude Code's own cap). */
 export const MAX_USAGE_CONTINUES = 2;
 
-/** Whether a usage limit on this instance's provider is waited out: its own switch, else the global one. */
+/** Whether a usage limit on this instance's provider (or independent profile) is waited out: its own switch, else the global one. */
 export function autoContinuesAt(config: OperationContext["config"], instanceId: string): boolean {
-  const kind = driverKindOfInstance(instanceId);
-  return (kind === null ? undefined : config.providers?.[kind]?.autoContinueAtUsageLimit) ?? config.autoContinueAtUsageLimit === true;
+  return resolveProfileProviderConfig(config, instanceId)?.autoContinueAtUsageLimit ?? config.autoContinueAtUsageLimit === true;
 }
 
 /** The runner hook that schedules a continue after a usage limit, when config asks for it on this turn's provider. */
@@ -1133,7 +1196,7 @@ export async function scheduleUsageContinue(
     scheduledFor: at,
     scheduleReason: "usage-reset",
     continueAttempt: attempt,
-  });
+  }, ctx.config);
   armScheduledTurn(threadId, sent.turn.id, at);
   // A delegated task runs out of usage: its parent hears now, with the
   // expected resume time, and still gets the normal report when the task
@@ -1269,6 +1332,10 @@ export async function compactMidTurn(ctx: OperationContext, threadId: string, us
   if (compactingMidTurn.has(threadId)) return false;
   const snapshot = await readLongThreadSnapshot(ctx.store, threadId);
   if (snapshot === null || !snapshot.turnRunning) return false;
+  // Compacting mid-turn stops the running turn so the `/compact` and its
+  // follow-up can take its place: while Antigravity's automatic prompts are
+  // held there is no place for them, so the running turn is left alone.
+  if (antigravityAutoPromptsHeld(ctx.config, snapshot.instanceId)) return false;
   // As it will stand when the turn has settled.
   const action = planLongThreadAction(ctx.config, { ...snapshot, turnRunning: false, usedTokens: usage.usedTokens, maxTokens: usage.maxTokens });
   if (action?.kind !== "compact") return false;
@@ -1291,11 +1358,11 @@ export async function compactMidTurn(ctx: OperationContext, threadId: string, us
   return true;
 }
 
-/** After a mid-turn compaction: the task goes on from where it stopped. */
+/** After a mid-turn compaction: the task goes on from where it stopped. Marked at its source, so the Antigravity off gate holds it like any automatic prompt. */
 async function resumeAfterCompaction(ctx: OperationContext, threadId: string, action: LongThreadAction | null): Promise<void> {
   // A hand-off in its place moved the work to a new thread: nothing to resume here.
   if (action?.kind === "handoff") return;
-  await startTurn(ctx, { threadId, prompt: COMPACTED_CONTINUE_PROMPT, onEvent: () => undefined });
+  await startTurn(ctx, { threadId, prompt: COMPACTED_CONTINUE_PROMPT, origin: "compaction", onEvent: () => undefined });
 }
 
 /**
@@ -1309,23 +1376,51 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string, o
   const action = planLongThreadAction(ctx.config, snapshot);
   if (action === null) return null;
   if (action.kind === "handoff") {
+    // An automatic hand-off is a prompt the user did not write: held while
+    // Antigravity delegation is off. The work stays in this thread; a notice
+    // says why, once until something else lands in the ledger.
+    if (antigravityAutoPromptsHeld(ctx.config, snapshot.instanceId)) {
+      const activities = await ctx.store.readActivities(threadId);
+      const last = activities.at(-1);
+      if (!(last?.kind === "notice" && last.payload?.held === "antigravity-delegation")) {
+        await ctx.store.appendLedger(threadId, "activity", {
+          id: ctx.store.newId(), threadId, turnId: null,
+          kind: "notice",
+          summary: "Hand-off held: Antigravity delegation and automatic prompts are off",
+          payload: { notice: "other", held: "antigravity-delegation", detail: "Turn on providers.antigravity.allowUnsupportedUse to let Moxen hand off automatically, or continue the thread yourself." },
+          createdAt: ctx.store.nowIso(),
+        });
+        ctx.store.emit(threadId, "activity");
+      }
+      return null;
+    }
     await continueThread(ctx, { threadId, automatic: true });
     return action;
   }
   if (action.reason !== "auto") {
     // An "ask" Moxen did not wait for: say why, so the card that never got an answer is accounted for.
+    const providerName =
+      ({
+        claude: "Claude Code",
+        codex: "Codex",
+        opencode: "OpenCode",
+        harness: "Moxen Harness",
+        antigravity: "Antigravity",
+        vibe: "Mistral Vibe",
+        acp: "ACP",
+      } as Record<string, string>)[driverKey(snapshot.instanceId)] ?? snapshot.instanceId;
     await ctx.store.appendLedger(threadId, "activity", {
       id: ctx.store.newId(),
       threadId,
       turnId: null,
       kind: "notice",
       summary: action.reason === "delegated" ? "Compacting: a delegated task has no one to ask" : "Compacting: the thread is nearly full",
-      payload: { notice: "other", detail: "Claude Code's own compaction is off while Moxen compacts, so Moxen does it rather than let the next turn hit the limit." },
+      payload: { notice: "other", detail: `${providerName}'s own compaction is off while Moxen compacts, so Moxen does it rather than let the next turn hit the limit.` },
       createdAt: ctx.store.nowIso(),
     });
     ctx.store.emit(threadId, "activity");
   }
-  const started = await startTurn(ctx, { threadId, prompt: COMPACT_PROMPT, onEvent: () => undefined });
+  const started = await startTurn(ctx, { threadId, prompt: COMPACT_PROMPT, origin: "compaction", onEvent: () => undefined });
   // A turn waiting to go on after it needs the compaction done first.
   if (options.wait === true) await started.run;
   return action;
@@ -1624,7 +1719,7 @@ export function firstMessageNote(firstMessage: string | undefined): string {
 function continuedHoldApplies(pause: UsagePause, selection: ModelSelection, now = Date.now()): boolean {
   if (usageKeyForInstance(selection.instanceId) !== pause.provider) return false;
   if (pause.resetsAt !== null && Number.isFinite(Date.parse(pause.resetsAt)) && Date.parse(pause.resetsAt) <= now) return false;
-  return providerExhausted(pause.provider, now);
+  return providerExhausted(pause.provider, now, selection.model);
 }
 
 /**
@@ -2264,6 +2359,11 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   const { store } = ctx;
   const source = await store.readThreadRecord(request.threadId);
   if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${request.threadId}.`, { exitCode: 2 });
+  // An agent continuing its own thread onto Antigravity starts delegated
+  // work there: refused while the setting is off, before a destination is
+  // reserved. The user's own Continue action and queued handoffs are not
+  // this path (their first turn is held by admission when automatic).
+  if (request.byAgent === true) requireAntigravityDelegation(ctx.config, (request.modelSelection ?? source.modelSelection).instanceId);
   const title = continuedTitle(source.title);
   // Review never stays on a thread: a continued review child, or a carried
   // one-off review turn, starts the new thread in Build instead.
@@ -2930,10 +3030,12 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const thread = await inspectThread(store, input.threadId);
   // Resolved before the ledger is touched: an unknown provider fails
   // without recording a turn.
-  const driver = ctx.driverFor((input.modelSelection ?? thread.modelSelection).instanceId);
+  const turnSelection = input.modelSelection ?? thread.modelSelection;
+  const driver = ctx.driverFor(turnSelection.instanceId);
   const { threadId: _threadId, driverPrompt, onEvent, ...send } = input;
-  const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(input.queue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : undefined;
-  const sent = await sendTurn(store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) });
+  const resolvedQueue = input.queue ? resolveQueueResetConditions(input.queue, turnSelection) : undefined;
+  const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(resolvedQueue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : resolvedQueue;
+  const sent = await sendTurn(store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) }, ctx.config);
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
@@ -2975,7 +3077,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   let startFailure: unknown = null;
   try {
     setup = await sessionSetup(ctx, turnThread, turnModel.instanceId);
-    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id) });
+    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id), ...usageLimitHook(ctx, sent.thread.id, turnModel.instanceId) });
   } catch (cause) {
     startFailure = cause;
   }
@@ -3018,6 +3120,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       storeTurnId: sent.turn.id,
       prompt: "",
       modelSelection: turnModel,
+      runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
       ...(onEvent ? { onEvent } : {}),
@@ -3049,6 +3152,8 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       // Always the turn's own model, so a live session switches when the
       // thread's model changed since it started.
       modelSelection: turnModel,
+      config: ctx.config,
+      runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
       ...(onEvent ? { onEvent } : {}),
@@ -3125,7 +3230,17 @@ export interface RevertOptions {
 }
 
 /**
- * Revert a thread's conversation so its first `keepTurns` turns remain.
+ * Whether a turn reached the provider: a promoted turn records `startedAt`,
+ * and a turn that ran at once is not `queued` delivery. A message that never
+ * left the queue carries no provider prompts and no checkpoint.
+ */
+function startedTurn(turn: StoredTurn): boolean {
+  return turn.delivery !== "queued" || turn.startedAt !== undefined;
+}
+
+/**
+ * Revert a thread's conversation so its first `keepTurns` turns remain, in the
+ * order they ran (the same numbering `checkpointTurnCount` and `turnDiff` use).
  * Files are left as they are unless `restoreFiles` asks for them too; the
  * checkpoints stay available to diff against either way.
  *
@@ -3135,6 +3250,11 @@ export interface RevertOptions {
  * received, which a steer makes more than one per turn — and only then is
  * the ledger cut. A provider that cannot roll back would refuse the
  * whole revert before anything changes.
+ *
+ * A message that never ran is not one of the turns being counted: an
+ * interrupted-before-start row is left in the ledger, and a terminal row
+ * that never reached the provider contributes no prompts and no file
+ * snapshot.
  */
 export async function revertThread(
   ctx: OperationContext,
@@ -3165,13 +3285,19 @@ export async function revertThread(
       details: { threadId },
     });
   }
-  const removed = turns.slice(keepTurns);
-  if (removed.length === 0) return { threadId, keptTurns: turns.length, removedTurns: 0, providers: [] };
+  const ran = ranTurns(turns);
+  const removed = ran.slice(keepTurns);
+  if (removed.length === 0) {
+    // The turns that ran are all kept; a queued or cancelled-before-start row
+    // is not a turn and stays as it is.
+    return { threadId, keptTurns: Math.min(keepTurns, ran.length), removedTurns: 0, providers: [] };
+  }
 
   // What each provider saw of the dropped turns, in prompts.
   const messages = await store.readMessages(threadId);
   const byDriver = new Map<string, { instanceId: string; selection: ModelSelection; prompts: number }>();
   for (const turn of removed) {
+    if (!startedTurn(turn)) continue;
     const selection = turn.modelSelection ?? thread.modelSelection;
     const key = driverKey(selection.instanceId);
     const prompts = messages.filter((message) => message.turnId === turn.id && message.role === "user").length || 1;
@@ -3179,13 +3305,15 @@ export async function revertThread(
     entry.prompts += prompts;
     byDriver.set(key, entry);
   }
-  // The files' target: the worktree as it was before the first dropped turn.
-  // Checked before anything changes, so a revert that cannot restore files
-  // leaves the conversation alone too.
+  // The files' target: the worktree as it was before the first dropped turn
+  // that reached the provider. A never-started row has no snapshot to name.
+  const firstStarted = removed.find(startedTurn) ?? null;
   const filesTarget =
     options.restoreFiles === true
-      ? ((await store.readCheckpoints(threadId)).find((checkpoint) => checkpoint.turnId === removed[0]!.id && checkpoint.baseRef)?.baseRef ?? null)
+      ? ((await store.readCheckpoints(threadId)).find((checkpoint) => checkpoint.turnId === firstStarted?.id && checkpoint.baseRef)?.baseRef ?? null)
       : null;
+  // Checked before anything changes, so a revert that cannot restore files
+  // leaves the conversation alone too.
   if (options.restoreFiles === true && filesTarget === null) {
     throw new CliError(
       "REVERT_FILES_UNAVAILABLE",
@@ -3200,7 +3328,7 @@ export async function revertThread(
     const live = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
     // No live session and nothing to resume: no provider remembers these turns.
     if (!live && !thread.providerSessions?.[key]) continue;
-    if (!driver.rollbackThread) {
+    if (!driver.rollbackThread || driver.capabilities?.supportsConversationRollback === false) {
       throw new CliError("REVERT_UNSUPPORTED", `The ${key} driver cannot roll back a conversation.`, {
         exitCode: 4,
         details: { threadId, provider: key },
@@ -3208,8 +3336,10 @@ export async function revertThread(
     }
     await ensureDriverSession(driver, thread, {
       modelSelection: entry.selection,
+      config: ctx.config,
       ...sessionStart(await sessionSetup(ctx, thread, entry.instanceId)),
       ...longThreadHook(ctx, threadId),
+      ...usageLimitHook(ctx, threadId, entry.instanceId),
     });
     await Effect.runPromise(driver.rollbackThread(threadId, entry.prompts));
     rolledBack.push(key);
@@ -3554,6 +3684,17 @@ export async function removeThreadWorktree(storeRoot: string, thread: StoredThre
   }
 }
 
+/** Reattach the original branch when archive freed its clean checkout. */
+export async function restoreThreadWorktree(storeRoot: string, thread: StoredThread): Promise<void> {
+  if (thread.env.mode !== "worktree" || existsSync(thread.env.path)) return;
+  const dir = path.resolve(thread.env.path);
+  const project = await projectById(storeRoot, thread.projectId);
+  if (path.dirname(dir) !== path.join(path.resolve(storeRoot), "worktrees") || !thread.env.branch || !project) {
+    throw new CliError("THREAD_WORKTREE_MISSING", "The thread's original checkout is missing and could not be restored.");
+  }
+  await runProcess("git", ["worktree", "add", "--", dir, thread.env.branch], { cwd: project.workspaceRoot });
+}
+
 /** Per-project settings file, read from the workspace root. */
 export const PROJECT_FILE = `${APP_NAME}.json` as const;
 
@@ -3767,6 +3908,26 @@ export async function handover(ctx: OperationContext, request: HandoverRequest):
 
 const DELEGATE_DEFAULT_TIMEOUT_MS = 600_000;
 
+/**
+ * Whether Moxen must hold automatic prompts on this instance: Antigravity
+ * with `providers.antigravity.allowUnsupportedUse` off (the default). Google's
+ * consumer sign-in covers only prompts the user types themselves, so a
+ * delegated task or an automatic turn is refused or held, never started.
+ */
+function antigravityAutoPromptsHeld(config: CliConfig, instanceId: string): boolean {
+  return driverKindOfInstance(instanceId) === "antigravity" && !antigravityUnsupportedUseAllowed(config);
+}
+
+/** Refuse starting delegated work on Antigravity while the setting is off, before anything is created. */
+function requireAntigravityDelegation(config: CliConfig, instanceId: string): void {
+  if (!antigravityAutoPromptsHeld(config, instanceId)) return;
+  throw new CliError(
+    "ANTIGRAVITY_DELEGATION_OFF",
+    "Delegation and automatic prompts are off for Antigravity: Google does not support them on consumer plans and may suspend the account. Turn on providers.antigravity.allowUnsupportedUse to allow them.",
+    { exitCode: 4, details: { instanceId, setting: "providers.antigravity.allowUnsupportedUse" } },
+  );
+}
+
 export interface DelegateRequest extends ModelRequest {
   /** A size explicitly supplied by the user, never copied from a model proposal. */
   readonly research?: ResearchPlan;
@@ -3849,7 +4010,7 @@ async function forkParentSession(
       details: { threadId: parentThreadId },
     });
   }
-  return { key, cursor: await driver.forkSession(cursor, workingDirectory) };
+  return { key, cursor: await driver.forkSession(cursor, workingDirectory, childSelection.instanceId) };
 }
 
 // -- task notifications -----------------------------------------------------------
@@ -3988,7 +4149,11 @@ async function parentMustWaitForUsage(ctx: OperationContext, parent: StoredThrea
   if (parentNotificationsHeld(parent)) return true;
   const turns = await ctx.store.readTurns(parent.id).catch(() => [] as StoredTurn[]);
   const selection = openTurn(turns)?.modelSelection ?? parent.modelSelection;
-  return providerExhausted(usageKeyForInstance(selection.instanceId));
+  // An Antigravity parent with delegation off takes no automatic prompt:
+  // the notice waits in the batch for the user's next message (or the
+  // setting turning on), exactly as a usage-held parent's does.
+  if (antigravityAutoPromptsHeld(ctx.config, selection.instanceId)) return true;
+  return providerExhausted(usageKeyForInstance(selection.instanceId), Date.now(), selection.model);
 }
 
 /** Deliver a parent's pending notification batch, unless it still cannot receive it. */
@@ -4034,11 +4199,16 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     if (held !== null) {
       const turns = await ctx.store.readTurns(parentThreadId).catch(() => [] as StoredTurn[]);
       const running = openTurn(turns) !== null;
-      const spent = providerExhausted(usageKeyForInstance((openTurn(turns)?.modelSelection ?? held.modelSelection).instanceId));
+      const activeSelection = openTurn(turns)?.modelSelection ?? held.modelSelection;
+      const spent = providerExhausted(usageKeyForInstance(activeSelection.instanceId), Date.now(), activeSelection.model);
       // An archived or deleted parent can never receive again: drop the
       // batch at once instead of keeping what no flush could deliver.
       const receivable = held.archivedAt == null && held.deletedAt == null;
-      if (receivable && (parentNotificationsHeld(held) || (!running && spent))) {
+      // A running turn is the user's own (the flush rides their send): the
+      // notice goes out with it. Idle, an Antigravity parent with delegation
+      // off keeps the batch for the next message or the setting turning on.
+      const antigravityHeld = !running && antigravityAutoPromptsHeld(ctx.config, activeSelection.instanceId);
+      if (receivable && (parentNotificationsHeld(held) || antigravityHeld || (!running && spent))) {
         // Still held, or spent with no live turn to steer into: stay durable
         // in the batch file instead of starting a turn into the same wall —
         // startTurn resolves even when the session fails, and the batch would
@@ -4217,8 +4387,9 @@ async function taskBackgroundState(
     return unknown;
   }
   const forgottenAfter = backgroundForgottenAfterMs(ctx.config);
+  const kind = driverKey(modelSelection.instanceId);
   return {
-    unknown: driver.backgroundTasks === undefined || driverKey(modelSelection.instanceId) === "opencode",
+    unknown: driver.backgroundTasks === undefined || kind === "opencode" || kind === "acp" || kind === "antigravity",
     tasks: summaries.map((task) => {
       const startedAt = task.startedAt ?? null;
       const rawAge = startedAt === null ? null : nowMs - Date.parse(startedAt);
@@ -4646,6 +4817,10 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   const project = await projectById(ctx.storeRoot, parent.projectId);
   const base = parent.modelSelection ?? project?.defaultModelSelection ?? defaultModelSelection();
   const modelSelection = followUpSelection(base, ctx.config, request, task) ?? base;
+  // Refused before anything is created — no thread, no worktree, no fork —
+  // on every path that starts a task here: single, batch entry, research
+  // role, review and fork alike.
+  requireAntigravityDelegation(ctx.config, modelSelection.instanceId);
   const research = options.fullResearchRun ? resolveResearchPlan(modelSelection, ctx.config, {
     size, ...(options.researchModels ? { models: options.researchModels } : {}),
   }) : null;
@@ -5571,6 +5746,9 @@ export async function sendTaskMessage(
   const message = rawMessage.trim();
   if (!message) throw new CliError("PROMPT_REQUIRED", "A non-empty thread message is required.", { exitCode: 2 });
   const { row, target } = await requireTaskControl(ctx, parentThreadId, rawTaskId, "task_send");
+  // An agent's message (or wake) starts a turn on the task: delegated work
+  // on Antigravity, refused while the setting is off.
+  requireAntigravityDelegation(ctx.config, target.modelSelection.instanceId);
   if (target.env.mode === "worktree" && target.env.path.trim() !== "" && !existsSync(target.env.path)) {
     throw new CliError(
       "TASK_WORKTREE_REMOVED",
@@ -5686,7 +5864,7 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
   }
   const scheduledFor = input.at === undefined ? undefined : parseScheduledTime(input.at, new Date(), "at");
   const conditions = input.conditions ?? [];
-  const queue = conditions.length > 0 ? parseQueuePolicy({ conditions, sequential: ctx.config.usageRecovery === "sequential" }) : undefined;
+  const queue = conditions.length > 0 ? resolveQueueResetConditions(parseQueuePolicy({ conditions, sequential: ctx.config.usageRecovery === "sequential" }, { deferReset: true }), target.modelSelection) : undefined;
   const started = await startTurn(ctx, {
     threadId: targetId,
     prompt: `${self ? SELF_QUEUED_HEADER : TASK_MESSAGE_HEADER}\n\n${message}`,
@@ -5703,7 +5881,7 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
     const rows = snapshot ? [...snapshot] : await queueRows(ctx);
     if (snapshot) await queueDependencies(ctx, rows);
     const row = rows.find((candidate) => candidate.thread.id === targetId) ?? { thread, turns: await ctx.store.readTurns(targetId) };
-    waitingFor = turn.queue ? queueAdmission(row, turn, rows, ctx.config).blocked : [];
+    waitingFor = turn.queue ? queueAdmission(row, turn, rows, ctx.config, undefined, await loadTurnOrigins(ctx.store, [row], ctx.config)).blocked : [];
     if (!turn.queue && thread.usagePause) waitingFor = ["Waiting for thread protection"];
   }
   const held = typeof turn.scheduledFor === "string" && Date.parse(turn.scheduledFor) > Date.now() ? turn.scheduledFor : null;

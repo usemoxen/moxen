@@ -9,10 +9,13 @@ import { testHarness } from "../../testing/harness.js";
 import { driverKindOfInstance } from "../../types.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { UsageProtection } from "../../usage/protection.js";
-import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeThread, unsnoozeThread } from "../threads.js";
+import { createThread, sendTurn, completeTurn, promoteDueScheduledTurn, snoozeThread, unsnoozeThread, reconcileOrphanedTurn } from "../threads.js";
+import { openThreadStore } from "../store.js";
 import type { TurnDriver } from "../execute.js";
 import { settleRuns } from "../../testing/turns.js";
-import { automaticUsageBlock, parseQueuePolicy, type QueuePolicy } from "../queue.js";
+import { automaticUsageBlock, loadTurnOrigins, parseQueuePolicy, queueAdmission, type QueuePolicy, type QueueRow } from "../queue.js";
+import type { StoredMessage, StoredThread, StoredTurn } from "../types.js";
+import { DEFAULT_CONFIG } from "../../config.js";
 import { editWorkQueue, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, type OperationContext } from "../operations.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
@@ -25,10 +28,10 @@ async function world() {
   const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: (instance) => {
     const kind = driverKindOfInstance(instance)!;
     let driver = drivers.get(kind);
-    if (!driver) { driver = (kind === "harness" ? w.drivers.codex! : w.drivers[kind]!)(); drivers.set(kind, driver); }
+    if (!driver) { driver = (kind === "harness" ? w.drivers.codex! : w.drivers[kind] ?? w.drivers.codex!)(); drivers.set(kind, driver); }
     return driver;
   } };
-  const make = (provider = "codex") => createThread(w.store, { projectId: "p", title: `Work on ${provider}`, env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: provider, model: "test-model" } });
+  const make = (provider = "codex", model = "test-model") => createThread(w.store, { projectId: "p", title: `Work on ${provider}`, env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: provider, model } });
   return { ...w, ctx, sent, make };
 }
 
@@ -463,6 +466,38 @@ describe("admission recovers depended-on threads", () => {
     expect(w.sent.map((turn) => turn.threadId)).toEqual([waiter.id]);
   });
 
+  it("does not start a scheduled message early when it recovers the thread", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const running = (await sendTurn(w.store, thread.id, { prompt: "work" })).turn;
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const waiting = (await sendTurn(w.store, thread.id, { prompt: "later", scheduledFor: at })).turn;
+    // The runner's process died (a crashed or restarted server). Recovery runs
+    // whatever waits behind it, but never a message scheduled for later.
+    await w.store.updateTurn(thread.id, running.id, { owner: { pid: await deadPid(), host: os.hostname() } });
+    const recovered = await reconcileOrphanedTurn(w.store, thread.id);
+    expect(recovered?.interrupted.id).toBe(running.id);
+    expect(recovered?.promoted).toBeNull();
+    await settleRuns();
+    const turns = await w.store.readTurns(thread.id);
+    expect(turns.find((turn) => turn.id === running.id)?.status).toBe("interrupted");
+    expect(turns.find((turn) => turn.id === waiting.id)).toMatchObject({ status: "queued", scheduledFor: at });
+    expect(w.sent).toEqual([]);
+  });
+
+  it("does not interrupt a live turn when another connection recovers the thread", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const running = (await sendTurn(w.store, thread.id, { prompt: "work" })).turn;
+    // A reconnect opens another connection over the same store, in this same
+    // server process: its recovery must leave that process's turn alone.
+    const reconnected = await openThreadStore(w.root);
+    expect(await reconcileOrphanedTurn(reconnected, thread.id)).toBeNull();
+    expect(await w.store.readTurns(thread.id)).toEqual([
+      expect.objectContaining({ id: running.id, status: "running", owner: expect.objectContaining({ pid: process.pid }) }),
+    ]);
+  });
+
   it("does the same for a thread condition when the dependency goes quiet", async () => {
     const w = await world();
     const dependency = await w.make();
@@ -727,5 +762,173 @@ describe("admission of held plain queued turns", () => {
     await runWorkQueue(w.ctx, now); await settleRuns();
     expect(w.sent).toEqual([]);
     expect((await w.store.readTurns(thread.id)).map((turn) => turn.status)).toEqual(["completed", "queued", "queued"]);
+  });
+});
+
+describe("Antigravity quota-pool scoping", () => {
+  it("scopes reset, usage, and exhaustion checks to the thread's Antigravity model pool", async () => {
+    const w = await world();
+    const geminiThread = await w.make("antigravity", "gemini-4-neon");
+    const claudeThread = await w.make("antigravity", "claude-sonnet-5-5");
+    const now = Date.now();
+    const geminiReset = new Date(now + 60_000).toISOString();
+    const claudeReset = new Date(now + 5 * 3600_000).toISOString();
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 100, exhausted: true, resetsAt: geminiReset },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 0, exhausted: false, resetsAt: claudeReset },
+    ], now);
+
+    // Protocol decode defers `resetsAt` until startTurn knows the thread's model.
+    const deferred = parseQueuePolicy(
+      { conditions: [{ type: "reset", provider: "antigravity", window: "session", resetsAt: null }] },
+      { deferReset: true },
+    );
+    expect(deferred.conditions[0]).toMatchObject({ type: "reset", resetsAt: null });
+
+    const geminiQueued = await startTurn(w.ctx, {
+      threadId: geminiThread.id,
+      prompt: "Resume Gemini after its 5h reset",
+      queue: deferred,
+    });
+    expect(geminiQueued.turn.queue?.conditions[0]).toMatchObject({ type: "reset", resetsAt: geminiReset });
+
+    // A Claude-on-Antigravity thread waits for 3p-5h, not gemini-5h.
+    const claudeResetQueued = await startTurn(w.ctx, {
+      threadId: claudeThread.id,
+      prompt: "Resume 3p after 3p reset",
+      queue: deferred,
+    });
+    expect(claudeResetQueued.turn.queue?.conditions[0]).toMatchObject({ type: "reset", resetsAt: claudeReset });
+
+    // Before geminiReset, Gemini stays blocked; after geminiReset + grace it fires without waiting for 3p-5h.
+    await runWorkQueue(w.ctx, now + 30_000);
+    expect(w.sent).toEqual([]);
+    await runWorkQueue(w.ctx, now + 66_000);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([geminiThread.id]);
+
+    // Meanwhile a queued usage-conditioned turn on Claude-on-Antigravity is NOT blocked by gemini-5h being 100%.
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 120_000).toISOString() },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 0, exhausted: false, resetsAt: claudeReset },
+    ], now + 66_000);
+    const claudeReady = await w.make("antigravity", "claude-sonnet-5-5");
+    await sendTurn(w.store, claudeReady.id, {
+      prompt: "Run on 3p pool while Gemini is exhausted",
+      queue: parseQueuePolicy({ conditions: [{ type: "usage", provider: "antigravity", window: "session", minimum: 10 }] }),
+    });
+    await runWorkQueue(w.ctx, now + 66_000);
+    await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([geminiThread.id, claudeReady.id]);
+  });
+
+  it("scopes UsageProtection.wrap to each Antigravity thread's own model pool reset", async () => {
+    const w = await world();
+    const geminiThread = await w.make("antigravity", "gemini-4-neon");
+    const claudeThread = await w.make("antigravity", "claude-sonnet-5-5");
+    await sendTurn(w.store, geminiThread.id, { prompt: "running on gemini" });
+    await sendTurn(w.store, claudeThread.id, { prompt: "running on 3p" });
+    const now = Date.now();
+    const geminiReset = new Date(now + 120_000).toISOString();
+    const claudeReset = new Date(now + 5 * 3600_000).toISOString();
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 98, exhausted: false, resetsAt: geminiReset },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 10, exhausted: false, resetsAt: claudeReset },
+    ], now);
+    const guard = new UsageProtection(async () => w.ctx);
+    try {
+      await guard.wrap("antigravity");
+      expect((await w.store.readThreadRecord(geminiThread.id))?.usagePause?.resetsAt).toBe(geminiReset);
+      expect((await w.store.readThreadRecord(claudeThread.id))?.usagePause?.resetsAt).toBe(claudeReset);
+    } finally {
+      guard.close();
+    }
+  });
+});
+
+describe("Antigravity held-prompt provenance (LOCAL-006)", () => {
+  const NOW = Date.parse("2026-10-01T12:00:00.000Z");
+  const iso = (at: number) => new Date(at).toISOString();
+  const HELD = "Antigravity automatic prompts are held: turn on providers.antigravity.allowUnsupportedUse";
+  const MINUTE = 60_000;
+  const HOUR = 60 * MINUTE;
+
+  function row(...turns: Array<Record<string, unknown> & { id: string; createdAt: string }>): { row: QueueRow; turns: StoredTurn[] } {
+    const thread = {
+      id: "ag-thread",
+      projectId: "p",
+      title: "Antigravity work",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      env: { kind: "local", path: "/tmp" },
+      createdAt: iso(NOW - 2 * HOUR),
+      updatedAt: iso(NOW),
+      archivedAt: null,
+      deletedAt: null,
+      settledAt: null,
+      snoozedUntil: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+    } as unknown as StoredThread;
+    const rows = turns.map((turn) => ({
+      threadId: "ag-thread",
+      status: "queued",
+      prompt: "do work",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      scheduledFor: null,
+      queue: { conditions: [], held: false, order: 1, sequential: true, continuation: "same-thread" },
+      ...turn,
+    })) as unknown as StoredTurn[];
+    return { row: { thread, turns: rows }, turns: rows };
+  }
+
+  it("holds a due scheduled agent message whose origin lives only on its message, while off", async () => {
+    const { row: queued, turns } = row({ id: "agent-queued", createdAt: iso(NOW - 2 * HOUR), scheduledFor: iso(NOW - MINUTE) });
+    // Pre-origin rows: the message ledger says the agent queued this one, the
+    // turn row predates its own origin column and carries none.
+    const messages = [{
+      id: "m1",
+      threadId: "ag-thread",
+      turnId: "agent-queued",
+      role: "user",
+      text: "Check the logs",
+      createdAt: iso(NOW - 2 * HOUR),
+      origin: "agent-message",
+    }] as unknown as StoredMessage[];
+    const store = { readMessages: async () => messages };
+    const origins = await loadTurnOrigins(store, [queued], DEFAULT_CONFIG);
+    const admission = queueAdmission(queued, turns[0]!, [queued], DEFAULT_CONFIG, NOW, origins);
+    expect(admission.blocked).toContain(HELD);
+    // With the setting on, the same message is admitted as today.
+    const allowed = queueAdmission(queued, turns[0]!, [queued], { ...DEFAULT_CONFIG, providers: { antigravity: { allowUnsupportedUse: true } } }, NOW, origins);
+    expect(allowed.blocked).not.toContain(HELD);
+  });
+
+  it("recovers origin from the message ledger only for Antigravity turns while the gate is off", async () => {
+    const { row: queued, turns } = row({ id: "agent-queued", createdAt: iso(NOW) });
+    const messages = [{ id: "m1", threadId: "ag-thread", turnId: "agent-queued", role: "user", text: "Check", createdAt: iso(NOW), origin: "agent-message" }] as unknown as StoredMessage[];
+    const store = { readMessages: async () => messages };
+    expect([...(await loadTurnOrigins(store, [queued], DEFAULT_CONFIG)).values()]).toEqual(["agent-message"]);
+    // While the setting is on no gate consults provenance: nothing is loaded.
+    expect((await loadTurnOrigins(store, [queued], { ...DEFAULT_CONFIG, providers: { antigravity: { allowUnsupportedUse: true } } })).size).toBe(0);
+  });
+
+  it("a scheduled user message firing late does not authorize an agent-only message queued later", () => {
+    const { row: queued, turns } = row(
+      // The user scheduled a message two hours ago; its timer fired five
+      // minutes ago, after the agent-only message was queued half an hour ago.
+      { id: "scheduled-user", status: "completed", createdAt: iso(NOW - 2 * HOUR), scheduledFor: iso(NOW - 5 * MINUTE), startedAt: iso(NOW - 5 * MINUTE) },
+      { id: "agent-queued", createdAt: iso(NOW - 30 * MINUTE), origin: "agent-message" },
+    );
+    const admission = queueAdmission(queued, turns[1]!, [queued], DEFAULT_CONFIG, NOW);
+    expect(admission.blocked).toContain(HELD);
+    // A genuine fresh user turn still releases the held message.
+    const { row: withUser, turns: freshTurns } = row(
+      { id: "scheduled-user", status: "completed", createdAt: iso(NOW - 2 * HOUR), scheduledFor: iso(NOW - 5 * MINUTE), startedAt: iso(NOW - 5 * MINUTE) },
+      { id: "agent-queued", createdAt: iso(NOW - 30 * MINUTE), origin: "agent-message" },
+      { id: "fresh-user", status: "running", createdAt: iso(NOW - 10 * MINUTE) },
+    );
+    expect(queueAdmission(withUser, freshTurns[1]!, [withUser], DEFAULT_CONFIG, NOW, new Map()).blocked).not.toContain(HELD);
   });
 });

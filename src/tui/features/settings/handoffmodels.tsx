@@ -2,7 +2,7 @@ import { OverflowText } from "../../ui/overflowtext.js";
 import { type MessageKey, currentLanguage, t, tx } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -110,7 +110,7 @@ export function HandoffModelsEditor({
     for (const { field } of FIELDS) if (model[field] !== null) onChange(field, model.slug, null);
   };
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     // Claimed, so the page behind does not also read this esc or arrow.
     key.preventDefault();
     const escape = key.name === "escape" || key.name === "esc";
@@ -144,7 +144,7 @@ export function HandoffModelsEditor({
     if (up) return setCursor(Math.max(at - 1, 0));
     if ((enter || key.name === "space" || key.name === "right") && models[at] !== undefined) return setPage({ slug: models[at]!.slug, field: 0 });
     if (clearKey) return clearModel(models[at]);
-  });
+  }, { capture: true });
 
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   useEffect(() => {

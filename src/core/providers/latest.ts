@@ -1,9 +1,10 @@
 /**
- * Which version of Claude Code, OpenCode and Codex is newest, for the settings
- * page's "update available" line. This reads the public npm registry:
- * `@openai/codex`, `@anthropic-ai/claude-code` with a
- * dist-tag per release channel, and `@opencode/cli` (the v2 CLI: it ships the
- * `opencode` binary, from the same repository, on the 2.0.x line).
+ * Which version of Claude Code, OpenCode, Codex and Antigravity is newest, for
+ * the settings page's "update available" line. Claude Code, OpenCode and Codex
+ * read the public npm registry (`@anthropic-ai/claude-code` with a dist-tag per
+ * release channel, `@opencode/cli` on the 2.0.x line, and `@openai/codex`).
+ * Antigravity (`agy`) is a standalone native binary published on GitHub
+ * Releases (`google-antigravity/antigravity-cli`).
  *
  * Claude Code has two channels, `latest` and `stable` (about a week behind), and
  * "newest" is the one the install follows; `claude doctor` says which. A failed
@@ -15,6 +16,8 @@ import type { LatestVersion, LatestVersions } from "../catalog/update.js";
 
 const REGISTRY = "https://registry.npmjs.org";
 const PACKAGES = { claude: "@anthropic-ai/claude-code", opencode: "@opencode/cli", codex: "@openai/codex" } as const;
+export const ANTIGRAVITY_LATEST_RELEASE_URL = "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest";
+export const VIBE_LATEST_RELEASE_URL = "https://api.github.com/repos/mistralai/mistral-vibe/releases/latest";
 const TIMEOUT_MS = 5_000;
 const KEEP_MS = 10 * 60_000;
 
@@ -27,7 +30,10 @@ export interface LatestDeps {
 }
 
 const defaultFetchJson = async (url: string, timeoutMs: number): Promise<unknown> => {
-  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { accept: "application/json" } });
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { accept: "application/vnd.github+json, application/json", "user-agent": "moxen" },
+  });
   if (!response.ok) throw new Error(`${response.status}`);
   return await response.json();
 };
@@ -57,6 +63,22 @@ async function tagVersion(pkg: string, tag: string, deps: LatestDeps): Promise<s
   }
 }
 
+/** The newest non-draft, non-prerelease version on a GitHub repository's Releases page, or null. */
+async function githubReleaseVersion(url: string, deps: LatestDeps): Promise<string | null> {
+  try {
+    const body = (await (deps.fetchJson ?? defaultFetchJson)(url, TIMEOUT_MS)) as {
+      tag_name?: unknown;
+      draft?: unknown;
+      prerelease?: unknown;
+    } | null;
+    if (!body || body.draft === true || body.prerelease === true) return null;
+    const raw = typeof body.tag_name === "string" ? body.tag_name.trim().replace(/^v/u, "") : "";
+    return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 const kept = new Map<string, { readonly at: number; readonly value: LatestVersion }>();
 
 async function cached(key: string, deps: LatestDeps, read: () => Promise<LatestVersion>): Promise<LatestVersion> {
@@ -77,8 +99,14 @@ export async function latestVersions(options: { readonly claudeBinaryPath?: stri
   };
   const opencode = (): Promise<LatestVersion> =>
     cached("opencode", deps, async () => ({ latest: await tagVersion(PACKAGES.opencode, "latest", deps), channel: null }));
-  const [claudeResult, opencodeResult, codex] = await Promise.all([claude(), opencode(), cached("codex", deps, async () => ({ latest: await tagVersion(PACKAGES.codex, "latest", deps), channel: null }))]);
-  return { claude: claudeResult, opencode: opencodeResult, codex };
+  const codex = (): Promise<LatestVersion> =>
+    cached("codex", deps, async () => ({ latest: await tagVersion(PACKAGES.codex, "latest", deps), channel: null }));
+  const antigravity = (): Promise<LatestVersion> =>
+    cached("antigravity", deps, async () => ({ latest: await githubReleaseVersion(ANTIGRAVITY_LATEST_RELEASE_URL, deps), channel: null }));
+  const vibe = (): Promise<LatestVersion> =>
+    cached("vibe", deps, async () => ({ latest: await githubReleaseVersion(VIBE_LATEST_RELEASE_URL, deps), channel: null }));
+  const [claudeResult, opencodeResult, codexResult, antigravityResult, vibeResult] = await Promise.all([claude(), opencode(), codex(), antigravity(), vibe()]);
+  return { claude: claudeResult, opencode: opencodeResult, codex: codexResult, antigravity: antigravityResult, vibe: vibeResult };
 }
 
 /** Forget what was kept (tests). */

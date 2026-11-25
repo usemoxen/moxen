@@ -75,6 +75,38 @@ const providers = [
     ],
     skills: [],
   },
+  {
+    instanceId: "antigravity",
+    driver: "antigravity",
+    displayName: "Antigravity",
+    enabled: true,
+    installed: true,
+    status: null,
+    auth: { status: "Google AI Pro" },
+    models: [
+      model("gemini-4-neon", "Gemini 4 Neon", true, ["low", "medium", "high", "xhigh"]),
+      model("gemini-4-argon", "Gemini 4 Argon", false, ["low", "medium", "high"]),
+      model("gemini-4-hydrogen", "Gemini 4 Hydrogen", false, ["low", "medium", "high", "xhigh"]),
+      model("gemini-4-carbon", "Gemini 4 Carbon", false, ["low", "medium", "high", "xhigh"]),
+      model("claude-opus-5-5", "Claude Opus 5.5 (Antigravity)", false, ["low", "medium", "high"]),
+      model("claude-sonnet-5-5", "Claude Sonnet 5.5 (Antigravity)", false, ["low", "medium", "high"]),
+    ],
+    skills: [],
+  },
+  {
+    instanceId: "vibe",
+    driver: "vibe",
+    displayName: "Mistral Vibe",
+    enabled: true,
+    installed: true,
+    status: null,
+    auth: { status: "os_keyring" },
+    models: [
+      model("mistral-large-4-0", "Mistral Large 4", true, ["low", "medium", "high"]),
+      model("mistral-medium-latest", "Mistral Medium", false, ["low", "medium", "high"]),
+    ],
+    skills: [],
+  },
 ];
 
 // A few MCP servers so each provider's "MCP servers" checklist has something to show (github is limited to Claude Code on its own entry).

@@ -1,10 +1,12 @@
+import { spawn } from "node:child_process";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import path from "node:path";
 
 import type { ClientApi, QueryResult } from "../../../server/api.js";
-import type { ModelSelection, ProjectEnvelope } from "../../../core/types.js";
+import type { ModelSelection, ProjectEnvelope, ProviderAccountSummary } from "../../../core/types.js";
+import { versionNumber } from "../../../core/catalog/update.js";
 import { expandHome } from "../../../core/config.js";
 import { t, tx } from "../../i18n/index.js";
 import { localizeSnapshot } from "../../i18n/settingsview.js";
@@ -24,6 +26,25 @@ const DESCRIPTIONS = ["guide.welcomeBody", "guide.appearanceBody", "guide.provid
 type GuideSettings = Pick<ReturnType<typeof useSettings>, "snapshot" | "saving" | "error" | "set" | "duplicate" | "run" | "test" | "testMcp" | "probe" | "discover" | "exportProfile" | "importProfile" | "notice">;
 interface Control { run: () => void; move?: (delta: number) => void; pane?: "providers" | "models" }
 
+function openBrowserUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+    const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+    const args = process.platform === "win32" ? ["/c", "start", "", parsed.toString()] : [parsed.toString()];
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.unref();
+  } catch {
+    // URL is shown inline as fallback.
+  }
+}
+
+function cliSetupDetail(check: { readonly installed?: boolean; readonly version?: string | null } | undefined): string {
+  if (!check?.installed) return t("guide.cliNotInstalledHint");
+  const ver = versionNumber(check.version ?? null);
+  return ver ? t("guide.cliInstalledVersion", { version: `v${ver}` }) : t("guide.cliInstalledReady");
+}
+
 export function OnboardingPage({
   step, onStep, settings, providers, selection, projects, projectId, client, remote = false,
   error, saving, motion, screenWidth, screenHeight, onMemory, onModel, onProject, onRefresh, onComplete, onClose,
@@ -38,7 +59,7 @@ export function OnboardingPage({
   onRefresh: () => void; onComplete: () => void; onClose: () => void;
 }) {
   const [focus, setFocus] = useState(0);
-  const [list, setList] = useState<"mcpServers" | "providers.harness.profiles" | null>(null);
+  const [list, setList] = useState<"mcpServers" | "providers.harness.profiles" | "providers.acp.agents" | null>(null);
   const [screen, setScreen] = useState<Screen>({ profile: null, model: null });
   const [heading, setHeading] = useState<string | null>(null);
   const [providerId, setProviderId] = useState<string | null>(selection?.instanceId ?? null);
@@ -47,13 +68,25 @@ export function OnboardingPage({
   const [searching, setSearching] = useState<"providers" | "models" | null>(null);
   const [folder, setFolder] = useState(false);
   const [addingProject, setAddingProject] = useState(false);
+  const [settingUpProvider, setSettingUpProvider] = useState(false);
+  const [chatGptAuthUrl, setChatGptAuthUrl] = useState<string | null>(null);
+  const [doctor, setDoctor] = useState<QueryResult<"doctor"> | null>(null);
+  const [accounts, setAccounts] = useState<readonly ProviderAccountSummary[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
   const scroll = useRef<ScrollBoxRenderable | null>(null);
   const providerScroll = useRef<ScrollBoxRenderable | null>(null);
   const modelScroll = useRef<ScrollBoxRenderable | null>(null);
   const controls: Control[] = [];
-  const disabled = saving || settings.saving !== null || addingProject;
+  const disabled = saving || settings.saving !== null || addingProject || settingUpProvider;
   const memoryStatus = useMemoryRuntime(client, step === 3);
+
+  useEffect(() => {
+    if (step !== 2) return;
+    let alive = true;
+    void client.query({ type: "doctor" }).then((res) => { if (alive) setDoctor(res); }).catch(() => undefined);
+    void client.query({ type: "providers.accounts" }).then((res) => { if (alive) setAccounts(res.accounts); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [step, client, settings.snapshot]);
 
   // One centred panel floats on the field: the animation only lives in the
   // margin, and no text ever sits on top of it. Every step shares its size,
@@ -105,7 +138,7 @@ export function OnboardingPage({
     const timer = setTimeout(() => scroll.current?.scrollChildIntoView("guide-memory-setup"), 0);
     return () => clearTimeout(timer);
   }, [step, showMemorySetup, settings.saving, memoryStatus?.phase, memoryStatus?.busy, memoryStatus?.validation?.checkedAt]);
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (list !== null) return; // The embedded editor owns its keys; it never replaces this page.
     if (folder) { if (key.name === "escape" && !disabled) setFolder(false); return; }
     if (searching !== null) {
@@ -126,7 +159,7 @@ export function OnboardingPage({
     if (key.name === "left" || key.name === "right") controls[focus]?.move?.(key.name === "left" ? -1 : 1);
     if (key.name === "]" && step < GUIDE_STEPS.length - 1) next();
     if (key.name === "[" && step > 0) changeStep(step - 1);
-  });
+  }, { capture: true });
   const button = (label: string, run: () => void, options: { chosen?: boolean; tone?: string; detail?: string; width?: number } = {}) => {
     const at = controls.push({ run }) - 1;
     return <GuideChoice key={label} id={`guide-control-${at}`} label={label} detail={options.detail} choice={options.chosen !== undefined} chosen={options.chosen ?? false} active={focus === at} tone={options.tone ?? COLOR.accent} width={options.width ?? inner} onPick={() => { setFocus(at); if (!disabled) run(); }} />;
@@ -221,22 +254,143 @@ export function OnboardingPage({
       {rows}
     </scrollbox>
   </box>;
+  const reloadAccounts = async () => {
+    const res = await client.query({ type: "providers.accounts" }).catch(() => null);
+    if (res) setAccounts(res.accounts);
+  };
+  const quickAddAccount = async (kind: "claude" | "antigravity") => {
+    if (disabled) return;
+    setSettingUpProvider(true);
+    setLocalError(null);
+    try {
+      await client.dispatch({ type: "provider.account.save", kind, id: "default", label: t("settings.default") });
+      await reloadAccounts();
+      setProviderId(`${kind}/default`);
+      onRefresh();
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSettingUpProvider(false);
+    }
+  };
+  const quickEnableOpencode = async () => {
+    if (disabled) return;
+    setSettingUpProvider(true);
+    setLocalError(null);
+    try {
+      await settings.set("providers.opencode.enabled", "true");
+      onRefresh();
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSettingUpProvider(false);
+    }
+  };
+  const quickEnableVibe = async () => {
+    if (disabled) return;
+    setSettingUpProvider(true);
+    setLocalError(null);
+    try {
+      await settings.set("providers.vibe.enabled", "true");
+      setProviderId("vibe");
+      onRefresh();
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSettingUpProvider(false);
+    }
+  };
+  const quickSignInChatGpt = async () => {
+    if (disabled || chatGptAuthUrl !== null) return;
+    setLocalError(null);
+    try {
+      const started = await client.dispatch({ type: "chatgpt.login.start", accountId: "default", label: t("settings.default") });
+      setChatGptAuthUrl(started.authorizationUrl);
+      openBrowserUrl(started.authorizationUrl);
+      void client
+        .dispatch({ type: "chatgpt.login.complete", sessionId: started.sessionId })
+        .then(async () => {
+          await reloadAccounts();
+          setProviderId("chatgpt/default");
+          onRefresh();
+        })
+        .catch((cause: unknown) => setLocalError(cause instanceof Error ? cause.message : String(cause)))
+        .finally(() => setChatGptAuthUrl(null));
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const claudeAdded = accounts.some((entry) => entry.kind === "claude") || entries.some((entry) => entry.driver === "claudeAgent");
+  const chatGptAccount = accounts.find((entry) => entry.kind === "chatgpt" && entry.signedIn === true);
+  const chatGptAdded = chatGptAccount !== undefined || entries.some((entry) => entry.driver === "chatgpt" && entry.enabled);
+  const opencodeAdded = value("providers.opencode.enabled") === true || entries.some((entry) => entry.driver === "opencode");
+  const antigravityAdded = accounts.some((entry) => entry.kind === "antigravity") || entries.some((entry) => entry.driver === "antigravity");
+  const vibeAdded = value("providers.vibe.enabled") === true || entries.some((entry) => entry.driver === "vibe");
+
   // A function: building it registers focus controls, so only the step that shows it may.
   const stepTwo = () => <>
-    {twoPane
-      ? <box style={{ flexDirection: "row", gap: 2, flexShrink: 0 }}>
-        {pane("providers", providerWidth, providerMatches.length, providerMatches.map(providerRow), t("guide.noProvidersMatch"))}
-        {pane("models", modelWidth, models.length, models.map(modelRow), t("guide.noModelsMatch"))}
-      </box>
-      : <box style={{ flexDirection: "column", flexShrink: 0 }}>
-        {pane("providers", inner, providerMatches.length, providerMatches.map(providerRow), t("guide.noProvidersMatch"))}
-        <box style={{ height: 1, flexShrink: 0 }} />
-        {pane("models", inner, models.length, models.map(modelRow), t("guide.noModelsMatch"))}
-      </box>}
+    {entries.length > 0 ? (
+      <>
+        {twoPane
+          ? <box style={{ flexDirection: "row", gap: 2, flexShrink: 0 }}>
+            {pane("providers", providerWidth, providerMatches.length, providerMatches.map(providerRow), t("guide.noProvidersMatch"))}
+            {pane("models", modelWidth, models.length, models.map(modelRow), t("guide.noModelsMatch"))}
+          </box>
+          : <box style={{ flexDirection: "column", flexShrink: 0 }}>
+            {pane("providers", inner, providerMatches.length, providerMatches.map(providerRow), t("guide.noProvidersMatch"))}
+            <box style={{ height: 1, flexShrink: 0 }} />
+            {pane("models", inner, models.length, models.map(modelRow), t("guide.noModelsMatch"))}
+          </box>}
+      </>
+    ) : (
+      <text fg={COLOR.dim} style={{ marginBottom: 1, flexShrink: 0 }}>{t("guide.noProvidersYet")}</text>
+    )}
     <box style={{ flexDirection: "column", marginTop: 1, flexShrink: 0 }}>
+      <text fg={COLOR.bright} attributes={TextAttributes.BOLD} style={{ flexShrink: 0, marginBottom: 1 }}>{t("guide.setupHeading")}</text>
+      {button(t("guide.addClaude"), () => { if (!claudeAdded) void quickAddAccount("claude"); }, {
+        chosen: claudeAdded,
+        tone: COLOR.added,
+        detail: claudeAdded ? t("guide.providerAdded") : cliSetupDetail(doctor?.providers?.claude),
+        width: inner,
+      })}
+      {button(chatGptAuthUrl !== null ? t("guide.chatGptSigningIn") : t("guide.signInChatGpt"), () => { if (!chatGptAdded) void quickSignInChatGpt(); }, {
+        chosen: chatGptAdded,
+        tone: COLOR.added,
+        detail: chatGptAccount?.email
+          ? t("settings.providers.authenticatedAs", { email: chatGptAccount.email })
+          : chatGptAdded
+            ? t("guide.providerAdded")
+            : t("guide.chatGptDetail"),
+        width: inner,
+      })}
+      {chatGptAuthUrl !== null ? (
+        <text fg={COLOR.dim} wrapMode="word" style={{ marginBottom: 1, flexShrink: 0 }}>
+          {t("settings.providers.openAuthUrl", { url: chatGptAuthUrl })}
+        </text>
+      ) : null}
+      {button(t("guide.enableOpencode"), () => { if (!opencodeAdded) void quickEnableOpencode(); }, {
+        chosen: opencodeAdded,
+        tone: COLOR.added,
+        detail: opencodeAdded ? t("guide.providerEnabled") : cliSetupDetail(doctor?.providers?.opencode),
+        width: inner,
+      })}
+      {button(t("guide.addAntigravity"), () => { if (!antigravityAdded) void quickAddAccount("antigravity"); }, {
+        chosen: antigravityAdded,
+        tone: COLOR.added,
+        detail: antigravityAdded ? t("guide.providerAdded") : cliSetupDetail(doctor?.providers?.antigravity),
+        width: inner,
+      })}
+      {button(t("guide.enableVibe"), () => { if (!vibeAdded) void quickEnableVibe(); }, {
+        chosen: vibeAdded,
+        tone: COLOR.added,
+        detail: vibeAdded ? t("guide.providerEnabled") : cliSetupDetail(doctor?.providers?.vibe),
+        width: inner,
+      })}
       {button(t("guide.addModelServer"), () => openList("providers.harness.profiles"), { detail: t("guide.addModelServerBody"), width: inner })}
-      {refreshControl()}
-      <text fg={COLOR.dim}>{providerStatus}</text>
+      {button(t("guide.addAcpAgent"), () => openList("providers.acp.agents"), { detail: t("guide.addAcpAgentBody"), width: inner })}
+      {entries.length > 0 ? refreshControl() : null}
+      {entries.length > 0 ? <text fg={COLOR.dim}>{providerStatus}</text> : null}
       <text fg={COLOR.dim}>{t("guide.loginHint")}</text>
     </box>
   </>;
@@ -247,7 +401,7 @@ export function OnboardingPage({
       heading={heading} onHeading={setHeading} saving={settings.saving} onSet={settings.set}
       onDuplicate={(id, newId) => settings.duplicate(list, id, newId)} run={settings.run}
       onTest={(id, model) => list === "mcpServers" ? settings.testMcp(id) : settings.test(id, model)} onProbe={settings.probe}
-      onDiscover={settings.discover} onExport={settings.exportProfile} onImport={settings.importProfile} notice={settings.notice}
+      onDiscover={settings.discover} onAcpRegistry={() => client.query({ type: "acp.registry.list" })} onExport={settings.exportProfile} onImport={settings.importProfile} notice={settings.notice}
       width={inner} onExit={closeList} exitLabel={t("guide.backToStep")} mcpRunner={(value("mcpRunner") ?? "npx") as "npx" | "bunx" | "pnpm" | "yarn"} />
     : step === 0 ? <>
       <text fg={COLOR.text} textAlign="center" style={{ width: inner, marginBottom: 2 }}>{t("guide.welcomeDetail")}</text>
@@ -281,7 +435,7 @@ export function OnboardingPage({
       {projects.filter((project) => !project.scratch).map((project) => button(String(project.title), () => onProject(project.id), { chosen: projectId === project.id, detail: String(project.workspaceRoot ?? "") }))}
       {folder ? <box style={{ flexDirection: "column", marginTop: 1 }}>
         <text fg={COLOR.bright}>{t("guide.folderPrompt")}</text>
-        <TextField initial="" placeholder={t("guide.folderPrompt")} width={inner} onSubmit={(text) => { void addFolder(text); }} />
+        <TextField key="onboarding-folder" initial="" placeholder={t("guide.folderPrompt")} width={inner} onCancel={() => { if (!disabled) setFolder(false); }} onSubmit={(text) => { void addFolder(text); }} />
         <HoverButton label={t("guide.cancelFolder")} fg={COLOR.dim} onClick={() => setFolder(false)} />
       </box> : button(t("guide.addFolder"), () => setFolder(true))}
       <text fg={COLOR.dim} style={{ marginTop: 1 }}>{t("guide.readySummary", { model: selection?.model ?? t("guide.noModel"), memory: memoryLabels[memory]! })}</text>

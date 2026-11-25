@@ -35,6 +35,7 @@ interface RecordedProvider {
   protectedAt?: string;
   checkedAt: string;
   windows: RecordedWindow[];
+  credits?: number;
 }
 
 export interface UsageProtectionOverride {
@@ -109,8 +110,14 @@ export function persistUsageLimits(storeRoot: string): void {
  * percentage (a live event that only says "allowed") keeps the last known
  * one; a window never seen with a percentage is left out.
  */
-export function recordUsageWindows(provider: string, windows: ReadonlyArray<RateLimitWindow>, at: number = Date.now()): void {
-  const previous = recorded.get(provider)?.windows ?? [];
+export function recordUsageWindows(
+  provider: string,
+  windows: ReadonlyArray<RateLimitWindow>,
+  at: number = Date.now(),
+  options?: { readonly credits?: number | null | undefined },
+): void {
+  const existing = recorded.get(provider);
+  const previous = existing?.windows ?? [];
   const merged = new Map(previous.map((window) => [window.id, window] as const));
   let changed = false;
   for (const window of windows) {
@@ -120,8 +127,21 @@ export function recordUsageWindows(provider: string, windows: ReadonlyArray<Rate
     merged.set(window.id, { id: window.id, label: window.label, usedPercent, resetsAt: window.resetsAt ?? known?.resetsAt ?? null });
     changed = true;
   }
+  const credits =
+    typeof options?.credits === "number" && Number.isFinite(options.credits)
+      ? options.credits
+      : existing?.credits;
+  if (typeof options?.credits === "number" && Number.isFinite(options.credits)) {
+    changed = true;
+  }
   if (!changed) return;
-  recorded.set(provider, { ...recorded.get(provider), checkedAt: new Date(at).toISOString(), windows: [...merged.values()], ...(windows.some((window) => window.exhausted || (window.usedPercent ?? 0) >= 100) ? { exhaustedAt: new Date(at).toISOString() } : {}) });
+  recorded.set(provider, {
+    ...existing,
+    checkedAt: new Date(at).toISOString(),
+    windows: [...merged.values()],
+    ...(credits === undefined ? {} : { credits }),
+    ...(windows.some((window) => window.exhausted || (window.usedPercent ?? 0) >= 100) ? { exhaustedAt: new Date(at).toISOString() } : {}),
+  });
   persistRecorded();
 }
 
@@ -135,14 +155,28 @@ function windowKind(label: string): string {
 }
 
 /**
- * The key one thread's usage windows live under. Claude and Codex report for
- * their whole driver; an `opencode/<provider>` instance is its own provider,
- * so Go's windows are its instance's and no other OpenCode instance's.
+ * The key one thread's usage windows live under.
+ * - Multi-account instances (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`,
+ *   `codex/<id>`) keep their own account-scoped key so exhausting one account
+ *   never blocks threads on another account of the same provider.
+ * - `opencode/<provider>` keeps its per-provider instance key (e.g. OpenCode Go).
+ * - Legacy singleton ids (`claudeAgent`, `codex`, `antigravity`, `agy`) map to
+ *   their bare driver kind (`claude`, `codex`, `antigravity`).
  */
 export function usageKeyForInstance(instanceId: string): string {
   const raw = instanceId.trim().toLowerCase();
   const kind = driverKindOfInstance(raw);
-  return kind !== null ? (kind === "opencode" && raw.startsWith("opencode/") ? raw : kind) : raw;
+  if (kind === null) return raw;
+  if (
+    (kind === "claude" && raw.startsWith("claude/"))
+    || (kind === "chatgpt" && raw.startsWith("chatgpt/"))
+    || (kind === "antigravity" && raw.startsWith("antigravity/"))
+    || (kind === "codex" && raw.startsWith("codex/"))
+    || (kind === "opencode" && raw.startsWith("opencode/"))
+  ) {
+    return raw;
+  }
+  return kind;
 }
 
 /**
@@ -166,9 +200,60 @@ export function usageLimitsSnapshot(now: number = Date.now()): Record<string, Pr
     });
     const rank: Record<string, number> = { session: 0, weekly: 1, monthly: 2, other: 3 };
     windows.sort((left, right) => (rank[left.kind] ?? 3) - (rank[right.kind] ?? 3));
-    result[provider] = { checkedAt: entry.checkedAt, windows, unavailable: null };
+    result[provider] = {
+      checkedAt: entry.checkedAt,
+      windows,
+      ...(typeof entry.credits === "number" && Number.isFinite(entry.credits) ? { credits: entry.credits } : {}),
+      unavailable: null,
+    };
   }
   return result;
+}
+
+function antigravityWindowMatchesModel(
+  window: { readonly id: string; readonly label: string },
+  model: string | null | undefined,
+): boolean {
+  const id = window.id.toLowerCase();
+  const label = window.label.toLowerCase();
+  const is3pWindow = id.startsWith("3p-") || id.startsWith("claude-gpt") || /\bclaude\s*&\s*gpt\b/i.test(label);
+  const isGeminiWindow = id.startsWith("gemini-") || /\bgemini\b|\bargon\b|\bneon\b/i.test(label);
+  const isArgonWindow = id.includes("argon") || /\bargon\b/i.test(label);
+  const rawModel = model?.trim().toLowerCase() ?? "";
+  if (!rawModel) {
+    // Without a specific model, keep the secondary 3p pool from blocking the primary Gemini pool.
+    return !is3pWindow;
+  }
+  const isGeminiModel = rawModel.startsWith("gemini") || rawModel === "default";
+  if (isGeminiModel) {
+    if (is3pWindow) return false;
+    if (isArgonWindow && !rawModel.includes("argon")) return false;
+    return true;
+  }
+  // Third-party model (Claude / GPT / etc.) on Antigravity: only 3p or shared windows apply.
+  if (isGeminiWindow && !is3pWindow) return false;
+  return true;
+}
+
+/** Whether a provider's usage window applies to a given model (e.g. Antigravity's Gemini vs 3p pools). */
+export function usageWindowMatchesModel(
+  provider: string,
+  window: { readonly id: string; readonly label: string },
+  model?: string | null,
+): boolean {
+  return driverKindOfInstance(provider) !== "antigravity" || antigravityWindowMatchesModel(window, model);
+}
+
+/** Snapshot windows for one provider filtered to those that govern `model`. */
+export function usageWindowsForModel(
+  provider: string,
+  now: number = Date.now(),
+  model?: string | null,
+): ProviderUsageWindow[] {
+  const windows = usageLimitsSnapshot(now)[provider]?.windows ?? [];
+  return driverKindOfInstance(provider) === "antigravity"
+    ? windows.filter((window) => antigravityWindowMatchesModel(window, model))
+    : windows;
 }
 
 /**
@@ -180,11 +265,17 @@ export function usageLimitsSnapshot(now: number = Date.now()): Record<string, Pr
 export function standingLimit(
   provider: string,
   now: number = Date.now(),
+  model?: string | null,
 ): { label: string; resetsAt: string } | null {
   const entry = recorded.get(provider);
   if (!entry) return null;
+  const isAntigravity = driverKindOfInstance(provider) === "antigravity";
   const spent = entry.windows
-    .filter((window) => window.usedPercent >= 100 && window.resetsAt !== null && Date.parse(window.resetsAt) > now)
+    .filter((window) => {
+      if (window.usedPercent < 100 || window.resetsAt === null || Date.parse(window.resetsAt) <= now) return false;
+      if (isAntigravity && !antigravityWindowMatchesModel(window, model)) return false;
+      return true;
+    })
     // Every spent window blocks the account; a session reset cannot clear a weekly limit.
     .sort((left, right) => Date.parse(right.resetsAt!) - Date.parse(left.resetsAt!));
   const first = spent[0];

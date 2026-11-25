@@ -9,19 +9,29 @@
  * Moxen starts its OpenCode servers with `update: "disable"`, so an explicit
  * call like this one is the only way one of them changes under a running app.
  */
+import { acpLaunchCommand } from "./acp/transport.js";
 import { codexLaunchCommand } from "./codex/transport.js";
 import { CliError } from "../errors.js";
 import { runProcess } from "../infra/process.js";
-import { describeUpdate, UPDATABLE_PROVIDERS, type ProviderUpdate, type UpdatableProvider } from "../catalog/update.js";
+import {
+  describeUpdate,
+  UPDATABLE_PROVIDERS,
+  type ProviderUpdate,
+  type ProviderUpdateAllItem,
+  type ProviderUpdateAllResult,
+  type UpdatableProvider,
+} from "../catalog/update.js";
 import { parseVersionNumber } from "./semver.js";
 
 export { describeUpdate, UPDATABLE_PROVIDERS };
-export type { ProviderUpdate, UpdatableProvider };
+export type { ProviderUpdate, ProviderUpdateAllItem, ProviderUpdateAllResult, UpdatableProvider };
 
 const COMMANDS: Record<UpdatableProvider, { readonly binary: string; readonly args: readonly string[]; readonly label: string }> = {
   codex: { binary: "codex", args: ["update"], label: "Codex" },
   claude: { binary: "claude", args: ["update"], label: "Claude Code" },
   opencode: { binary: "opencode", args: ["upgrade"], label: "OpenCode" },
+  antigravity: { binary: "agy", args: ["update"], label: "Antigravity" },
+  vibe: { binary: "uv", args: ["tool", "upgrade", "mistral-vibe"], label: "Mistral Vibe" },
 };
 
 /** A package-manager install can take a while; the tool prints progress and exits when done. */
@@ -56,13 +66,19 @@ function tail(text: string): string {
 
 export async function updateProvider(provider: UpdatableProvider, deps: UpdateDeps = {}): Promise<ProviderUpdate> {
   const { args, label } = COMMANDS[provider];
-  const binary = deps.binaryPath?.trim() || COMMANDS[provider].binary;
+  const binary = provider === "vibe" ? COMMANDS[provider].binary : (deps.binaryPath?.trim() || COMMANDS[provider].binary);
+  const versionBinary = provider === "vibe" ? "vibe" : binary;
   const env = deps.env ?? process.env;
   const run: NonNullable<UpdateDeps["run"]> = deps.run ?? ((binary, argv, env) => {
-    const launch = provider === "codex" ? codexLaunchCommand(binary, argv, env) : { command: binary, args: argv };
+    const launch =
+      provider === "codex"
+        ? codexLaunchCommand(binary, argv, env)
+        : provider === "antigravity"
+          ? acpLaunchCommand(binary, argv, env)
+          : { command: binary, args: argv };
     return defaultRun(launch.command, launch.args, env);
   });
-  const before = await versionOf(binary, env, run);
+  const before = await versionOf(versionBinary, env, run);
   let result: { stdout: string; stderr: string; exitCode: number };
   try {
     result = await run(binary, args, env);
@@ -77,6 +93,29 @@ export async function updateProvider(provider: UpdatableProvider, deps: UpdateDe
       details: { provider, binary, exitCode: result.exitCode, before },
     });
   }
-  const after = await versionOf(binary, env, run);
+  const after = await versionOf(versionBinary, env, run);
   return { provider, before, after, updated: before !== null && after !== null && before !== after, output };
+}
+
+/** Update multiple provider CLIs in parallel; one failure never aborts or hides the others. */
+export async function updateAllProviders(
+  providers: readonly UpdatableProvider[] = UPDATABLE_PROVIDERS,
+  depsFor: (provider: UpdatableProvider) => UpdateDeps = () => ({}),
+): Promise<ProviderUpdateAllResult> {
+  const unique = [...new Set(providers)];
+  const results = await Promise.all(
+    unique.map(async (provider): Promise<ProviderUpdateAllItem> => {
+      try {
+        const update = await updateProvider(provider, depsFor(provider));
+        return { provider, ok: true, update };
+      } catch (cause) {
+        return {
+          provider,
+          ok: false,
+          error: cause instanceof Error ? cause.message : String(cause),
+        };
+      }
+    }),
+  );
+  return { results };
 }

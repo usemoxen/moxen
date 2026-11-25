@@ -427,6 +427,184 @@ describe("opencode driver", () => {
     await Effect.runPromise(Fiber.interrupt(fiber));
   });
 
+  it("ends a /compact turn on the session's own idle marker when no execution ever runs for it", async () => {
+    // A /compact turn sends no prompt, so no `session.execution.succeeded` ever
+    // fires for it: when the compaction's own end event was already consumed by
+    // an earlier (merged) compaction, the idle marker is the one signal left.
+    const { transport, driver } = start();
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    const server = transport.servers[0]!;
+    expect(server.callsTo("session.compact")).toHaveLength(1);
+    expect(server.callsTo("session.prompt")).toHaveLength(0);
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    // The server marks the session idle once the compaction work drains.
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    // Bounded, so a turn that never settles fails in half a second, not at the
+    // test timeout: the waiter resolving is the whole assertion.
+    const settled = await Promise.race([
+      outcome.then((result) => ({ settled: true as const, result })),
+      new Promise<{ settled: false }>((resolve) => setTimeout(() => resolve({ settled: false }), 500)),
+    ]);
+    expect(settled.settled).toBe(true);
+    if (settled.settled) expect(settled.result).toMatchObject({ status: "completed", error: null });
+  });
+
+  it("does not let a compaction's delayed raw idle complete the prompt turn that follows it, even before its prompt enqueues", async () => {
+    // The raw `session.idle` of a finished compaction can straggle in against
+    // a turn that never asked for one — a normal prompt whose inbox item has
+    // not even reached the event stream yet, so the translator cannot hold
+    // it back either. It must not end that turn.
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    const compact = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    await server.pushRaw({
+      type: "session.compaction.ended",
+      data: { sessionID: "opencode-session-1", reason: "manual", text: "Kept." },
+    });
+    await expect(driver.awaitTurn("thread-1", compact.turnId)).resolves.toMatchObject({ status: "completed" });
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go on" }));
+    let settled = false;
+    const outcome = driver.awaitTurn("thread-1", sent.turnId).then((result) => {
+      settled = true;
+      return result;
+    });
+    // The delayed raw idle of the first compaction, against the open prompt turn.
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(settled).toBe(false);
+    // The turn still owns its own end: the execution's idle completes it.
+    await server.pushRaw({ type: "session.execution.succeeded", data: { sessionID: "opencode-session-1" } });
+    await expect(outcome).resolves.toMatchObject({ status: "completed" });
+  });
+
+  it("does not let a compaction's delayed raw idle complete a second /compact whose request is still enqueued", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    await server.pushRaw({
+      type: "session.compaction.ended",
+      data: { sessionID: "opencode-session-1", reason: "manual", text: "Kept." },
+    });
+    await expect(driver.awaitTurn("thread-1", first.turnId)).resolves.toMatchObject({ status: "completed" });
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    expect(server.callsTo("session.compact")).toHaveLength(2);
+    // The server's own view: the second turn's compaction is still queued, not drained.
+    server.inbox = [{ id: "msg_compact_2", type: "compaction" }];
+    let settled = false;
+    const outcome = driver.awaitTurn("thread-1", second.turnId).then((result) => {
+      settled = true;
+      return result;
+    });
+    // The first compaction's delayed raw idle: verified against the server and refused.
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    await waitFor("the session's inbox to be checked", () => server.callsTo("session.inbox.list").length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    // Drained since: the same marker now ends the turn.
+    server.inbox = [];
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    await expect(outcome).resolves.toMatchObject({ status: "completed" });
+  });
+
+  it("does not let a compaction's delayed raw idle complete a second /compact that is running, dequeued from its inbox", async () => {
+    // Dequeued from the inbox, the compaction no longer shows in
+    // `session.inbox.list` — only `session.active` still tells the truth
+    // about it. A raw idle that arrives while the session is busy running
+    // the second compaction is an earlier run's echo.
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    await server.pushRaw({
+      type: "session.compaction.ended",
+      data: { sessionID: "opencode-session-1", reason: "manual", text: "Kept." },
+    });
+    await expect(driver.awaitTurn("thread-1", first.turnId)).resolves.toMatchObject({ status: "completed" });
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    expect(server.callsTo("session.compact")).toHaveLength(2);
+    // Nothing queued, but the server lists the session as running.
+    server.inbox = [];
+    server.active = true;
+    let settled = false;
+    const outcome = driver.awaitTurn("thread-1", second.turnId).then((result) => {
+      settled = true;
+      return result;
+    });
+    // The first compaction's delayed raw idle: refused while the second is still running.
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    await waitFor("the session's activity to be checked", () => server.callsTo("session.active").length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    // At rest since: the same marker ends the turn, with nothing booked on it.
+    server.active = false;
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    const completed = await outcome;
+    expect(completed).toMatchObject({ status: "completed", error: null });
+    expect(completed.usage).toEqual({ input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 });
+  });
+
+  it("settles an idle-only /compact without booking the previous reply's tokens", async () => {
+    // A /compact with no prompt of its own books no usage: the metered reply
+    // left on the timeline belongs to the turn that produced it and was
+    // booked there already.
+    const { transport, driver } = start({
+      messages: [
+        { info: { id: "msg_user_1", role: "user" }, parts: [{ id: "p-0", messageID: "msg_user_1", type: "text", text: "hi" }] },
+        {
+          info: {
+            id: "msg_asst_1",
+            role: "assistant",
+            parentID: "msg_user_1",
+            tokens: { input: 12_000, output: 500, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: 1, completed: 2 },
+          },
+          parts: [{ id: "p-1", messageID: "msg_asst_1", type: "text", text: "done" }],
+        },
+      ],
+    });
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    const server = transport.servers[0]!;
+    // The compaction drains on its own: raw idle is the only end the turn hears.
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    const settled = await Promise.race([
+      driver.awaitTurn("thread-1", sent.turnId).then((result) => ({ settled: true as const, result })),
+      new Promise<{ settled: false }>((resolve) => setTimeout(() => resolve({ settled: false }), 500)),
+    ]);
+    expect(settled.settled).toBe(true);
+    if (settled.settled) {
+      expect(settled.result).toMatchObject({ status: "completed", error: null });
+      // Zero usage, matching the `session.compaction.ended` end: the 12,000/500 of
+      // the earlier reply stay booked to that reply's turn alone.
+      expect(settled.result.usage).toEqual({ input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 });
+    }
+  });
+
+  it("completes a genuine drained idle-only /compact promptly, on the strength of the server's own inbox", async () => {
+    // The drained check is a gate, not a stall: once the server reports
+    // nothing enqueued the very marker that would have been refused a moment
+    // earlier ends the turn.
+    const { transport, driver } = start();
+    await startSession(driver);
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    const server = transport.servers[0]!;
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    const settled = await Promise.race([
+      outcome.then((result) => ({ settled: true as const, result })),
+      new Promise<{ settled: false }>((resolve) => setTimeout(() => resolve({ settled: false }), 500)),
+    ]);
+    expect(settled.settled).toBe(true);
+    if (settled.settled) {
+      expect(settled.result).toMatchObject({ status: "completed", error: null });
+      // ...and the completion was verified against the server's inbox, not assumed.
+      expect(server.callsTo("session.inbox.list").length).toBeGreaterThan(0);
+    }
+  });
+
   it("compacts and carries the task on when a request is rejected as too long, once per turn", async () => {
     // OpenCode's own recovery is off (Moxen runs the compaction), so the rejection is Moxen's to rescue.
     const { transport, driver } = start();

@@ -22,6 +22,7 @@
  */
 import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import type { SubagentTranscript } from "../core/threads/subagents.js";
+import type { NativeSubagentRow } from "./subagentrows.js";
 import type { ImageAttachmentUpload } from "../core/attachments.js";
 import { SKILL_SOURCES, type SkillAddress, type SkillSource, type ManagedSkill, type SkillRoots } from "../core/skills/management.js";
 import { parseSkillProviders } from "../core/skills/routing.js";
@@ -32,7 +33,8 @@ import { knowledgeInput } from "../core/knowledge/input.js";
 import { MEMORY_SCOPES, MEMORY_TYPES, type ImportResult, type Memory, type MemoryBefore, type MemoryScope, type MemorySearch, type MemoryType } from "../core/memory/memory.js";
 import { INTERACTION_MODES, requestedInteractionMode } from "../core/interactionmode.js";
 import type { RemoteAccessStatus, RemoteDevice, RemotePairing } from "./transport/remoteaccess.js";
-import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type UpdatableProvider } from "../core/catalog/update.js";
+import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdate, type ProviderUpdateAllResult, type UpdatableProvider } from "../core/catalog/update.js";
+import type { AcpRegistryPreset } from "../core/providers/acp/registry.js";
 import type {
   AskedTask,
   CancelledTask,
@@ -61,7 +63,15 @@ import type { ModelRequest } from "../core/catalog/selection.js";
 import type { SettingView } from "../core/configschema.js";
 import type { McpTestResult } from "../core/mcptest.js";
 import type { HarnessTestResult, ProbeReport } from "../core/providers/harness/probe.js";
-import type { CliConfig, DiscoverResult, HarnessApiFormat } from "../core/types.js";
+import {
+  ACCOUNT_PROVIDER_KINDS,
+  type AccountProviderKind,
+  type CliConfig,
+  type DiscoverResult,
+  type HarnessApiFormat,
+  type ProviderAccountSaveInput,
+  type ProviderAccountSummary,
+} from "../core/types.js";
 import type { GitBranch, GitCommit, GitCommitDetail, GitOverview, GitWorktreeStatus } from "../core/git/history.js";
 import type {
   ForgeCheckRun,
@@ -83,7 +93,7 @@ import type { UsageCard } from "../core/usage/statsstore.js";
 import type { UsageProtectionSnapshot } from "../core/usage/protection.js";
 import { parseQueuePolicy, type QueuePolicy, type WorkQueueEntry } from "../core/threads/queue.js";
 import type { ProviderSummary, ProviderUsageLimits, SkillInventory } from "../core/catalog/summary.js";
-import type { BackgroundTaskSummary, ContextBreakdown } from "../core/providers/spi.js";
+import type { BackgroundTaskSummary, ContextBreakdown, ContextWindowUsage } from "../core/providers/spi.js";
 import type { StoredProject } from "../core/projects/projects.js";
 import { RESEARCH_SIZE_MESSAGE, isValidResearchSize } from "../core/threads/researchvocab.js";
 import type { ResearchMessage, ResearchRole, ResearchPlan, ResearchModels, ResearchSize, StoredResearchRun, SendDelivery, SendIfBusy, TurnDelivery, TurnStatus } from "../core/threads/types.js";
@@ -165,6 +175,8 @@ export interface ResearchProposal {
 export type CommandBody =
   | { readonly type: "prompt.improve"; readonly directory: string; readonly prompt: string; readonly modelSelection?: ModelSelection; readonly protectedText?: readonly string[] }
   | { readonly type: "project.create"; readonly workspaceRoot: string; readonly projectId?: string; readonly title?: string }
+  | { readonly type: "project.rename"; readonly projectId: string; readonly title: string }
+  | { readonly type: "project.remove"; readonly projectId: string }
   | {
       readonly type: "thread.create";
       /** Required unless `scratch` is set. */
@@ -212,6 +224,7 @@ export type CommandBody =
   | { readonly type: "thread.snooze"; readonly threadId: string; readonly snoozedUntil: string }
   | { readonly type: "thread.unsnooze"; readonly threadId: string }
   | { readonly type: "thread.archive"; readonly threadId: string }
+  | { readonly type: "thread.restore"; readonly threadId: string }
   | { readonly type: "thread.delete"; readonly threadId: string }
   | {
       readonly type: "thread.meta.update";
@@ -366,6 +379,37 @@ export type CommandBody =
   | { readonly type: "harness.models.discover"; readonly baseUrl: string; readonly apiFormat: HarnessApiFormat; readonly apiKeyEnv?: string }
   /** Runs a provider CLI's own updater (`claude update`, `opencode upgrade`) on the machine the sessions run on. */
   | { readonly type: "provider.update"; readonly provider: UpdatableProvider }
+  /** Runs provider CLI updaters in parallel across all (or selected) updatable CLIs; one failure never hides others. */
+  | { readonly type: "provider.update-all"; readonly providers?: readonly UpdatableProvider[] }
+  /** Create or edit a configured provider account (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`). */
+  | ({ readonly type: "provider.account.save" } & ProviderAccountSaveInput)
+  /** Remove a configured provider account (and delete any stored ChatGPT OAuth keychain bundle). */
+  | { readonly type: "provider.account.remove"; readonly kind: AccountProviderKind; readonly id: string }
+  /** Enable or disable a configured provider account without deleting it. */
+  | { readonly type: "provider.account.toggle"; readonly kind: AccountProviderKind; readonly id: string; readonly enabled: boolean }
+  /** Start an in-app CLI login session for a configured provider account (`claude`, `antigravity`, or `chatgpt` Codex companion). */
+  | { readonly type: "provider.account.login.start"; readonly kind: AccountProviderKind; readonly id: string; readonly homePath?: string }
+  /** Wait for a pending provider account CLI login session to finish (optionally feeding a pasted OAuth code). */
+  | { readonly type: "provider.account.login.complete"; readonly sessionId: string; readonly code?: string; readonly timeoutMs?: number }
+  /** Cancel a pending provider account CLI login session. */
+  | { readonly type: "provider.account.login.cancel"; readonly sessionId: string }
+  /** Start an OpenAI Sign in with ChatGPT OAuth 2.0 PKCE + OIDC login session behind the server boundary. */
+  | { readonly type: "chatgpt.login.start"; readonly accountId: string; readonly label?: string }
+  /** Wait for (or manually complete from a pasted redirect URL) a pending Sign in with ChatGPT login session. */
+  | { readonly type: "chatgpt.login.complete"; readonly sessionId: string; readonly callbackUrl?: string; readonly timeoutMs?: number }
+  /** Cancel a pending Sign in with ChatGPT login session and close its loopback listener. */
+  | { readonly type: "chatgpt.login.cancel"; readonly sessionId: string }
+  /** Revoke tokens and clear OS keychain credentials for a Sign in with ChatGPT account. */
+  | { readonly type: "chatgpt.logout"; readonly accountId: string }
+  /** Pair and cryptographically verify a Codex companion (`CODEX_HOME`) against a signed-in ChatGPT account's OIDC identity. */
+  | {
+      readonly type: "chatgpt.codex.pair";
+      readonly accountId: string;
+      readonly codexHomePath?: string;
+      readonly codexBinaryPath?: string;
+      readonly codexLaunchArgs?: string;
+      readonly confirmWorkspace?: boolean;
+    }
   /**
    * Continue a thread in a new one: same project and checkout, opened with a
    * handoff written from the old thread's ledger. Without a model request the
@@ -444,6 +488,8 @@ export type WorkspaceGitCall = "changed" | "status" | "diff";
 export interface CommandResults {
   "prompt.improve": { readonly text: string; readonly provider: string; readonly model: string };
   "project.create": { readonly projectId: string; readonly created: boolean };
+  "project.rename": { readonly projectId: string; readonly title: string };
+  "project.remove": { readonly projectId: string };
   "thread.create": { readonly threadId: string } & Accepted;
   "thread.turn.start": StartedTurnSummary & Accepted;
   "thread.turn.interrupt": Accepted;
@@ -457,6 +503,7 @@ export interface CommandResults {
   "thread.snooze": Accepted;
   "thread.unsnooze": Accepted;
   "thread.archive": Accepted;
+  "thread.restore": Accepted;
   "thread.delete": Accepted;
   "thread.meta.update": Accepted;
   "thread.model-selection.set": Accepted;
@@ -511,6 +558,42 @@ export interface CommandResults {
   "harness.profile.probe": ProbeReport & { readonly saved: boolean };
   "harness.models.discover": DiscoverResult;
   "provider.update": ProviderUpdate;
+  "provider.update-all": ProviderUpdateAllResult;
+  "provider.account.save": { readonly account: ProviderAccountSummary; readonly created: boolean; readonly settings: SettingsSnapshot } & Accepted;
+  "provider.account.remove": { readonly removed: boolean; readonly settings: SettingsSnapshot } & Accepted;
+  "provider.account.toggle": { readonly account: ProviderAccountSummary; readonly settings: SettingsSnapshot } & Accepted;
+  "provider.account.login.start": {
+    readonly sessionId: string;
+    readonly kind: AccountProviderKind;
+    readonly id: string;
+    readonly homePath: string | null;
+    readonly authorizationUrl: string | null;
+    readonly openBrowser: boolean;
+    readonly needsCodeInput: boolean;
+    readonly message: string | null;
+  };
+  "provider.account.login.complete": {
+    readonly account: ProviderAccountSummary | null;
+    readonly verified?: boolean;
+    readonly needsConfirmation?: boolean;
+    readonly reason?: string | null;
+    readonly settings: SettingsSnapshot;
+  } & Accepted;
+  "provider.account.login.cancel": Accepted;
+  "chatgpt.login.start": { readonly sessionId: string; readonly accountId: string; readonly authorizationUrl: string; readonly redirectUri: string };
+  "chatgpt.login.complete": { readonly account: ProviderAccountSummary; readonly settings: SettingsSnapshot } & Accepted;
+  "chatgpt.login.cancel": Accepted;
+  "chatgpt.logout": { readonly account: ProviderAccountSummary | null; readonly settings: SettingsSnapshot } & Accepted;
+  "chatgpt.codex.pair": {
+    readonly verified: boolean;
+    readonly needsConfirmation: boolean;
+    readonly reason: string | null;
+    readonly account: ProviderAccountSummary;
+    readonly codexEmail: string | null;
+    readonly codexPlanType: string | null;
+    readonly codexWorkspaceName: string | null;
+    readonly settings: SettingsSnapshot;
+  };
   "thread.continue": { readonly threadId: string; readonly title: string; readonly scheduledFor: string | null } & Accepted;
   "thread.continue-agent": ContinuedOwnThread & Accepted;
   "thread.side-question": { readonly text: string; readonly withContext: boolean; readonly provider: string };
@@ -592,6 +675,10 @@ export type Query =
   | { readonly type: "thread.turn.await"; readonly threadId: string; readonly turnId: string }
   /** The live provider catalog, probed on every call, with hidden-model preferences applied. */
   | { readonly type: "providers.list" }
+  /** Configured multi-account entries (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`), credential-free. */
+  | { readonly type: "providers.accounts" }
+  /** Agents advertised by the pinned v1 ACP Registry, with suggested launch commands for this platform. */
+  | { readonly type: "acp.registry.list"; readonly forceRefresh?: boolean }
   | { readonly type: "image-generation.availability"; readonly threadId: string }
   | { readonly type: "skills.manage.list"; readonly projectId?: string }
   | ({ readonly type: "skills.manage.read"; readonly projectId?: string } & SkillAddress)
@@ -781,6 +868,7 @@ export interface QueryResults {
   "research.role.report": DescribedTask;
   "thread.turn.await": { readonly status: TurnStatus };
   "providers.list": { readonly providers: readonly ProviderSummary[] };
+  "providers.accounts": { readonly accounts: readonly ProviderAccountSummary[] };
   doctor: Diagnosis;
   "store.problems": { readonly problems: readonly StoreProblem[] };
   "skills.list": SkillInventory;
@@ -819,6 +907,7 @@ export interface QueryResults {
   "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig; readonly problems: readonly ConfigProblem[] };
   "harness.profile.export": { readonly id: string; readonly text: string };
   "provider.latest": LatestVersions;
+  "acp.registry.list": { readonly agents: readonly AcpRegistryPreset[]; readonly source: "network" | "cache" | "empty" };
   "app.update.check": UpdateCheck;
   "git.overview": GitOverview;
   "workspace.git": { readonly stdout: string };
@@ -854,7 +943,8 @@ export type ShellFrame =
       readonly snapshot: {
         readonly snapshotSequence: number;
         readonly projects: readonly ProjectEnvelope[];
-        readonly threads: readonly ThreadEnvelope[];
+        readonly threads: readonly (ThreadEnvelope & { readonly delegationNotifies?: true })[];
+        readonly archivedThreads?: readonly { readonly id: string; readonly title: string }[];
         readonly researchRuns?: readonly StoredResearchRun[];
         readonly researchProposals?: readonly ResearchProposal[];
       };
@@ -879,8 +969,13 @@ export type ShellFrame =
       readonly event: { readonly type: "app.server-restart-required"; readonly payload: { readonly version: string; readonly from: string | null } };
     };
 
+export type ThreadDetail = ThreadEnvelope & {
+  readonly subagentRows?: readonly (NativeSubagentRow & { readonly stoppable: boolean })[];
+  readonly contextUsage?: ContextWindowUsage;
+};
+
 export type ThreadFrame =
-  | { readonly kind: "snapshot"; readonly snapshot: { readonly snapshotSequence: number; readonly thread: ThreadEnvelope } }
+  | { readonly kind: "snapshot"; readonly snapshot: { readonly snapshotSequence: number; readonly thread: ThreadDetail } }
   | { readonly kind: "synchronized" }
   /** Live assistant text between snapshots: `text` is the delta, not the whole reply. */
   | {
@@ -954,6 +1049,17 @@ export interface SettingsSnapshot {
   readonly path: string;
   readonly exists: boolean;
   readonly settings: readonly SettingView[];
+  /**
+   * Independent per-profile settings keyed by canonical `instanceId`
+   * (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`). Each profile carries
+   * its own full setting table, never inheriting parent `providers.<kind>.*`.
+   */
+  readonly accountSettings?: Readonly<Record<string, readonly SettingView[]>>;
+  /**
+   * Configured multi-account provider summaries so Settings opens with the
+   * sidebar and Overview populated immediately without waiting on a second RPC.
+   */
+  readonly accounts?: readonly ProviderAccountSummary[];
 }
 
 // -- runtime decoding --------------------------------------------------------
@@ -1102,6 +1208,10 @@ export function decodeCommand(value: unknown): Command {
         ...(asString(record.projectId) ? { projectId: asString(record.projectId) as string } : {}),
         ...(asString(record.title) ? { title: asString(record.title) as string } : {}),
       };
+    case "project.rename":
+      return { ...meta, type, projectId: requireField(record.projectId, type, "projectId"), title: requireField(record.title, type, "title") };
+    case "project.remove":
+      return { ...meta, type, projectId: requireField(record.projectId, type, "projectId") };
     case "thread.create": {
       const projectId = asString(record.projectId);
       const scratch = record.scratch === true;
@@ -1130,7 +1240,7 @@ export function decodeCommand(value: unknown): Command {
         type,
         threadId: threadId(),
         message: decodeMessage(record.message),
-        ...(record.queue !== undefined ? { queue: parseQueuePolicy(record.queue) } : {}),
+        ...(record.queue !== undefined ? { queue: parseQueuePolicy(record.queue, { deferReset: true }) } : {}),
         ...(selection ? { modelSelection: selection } : {}),
         // A one-off (`/research`, `/review`) runs this prompt in that mode; the thread keeps its own.
         ...(record.interactionMode !== undefined ? { interactionMode: requestedInteractionMode(record.interactionMode, type, INTERACTION_MODES) } : {}),
@@ -1156,7 +1266,7 @@ export function decodeCommand(value: unknown): Command {
     case "thread.protect":
       return { ...meta, type, threadId: threadId() };
     case "queue.edit":
-      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy) } : {}), ...optionalBoolean(record, "notifyParent", type) };
+      return { ...meta, type, threadId: threadId(), turnId: requireField(record.turnId, type, "turnId"), action: requireEnum(record.action, type, "action", ["first", "last", "up", "down", "hold", "release", "remove", "restore", "edit"] as const), ...(record.policy !== undefined ? { policy: parseQueuePolicy(record.policy, { deferReset: true }) } : {}), ...optionalBoolean(record, "notifyParent", type) };
     case "handoff.submit":
       return { ...meta, type, threadId: threadId(), requestId: requireField(record.requestId, type, "requestId"), summary: requireField(record.summary, type, "summary") };
     case "usage.queue":
@@ -1185,6 +1295,7 @@ export function decodeCommand(value: unknown): Command {
     }
     case "thread.unsnooze":
     case "thread.archive":
+    case "thread.restore":
     case "thread.delete":
       return { ...meta, type, threadId: threadId() };
     case "thread.meta.update":
@@ -1373,7 +1484,7 @@ export function decodeCommand(value: unknown): Command {
         message: requireField(record.message, type, "message"),
         ...(record.threadId !== undefined ? { threadId: requireThreadId(record.threadId) } : {}),
         ...optionalString(record, "at"),
-        ...(record.conditions !== undefined ? { conditions: parseQueuePolicy({ conditions: record.conditions }).conditions } : {}),
+        ...(record.conditions !== undefined ? { conditions: parseQueuePolicy({ conditions: record.conditions }, { deferReset: true }).conditions } : {}),
       };
     case "thread.background.stop":
       return {
@@ -1568,12 +1679,160 @@ export function decodeCommand(value: unknown): Command {
         type,
         provider: requireEnum(record.provider, type, "provider", UPDATABLE_PROVIDERS),
       };
+    case "provider.update-all": {
+      if (record.providers === undefined) return { ...meta, type };
+      if (!Array.isArray(record.providers)) {
+        throw new CliError("INVALID_THREAD_OPTION", `${type} providers must be an array.`, { exitCode: 2 });
+      }
+      const providers = record.providers.map((entry) => requireEnum(entry, type, "providers[]", UPDATABLE_PROVIDERS));
+      return { ...meta, type, providers };
+    }
+    case "provider.account.save":
+      return {
+        ...meta,
+        type,
+        kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
+        id: requireField(record.id, type, "id"),
+        ...optionalNullableString(record, "label", type),
+        ...optionalBoolean(record, "enabled", type),
+        ...optionalNullableString(record, "homePath", type),
+        ...optionalNullableString(record, "binaryPath", type),
+        ...optionalNullableLaunchArgs(record, type),
+        ...optionalNullableEnv(record, type),
+        ...optionalNullableString(record, "model", type),
+        ...optionalNullableString(record, "thinkingEffort", type),
+        ...optionalNullableString(record, "codexHomePath", type),
+        ...optionalNullableString(record, "codexBinaryPath", type),
+        ...optionalNullableString(record, "codexLaunchArgs", type),
+      };
+    case "provider.account.remove":
+      return {
+        ...meta,
+        type,
+        kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
+        id: requireField(record.id, type, "id"),
+      };
+    case "provider.account.toggle":
+      if (typeof record.enabled !== "boolean") {
+        throw new CliError("INVALID_THREAD_OPTION", `${type} requires enabled as a boolean.`, { exitCode: 2 });
+      }
+      return {
+        ...meta,
+        type,
+        kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
+        id: requireField(record.id, type, "id"),
+        enabled: record.enabled,
+      };
+    case "provider.account.login.start":
+      return {
+        ...meta,
+        type,
+        kind: requireEnum(record.kind, type, "kind", ACCOUNT_PROVIDER_KINDS),
+        id: requireField(record.id, type, "id"),
+        ...optionalString(record, "homePath"),
+      };
+    case "provider.account.login.complete":
+      return {
+        ...meta,
+        type,
+        sessionId: requireField(record.sessionId, type, "sessionId"),
+        ...optionalString(record, "code"),
+        ...optionalNumber(record, "timeoutMs", type),
+      };
+    case "provider.account.login.cancel":
+      return {
+        ...meta,
+        type,
+        sessionId: requireField(record.sessionId, type, "sessionId"),
+      };
+    case "chatgpt.login.start":
+      return {
+        ...meta,
+        type,
+        accountId: requireField(record.accountId, type, "accountId"),
+        ...optionalString(record, "label"),
+      };
+    case "chatgpt.login.complete":
+      return {
+        ...meta,
+        type,
+        sessionId: requireField(record.sessionId, type, "sessionId"),
+        ...optionalString(record, "callbackUrl"),
+        ...optionalNumber(record, "timeoutMs", type),
+      };
+    case "chatgpt.login.cancel":
+      return {
+        ...meta,
+        type,
+        sessionId: requireField(record.sessionId, type, "sessionId"),
+      };
+    case "chatgpt.logout":
+      return {
+        ...meta,
+        type,
+        accountId: requireField(record.accountId, type, "accountId"),
+      };
+    case "chatgpt.codex.pair":
+      return {
+        ...meta,
+        type,
+        accountId: requireField(record.accountId, type, "accountId"),
+        ...optionalString(record, "codexHomePath"),
+        ...optionalString(record, "codexBinaryPath"),
+        ...optionalString(record, "codexLaunchArgs"),
+        ...optionalBoolean(record, "confirmWorkspace", type),
+      };
     default:
       throw unknownCommand(type);
   }
 }
 
 // -- field decoders ------------------------------------------------------------
+
+function optionalNullableString<K extends string>(
+  record: Record<string, unknown>,
+  key: K,
+  command: string,
+): { [P in K]?: string | null } {
+  const value = record[key];
+  if (value === undefined) return {} as { [P in K]?: string | null };
+  if (value === null || typeof value === "string") return { [key]: value } as { [P in K]?: string | null };
+  throw new CliError("INVALID_THREAD_OPTION", `${command} ${key} must be a string or null.`, { exitCode: 2 });
+}
+
+function optionalNullableLaunchArgs(
+  record: Record<string, unknown>,
+  command: string,
+): { readonly launchArgs?: string | readonly string[] | null } {
+  const value = record.launchArgs;
+  if (value === undefined) return {};
+  if (value === null || typeof value === "string") return { launchArgs: value };
+  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
+    return { launchArgs: value as string[] };
+  }
+  throw new CliError("INVALID_THREAD_OPTION", `${command} launchArgs must be a string, string array, or null.`, { exitCode: 2 });
+}
+
+function optionalNullableEnv(
+  record: Record<string, unknown>,
+  command: string,
+): { readonly env?: Readonly<Record<string, string>> | null } {
+  const value = record.env;
+  if (value === undefined) return {};
+  if (value === null) return { env: null };
+  const map = asRecord(value);
+  if (map === null) {
+    throw new CliError("INVALID_THREAD_OPTION", `${command} env must be a string map or null.`, { exitCode: 2 });
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) {
+    if (typeof v !== "string") {
+      throw new CliError("INVALID_THREAD_OPTION", `${command} env.${k} must be a string.`, { exitCode: 2 });
+    }
+    out[k] = v;
+  }
+  return { env: out };
+}
 
 function optionalString<K extends string>(record: Record<string, unknown>, key: K): { [P in K]?: string } {
   const value = asString(record[key]);
@@ -1755,7 +2014,11 @@ export function decodeQuery(value: unknown): Query {
         turnId: requireField(record.turnId, type, "turnId"),
       };
     case "providers.list":
+    case "providers.accounts":
     case "doctor":
+      return { type };
+    case "acp.registry.list":
+      return { type, ...optionalBoolean(record, "forceRefresh", type) };
     case "usage.card": {
       if (record.palette !== undefined && !isCardPalette(record.palette)) {
         throw new CliError("INVALID_QUERY", "usage.card palette must give background, text, dim, empty and muted as #rrggbb, and four levels.", { exitCode: 2 });

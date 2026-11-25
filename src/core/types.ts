@@ -167,6 +167,142 @@ export interface ForgeConfig {
   glabPath?: string;
 }
 
+/** Public, credential-free summary of one configured provider account (`providers.accounts` query). */
+export interface ProviderAccountSummary {
+  readonly kind: AccountProviderKind;
+  readonly id: string;
+  readonly instanceId: string;
+  readonly label: string;
+  readonly enabled: boolean;
+  readonly homePath: string | null;
+  readonly binaryPath: string | null;
+  readonly launchArgs: string | null;
+  readonly env: Readonly<Record<string, string>>;
+  readonly model: string | null;
+  readonly thinkingEffort: string | null;
+  readonly email: string | null;
+  readonly workspaceName: string | null;
+  readonly planType: string | null;
+  readonly signedIn: boolean | null;
+  readonly codexHomePath: string | null;
+  readonly codexBinaryPath: string | null;
+  readonly codexLaunchArgs: string | null;
+  readonly codexVerified: boolean;
+  /**
+   * Why a configured account cannot run regardless of its own `enabled`
+   * flag: an Antigravity account gated by the off-by-default
+   * `providers.antigravity.allowUnsupportedUse` (multiple or isolated
+   * accounts). The user's own toggle stays `enabled`; the reason says how
+   * to fix it. Absent for every other account kind.
+   */
+  readonly disabledReason?: string | null;
+}
+
+/** Multi-account provider kinds addressed as `<kind>/<id>`. */
+export const ACCOUNT_PROVIDER_KINDS = ["claude", "chatgpt", "antigravity"] as const;
+export type AccountProviderKind = (typeof ACCOUNT_PROVIDER_KINDS)[number];
+
+/** Payload for creating or updating one provider account (`provider.account.save`). */
+export interface ProviderAccountSaveInput {
+  readonly kind: AccountProviderKind;
+  readonly id: string;
+  readonly label?: string | null;
+  readonly enabled?: boolean;
+  readonly homePath?: string | null;
+  readonly binaryPath?: string | null;
+  readonly launchArgs?: string | readonly string[] | null;
+  readonly env?: Readonly<Record<string, string>> | null;
+  readonly model?: string | null;
+  readonly thinkingEffort?: string | null;
+  readonly codexHomePath?: string | null;
+  readonly codexBinaryPath?: string | null;
+  readonly codexLaunchArgs?: string | null;
+}
+
+/**
+ * Shared fields for a configured provider account (`claude/<id>`, `chatgpt/<id>`,
+ * `antigravity/<id>`). Credentials never live here: Claude and Antigravity
+ * isolate CLI-owned logins under `homePath`, and ChatGPT stores OAuth tokens
+ * exclusively in the OS keychain (`src/core/secrets.ts`).
+ */
+export interface ProviderAccountBase {
+  /** Slug within the provider kind; forms `<kind>/<id>`. */
+  id: string;
+  /** Human-readable display name shown in pickers and Settings (e.g. "Personal", "Work"). */
+  label?: string;
+  /** Switch this account off without removing it. Unset means enabled. */
+  enabled?: boolean;
+  /** Default model slug for new threads on this account; overrides the provider-level default. */
+  model?: string;
+  /** Default thinking effort for new threads on this account; overrides the provider-level default. */
+  thinkingEffort?: string;
+  /** Non-secret environment variables merged into this account's CLI process. */
+  env?: Record<string, string>;
+}
+
+/**
+ * One configured Claude Code profile (`providers.claude.accounts[]`).
+ * Independently configurable across all Claude Code settings (seeded with
+ * sensible defaults when unset; never inherits a parent `providers.claude.*`).
+ */
+export interface ClaudeAccountConfig extends ProviderAccountBase, Omit<ClaudeProviderConfig, "accounts" | "model" | "thinkingEffort"> {
+  /** Isolated `CLAUDE_CONFIG_DIR` for this profile (never overrides `HOME`). */
+  homePath?: string;
+  /** `claude` executable path for this profile. Default: `claude` on PATH. */
+  binaryPath?: string;
+  /** Extra CLI launch arguments for this profile. */
+  launchArgs?: readonly string[];
+}
+
+/**
+ * One configured Antigravity profile (`providers.antigravity.accounts[]`).
+ * Independently configurable across all Antigravity settings.
+ */
+export interface AntigravityAccountConfig extends ProviderAccountBase, Omit<AntigravityProviderConfig, "accounts" | "model" | "thinkingEffort"> {
+  /**
+   * Isolated account root directory. When set, Moxen launches `agy` with
+   * `HOME`/`USERPROFILE` pointing here and `--gemini-dir <homePath>/.gemini`.
+   * Caveat: tools spawned by `agy` inherit this `HOME`/`USERPROFILE`.
+   */
+  homePath?: string;
+  /** `agy` binary path for this profile. Default: `agy` on PATH. */
+  binaryPath?: string;
+  /** Extra CLI launch arguments for this profile. */
+  launchArgs?: string;
+}
+
+/**
+ * One configured Sign in with ChatGPT profile (`providers.chatgpt.accounts[]`).
+ * Independently configurable across all ChatGPT/Harness settings.
+ */
+export interface ChatGptAccountConfig extends ProviderAccountBase, Omit<ChatGptProviderConfig, "accounts" | "model" | "thinkingEffort"> {
+  /** Verified OIDC email from Sign in with ChatGPT (display/pairing metadata only). */
+  email?: string;
+  /** Verified OIDC subject (`sub`). */
+  userId?: string;
+  /** Workspace or organization name selected during sign-in / pairing. */
+  workspaceName?: string;
+  /** Verified ChatGPT workspace/account identifier when available. */
+  accountId?: string;
+  /** Plan tier reported by ChatGPT/Codex (e.g. "plus", "pro", "team"). */
+  planType?: string;
+  /** OS keychain reference (`keychain:...`) for this account's OAuth bundle; never raw tokens. */
+  authRef?: string;
+  /** Paired Codex companion `CODEX_HOME` for live usage windows, reset credits, and image generation. */
+  codexHomePath?: string;
+  /** `codex` binary path for the paired companion. Default: `codex` on PATH. */
+  codexBinaryPath?: string;
+  /** Extra launch args for the paired Codex companion. */
+  codexLaunchArgs?: string;
+  /** True once the paired Codex companion identity was verified against this ChatGPT account. */
+  codexVerified?: boolean;
+}
+
+/** Sign in with ChatGPT provider configuration (`providers.chatgpt.*`), backed by Moxen Harness. */
+export interface ChatGptProviderConfig extends Omit<OpencodeProviderConfig, "binaryPath" | "bundledSkills" | "moxenPrompt" | "compactBuffer" | "disabledNativeTools" | "webSearchOrder" | "webFetchOrder"> {
+  accounts?: ChatGptAccountConfig[];
+}
+
 /** Codex app-server, using the CLI login and configuration. */
 export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
   homePath?: string;
@@ -174,11 +310,55 @@ export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundl
   reasoningSummary?: "auto" | "concise" | "detailed" | "none";
 }
 
+/** First-class Antigravity CLI (`agy`) provider configuration (`providers.antigravity.*`). */
+export interface AntigravityProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
+  launchArgs?: string;
+  /**
+   * Whether Moxen may do what Google does not support on Antigravity consumer
+   * plans: delegate to it, start automatic prompts on its threads, and run
+   * multiple accounts with isolated home folders. Off by default. One key
+   * for every account (`antigravity`, `antigravity/<id>`, legacy `agy`);
+   * Moxen never turns it on for the user.
+   */
+  allowUnsupportedUse?: boolean;
+  accounts?: AntigravityAccountConfig[];
+}
+
+/** First-class Mistral Vibe (`vibe-app-server`) provider configuration (`providers.vibe.*`). */
+export interface VibeProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
+  vibeHome?: string;
+  launchArgs?: string;
+}
+
+/** One configured ACP profile entry (`providers.acp.agents[]`). */
+export interface AcpAgentConfig {
+  readonly id: string;
+  readonly name?: string;
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly launchArgs?: string;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly enabled?: boolean;
+  readonly defaultModel?: string;
+  readonly defaultMode?: string;
+}
+
+/** Agent Client Protocol (ACP) multi-profile provider configuration (`providers.acp.*`). */
+export interface AcpProviderConfig extends Omit<OpencodeProviderConfig, "binaryPath" | "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
+  agents?: AcpAgentConfig[];
+}
+
 export interface ProvidersConfig {
+  /** Set to true once legacy provider settings/threads have been migrated to opt-in independent profiles. */
+  profilesMigrated?: boolean;
   codex?: CodexProviderConfig;
   claude?: ClaudeProviderConfig;
+  chatgpt?: ChatGptProviderConfig;
   opencode?: OpencodeProviderConfig;
   harness?: HarnessProviderConfig;
+  antigravity?: AntigravityProviderConfig;
+  vibe?: VibeProviderConfig;
+  acp?: AcpProviderConfig;
 }
 
 /** Moxen Harness: our own agent loop against endpoints the user configures. */
@@ -368,6 +548,8 @@ export interface HarnessProfileConfig {
 
 /** What the user may set for OpenCode. Its external-server URL and password are not offered yet (see `configschema.ts`). */
 export interface OpencodeProviderConfig extends ModelPriceMaps {
+  /** Opt-in switch for OpenCode (single provider, disabled by default until added in Overview or onboarding). */
+  enabled?: boolean;
   memory?: boolean;
   /** Who compacts: OpenCode itself, Moxen (asking first, or on its own), or nobody. Unset: `autoCompact` (off when false), else OpenCode. */
   compaction?: "provider" | "ask" | "auto" | "off";
@@ -508,6 +690,8 @@ export interface ClaudeProviderConfig extends ModelPriceMaps {
   autoCompactPercent?: number;
   /** Run every Claude Code session with Ultracode (workflow orchestration) on. Unset: off. */
   ultracode?: boolean;
+  /** Configured Claude Code accounts (`claude/<id>`). */
+  accounts?: ClaudeAccountConfig[];
 }
 
 export interface RuntimeState {
@@ -738,14 +922,283 @@ export interface WorkspaceResolution {
   branch: string | null;
 }
 
-/** The provider driver an instance id routes to (`opencode/<provider>`, `harness/<profile>`, and `claudeAgent`, the historical Claude id), or null for an id no driver owns. */
-export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "opencode" | "harness" | null {
+/** The provider driver an instance id routes to (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`, `opencode/<provider>`, `harness/<profile>`, `acp/<agent>`, `vibe`, plus legacy `claudeAgent`, `codex`, `antigravity`, `agy`), or null for an id no driver owns. */
+export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | null {
   const key = instanceId.trim().toLowerCase();
-  if (key === "codex") return "codex";
+  if (key === "codex" || key.startsWith("codex/")) return "codex";
+  if (key === "chatgpt" || key.startsWith("chatgpt/")) return "chatgpt";
+  if (key === "antigravity" || key === "agy" || key.startsWith("antigravity/")) return "antigravity";
+  if (key === "vibe" || key.startsWith("vibe/")) return "vibe";
   if (key === "opencode" || key.startsWith("opencode/")) return "opencode";
   if (key === "harness" || key.startsWith("harness/")) return "harness";
-  if (key === "claudeagent" || key === "claude") return "claude";
+  if (key === "acp" || key.startsWith("acp/")) return "acp";
+  if (key === "claudeagent" || key === "claude" || key.startsWith("claude/")) return "claude";
   return null;
+}
+
+/**
+ * Whether Moxen may do what Google does not support on Antigravity consumer
+ * plans (`providers.antigravity.allowUnsupportedUse`, off by default):
+ * delegation, automatic prompts, and multiple accounts. The default makes
+ * Moxen refuse or disable all three. The one provider-level key governs
+ * every Antigravity account; resolve the instance's kind with
+ * `driverKindOfInstance` before asking this. Moxen never turns it on for
+ * the user.
+ */
+export function antigravityUnsupportedUseAllowed(config: Pick<CliConfig, "providers">): boolean {
+  return config.providers?.antigravity?.allowUnsupportedUse === true;
+}
+
+/**
+ * Environment keys that would move an Antigravity launch or login off the
+ * host user's own login environment: the POSIX and Windows homes, the
+ * Windows profile and app-data directories, the XDG config/state/data/cache
+ * directories that redirect where CLI state is kept, and `SSH_CONNECTION`,
+ * whose presence makes `agy` use per-home file-based token storage instead
+ * of the OS keyring. Matched case-insensitively: Windows env keys have no
+ * case, so an override in any case is an override.
+ */
+const ANTIGRAVITY_LOGIN_ENV_KEYS: ReadonlySet<string> = new Set([
+  "home",
+  "userprofile",
+  "appdata",
+  "localappdata",
+  "ssh_connection",
+  "xdg_config_home",
+  "xdg_data_home",
+  "xdg_state_home",
+  "xdg_cache_home",
+]);
+
+/** The keys of `env` that would override the host login environment for an Antigravity launch, in config order. */
+export function antigravityLoginEnvOverrides(env: Readonly<Record<string, string>> | undefined): string[] {
+  return Object.keys(env ?? {}).filter((key) => ANTIGRAVITY_LOGIN_ENV_KEYS.has(key.trim().toLowerCase()));
+}
+
+/**
+ * Tokenize one launch-args string the way a launch does — the mirror of
+ * `tokenizeLaunchArgs` (`providers/codex/config.js`): single/double quotes,
+ * backslash escapes, whitespace-separated. This module is the root of the
+ * graph that tokenizer lives in, so it cannot import it; the mirror is
+ * pinned by the Antigravity account tests against it. Null when the string
+ * is malformed (an unterminated quote).
+ */
+function tokenizeLaunchArgsForGate(raw: string): string[] | null {
+  const args: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  let escaped = false;
+  let pushed = false;
+  const flush = (): void => {
+    if (current.length > 0 || pushed) args.push(current);
+    current = "";
+    pushed = false;
+  };
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index]!;
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'" && /[\s"\\]/.test(raw[index + 1] ?? "")) {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      quote = char;
+      pushed = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      flush();
+      continue;
+    }
+    current += char;
+  }
+  if (quote) return null;
+  flush();
+  return args;
+}
+
+/**
+ * Whether a launch-args string asks `agy` to keep its state somewhere other
+ * than the login's own home (`--gemini-dir`/`--gemini-dir=...`). Tokens are
+ * compared unquoted, exactly as the launch would read them, so a quoted
+ * `"--gemini-dir"` is caught too; a malformed string is refused while the
+ * gate is on if it could contain the flag at all.
+ */
+function antigravityLaunchArgsSelectDirectory(launchArgs: string | undefined): boolean {
+  const trimmed = launchArgs?.trim();
+  if (!trimmed) return false;
+  const tokens = tokenizeLaunchArgsForGate(trimmed);
+  if (tokens === null) return trimmed.includes("--gemini-dir");
+  return tokens.some((token) => token === "--gemini-dir" || token.startsWith("--gemini-dir="));
+}
+
+/**
+ * The one off-mode policy for every Antigravity launch and login input (see
+ * `providers.antigravity.allowUnsupportedUse`): null when the input may run,
+ * and otherwise the reason the off-by-default gate refuses it — an isolated
+ * `homePath`, an env override of a home/profile/SSH/config-dir variable, or a
+ * `--gemini-dir` launch argument all land the login on an environment or
+ * directory other than the host user's own. While off such input is refused
+ * with `ANTIGRAVITY_ACCOUNT_OFF`, never silently stripped down to the host
+ * login: a config that picks out a folder the user did not opt into is an
+ * accident to report, not a detail to quietly drop.
+ */
+export function antigravityOffUseLaunchBlockedReason(
+  config: Pick<AntigravityProviderConfig, "allowUnsupportedUse"> | undefined,
+  input: { readonly homePath?: string | undefined; readonly env?: Readonly<Record<string, string>> | undefined; readonly launchArgs?: string | undefined },
+): string | null {
+  if (config?.allowUnsupportedUse === true) return null;
+  if (input.homePath?.trim()) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login runs only on the host agy login, with the host home. Google does not support multiple consumer accounts and may suspend them. Remove this Antigravity profile's homePath so it uses the host agy login, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  const envOverrides = antigravityLoginEnvOverrides(input.env);
+  if (envOverrides.length > 0) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login runs only in the host user's own environment, and an override of ${envOverrides.join(", ")} would move it off that login. Google does not support multiple consumer accounts and may suspend them. Remove the override${envOverrides.length === 1 ? "" : "s"} from this Antigravity profile, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  if (antigravityLaunchArgsSelectDirectory(input.launchArgs)) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login keeps its state in the host user's own home, and --gemini-dir would move it off that login. Google does not support multiple consumer accounts and may suspend them. Remove --gemini-dir from this Antigravity profile's launchArgs, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  return null;
+}
+
+/**
+ * Why the Antigravity account behind `instanceId` cannot run while
+ * `providers.antigravity.allowUnsupportedUse` is off (the default): null
+ * when it may. While off Moxen runs at most one Antigravity account — the
+ * first configured account without a `homePath`, which shares the host
+ * `agy` login with its environment untouched — and never launches, probes
+ * for usage or credits, or routes to any configured account that has an
+ * isolated `homePath`, an env override of a home/profile/SSH/config-dir
+ * variable, a `--gemini-dir` launch argument, or any configured account
+ * beyond that one; the host instance ids answer the same question for the
+ * provider-level launch config. The host instance ids (`antigravity`,
+ * legacy `agy`) and an account id with no configured entry are the host
+ * login itself (no folder, no isolation) and stay allowed. No path on
+ * this gate may read or write another account's folder.
+ */
+export function antigravityAccountBlockedReason(
+  config: Pick<AntigravityProviderConfig, "allowUnsupportedUse" | "accounts" | "launchArgs"> | undefined,
+  instanceId: string,
+): string | null {
+  if (config?.allowUnsupportedUse === true) return null;
+  if (driverKindOfInstance(instanceId) !== "antigravity") return null;
+  const parsed = parseAccountInstanceId(instanceId);
+  if (parsed === null) {
+    // The host login: its only launch input of its own is the
+    // provider-level launch config, so an argument that moves the login
+    // off the host home is refused, not quietly dropped.
+    return antigravityOffUseLaunchBlockedReason(config, { launchArgs: config?.launchArgs });
+  }
+  const accounts = config?.accounts ?? [];
+  const account = accounts.find((entry) => entry.id.trim().toLowerCase() === parsed.accountId);
+  // No configured entry: no account folder and no isolation, so it runs on
+  // the host `agy` login, the one account that stays while off.
+  if (account === undefined) return null;
+  if (account.homePath?.trim()) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the one that shares the host agy login with no homePath. Google does not support multiple consumer accounts and may suspend them. Remove account "${parsed.accountId}" homePath so it uses the host agy login, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  const launch = antigravityOffUseLaunchBlockedReason(config, { env: account.env, launchArgs: account.launchArgs ?? config?.launchArgs });
+  if (launch !== null) return launch;
+  // The account that stays while the gate is off: the first configured
+  // without a `homePath` or any non-host env/launch-args override of its
+  // own — env overrides keep an account out even without a folder, and a
+  // second clean account never displaces the first.
+  const survivor = accounts.find((entry) => antigravityOffUseLaunchBlockedReason(config, { homePath: entry.homePath, env: entry.env, launchArgs: entry.launchArgs ?? config?.launchArgs }) === null);
+  if (survivor && survivor.id.trim().toLowerCase() === parsed.accountId) return null;
+  return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the first without a homePath. Google does not support multiple consumer accounts and may suspend them. Keep only that account, or turn providers.antigravity.allowUnsupportedUse on.`;
+}
+
+/** Parse an account-addressed instance id (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`), or null for legacy/non-account ids. */
+export function parseAccountInstanceId(instanceId: string): { readonly kind: AccountProviderKind; readonly accountId: string } | null {
+  const trimmed = instanceId.trim().toLowerCase();
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return null;
+  const prefix = trimmed.slice(0, slash);
+  const accountId = trimmed.slice(slash + 1).trim();
+  if (!accountId || accountId.includes("/")) return null;
+  if (prefix === "claude" || prefix === "chatgpt" || prefix === "antigravity") {
+    return { kind: prefix, accountId };
+  }
+  return null;
+}
+
+/** Canonical account instance id (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`). */
+export function accountInstanceId(kind: AccountProviderKind, accountId: string): string {
+  return `${kind}/${accountId.trim().toLowerCase()}`;
+}
+
+/**
+ * Portable tilde-prefixed Moxen-managed isolated directory for a provider account
+ * (`~/.moxen/accounts/<kind>/<id>`). Expanded via `expandHome()` on POSIX and Windows.
+ */
+export function managedAccountHomeDisplayPath(kind: AccountProviderKind, id: string): string {
+  const normalized = id.trim().toLowerCase() || "default";
+  return `~/.moxen/accounts/${kind}/${normalized}`;
+}
+
+/**
+ * Resolve the independent provider configuration for an exact `instanceId`.
+ *
+ * - Multi-account profiles (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`)
+ *   return ONLY that profile's own independent settings (never inheriting a
+ *   parent `providers.<kind>.*`).
+ * - Single-provider / non-account kinds (`opencode`, `harness`, `acp`, `codex`)
+ *   return `config.providers?.[kind]`.
+ */
+export function resolveProfileProviderConfig(
+  config: Pick<CliConfig, "providers">,
+  instanceId: string,
+):
+  | ClaudeProviderConfig
+  | ChatGptProviderConfig
+  | AntigravityProviderConfig
+  | VibeProviderConfig
+  | CodexProviderConfig
+  | ProvidersConfig["opencode"]
+  | ProvidersConfig["harness"]
+  | ProvidersConfig["acp"]
+  | undefined {
+  const parsed = parseAccountInstanceId(instanceId);
+  if (parsed) {
+    if (parsed.kind === "claude") {
+      return config.providers?.claude?.accounts?.find(
+        (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
+      );
+    }
+    if (parsed.kind === "chatgpt") {
+      return config.providers?.chatgpt?.accounts?.find(
+        (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
+      );
+    }
+    return config.providers?.antigravity?.accounts?.find(
+      (entry) => entry.id.trim().toLowerCase() === parsed.accountId,
+    );
+  }
+  const raw = instanceId.trim().toLowerCase();
+  if (raw === "opencode" || raw.startsWith("opencode/")) return config.providers?.opencode;
+  if (raw === "harness" || raw.startsWith("harness/")) return config.providers?.harness;
+  if (raw === "acp" || raw.startsWith("acp/")) return config.providers?.acp;
+  if (raw === "codex" || raw.startsWith("codex/")) return config.providers?.codex;
+  if (raw === "vibe" || raw.startsWith("vibe/")) return config.providers?.vibe;
+  if (raw === "claudeagent" || raw === "claude") {
+    return config.providers?.claude?.accounts?.[0] ?? config.providers?.claude;
+  }
+  if (raw === "antigravity" || raw === "agy") {
+    return config.providers?.antigravity?.accounts?.[0] ?? config.providers?.antigravity;
+  }
+  if (raw === "chatgpt") {
+    return config.providers?.chatgpt?.accounts?.[0] ?? config.providers?.chatgpt;
+  }
+  return undefined;
 }
 
 /** One model a server lists when asked (`harness.models.discover`). */

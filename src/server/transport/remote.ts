@@ -446,6 +446,8 @@ export class RemoteConnection implements ClientApi {
       const attempts = this.link.status === "reconnecting" ? this.link.attempts : 0;
       this.setLink({ status: "reconnecting", since, attempts, reason: dropped === null ? "the connection closed" : dropped });
       void this.reconnect();
+    } else if (!this.closed && this.options.reconnect === false) {
+      this.setLink({ status: "failed", reason: message, code: "SERVER_DISCONNECTED" });
     }
   }
 

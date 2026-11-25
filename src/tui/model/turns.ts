@@ -302,7 +302,7 @@ export interface ContextUsageDisplay {
   usedLabel: string;
   maxLabel: string | null;
   totalProcessedLabel: string | null;
-  /** Running session cost; null when the driver reports none (non-Claude). */
+  /** Running thread cost; null when no turn can be priced. */
   costLabel: string | null;
 }
 

@@ -1,4 +1,4 @@
-import { driverKindOfInstance, type CliConfig } from "../../core/types.js";
+import { driverKindOfInstance, parseAccountInstanceId, type CliConfig } from "../../core/types.js";
 import { configuredModel } from "../../core/catalog/selection.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
 import { updateState, versionNumber, type UpdatableProvider } from "../../core/catalog/update.js";
@@ -68,7 +68,155 @@ export type SettingControl =
   /** `warning`: what the ranked tools still need (a server to add, a switch that is off), said on the closed row too. */
   | { readonly kind: "order"; readonly rows: readonly WebOrderRow[]; readonly warning?: string }
   /** The models of one provider, each with its own long-thread overrides or none: opened in its own editor, a page per model. */
-  | { readonly kind: "handoff"; readonly models: readonly ModelOverrideEntry[]; readonly compaction: ModelCompactionChoices };
+  | { readonly kind: "handoff"; readonly models: readonly ModelOverrideEntry[]; readonly compaction: ModelCompactionChoices }
+  /** The models of one provider, each with its own token prices (USD per million tokens) over Moxen's shipped list. */
+  | { readonly kind: "prices"; readonly models: readonly ModelPriceEntry[] };
+
+/** The four per-model token prices in USD per million tokens; null means unset / follow shipped. */
+export interface ModelPriceValues {
+  readonly input: number | null;
+  readonly output: number | null;
+  readonly cacheRead: number | null;
+  readonly cacheWrite: number | null;
+}
+export type ModelPriceField = keyof ModelPriceValues;
+
+/** One model as the per-model prices editor lists it. */
+export interface ModelPriceEntry {
+  readonly slug: string;
+  readonly name: string;
+  /** False when the config names a slug the provider does not currently offer (listed so it can be cleared). */
+  readonly offered: boolean;
+  readonly custom: ModelPriceValues;
+  readonly shipped: ModelPriceValues;
+}
+
+/** The config key each per-model price field is kept in, under `providers.<kind>.`. */
+export const MODEL_PRICE_KEY: Readonly<Record<ModelPriceField, string>> = {
+  input: "modelInputPrices",
+  output: "modelOutputPrices",
+  cacheRead: "modelCacheReadPrices",
+  cacheWrite: "modelCacheWritePrices",
+};
+
+export function hasCustomPrices(entry: Pick<ModelPriceEntry, "custom">): boolean {
+  return entry.custom.input !== null || entry.custom.output !== null || entry.custom.cacheRead !== null || entry.custom.cacheWrite !== null;
+}
+
+export function hasShippedPrices(entry: Pick<ModelPriceEntry, "shipped">): boolean {
+  return entry.shipped.input !== null || entry.shipped.output !== null || entry.shipped.cacheRead !== null || entry.shipped.cacheWrite !== null;
+}
+
+/** Format USD per million tokens compactly (`$2`, `$0.5`, `$6.25`, `$0`). */
+export function formatUsdPerMillion(usd: number): string {
+  const clean = Number.isFinite(usd) ? Number(usd.toPrecision(12)) : usd;
+  return `$${clean}`;
+}
+
+/** Parse a `slug=price` price map string permissively (skipping invalid entries). */
+export function pricesFromText(text: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const part of text.split(/[\n,]/)) {
+    const at = part.lastIndexOf("=");
+    if (at <= 0) continue;
+    const slug = part.slice(0, at).trim();
+    const raw = part.slice(at + 1).trim();
+    if (slug === "" || raw === "") continue;
+    const value = Number(raw);
+    if (Number.isFinite(value) && value >= 0) out[slug] = value;
+  }
+  return out;
+}
+
+/** Format a price map back into `slug=price` comma-separated form. */
+export function pricesToText(map: Readonly<Record<string, number>>): string {
+  return Object.entries(map).map(([slug, price]) => `${slug}=${price}`).join(", ");
+}
+
+/** Update or remove one model's price in a single price-map setting; other models stay untouched. */
+export function withModelPrice(value: SettingValue, slug: string, next: number | null): string {
+  const held = pricesFromText(value === undefined ? "" : String(value));
+  if (next === null) delete held[slug];
+  else held[slug] = next;
+  return pricesToText(held);
+}
+
+/** Parse a single USD-per-million-tokens field edit (blank clears, optional leading `$`, finite >= 0). */
+export function parseUsdInput(raw: string): { readonly ok: true; readonly value: number | null } | { readonly ok: false } {
+  const trimmed = raw.trim().replace(/^\$\s*/, "");
+  if (trimmed === "") return { ok: true, value: null };
+  const value = Number(trimmed);
+  if (!Number.isFinite(value) || value < 0) return { ok: false };
+  return { ok: true, value };
+}
+
+export type ModelPriceSettingValues = Readonly<Record<ModelPriceField, SettingValue>>;
+type ShippedPriceMap = Readonly<Record<string, { readonly input?: number; readonly output?: number; readonly cacheRead?: number; readonly cacheWrite?: number }>>;
+
+/**
+ * The models a provider's per-model prices editor lists: its catalog models
+ * (hidden ones left out, the default first), each with its custom and shipped
+ * USD/1M prices, then any model the four price maps name that the catalog does
+ * not, so a stale or hand-written override can still be seen and cleared.
+ */
+export function modelPriceEntries(
+  providers: readonly ProviderSummary[] | null,
+  kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined,
+  values: ModelPriceSettingValues,
+  shippedPrices: ShippedPriceMap | undefined,
+): ModelPriceEntry[] {
+  const text = (field: ModelPriceField) => (values[field] === undefined ? "" : String(values[field]));
+  const maps = {
+    input: pricesFromText(text("input")),
+    output: pricesFromText(text("output")),
+    cacheRead: pricesFromText(text("cacheRead")),
+    cacheWrite: pricesFromText(text("cacheWrite")),
+  };
+  const customOf = (slug: string): ModelPriceValues => ({
+    input: maps.input[slug] ?? null,
+    output: maps.output[slug] ?? null,
+    cacheRead: maps.cacheRead[slug] ?? null,
+    cacheWrite: maps.cacheWrite[slug] ?? null,
+  });
+  const shippedOf = (slug: string): ModelPriceValues => {
+    const row = shippedPrices?.[slug];
+    return {
+      input: row?.input ?? null,
+      output: row?.output ?? null,
+      cacheRead: row?.cacheRead ?? null,
+      cacheWrite: row?.cacheWrite ?? null,
+    };
+  };
+  const out: ModelPriceEntry[] = [];
+  const seen = new Set<string>();
+  for (const provider of providers ?? []) {
+    if (kind !== undefined && driverKindOfInstance(provider.instanceId) !== kind) continue;
+    for (const model of [...provider.models].sort((a, b) => Number(b.isDefault === true) - Number(a.isDefault === true))) {
+      if (model.isHidden || seen.has(model.slug)) continue;
+      seen.add(model.slug);
+      out.push({ slug: model.slug, name: model.name, offered: true, custom: customOf(model.slug), shipped: shippedOf(model.slug) });
+    }
+  }
+  const known = providers !== null;
+  const named = new Set([
+    ...Object.keys(maps.input),
+    ...Object.keys(maps.output),
+    ...Object.keys(maps.cacheRead),
+    ...Object.keys(maps.cacheWrite),
+  ]);
+  for (const slug of named) {
+    if (!seen.has(slug)) {
+      out.push({
+        slug,
+        name: known ? `${slug} (not offered)` : slug,
+        offered: !known,
+        custom: customOf(slug),
+        shipped: shippedOf(slug),
+      });
+    }
+  }
+  return out;
+}
 
 /** The four things a model can choose for itself; null follows the provider. */
 export interface ModelOverrides {
@@ -146,7 +294,7 @@ export type ModelOverrideValues = Readonly<Record<ModelOverrideField, SettingVal
  * for it, then any model they name that the catalog does not, so a stale or
  * hand-written override can still be seen and cleared.
  */
-export function modelOverrideEntries(providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "opencode" | "harness" | undefined, values: ModelOverrideValues): ModelOverrideEntry[] {
+export function modelOverrideEntries(providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined, values: ModelOverrideValues): ModelOverrideEntry[] {
   const text = (field: ModelOverrideField) => (values[field] === undefined ? "" : String(values[field]));
   const sizes = { handoffAt: handoffModelsFromText(text("handoffAt")), compactAt: handoffModelsFromText(text("compactAt")) };
   const modes = { handoff: modesFromText(text("handoff")), compaction: modesFromText(text("compaction")) };
@@ -263,17 +411,22 @@ function valueOf(settings: readonly SettingView[], key: string): string | undefi
  * the provider's catalog default does.
  */
 export function configuredDefaultModel(settings: readonly SettingView[], instanceId: string): string | undefined {
-  const model = (kind: "claude" | "codex" | "opencode" | "harness") => ({ model: valueOf(settings, `providers.${kind}.model`) });
+  const parsed = parseAccountInstanceId(instanceId);
+  if (parsed) {
+    const accountModel = valueOf(settings, `providers.${parsed.kind}.accounts[${parsed.accountId}].model`);
+    if (accountModel !== undefined) return accountModel;
+  }
+  const model = (kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe") => ({ model: valueOf(settings, `providers.${kind}.model`) });
   const provider = valueOf(settings, "provider");
   const global = valueOf(settings, "model");
   return configuredModel(
-    { ...(provider === undefined ? {} : { provider }), ...(global === undefined ? {} : { model: global }), providers: { codex: model("codex"), claude: model("claude"), opencode: model("opencode"), harness: model("harness") } } as Pick<CliConfig, "provider" | "model" | "providers">,
+    { ...(provider === undefined ? {} : { provider }), ...(global === undefined ? {} : { model: global }), providers: { codex: model("codex"), claude: model("claude"), chatgpt: model("chatgpt"), opencode: model("opencode"), harness: model("harness"), acp: model("acp"), antigravity: model("antigravity"), vibe: model("vibe") } } as Pick<CliConfig, "provider" | "model" | "providers">,
     instanceId,
   );
 }
 
 /** Whose models a model setting picks from, for a warning: the provider of its page, else the global Provider. */
-function catalogName(settings: readonly SettingView[], providers: readonly ProviderSummary[], providerKind: "claude" | "codex" | "opencode" | "harness" | undefined): string {
+function catalogName(settings: readonly SettingView[], providers: readonly ProviderSummary[], providerKind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined): string {
   const aimed = valueOf(settings, "provider");
   const provider = providers.find((entry) => (providerKind !== undefined ? driverKindOfInstance(entry.instanceId) === providerKind : entry.instanceId === aimed));
   return provider?.displayName ?? provider?.instanceId ?? t("settings.theProvider");
@@ -284,10 +437,10 @@ function offered(providers: readonly ProviderSummary[]): readonly ProviderSummar
   return providers.filter((provider) => provider.enabled);
 }
 
-/** The provider an MCP access setting (`providers.<kind>.mcpExclude`) belongs to. */
-function mcpAccessKind(key: string): "claude" | "codex" | "opencode" | "harness" | null {
-  const kind = /^providers\.(claude|codex|opencode|harness)\.mcpExclude$/.exec(key)?.[1];
-  return kind === "codex" || kind === "claude" || kind === "opencode" || kind === "harness" ? kind : null;
+/** The provider an MCP access setting (`providers.<kind>.mcpExclude` or `providers.<kind>.accounts[<id>].mcpExclude`) belongs to. */
+function mcpAccessKind(key: string): "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | null {
+  const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity|vibe)(?:\.accounts\[[^\]]+\])?\.mcpExclude$/.exec(key)?.[1];
+  return kind === "codex" || kind === "claude" || kind === "chatgpt" || kind === "opencode" || kind === "harness" || kind === "acp" || kind === "antigravity" || kind === "vibe" ? kind : null;
 }
 
 /** Every configured server with what keeps it from this provider besides the checklist, and the names switched off here. */
@@ -389,7 +542,7 @@ function isUnsupportedMode(
   providers: readonly ProviderSummary[] | null,
 ): boolean {
   if (!descriptor.key.endsWith("runtimeMode") || providers === null) return false;
-  const kindOfPage = descriptor.key.startsWith("providers.") ? (descriptor.key.split(".")[1] as "claude" | "codex" | "opencode" | "harness") : undefined;
+  const kindOfPage = descriptor.key.startsWith("providers.") ? (descriptor.key.split(".")[1] as "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe") : undefined;
   const providerId = valueOf(settings, "provider");
   const governed = offered(providers).filter((provider) =>
     kindOfPage !== undefined ? driverKindOfInstance(provider.instanceId) === kindOfPage : providerId === undefined || provider.instanceId === providerId,
@@ -462,6 +615,7 @@ export function settingControl(
         return { kind: "tools", tools, excluded: String(value ?? "").split(",").map((name) => name.trim()).filter((name) => name !== "") };
       }
       if (kind.source === "model-overrides") return modelOverridesControl(descriptor, value, settings, providers, kind.providerKind);
+      if (kind.source === "model-prices") return modelPricesControl(descriptor, value, settings, providers, kind.providerKind);
       if (kind.source === undefined) return { kind: "text", multiline: kind.multiline === true, ...(effective ? { effective } : {}) };
       // No catalog yet (still loading): the list would be empty, not wrong.
       options = catalogOptions(kind, settings, providers ?? [], effective);
@@ -523,6 +677,10 @@ export function settingValueLabel(descriptor: SettingDescriptor, value: SettingV
     const set = control.models.filter(hasOverrides).length;
     return set === 0 ? t("settings.noneAny") : t("settings.models", { count: set });
   }
+  if (control.kind === "prices") {
+    const set = control.models.filter(hasCustomPrices).length;
+    return set === 0 ? t("mp.shippedSummary") : t("settings.models", { count: set });
+  }
   if (descriptor.kind.type === "boolean") {
     if (control.kind === "toggle" && control.tristate === true && value === undefined) return defaultLabel(control.effective);
     return value === true ? t("settings.on") : t("settings.off");
@@ -548,6 +706,8 @@ export function updatableProviderOf(section: SettingSection): UpdatableProvider 
   if (section === "provider:codex") return "codex";
   if (section === "provider:claude") return "claude";
   if (section === "provider:opencode") return "opencode";
+  if (section === "provider:antigravity") return "antigravity";
+  if (section === "provider:vibe") return "vibe";
   return null;
 }
 
@@ -647,7 +807,7 @@ export function moxenVersionLine(view: UpdateView): MoxenVersionLine {
 }
 
 /** The "Per model" row: every model with its four overrides, read from the four settings beside it, and what its Compaction can be. */
-function modelOverridesControl(descriptor: SettingDescriptor, value: SettingValue, settings: readonly SettingView[], providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "opencode" | "harness" | undefined): SettingControl {
+function modelOverridesControl(descriptor: SettingDescriptor, value: SettingValue, settings: readonly SettingView[], providers: readonly ProviderSummary[] | null, kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined): SettingControl {
   const prefix = descriptor.key.slice(0, descriptor.key.lastIndexOf(".") + 1);
   const read = (field: ModelOverrideField) => settings.find((view) => view.descriptor.key === `${prefix}${MODEL_OVERRIDE_KEY[field]}`)?.value;
   // The row's own key holds the hand-off sizes; the other three sit beside it.
@@ -663,4 +823,24 @@ function modelOverridesControl(descriptor: SettingDescriptor, value: SettingValu
         : { choices: choices.filter((choice) => choice.value !== "provider"), unavailable: null }
       : { choices, unavailable: null };
   return { kind: "handoff", models: modelOverrideEntries(providers, kind, values), compaction };
+}
+
+/** The "Prices per model" row: every model with its custom and shipped token prices, read from the four price maps beside it. */
+function modelPricesControl(
+  descriptor: SettingDescriptor,
+  value: SettingValue,
+  settings: readonly SettingView[],
+  providers: readonly ProviderSummary[] | null,
+  kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined,
+): SettingControl {
+  const prefix = descriptor.key.slice(0, descriptor.key.lastIndexOf(".") + 1);
+  const read = (field: ModelPriceField) => settings.find((view) => view.descriptor.key === `${prefix}${MODEL_PRICE_KEY[field]}`)?.value;
+  const view = settings.find((entry) => entry.descriptor.key === descriptor.key);
+  const values: ModelPriceSettingValues = {
+    input: value,
+    output: read("output"),
+    cacheRead: read("cacheRead"),
+    cacheWrite: read("cacheWrite"),
+  };
+  return { kind: "prices", models: modelPriceEntries(providers, kind, values, view?.shippedPrices) };
 }

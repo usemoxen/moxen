@@ -2,7 +2,7 @@ import { overflowColumns, textWidth } from "../../model/textoverflow.js";
 import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useEffect, useMemo, useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { SearchField } from "../../ui/searchfield.js";
 import { ModalShell } from "../../ui/modalshell.js";
@@ -44,6 +44,9 @@ export function pickRow(row: PickerRow): void {
 export interface PickerSection {
   header?: string;
   headerColor?: string;
+  /** Optional right-aligned summary on the section header line (e.g. per-account usage limits). */
+  headerMeta?: string;
+  headerMetaColor?: string;
   rows: PickerRow[];
 }
 
@@ -168,7 +171,7 @@ export function PickerModal({
 
   const safe = visible.length === 0 ? -1 : Math.min(index, visible.length - 1);
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     // "esc" alias included: some inputs report the raw alias instead of the
     // canonical "escape".
     if (key.name === "escape" || key.name === "esc") {
@@ -221,7 +224,7 @@ export function PickerModal({
       onFilterChange(`${filter}${sequence}`);
       setIndex(0);
     }
-  });
+  }, { capture: true });
 
   const inner = Math.max(10, width - 4);
   // The scrollbar and the content's right padding take two columns of a row.
@@ -281,12 +284,20 @@ export function PickerModal({
         ) : (
           visibleSections.map((section, sectionIndex) => (
             <box key={sectionIndex} style={{ flexDirection: "column", flexShrink: 0 }}>
-              {section.header === undefined ? null : (
-                <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: sectionIndex === 0 ? 0 : 1 }}>
-                  <text fg={section.headerColor ?? COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{`${section.header} `}</text>
-                  <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"─".repeat(Math.max(0, inner - section.header.length - 2))}</text>
-                </box>
-              )}
+              {section.header === undefined ? null : (() => {
+                const meta = section.headerMeta?.trim() ?? "";
+                const reserved = section.header.length + 2 + (meta.length > 0 ? meta.length + 1 : 0);
+                const ruleLen = Math.max(0, inner - reserved);
+                return (
+                  <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: sectionIndex === 0 ? 0 : 1 }}>
+                    <text fg={section.headerColor ?? COLOR.bright} bg={SURFACE.raised} attributes={TextAttributes.BOLD} selectable={false}>{`${section.header} `}</text>
+                    <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>{"─".repeat(ruleLen)}</text>
+                    {meta.length > 0 ? (
+                      <text fg={section.headerMetaColor ?? COLOR.dim} bg={SURFACE.raised} selectable={false}>{` ${meta}`}</text>
+                    ) : null}
+                  </box>
+                );
+              })()}
               {section.rows.map((row) => {
                 const active = visible[safe]?.key === row.key;
                 const disabled = row.disabled === true;

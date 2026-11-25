@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_CONFIG } from "../../config.js";
+import { describeSettings } from "../../configschema.js";
 import type { McpServerSpec } from "../../mcp.js";
 import { buildWebGuidance } from "../webguidance.js";
 
@@ -52,5 +54,36 @@ describe("web guidance", () => {
 
   it("says nothing about an OpenCode tool that is off: OpenCode takes it out of the model's list", () => {
     expect(buildWebGuidance({ provider: "opencode", disabledNativeTools: "webfetch, Shell,websearch", servers: [] })).toBe("");
+  });
+
+  it("exposes Mistral Vibe's built-in web_search/web_fetch in settings web-order and runtime guidance", () => {
+    const views = describeSettings({
+      ...DEFAULT_CONFIG,
+      mcpServers: {
+        "brave-search": { command: "npx", args: ["-y", "@brave/brave-search-mcp-server"] },
+        exa: { type: "http", url: "https://mcp.exa.ai/mcp" },
+      },
+    });
+    const search = views.find((v) => v.descriptor.key === "providers.vibe.webSearchOrder");
+    const fetch = views.find((v) => v.descriptor.key === "providers.vibe.webFetchOrder");
+    expect(search?.order?.map((e) => ({ id: e.id, summary: e.summary, locked: e.locked }))).toEqual([
+      { id: "brave", summary: "brave_web_search", locked: null },
+      { id: "exa", summary: "web_search_exa", locked: null },
+      { id: "native", summary: "web_search", locked: null },
+    ]);
+    expect(fetch?.order?.map((e) => ({ id: e.id, summary: e.summary, locked: e.locked }))).toEqual([
+      { id: "moxen", summary: "web_fetch", locked: null },
+      { id: "exa", summary: "web_fetch_exa", locked: null },
+      { id: "native", summary: "web_fetch", locked: null },
+    ]);
+
+    const guidance = buildWebGuidance({
+      provider: "vibe",
+      searchOrder: ["brave", "native"],
+      fetchOrder: ["moxen", "native"],
+      servers: [brave, moxen],
+    });
+    expect(guidance).toContain("For web searches, prefer in this order: brave_web_search (Brave Search), then the built-in web_search.");
+    expect(guidance).toContain("For reading a page, prefer in this order: web_fetch (moxen), then the built-in web_fetch.");
   });
 });

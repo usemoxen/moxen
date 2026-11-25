@@ -22,8 +22,9 @@
 import { readListScalar, resolveListKey, type ListDescriptor, type ListTarget } from "./configlist.js";
 import { CliError } from "./errors.js";
 import { webOrderEntries, webOrderUnavailable, type WebOrderEntry, type WebRole } from "./webservers.js";
-import { CODEX_NATIVE_TOOLS, CLAUDE_NATIVE_TOOLS, DEFAULT_DISABLED_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
+import { CODEX_NATIVE_TOOLS, CLAUDE_NATIVE_TOOLS, DEFAULT_DISABLED_NATIVE_TOOLS, OPENCODE_NATIVE_TOOLS, VIBE_NATIVE_TOOLS, type NativeTool } from "./nativetools.js";
 import { formatHandoffModels, formatModeModels } from "./handoffmodels.js";
+import { DEFAULT_MODEL_PRICES, type ModelPrice } from "./usage/prices.js";
 import { numberLabel } from "./configformat.js";
 import {
   COMPACTION_MODES,
@@ -44,6 +45,8 @@ import { isSecretRef } from "./secrets.js";
 import { formatPriceMap } from "./modelprices.js";
 import { MCP_RUNNER_SETTING, MCP_SERVERS_SETTING } from "./mcpschema.js";
 import { describeMcpServers } from "./mcpview.js";
+import { ACP_AGENTS_SETTING } from "./providers/acp/agentschema.js";
+import { describeAcpAgents } from "./providers/acp/agentview.js";
 import { HARNESS_PROFILES_SETTING } from "./providers/harness/profileschema.js";
 import { describeHarnessProfiles } from "./providers/harness/profileview.js";
 import { moxenToolsOf } from "./mcp.js";
@@ -69,6 +72,10 @@ export const SETTING_SECTIONS = [
   "provider:claude",
   "provider:opencode",
   "provider:codex",
+  "provider:antigravity",
+  "provider:vibe",
+  "provider:chatgpt",
+  "provider:acp",
   "provider:harness",
   "mcp",
   "skills",
@@ -87,7 +94,11 @@ export const SECTION_LABEL: Record<SettingSection, string> = {
   git: "Git and forges",
   "provider:codex": "Codex",
   "provider:claude": "Claude Code",
+  "provider:chatgpt": "ChatGPT",
   "provider:opencode": "OpenCode",
+  "provider:antigravity": "Antigravity",
+  "provider:vibe": "Mistral Vibe",
+  "provider:acp": "ACP",
   "provider:harness": "Moxen Harness",
   mcp: "MCP servers",
   skills: "Skills",
@@ -122,17 +133,17 @@ export type SettingKind =
        * instance, a model slug, an effort level). A client offers what the
        * catalog lists rather than a text box; the file still holds the id.
        */
-      readonly source?: "provider" | "model" | "effort" | "mcp-server" | "model-overrides" | "native-tools" | "web-order";
+      readonly source?: "provider" | "model" | "effort" | "mcp-server" | "model-overrides" | "model-prices" | "native-tools" | "web-order";
       /** With `source` web-order: which tools the order ranks. */
       readonly web?: WebRole;
       /** With `source` native-tools: the provider's own tools this setting can switch off (`core/nativetools.ts`). */
       readonly tools?: readonly NativeTool[];
       /** With `source` model or effort: offer only this provider's models (the setting belongs to its page). */
-      readonly providerKind?: "claude" | "codex" | "opencode" | "harness";
+      readonly providerKind?: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe";
       /** With `source` model: whose value names the provider instance this setting's models belong to, instead of the global Provider. */
       readonly providerKey?: string;
       /** With `source` provider or model: offer only providers with these drivers. */
-      readonly providerKinds?: readonly ("claude" | "codex" | "opencode" | "harness")[];
+      readonly providerKinds?: readonly ("claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe")[];
     }
   /**
    * `unit` is appended when the value is shown ("20" -> "20s"). `presets`
@@ -183,8 +194,8 @@ export interface ListField {
 
 export type ListFieldKind =
   | { readonly type: "string"; readonly placeholder?: string; readonly multiline?: boolean }
-  | { readonly type: "integer"; readonly unit?: string; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
-  | { readonly type: "number"; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
+  | { readonly type: "integer"; readonly min?: number; readonly max?: number; readonly unit?: string; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
+  | { readonly type: "number"; readonly min?: number; readonly max?: number; readonly presets?: readonly number[]; readonly ends?: SettingEnds }
   | { readonly type: "boolean" }
   | { readonly type: "secret" }
   | { readonly type: "enum"; readonly choices: readonly SettingChoice[] }
@@ -211,7 +222,7 @@ export interface ListKind {
   /** Kept in the config as an object keyed by id (MCP servers, as in `.mcp.json`) rather than an array of objects carrying one. */
   readonly keyed?: boolean;
   /** How a client walks a user through adding one. */
-  readonly add: "harness-profile" | "mcp-server";
+  readonly add: "harness-profile" | "mcp-server" | "acp-agent";
   readonly fields: readonly ListField[];
   readonly actions: readonly ("duplicate" | "test" | "probe" | "transfer")[];
 }
@@ -340,6 +351,11 @@ const COMPACTION_TEXT: Readonly<Record<LongThreadKind, { readonly own: string; r
     description:
       "Who compacts a thread as it fills. Claude Code: it decides, and a size under 'Compact at' becomes its auto-compact window (100K to 1M). Moxen: Claude Code's own is switched off and Moxen compacts past 'Compact at', open or not; asking offers a card, but a delegated task, or a thread halfway from the line to full, is compacted unasked. Off: nobody compacts.",
   },
+  chatgpt: {
+    own: "Automatic",
+    description:
+      "Who compacts a thread as it fills. Automatic: past 'Compact at', between turns and in the middle of a long one, and when the server refuses a prompt as too long. Asking offers a card at the line instead, but a delegated task, or a thread halfway from the line to full, is compacted unasked. Off leaves /compact and the rescue for a refused prompt.",
+  },
   opencode: {
     own: "OpenCode",
     description:
@@ -350,6 +366,21 @@ const COMPACTION_TEXT: Readonly<Record<LongThreadKind, { readonly own: string; r
     description:
       "Who compacts a thread as it fills. Automatic: past 'Compact at', between turns and in the middle of a long one, and when the server refuses a prompt as too long. Asking offers a card at the line instead, but a delegated task, or a thread halfway from the line to full, is compacted unasked. Off leaves /compact and the rescue for a refused prompt.",
   },
+  acp: {
+    own: "ACP agent",
+    description:
+      "Who compacts a thread as it fills. ACP agent: the agent handles its own context. Moxen can compact at the chosen line, asking first or automatically. Off disables automatic compaction.",
+  },
+  antigravity: {
+    own: "Antigravity",
+    description:
+      "Who compacts a thread as it fills. Antigravity: the CLI handles its own context. Moxen can compact at the chosen line, asking first or automatically. Off disables automatic compaction.",
+  },
+  vibe: {
+    own: "Mistral Vibe",
+    description:
+      "Who compacts a thread as it fills. Mistral Vibe: the app server handles its own context. Moxen can compact at the chosen line, asking first or automatically. Off disables automatic compaction.",
+  },
 };
 
 const COMPACTION_CHOICE_LABEL: Readonly<Record<Exclude<CompactionMode, "provider">, string>> = { ask: "Moxen asks", auto: "Moxen does it", off: "Off" };
@@ -357,14 +388,14 @@ const COMPACTION_CHOICE_LABEL: Readonly<Record<Exclude<CompactionMode, "provider
 /** The sentence every Long threads group ends on, so the two lines are never read apart. */
 const LINES_INTERACT = "Handing off is offered first when its line is lower than compaction's; past both, the lower one acts first.";
 
-const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "opencode" | "harness", string>> = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode", harness: "Moxen Harness" };
+const PROVIDER_NAME: Readonly<Record<"claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe", string>> = { codex: "Codex", claude: "Claude Code", chatgpt: "ChatGPT", opencode: "OpenCode", harness: "Moxen Harness", acp: "ACP", antigravity: "Antigravity", vibe: "Mistral Vibe" };
 
 /**
  * One Tools group per provider, from one template so the three tabs cannot drift: Moxen's own tools
  * and skills, MCP reach, the to-do list, and (Claude Code, OpenCode) the web orders and the
  * provider's own tools to switch off.
  */
-function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
+function toolSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   const base = { section, group: "Tools", appliesAt: "next-session" } as const;
@@ -423,7 +454,7 @@ function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): Settin
       defaultValue: true,
     },
   ];
-  if (kind === "harness") return settings;
+  if (kind === "harness" || kind === "chatgpt" || kind === "acp" || kind === "antigravity") return settings;
   const advice = "It is advice in the prompt: no tool is switched off, and the model may still pick another.";
   return [
     ...settings,
@@ -449,14 +480,14 @@ function toolSettings(kind: "claude" | "codex" | "opencode" | "harness"): Settin
       label: "Built-in tools off",
       description: kind === "codex" ? "Codex tools and tool families to switch off. Supported switches remove tools from the model; an always-on entry explains the native restriction." : `${name}'s own tools to switch off: each is taken out of the model's list.`,
       ...(kind === "opencode" ? { appliesAt: "provider-restart" as const } : {}),
-      kind: { type: "string", placeholder: "none switched off", source: "native-tools", tools: kind === "codex" ? CODEX_NATIVE_TOOLS : kind === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS },
+      kind: { type: "string", placeholder: "none switched off", source: "native-tools", tools: kind === "codex" ? CODEX_NATIVE_TOOLS : kind === "claude" ? CLAUDE_NATIVE_TOOLS : kind === "vibe" ? VIBE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS },
       defaultValue: DEFAULT_DISABLED_NATIVE_TOOLS[kind],
     },
   ];
 }
 
 /** A provider's switch for the skills Moxen used to ship (MXN-138): kept so older configs still load, and does nothing. */
-function moxenSkillsSetting(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor {
+function moxenSkillsSetting(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe"): SettingDescriptor {
   return {
     key: `providers.${kind}.moxenSkills`,
     label: "Moxen's skills",
@@ -474,7 +505,7 @@ function moxenSkillsSetting(kind: "claude" | "codex" | "opencode" | "harness"): 
  * One Sessions group per provider, the global Sessions settings narrowed to it: instructions that only this
  * provider's threads get, and whether a usage limit is waited out. Unset, each follows the global one.
  */
-function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
+function sessionSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
   const section = `provider:${kind}` as const;
   return [
@@ -491,7 +522,7 @@ function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness"): Set
     {
       key: `providers.${kind}.sessionTtl`,
       label: "Idle session lifetime",
-      description: `How long ${kind === "claude" ? "a" : kind === "opencode" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back." }[kind]}`,
+      description: `How long ${kind === "opencode" || kind === "acp" || kind === "antigravity" ? "an" : "a"} ${name} session stays warm with nothing happening on it, before it is ended (the next message resumes it). ${{ codex: "Each is a Codex app-server process.", claude: "Each is a Claude Code process.", chatgpt: "Sessions run through Moxen Harness against OpenAI Responses.", opencode: "Sessions share one OpenCode server per folder.", harness: "A local server re-reads the whole prompt when a session comes back.", acp: "Each is an ACP agent process.", antigravity: "Each is an `agy acp` process.", vibe: "Each is a `vibe-app-server` process." }[kind]}`,
       section,
       group: "Sessions",
       kind: { type: "duration", presets: DURATION_PRESETS, ends: { low: "Shorter", high: "Longer" } },
@@ -502,7 +533,7 @@ function sessionSettings(kind: "claude" | "codex" | "opencode" | "harness"): Set
     {
       key: `providers.${kind}.autoContinueAtUsageLimit`,
       label: "Continue after a usage limit",
-      description: `When a plan limit stops ${kind === "opencode" ? "an" : "a"} ${name} turn, schedule a continue for just after it resets. Limits are per account, so this can be on for a subscription and off for a metered key.`,
+      description: `When a plan limit stops ${kind === "opencode" || kind === "acp" || kind === "antigravity" ? "an" : "a"} ${name} turn, schedule a continue for just after it resets. Limits are per account, so this can be on for a subscription and off for a metered key.`,
       section,
       group: "Sessions",
       kind: { type: "boolean" },
@@ -532,12 +563,12 @@ function longThreadSettings(kind: LongThreadKind): SettingDescriptor[] {
       kind: {
         type: "enum",
         choices: modes.map((mode) =>
-          kind === "harness" ? choice(mode, mode === "auto" ? "Automatic" : mode === "ask" ? "Moxen asks" : "Off") : choice(mode, mode === "provider" ? COMPACTION_TEXT[kind].own : COMPACTION_CHOICE_LABEL[mode]),
+          kind === "harness" || kind === "chatgpt" ? choice(mode, mode === "auto" ? "Automatic" : mode === "ask" ? "Moxen asks" : "Off") : choice(mode, mode === "provider" ? COMPACTION_TEXT[kind].own : COMPACTION_CHOICE_LABEL[mode]),
         ),
       },
       defaultValue: undefined,
       fallback: { resolver: "compactionMode" },
-      ...(kind === "harness" ? {} : { appliesAt: "server-restart" as const }),
+      ...(kind === "harness" || kind === "chatgpt" || kind === "acp" || kind === "antigravity" ? {} : { appliesAt: "server-restart" as const }),
     },
     {
       key: `providers.${kind}.compactAt`,
@@ -609,26 +640,47 @@ function perModelSettings(kind: LongThreadKind): SettingDescriptor[] {
   ];
 }
 
-/** One Model prices group per provider, from one template so the four tabs cannot drift: what a million tokens of each kind cost for this provider's models. */
-function priceSettings(kind: "claude" | "codex" | "opencode" | "harness"): SettingDescriptor[] {
+const PRICE_EXAMPLE: Readonly<Record<"claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe", string>> = {
+  claude: "claude-opus-5=5",
+  codex: "gpt-6.1-sol=2",
+  chatgpt: "gpt-6.1-sol=2",
+  opencode: "opencode-go/muse-spark-1.3-contributor=2",
+  harness: "qwen3.8-flash-next=0.5",
+  antigravity: "gemini-4-neon=2",
+  vibe: "mistral-large-4-0=0.5",
+  acp: "claude-sonnet=3",
+};
+
+/** One Model prices group per provider, from one template so the provider tabs cannot drift: one per-model editor backed by the four underlying price maps. */
+function priceSettings(kind: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe"): SettingDescriptor[] {
   const name = PROVIDER_NAME[kind];
+  const example = PRICE_EXAMPLE[kind];
   const section = `provider:${kind}` as const;
   const group = "Model prices";
-  const row = (leaf: "modelInputPrices" | "modelOutputPrices" | "modelCacheReadPrices" | "modelCacheWritePrices", label: string, tokens: string): SettingDescriptor => ({
+  const hiddenRow = (leaf: "modelOutputPrices" | "modelCacheReadPrices" | "modelCacheWritePrices", label: string, tokens: string): SettingDescriptor => ({
     key: `providers.${kind}.${leaf}`,
     label,
-    description: `What one million ${tokens} tokens cost on ${name} models, as model=USD pairs (opencode-go/muse-spark-1.3-contributor=2). Beats the shipped price for those models. A model with no price anywhere stays unpriced.`,
+    description: `What one million ${tokens} tokens cost on ${name} models, as model=USD pairs (${example}). Beats the shipped price for those models. A model with no price anywhere stays unpriced.`,
     section,
     group,
+    hidden: true,
     kind: { type: "string", placeholder: "model=2", multiline: true },
     defaultValue: undefined,
     fallback: { text: "Moxen's shipped prices" },
   });
   return [
-    row("modelInputPrices", "Input price", "input"),
-    row("modelOutputPrices", "Output price", "output"),
-    row("modelCacheReadPrices", "Cache read price", "cache-read"),
-    row("modelCacheWritePrices", "Cache write price", "cache-write"),
+    {
+      key: `providers.${kind}.modelInputPrices`,
+      label: "Prices per model",
+      description: `What one million tokens cost on ${name} models, per model: input, output, cache read and cache write in USD. Beats Moxen's shipped prices; a model with no price anywhere stays unpriced. In the config file and \`moxen config set\`, each kind takes model=USD pairs (${example}).`,
+      section,
+      group,
+      kind: { type: "string", placeholder: "model=2", multiline: true, source: "model-prices", providerKind: kind },
+      defaultValue: undefined,
+    },
+    hiddenRow("modelOutputPrices", "Output price", "output"),
+    hiddenRow("modelCacheReadPrices", "Cache read price", "cache-read"),
+    hiddenRow("modelCacheWritePrices", "Cache write price", "cache-write"),
   ];
 }
 
@@ -891,7 +943,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     description: "The provider the composer's improve action uses to rewrite a draft. Only providers that can complete a request with no tools are offered, because the improver reads untrusted project text and must never act.",
     section: "agent",
     group: "Prompt improver",
-    kind: { type: "string", placeholder: "claude", source: "provider", providerKinds: ["claude", "opencode"] },
+    kind: { type: "string", placeholder: "claude", source: "provider", providerKinds: ["claude", "chatgpt", "opencode", "harness"] },
     defaultValue: undefined,
     fallback: { resolver: "promptImproverProvider" },
   },
@@ -901,7 +953,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     description: "The model the composer's improve action uses. Its provider is the one above; a model belongs to one provider, so changing the provider asks for one of its models.",
     section: "agent",
     group: "Prompt improver",
-    kind: { type: "string", placeholder: "claude-haiku-5-5", source: "model", providerKey: "promptImprover.provider", providerKinds: ["claude", "opencode"] },
+    kind: { type: "string", placeholder: "claude-haiku-5-5", source: "model", providerKey: "promptImprover.provider", providerKinds: ["claude", "chatgpt", "opencode", "harness"] },
     defaultValue: undefined,
     fallback: { resolver: "promptImproverModel" },
   },
@@ -1017,7 +1069,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   {
     key: "ui.language",
     label: "Language",
-    description: "The language of the interface. Auto follows the terminal's locale (LC_ALL, LC_MESSAGES, LANG) and falls back to English. Only the TUI is translated; CLI output and --json stay in English.",
+    description: "The language of the interface. Auto follows the environment (LC_ALL, LC_MESSAGES, LANG) and the system locale, then falls back to English. CLI output and --json stay in English.",
     section: "interface",
     kind: {
       type: "enum",
@@ -1186,7 +1238,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     key: "updates.checkLatest",
     label: "Check for newer versions",
     description:
-      "When the settings page opens, ask the npm registry which Claude Code and OpenCode releases are newest, so it can say whether an update is available. Nothing else is sent. Off, the page shows installed versions only.",
+      "When the settings page opens, check which Claude Code, OpenCode, Codex and Antigravity releases are newest, so it can say whether an update is available. Nothing else is sent. Off, the page shows installed versions only.",
     section: "general",
     kind: { type: "boolean" },
     defaultValue: true,
@@ -1503,6 +1555,232 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     defaultValue: field === "binaryPath" ? "codex" : undefined,
     appliesAt: "server-restart",
   })),
+  // -- ChatGPT (Sign in with ChatGPT via Moxen Harness) ----------------------
+  {
+    key: "providers.chatgpt.runtimeMode",
+    label: "Permissions",
+    description: "How much a new ChatGPT thread may do without asking.",
+    section: "provider:chatgpt",
+    group: "Defaults",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("approval-required", "Supervised", "Ask before every edit and command."),
+        choice("auto-accept-edits", "Auto-accept edits", "Reads and edits go through; commands still ask."),
+        choice("auto", "Auto", "Moxen's command classifier lets safe calls through and refuses dangerous ones."),
+        choice("full-access", "Full access", "No prompts at all."),
+      ],
+    },
+    defaultValue: undefined,
+    fallback: { key: "runtimeMode" },
+  },
+  {
+    key: "providers.chatgpt.model",
+    label: "Model",
+    description: "The model a new ChatGPT thread starts with, when neither the request nor the project names one.",
+    section: "provider:chatgpt",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "model", providerKind: "chatgpt" },
+    defaultValue: undefined,
+    fallback: { resolver: "providerModel" },
+  },
+  {
+    key: "providers.chatgpt.thinkingEffort",
+    label: "Effort",
+    description: "The reasoning effort a new ChatGPT thread starts at, for models that take one.",
+    section: "provider:chatgpt",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "effort", providerKind: "chatgpt" },
+    defaultValue: undefined,
+    fallback: { key: "thinkingEffort" },
+  },
+  ...toolSettings("chatgpt"),
+  ...sessionSettings("chatgpt"),
+  ...longThreadSettings("chatgpt"),
+  ...priceSettings("chatgpt"),
+
+  // -- Antigravity -----------------------------------------------------------
+  {
+    key: "providers.antigravity.runtimeMode",
+    label: "Permissions",
+    description: "How much a new Antigravity thread may do without asking.",
+    section: "provider:antigravity",
+    group: "Defaults",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("approval-required", "Supervised", "Ask before every edit and command."),
+        choice("auto-accept-edits", "Auto-accept edits", "Reads and edits go through; commands still ask."),
+        choice("auto", "Auto", "Antigravity's own rules judge each call."),
+        choice("full-access", "Full access", "No prompts at all."),
+      ],
+    },
+    defaultValue: undefined,
+    fallback: { key: "runtimeMode" },
+  },
+  {
+    key: "providers.antigravity.model",
+    label: "Model",
+    description: "The model a new Antigravity thread starts with, when neither the request nor the project names one.",
+    section: "provider:antigravity",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "model", providerKind: "antigravity" },
+    defaultValue: undefined,
+    fallback: { resolver: "providerModel" },
+  },
+  {
+    key: "providers.antigravity.thinkingEffort",
+    label: "Effort",
+    description: "The reasoning effort a new Antigravity thread starts at, for models that take one.",
+    section: "provider:antigravity",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "effort", providerKind: "antigravity" },
+    defaultValue: undefined,
+    fallback: { key: "thinkingEffort" },
+  },
+  {
+    key: "providers.antigravity.allowUnsupportedUse",
+    label: "Allow unsupported Antigravity use",
+    description:
+      "Let other threads delegate tasks to Antigravity, let Moxen start prompts you did not write on its threads (task notices, agent messages, continues after a usage limit, handing off), and let Moxen run several Antigravity accounts, each in its own home folder. Google does not support delegation, automatic prompts or multiple accounts on consumer plans and may suspend the Antigravity account.",
+    section: "provider:antigravity",
+    group: "Defaults",
+    kind: { type: "boolean" },
+    defaultValue: false,
+  },
+  ...toolSettings("antigravity"),
+  ...sessionSettings("antigravity"),
+  ...longThreadSettings("antigravity"),
+  ...priceSettings("antigravity"),
+  ...(["binaryPath", "launchArgs"] as const).map((field): SettingDescriptor => ({
+    key: `providers.antigravity.${field}`,
+    label: { binaryPath: "Antigravity executable", launchArgs: "Launch arguments" }[field],
+    description: { binaryPath: "The `agy` binary to spawn.", launchArgs: "Extra arguments passed to `agy acp`." }[field],
+    section: "provider:antigravity", group: "Setup", kind: { type: "string", ...(field === "binaryPath" ? { placeholder: "agy" } : {}) },
+    defaultValue: field === "binaryPath" ? "agy" : undefined,
+    appliesAt: "server-restart",
+  })),
+  // -- Mistral Vibe ----------------------------------------------------------
+  {
+    key: "providers.vibe.enabled",
+    label: "Enable Mistral Vibe",
+    description: "Add Mistral Vibe as a provider in Moxen.",
+    section: "provider:vibe",
+    group: "Setup",
+    hidden: true,
+    kind: { type: "boolean" },
+    defaultValue: false,
+  },
+  {
+    key: "providers.vibe.runtimeMode",
+    label: "Permissions",
+    description: "How much a new Mistral Vibe thread may do without asking.",
+    section: "provider:vibe",
+    group: "Defaults",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("approval-required", "Supervised", "Ask before every edit and command."),
+        choice("auto-accept-edits", "Auto-accept edits", "Reads and edits go through; commands still ask."),
+        choice("auto", "Auto", "Moxen's command safety rules judge each call."),
+        choice("full-access", "Full access", "No prompts at all."),
+      ],
+    },
+    defaultValue: undefined,
+    fallback: { key: "runtimeMode" },
+  },
+  {
+    key: "providers.vibe.model",
+    label: "Model",
+    description: "The model a new Mistral Vibe thread starts with, when neither the request nor the project names one.",
+    section: "provider:vibe",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "model", providerKind: "vibe" },
+    defaultValue: undefined,
+    fallback: { resolver: "providerModel" },
+  },
+  {
+    key: "providers.vibe.thinkingEffort",
+    label: "Effort",
+    description: "The reasoning effort a new Mistral Vibe thread starts at, for models that take one.",
+    section: "provider:vibe",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "effort", providerKind: "vibe" },
+    defaultValue: undefined,
+    fallback: { key: "thinkingEffort" },
+  },
+  ...toolSettings("vibe"),
+  ...sessionSettings("vibe"),
+  ...longThreadSettings("vibe"),
+  ...priceSettings("vibe"),
+  ...(["binaryPath", "vibeHome", "launchArgs"] as const).map((field): SettingDescriptor => ({
+    key: `providers.vibe.${field}`,
+    label: { binaryPath: "Vibe executable", vibeHome: "Vibe home directory", launchArgs: "Launch arguments" }[field],
+    description: {
+      binaryPath: "The `vibe-app-server` binary to spawn. A relative path resolves against the Moxen server's working directory; on Windows an unrecognized batch wrapper or a drive-relative path is rejected.",
+      vibeHome: "Directory passed as `VIBE_HOME` for Vibe's configuration and session logs.",
+      launchArgs: "Extra arguments passed to `vibe-app-server`.",
+    }[field],
+    section: "provider:vibe",
+    group: "Setup",
+    kind: { type: "string", ...(field === "binaryPath" ? { placeholder: "vibe-app-server" } : {}) },
+    defaultValue: field === "binaryPath" ? "vibe-app-server" : undefined,
+    appliesAt: "server-restart",
+  })),
+  // -- ACP -------------------------------------------------------------------
+  {
+    key: "providers.acp.runtimeMode",
+    label: "Permissions",
+    description: "How much a new ACP thread may do without asking.",
+    section: "provider:acp",
+    group: "Defaults",
+    kind: {
+      type: "enum",
+      choices: [
+        choice("approval-required", "Supervised", "Ask before every edit and command."),
+        choice("auto-accept-edits", "Auto-accept edits", "Reads and edits go through; commands still ask."),
+        choice("auto", "Auto", "The ACP agent's own rules judge each call."),
+        choice("full-access", "Full access", "No prompts at all."),
+      ],
+    },
+    defaultValue: undefined,
+    fallback: { key: "runtimeMode" },
+  },
+  {
+    key: "providers.acp.model",
+    label: "Model",
+    description: "The model a new ACP thread starts with, when neither the request nor the project names one.",
+    section: "provider:acp",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "model", providerKind: "acp" },
+    defaultValue: undefined,
+    fallback: { resolver: "providerModel" },
+  },
+  {
+    key: "providers.acp.thinkingEffort",
+    label: "Effort",
+    description: "The reasoning effort a new ACP thread starts at, for models that take one.",
+    section: "provider:acp",
+    group: "Defaults",
+    kind: { type: "string", placeholder: "the provider's own default", source: "effort", providerKind: "acp" },
+    defaultValue: undefined,
+    fallback: { key: "thinkingEffort" },
+  },
+  ...toolSettings("acp"),
+  ...sessionSettings("acp"),
+  ...longThreadSettings("acp"),
+  ...priceSettings("acp"),
+  ACP_AGENTS_SETTING,
+  {
+    key: "providers.opencode.enabled",
+    label: "Enable OpenCode",
+    description: "Add OpenCode as a provider in Moxen. Off by default until you enable it from Overview or onboarding.",
+    section: "provider:opencode",
+    group: "Setup",
+    hidden: true,
+    kind: { type: "boolean" },
+    defaultValue: false,
+  },
   {
     key: "providers.opencode.runtimeMode",
     label: "Permissions",
@@ -1759,7 +2037,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
  * thread starts with, the tools, how long threads are handled, then whatever is
  * particular to that provider, and where it lives last.
  */
-const PROVIDER_GROUP_ORDER = ["Defaults", "Tools", "Long threads", "Sessions", "Model prices", "Setup", "Output", "Ultracode", "Prompt", "Web search", "Model servers"];
+const PROVIDER_GROUP_ORDER = ["Defaults", "Tools", "Long threads", "Sessions", "Model prices", "Setup", "Runtime", "Output", "Ultracode", "Prompt", "Web search", "Model servers", "ACP agents"];
 
 /** The Defaults tab in the order a new thread's choices are made: provider, model, effort, then permissions and checkout. */
 const DEFAULTS_ORDER = ["provider", "model", "speedMode", "thinkingEffort", "runtimeMode", "interactionMode", "threadEnvMode"];
@@ -1780,7 +2058,7 @@ function orderDefaults(settings: readonly SettingDescriptor[]): readonly Setting
 
 function orderProviderGroups(settings: readonly SettingDescriptor[]): readonly SettingDescriptor[] {
   const out = [...settings];
-  for (const section of ["provider:codex", "provider:claude", "provider:opencode", "provider:harness"] as const) {
+  for (const section of ["provider:codex", "provider:claude", "provider:chatgpt", "provider:opencode", "provider:antigravity", "provider:vibe", "provider:acp", "provider:harness"] as const) {
     const slots = out.flatMap((entry, at) => (entry.section === section ? [at] : []));
     const rank = (entry: SettingDescriptor): number => {
       const at = entry.group === undefined ? -1 : PROVIDER_GROUP_ORDER.indexOf(entry.group);
@@ -1801,8 +2079,121 @@ const BY_KEY: ReadonlyMap<string, SettingDescriptor> = new Map(
   SETTINGS.map((descriptor) => [descriptor.key, descriptor]),
 );
 
+const ACCOUNT_SETTING_KEY_RE = /^providers\.(claude|chatgpt|antigravity)\.accounts\[([a-z0-9][a-z0-9._-]{0,63})\]\.([a-zA-Z0-9_]+)$/;
+
+export interface ParsedAccountSettingKey {
+  readonly kind: "claude" | "chatgpt" | "antigravity";
+  readonly id: string;
+  readonly field: string;
+}
+
+/** Parse a per-profile setting key like `providers.claude.accounts[personal].runtimeMode`. */
+export function parseAccountSettingKey(key: string): ParsedAccountSettingKey | null {
+  const match = ACCOUNT_SETTING_KEY_RE.exec(key);
+  if (!match) return null;
+  return {
+    kind: match[1] as "claude" | "chatgpt" | "antigravity",
+    id: match[2]!,
+    field: match[3]!,
+  };
+}
+
+function extraAccountFieldDescriptor(parsed: ParsedAccountSettingKey): SettingDescriptor | undefined {
+  const section: SettingSection =
+    parsed.kind === "claude" ? "provider:claude" : parsed.kind === "chatgpt" ? "provider:chatgpt" : "provider:antigravity";
+  const key = `providers.${parsed.kind}.accounts[${parsed.id}].${parsed.field}`;
+  switch (parsed.field) {
+    case "label":
+      return {
+        key,
+        label: "Display name",
+        description: "Human-readable label shown in pickers and Settings.",
+        section,
+        group: "Setup",
+        kind: { type: "string", placeholder: parsed.id },
+        defaultValue: undefined,
+      };
+    case "enabled":
+      return {
+        key,
+        label: "Enabled",
+        description: "Switch this provider profile on or off without removing its configuration.",
+        section,
+        group: "Setup",
+        kind: { type: "boolean" },
+        defaultValue: true,
+      };
+    case "homePath":
+      if (parsed.kind === "antigravity") {
+        return {
+          key,
+          label: "Account home",
+          description: "Isolated HOME/USERPROFILE root for this Antigravity profile (passes --gemini-dir <homePath>/.gemini).",
+          section,
+          group: "Setup",
+          kind: { type: "string", placeholder: `~/.agy-${parsed.id}` },
+          defaultValue: undefined,
+          appliesAt: "server-restart",
+        };
+      }
+      return undefined;
+    case "launchArgs":
+      if (parsed.kind === "claude") {
+        return {
+          key,
+          label: "Launch arguments",
+          description: "Extra CLI arguments passed when spawning Claude Code for this profile.",
+          section,
+          group: "Setup",
+          kind: { type: "string" },
+          defaultValue: undefined,
+          appliesAt: "server-restart",
+        };
+      }
+      return undefined;
+    case "codexHomePath":
+    case "codexBinaryPath":
+    case "codexLaunchArgs":
+      if (parsed.kind === "chatgpt") {
+        const labels = {
+          codexHomePath: "Codex companion home",
+          codexBinaryPath: "Codex companion binary",
+          codexLaunchArgs: "Codex companion launch arguments",
+        } as const;
+        const descriptions = {
+          codexHomePath: "CODEX_HOME for the paired Codex companion (live usage windows, reset credits, and image generation).",
+          codexBinaryPath: "Override the `codex` binary used for this account's paired companion.",
+          codexLaunchArgs: "Extra launch arguments passed to the paired Codex companion.",
+        } as const;
+        return {
+          key,
+          label: labels[parsed.field],
+          description: descriptions[parsed.field],
+          section,
+          group: "Setup",
+          kind: { type: "string", ...(parsed.field === "codexBinaryPath" ? { placeholder: "codex" } : {}) },
+          defaultValue: parsed.field === "codexBinaryPath" ? "codex" : undefined,
+          appliesAt: "server-restart",
+        };
+      }
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+function accountSettingDescriptor(key: string): SettingDescriptor | undefined {
+  const parsed = parseAccountSettingKey(key);
+  if (!parsed) return undefined;
+  const template = BY_KEY.get(`providers.${parsed.kind}.${parsed.field}`);
+  if (template) {
+    return { ...template, key };
+  }
+  return extraAccountFieldDescriptor(parsed);
+}
+
 export function settingDescriptor(key: string): SettingDescriptor | undefined {
-  return BY_KEY.get(key);
+  return BY_KEY.get(key) ?? accountSettingDescriptor(key);
 }
 
 /** Every key, in table order — what `config set` accepts and lists on error. List keys address entries as `key[<id>]…`. */
@@ -1812,12 +2203,13 @@ const LISTS: readonly ListDescriptor[] = SETTINGS.filter((descriptor): descripto
 
 /** What a key into a list setting addresses, or null for any other key. Throws for a malformed one. */
 export function listTarget(key: string): ListTarget | null {
+  if (parseAccountSettingKey(key) !== null) return null;
   return key.includes("[") || LISTS.some((list) => list.key === key) ? resolveListKey(key, LISTS) : null;
 }
 
-/** Whether `config set` accepts the key: a flat key, or an entry or field of a list. */
+/** Whether `config set` accepts the key: a flat key, a per-profile key, or an entry or field of a list. */
 export function isSettingKey(key: string): boolean {
-  if (BY_KEY.has(key)) return true;
+  if (BY_KEY.has(key) || accountSettingDescriptor(key) !== undefined) return true;
   try {
     return listTarget(key) !== null;
   } catch {
@@ -1840,23 +2232,34 @@ function walk(source: unknown, path: readonly string[]): unknown {
   return current;
 }
 
-/**
- * The value in force for a key: what the config holds, else the
- * descriptor's default. Unknown keys read as `undefined` rather than
- * throwing, so a config written by a newer build stays readable.
- */
-export function readSetting(config: CliConfig, key: string): SettingValue {
-  const entry = key.includes("[") ? listTarget(key) : null;
-  if (entry) return readListScalar(config, entry);
-  const raw = walk(config, key.split("."));
+function readRawField(raw: unknown, key: string): SettingValue {
   if (raw === undefined || raw === null) return settingDescriptor(key)?.defaultValue;
   if (typeof raw === "string" || typeof raw === "boolean" || typeof raw === "number") return raw;
+  if (key.endsWith(".launchArgs") && Array.isArray(raw)) return raw.join(" ");
   if ((key.endsWith(".autoHandoffModels") || key.endsWith(".compactAtModels")) && typeof raw === "object") return formatHandoffModels(raw as Record<string, number>);
   if ((key.endsWith(".handoffModels") || key.endsWith(".compactionModels")) && typeof raw === "object") return formatModeModels(raw as Record<string, string>);
   if ((key.endsWith(".modelInputPrices") || key.endsWith(".modelOutputPrices") || key.endsWith(".modelCacheReadPrices") || key.endsWith(".modelCacheWritePrices")) && typeof raw === "object") {
     return formatPriceMap(raw as Record<string, number>);
   }
   return undefined;
+}
+
+/**
+ * The value in force for a key: what the config holds, else the
+ * descriptor's default. Unknown keys read as `undefined` rather than
+ * throwing, so a config written by a newer build stays readable.
+ */
+export function readSetting(config: CliConfig, key: string): SettingValue {
+  const accountKey = parseAccountSettingKey(key);
+  if (accountKey) {
+    const accounts = config.providers?.[accountKey.kind]?.accounts;
+    const found = accounts?.find((entry) => entry.id.trim().toLowerCase() === accountKey.id);
+    if (!found) return settingDescriptor(key)?.defaultValue;
+    return readRawField((found as unknown as Record<string, unknown>)[accountKey.field], key);
+  }
+  const entry = key.includes("[") ? listTarget(key) : null;
+  if (entry) return readListScalar(config, entry);
+  return readRawField(walk(config, key.split(".")), key);
 }
 
 /** A key is never written to the config: only the reference to where the keychain holds it. */
@@ -1993,6 +2396,23 @@ function writeSettingValue(config: CliConfig, key: string, value: SettingValue):
   const descriptor = settingDescriptor(key);
   if (!descriptor) throw new CliError("INVALID_CONFIG_KEY", `Unknown config key: ${key}`);
   const clears = value === "" && descriptor.defaultValue !== "";
+  const accountKey = parseAccountSettingKey(key);
+  if (accountKey) {
+    const providers = { ...(config.providers ?? {}) };
+    const section = { ...(providers[accountKey.kind] ?? {}) };
+    const accounts = [...(section.accounts ?? [])];
+    const idx = accounts.findIndex((entry) => entry.id.trim().toLowerCase() === accountKey.id);
+    if (idx < 0) {
+      throw new CliError("INVALID_CONFIG", `No ${accountKey.kind} profile with id "${accountKey.id}" exists.`);
+    }
+    const updated: Record<string, unknown> = { ...(accounts[idx] as unknown as Record<string, unknown>) };
+    if (clears) delete updated[accountKey.field];
+    else updated[accountKey.field] = value;
+    accounts[idx] = updated as never;
+    section.accounts = accounts as never;
+    providers[accountKey.kind] = section as never;
+    return { ...config, providers };
+  }
   const path = key.split(".");
   const next = { ...config } as Record<string, unknown>;
   let cursor = next;
@@ -2020,6 +2440,8 @@ export interface SettingView {
   readonly unavailable?: string;
   /** For a web order: the tools it can rank, with the ones this provider cannot use marked. */
   readonly order?: readonly WebOrderEntry[];
+  /** For model prices: Moxen's shipped USD-per-million-tokens table, keyed by model slug. */
+  readonly shippedPrices?: Readonly<Record<string, ModelPrice>>;
   /** What applies while the setting is unset (from its `fallback`), so a page's Default can name it. Absent when set, or when nothing more is known. */
   readonly effective?: SettingEffective;
   /** What the setting amounts to with everything else taken into account, set or not ("Served by Moxen from its own folder"); a page shows it beneath. */
@@ -2049,7 +2471,7 @@ function settingPlace(from: SettingDescriptor, to: SettingDescriptor): string {
 
 /** The provider a Long threads row is on; undefined for the global one. */
 const longThreadKindOf = (descriptor: SettingDescriptor): LongThreadKind | undefined =>
-  /^providers\.(claude|codex|opencode|harness)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
+  /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity|vibe)\./.exec(descriptor.key)?.[1] as LongThreadKind | undefined;
 
 /** What a long-thread rule found, said on `descriptor`'s page: the value as that page writes it, and where it is set (nothing for the built-in default). */
 function sourcedEffective(descriptor: SettingDescriptor, value: string, key: string | null): SettingEffective {
@@ -2061,7 +2483,7 @@ function sourcedEffective(descriptor: SettingDescriptor, value: string, key: str
 const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, descriptor: SettingDescriptor) => SettingEffective | undefined>> = {
   /** A provider's delegation tools or web_fetch, unset: the older all-at-once `moxenTools` (`moxenToolsOf`), else on. */
   moxenTools(config, descriptor) {
-    const kind = /^providers\.(claude|codex|opencode|harness)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "opencode" | "harness" | undefined;
+    const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity|vibe)\./.exec(descriptor.key)?.[1] as "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe" | undefined;
     const legacy = kind === undefined ? undefined : config.providers?.[kind]?.moxenTools;
     return legacy === false ? { value: false, label: "Off", origin: `from providers.${kind}.moxenTools in the config file` } : { value: true, label: "On" };
   },
@@ -2090,7 +2512,7 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
   },
   /** A provider tab's Model, unset: the global Model when the global Provider is this one (`configuredModel`); else the provider's catalog default, which the picker names itself. */
   providerModel(config, descriptor) {
-    const kind = /^providers\.(claude|codex|opencode|harness)\.model$/.exec(descriptor.key)?.[1];
+    const kind = /^providers\.(claude|codex|chatgpt|opencode|harness|acp|antigravity|vibe)\.model$/.exec(descriptor.key)?.[1];
     const global = BY_KEY.get("model")!;
     const aimed = kind !== undefined && config.provider !== undefined && driverKindOfInstance(config.provider) === kind;
     if (aimed && config.model !== undefined && config.model.trim() !== "") return { value: config.model, label: config.model, origin: settingPlace(descriptor, global) };
@@ -2123,10 +2545,21 @@ const FALLBACK_RESOLVERS: Readonly<Record<FallbackResolver, (config: CliConfig, 
     if (mode === "off") return undefined;
     if (kind === "harness") return { value: undefined, label: "70% of the window (60% under 128K)" };
     const buffer = kind === "opencode" ? config.providers?.opencode?.compactBuffer : undefined;
-    return {
-      value: undefined,
-      label: kind === "codex" ? "Codex's own" : kind === "claude" ? "Claude Code's own, tuned per model" : buffer !== undefined ? `OpenCode's own, ${numberLabel(buffer, true)} before the limit` : "OpenCode's own, 10% before the limit",
-    };
+    const label =
+      kind === "codex"
+        ? "Codex's own"
+        : kind === "claude"
+          ? "Claude Code's own, tuned per model"
+          : kind === "antigravity"
+            ? "Antigravity's own"
+            : kind === "vibe"
+              ? "Mistral Vibe's own"
+              : kind === "acp"
+              ? "The ACP agent's own"
+              : buffer !== undefined
+                ? `OpenCode's own, ${numberLabel(buffer, true)} before the limit`
+                : "OpenCode's own, 10% before the limit";
+    return { value: undefined, label };
   },
 };
 
@@ -2154,6 +2587,7 @@ const IN_FORCE: Readonly<Record<string, (config: CliConfig) => string>> = {};
 /** How each list setting's entries are described, keyed by its setting key. */
 const LIST_VIEWS: Readonly<Record<string, (config: CliConfig) => readonly ListItemView[]>> = {
   [HARNESS_PROFILES_SETTING.key]: describeHarnessProfiles,
+  [ACP_AGENTS_SETTING.key]: describeAcpAgents,
   [MCP_SERVERS_SETTING.key]: (config) => describeMcpServers(config),
 };
 
@@ -2170,9 +2604,9 @@ function settingUnavailable(config: CliConfig, descriptor: SettingDescriptor): s
 }
 
 /** A web order's provider and role, from its key. */
-function webOrderOf(descriptor: SettingDescriptor): { provider: "claude" | "codex" | "opencode"; role: WebRole } | null {
-  const match = /^providers\.(claude|codex|opencode)\.web(Search|Fetch)Order$/.exec(descriptor.key);
-  return match === null ? null : { provider: match[1] as "claude" | "codex" | "opencode", role: match[2] === "Search" ? "search" : "fetch" };
+function webOrderOf(descriptor: SettingDescriptor): { provider: "claude" | "codex" | "opencode" | "vibe"; role: WebRole } | null {
+  const match = /^providers\.(claude|codex|opencode|vibe)\.web(Search|Fetch)Order$/.exec(descriptor.key);
+  return match === null ? null : { provider: match[1] as "claude" | "codex" | "opencode" | "vibe", role: match[2] === "Search" ? "search" : "fetch" };
 }
 
 export function describeSettings(config: CliConfig): readonly SettingView[] {
@@ -2183,6 +2617,7 @@ export function describeSettings(config: CliConfig): readonly SettingView[] {
     const value = readSetting(config, descriptor.key);
     const effective = value === undefined || value === "" ? effectiveOf(config, descriptor) : undefined;
     const inForce = IN_FORCE[descriptor.key]?.(config);
+    const shippedPrices = descriptor.kind.type === "string" && descriptor.kind.source === "model-prices" ? DEFAULT_MODEL_PRICES : undefined;
     return {
       descriptor,
       value,
@@ -2190,8 +2625,79 @@ export function describeSettings(config: CliConfig): readonly SettingView[] {
       ...(items ? { items } : {}),
       ...(unavailable ? { unavailable } : {}),
       ...(web ? { order: webOrderEntries(config, web.provider, web.role) } : {}),
+      ...(shippedPrices ? { shippedPrices } : {}),
       ...(effective ? { effective } : {}),
       ...(inForce ? { inForce } : {}),
     };
   });
+}
+
+/**
+ * Full independent `SettingView[]` for one configured profile (`claude/<id>`,
+ * `chatgpt/<id>`, or `antigravity/<id>`). Each profile gets every setting for
+ * its provider kind with sensible defaults when unset (never inheriting from a
+ * parent `providers.<kind>.*` override).
+ */
+export function describeAccountSettings(
+  config: CliConfig,
+  kind: "claude" | "chatgpt" | "antigravity",
+  id: string,
+): readonly SettingView[] {
+  const normalizedId = id.trim().toLowerCase();
+  const accounts = config.providers?.[kind]?.accounts;
+  const account = accounts?.find((entry) => entry.id.trim().toLowerCase() === normalizedId);
+  if (!account) return [];
+  const section: SettingSection =
+    kind === "claude" ? "provider:claude" : kind === "chatgpt" ? "provider:chatgpt" : "provider:antigravity";
+  const prefix = `providers.${kind}.`;
+  // Build a synthetic view of `config` where `providers[kind]` holds ONLY this profile's own settings
+  // so fallback/effective/web-order calculations read this profile independently (sensible defaults when unset).
+  const isolatedConfig: CliConfig = {
+    ...config,
+    providers: {
+      ...(config.providers ?? {}),
+      [kind]: { ...account },
+    },
+  };
+  const baseDescriptors = SETTINGS.filter((descriptor) => descriptor.section === section);
+  return baseDescriptors.map((base) => {
+    const field = base.key.startsWith(prefix) ? base.key.slice(prefix.length) : base.key;
+    const key = `providers.${kind}.accounts[${normalizedId}].${field}`;
+    const visibleWhen =
+      base.visibleWhen !== undefined && base.visibleWhen.key.startsWith(prefix)
+        ? { ...base.visibleWhen, key: `providers.${kind}.accounts[${normalizedId}].${base.visibleWhen.key.slice(prefix.length)}` }
+        : base.visibleWhen;
+    const descriptor: SettingDescriptor = {
+      ...base,
+      key,
+      ...(visibleWhen !== undefined ? { visibleWhen } : {}),
+    };
+    const web = webOrderOf(base);
+    const unavailable = web === null ? undefined : webOrderUnavailable(isolatedConfig, web.provider, web.role);
+    const rawVal = (account as unknown as Record<string, unknown>)[field];
+    const value = readRawField(rawVal, key);
+    const effective = value === undefined || value === "" ? effectiveOf(isolatedConfig, base) : undefined;
+    const shippedPrices = descriptor.kind.type === "string" && descriptor.kind.source === "model-prices" ? DEFAULT_MODEL_PRICES : undefined;
+    return {
+      descriptor,
+      value,
+      explicit: rawVal !== undefined,
+      ...(unavailable ? { unavailable } : {}),
+      ...(web ? { order: webOrderEntries(isolatedConfig, web.provider, web.role) } : {}),
+      ...(shippedPrices ? { shippedPrices } : {}),
+      ...(effective ? { effective } : {}),
+    };
+  });
+}
+
+/** Independent per-profile `SettingView[]` map keyed by `<kind>/<id>` for every configured profile. */
+export function describeAllAccountSettings(config: CliConfig): Readonly<Record<string, readonly SettingView[]>> {
+  const out: Record<string, readonly SettingView[]> = {};
+  for (const kind of ["claude", "chatgpt", "antigravity"] as const) {
+    for (const account of config.providers?.[kind]?.accounts ?? []) {
+      const id = account.id.trim().toLowerCase();
+      out[`${kind}/${id}`] = describeAccountSettings(config, kind, id);
+    }
+  }
+  return out;
 }

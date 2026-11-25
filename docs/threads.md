@@ -42,7 +42,9 @@ process running it (pid and host). If that process dies mid-turn — a
 crashed server, a killed CLI, a TUI closed during a turn — nothing would
 ever settle it, so the next operation that touches the thread interrupts
 the orphaned turn and runs the one queued behind it. A turn owned on
-another host is never judged.
+another host is never judged. A running turn that a server shutdown stops
+is recorded interrupted with that reason, and so is one a settle ends, so a
+ledger never leaves an unexplained stop.
 
 A queued message outlives the settle it was waiting for when the thread
 cannot take it: a snoozed thread, or a provider whose allowance is
@@ -73,6 +75,28 @@ thread becoming active again. An automatic continue whose time came while
 the thread already resumed — a turn ran to completion after it came due —
 is taken back before it runs instead of firing as a pointless turn; a turn
 that failed or was interrupted does not count as resumed.
+
+Antigravity threads hold automatic prompts the same way while
+`providers.antigravity.allowUnsupportedUse` is off (the default): Google's consumer
+sign-in covers only prompts you type yourself, so a task notice, an
+agent-queued message, a continue after a usage limit, a usage-protection
+wrap-up or recovery, one of Moxen's compaction prompts or its
+post-compaction resume, or an automatic hand-off waits in the work queue or
+the notice batch rather than starting a turn. A running turn is never
+stopped for a compaction whose follow-up could not start, and a hand-off you
+queued yourself that wants a model summary completes on its stored summary
+rather than waiting on a summary the gate would hold. The
+entry shows why it waits, and runs with your next message or when you turn the
+setting on. Delegating a new task to Antigravity is refused outright while off
+(`ANTIGRAVITY_DELEGATION_OFF`), before a thread or worktree is created; an
+agent's `task_send`/wake and `thread_continue` onto Antigravity are refused the
+same way. What you type, queue, schedule or click always runs, and a turn the
+provider starts itself is left alone. While the setting is off Moxen also runs
+at most one Antigravity account, the one that shares the host `agy` login: a
+request that targets an isolated or extra account fails with
+`ANTIGRAVITY_ACCOUNT_OFF`, naming the setting and how to fix it. See
+[Providers](providers.md) for the setting, the account-suspension warning and
+the multiple-account rules.
 
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees
@@ -1201,7 +1225,10 @@ idle source: while one of its turns is running, it is refused with
 `THREAD_BUSY` before anything is written — no destination, note, staged
 transfer or queue edit — so the queued messages stay and run there. Usage, protection and summary traffic, and
 queue-selected model/stored handoffs, keep their own semantics and never
-move this way; removed entries stay removed. The agent's `thread_continue`
+move this way; removed entries stay removed. A moved agent-queued message
+keeps its origin, so on an Antigravity thread with automatic prompts held it
+waits in the Work queue like any agent-queued message there until the user's
+next message or the setting turns on. The agent's `thread_continue`
 above is unchanged: queued work left on the old thread stays there and runs
 there.
 
@@ -1362,7 +1389,11 @@ the file, and writes its replacement too.
 ## Revert
 
 Revert rolls back every provider that saw a dropped turn, then cuts the
-ledger. Files stay as they are unless asked back too (`--restore-files`),
+ledger. Turns are counted in the order they ran, as every other reader
+numbers them; a message that never ran is not counted: an interrupted one
+is left in the ledger, and a terminal one that never reached the provider
+has no prompt or snapshot to roll back.
+Files stay as they are unless asked back too (`--restore-files`),
 in which case the worktree returns to the first dropped turn's snapshot
 and the replaced state is pinned under a `revert-*` ref to undo by.
 
@@ -1382,9 +1413,10 @@ threads stored before this read the same way; a total that drops (a resumed
 process starts counting again) counts as new spend. Where the provider reports a cost
 (`costUsd`: Claude's `total_cost_usd`, OpenCode's per-step `cost`) the turn
 records it too, an estimate and not a bill; without one the field is absent.
-A turn that recorded no cost keeps none on the ledger: Stats and usage
-protection price it at the model's current prices instead (below), and only a
-model with no price anywhere reads as unpriced.
+A turn that recorded no cost keeps none on the ledger: Stats, usage
+protection, and live thread context readings (`thread.context` and
+`context-window.updated`) price it at the model's current prices instead
+(below), and only a model with no price anywhere reads as unpriced.
 
 ### Stats
 
@@ -1407,12 +1439,29 @@ above, so the instances stored as running totals are the Claude ones
 
 ### Model prices
 
-Each provider's settings page, under Model prices, values that provider's
-models in USD per million tokens: an input, output, cache-read and
-cache-write price per model, as `model=price` pairs
+Each provider's settings page, under Model prices → Prices per model, edits
+that provider's models in USD per million tokens (input, output, cache read
+and cache write per model). In the config file and CLI, the four underlying
+keys (`modelInputPrices`, `modelOutputPrices`, `modelCacheReadPrices`,
+`modelCacheWritePrices`) take `model=price` pairs
 (`moxen config set providers.opencode.modelInputPrices 'opencode-go/muse-spark-1.3-contributor=2'`).
-A row you set beats Moxen's shipped price for those fields on that provider,
-so the same model can cost differently on two providers; clearing a row, or a
-model from it, returns to the shipped price. A price with only some fields
+A price you set beats Moxen's shipped price for those fields on that provider,
+so the same model can cost differently on two providers; clearing a field or
+resetting a model returns to the shipped price. A price with only some fields
 values what it names and counts the rest as zero. Models match by the string
 Stats buckets them under, slash included.
+
+Moxen's shipped list reports **API-equivalent prices**, not subscription charges:
+- OpenAI, Anthropic and Gemini rows are hand-maintained in `src/core/usage/prices.ts`.
+- OpenCode Go (`opencode-go/<id>`) and OpenCode Zen (`opencode/<id>`) rows live
+  in `src/core/usage/opencode-prices.generated.json`, regenerated at build time
+  from `models.dev` by `bun run update:opencode-prices` (and a scheduled weekly
+  PR workflow). Nothing downloads prices at runtime, and hand-edited rows in
+  `prices.ts` always take precedence over generated rows.
+- `@opencode/client` exposes only `info.cost` (not `opencode.allowance` or
+  `opencode.list_cost`), so Moxen keeps a turn's reported cost when present and
+  falls back to the shipped price table otherwise.
+- Models with context-size tiers (such as `opencode-go/qwen3.7-plus` above 256k)
+  are priced per turn from that turn's prompt size (`input + cacheRead + cacheCreate`),
+  applying the matching tier above its threshold.
+- Free models priced at zero show as `free`, distinct from `unpriced`.

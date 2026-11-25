@@ -6,14 +6,17 @@
  * `moxen config` offer; a name that is not in it is passed through as typed,
  * because the providers add tools faster than this table does.
  *
- * What is left out on purpose: the tools moxen's own settings already own
- * (the to-do list's `todos`, plan mode's enter and exit), and OpenCode's
- * session, worktree and browser utilities, which ask for no permission and so
- * have nothing to deny.
+ * What is left out on purpose: the tools Moxen's own settings already own
+ * (the to-do list's `todos`, plan mode's enter and exit), Claude Code's native
+ * subagent tool (both names, `Agent` and `Task`, blocked in every
+ * Moxen-started session so there is nothing to switch), OpenCode's native
+ * `subagent` tool (always denied in every Moxen-started OpenCode server so
+ * delegation stays in Moxen threads), and OpenCode's session, worktree and
+ * browser utilities, which ask for no permission and so have nothing to deny.
  */
 import { CliError } from "./errors.js";
 
-export type NativeToolProvider = "claude" | "codex" | "opencode";
+export type NativeToolProvider = "claude" | "codex" | "opencode" | "vibe";
 
 export interface NativeTool {
   /** Claude: the tool's name, as `disallowedTools` takes it. OpenCode: the permission action. */
@@ -40,7 +43,6 @@ export const CLAUDE_NATIVE_TOOLS: readonly NativeTool[] = [
   { name: "Monitor", label: "Monitor", group: "Commands", summary: "Runs a command in the background and streams its output." },
   { name: "WebSearch", label: "Web search", group: "Web", summary: "Anthropic's web search." },
   { name: "WebFetch", label: "Web fetch", group: "Web", summary: "Fetches a URL and answers a prompt about it." },
-  { name: "Agent", label: "Subagents", group: "Agents", summary: "Spawns a subagent. Moxen's Agents tab reads these." },
   { name: "SendMessage", label: "Send message", group: "Agents", summary: "Messages another agent or session." },
   { name: "Skill", label: "Skills", group: "Agents", summary: "Loads a skill." },
   { name: "AskUserQuestion", label: "Ask a question", group: "Interaction", summary: "Asks you multiple-choice questions." },
@@ -62,10 +64,12 @@ export const OPENCODE_NATIVE_TOOLS: readonly NativeTool[] = [
   { name: "execute", label: "Code mode", group: "Commands", summary: "Runs code that calls other tools." },
   { name: "websearch", label: "Web search", group: "Web", summary: "Searches the web through the selected integration." },
   { name: "webfetch", label: "Web fetch", group: "Web", summary: "Fetches a URL as markdown, text or HTML." },
-  { name: "subagent", label: "Subagents", group: "Agents", summary: "Starts a child agent." },
   { name: "skill", label: "Skills", group: "Agents", summary: "Loads a skill." },
   { name: "question", label: "Ask a question", group: "Interaction", summary: "Asks you a question." },
 ];
+
+/** OpenCode permission actions Moxen always denies on servers it starts (native subagents bypass Moxen thread delegation). */
+export const OPENCODE_ALWAYS_DENIED_TOOLS: readonly string[] = ["subagent"];
 
 /** Feature switches verified with the installed CLI's strict configuration validator. */
 export const CODEX_NATIVE_TOOLS: readonly NativeTool[] = [
@@ -82,6 +86,19 @@ export const CODEX_NATIVE_TOOLS: readonly NativeTool[] = [
   { name: "goals", label: "Goals", group: "Agents", summary: "create_goal, get_goal and update_goal; long-running goals with their own completion audit.", codexControl: { key: "features.goals", off: false } },
 ];
 
+/** Built-in Mistral Vibe tools verified on `vibe-app-server` 3.1.4 (`task` subagent is always disabled; `todo` is owned by the To-do list toggle). */
+export const VIBE_NATIVE_TOOLS: readonly NativeTool[] = [
+  { name: "read_file", label: "Read", group: "Files", summary: "Reads files." },
+  { name: "write_file", label: "Write", group: "Files", summary: "Creates or overwrites files." },
+  { name: "edit", label: "Edit", group: "Files", summary: "Makes targeted edits to files." },
+  { name: "grep", label: "Grep", group: "Files", summary: "Searches file contents." },
+  { name: "bash", label: "Bash", group: "Commands", summary: "Runs shell commands." },
+  { name: "web_search", label: "Web search", group: "Web", summary: "Searches the web." },
+  { name: "web_fetch", label: "Web fetch", group: "Web", summary: "Fetches a URL." },
+  { name: "skill", label: "Skills", group: "Agents", summary: "Loads a skill." },
+  { name: "ask_user_question", label: "Ask a question", group: "Interaction", summary: "Asks you multiple-choice questions." },
+];
+
 export function codexDisabledToolConfig(names: readonly string[]): Record<string, boolean | string> {
   const config: Record<string, boolean | string> = {};
   for (const name of names) {
@@ -93,7 +110,13 @@ export function codexDisabledToolConfig(names: readonly string[]): Record<string
 }
 
 export function nativeToolsOf(provider: NativeToolProvider): readonly NativeTool[] {
-  return provider === "codex" ? CODEX_NATIVE_TOOLS : provider === "claude" ? CLAUDE_NATIVE_TOOLS : OPENCODE_NATIVE_TOOLS;
+  return provider === "codex"
+    ? CODEX_NATIVE_TOOLS
+    : provider === "claude"
+      ? CLAUDE_NATIVE_TOOLS
+      : provider === "vibe"
+        ? VIBE_NATIVE_TOOLS
+        : OPENCODE_NATIVE_TOOLS;
 }
 
 /**
@@ -119,14 +142,15 @@ export function isNativeToolDisabled(setting: string | undefined, name: string, 
 
 /**
  * What an OpenCode server is started with so the tools stay off: `websearch:
- * false`, and a `deny` rule on `*` for every other action. Both take the tool
- * out of the model's list (checked on OpenCode 2.1.2: a model asked for its
- * tools no longer names them). Nothing when none is off.
+ * false`, and a `deny` rule on `*` for every other action (including OpenCode's
+ * native `subagent` tool, which is always denied so multi-agent work routes
+ * through Moxen's delegated threads). Both take the tool out of the model's
+ * list (checked on OpenCode 2.1.2: a model asked for its tools no longer names
+ * them).
  */
 export function opencodeDisabledToolConfig(setting: string | undefined): { websearch?: false; permissions?: Array<{ action: string; resource: string; effect: "deny" }> } {
   const names = disabledNativeToolNames(setting).map((name) => name.toLowerCase());
-  if (names.length === 0) return {};
-  const denied = names.filter((name) => name !== "websearch");
+  const denied = [...new Set([...names.filter((name) => name !== "websearch"), ...OPENCODE_ALWAYS_DENIED_TOOLS])];
   return {
     ...(names.includes("websearch") ? { websearch: false as const } : {}),
     ...(denied.length > 0 ? { permissions: denied.map((action) => ({ action, resource: "*", effect: "deny" as const })) } : {}),

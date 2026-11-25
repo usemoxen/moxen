@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 
 import type { ExperienceSnapshot, ReleaseText } from "../../../server/api.js";
@@ -43,7 +43,7 @@ export function ChangelogModal({ snapshot, error, saving, screenWidth, screenHei
   const open = (index: number) => { setReleaseIndex(index); setHistory(false); setFocus("read"); };
   useEffect(() => { scroll.current?.scrollTo(0); }, [releaseIndex, history]);
   useEffect(() => { scroll.current?.scrollChildIntoView(`release-control-${focus}`); }, [focus]);
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (saving) return;
     if (key.ctrl && key.name === "c") { onClose(); return; }
     if (key.name === "escape") { if (history) setHistory(false); else onClose(); return; }
@@ -58,7 +58,7 @@ export function ChangelogModal({ snapshot, error, saving, screenWidth, screenHei
     if (key.name === "return") (controls.find((control) => control.id === focus) ?? controls[controls.length - 1])?.run();
     if (key.name === "pagedown") scroll.current?.scrollBy(8);
     if (key.name === "pageup") scroll.current?.scrollBy(-8);
-  });
+  }, { capture: true });
 
   const notes = release === undefined ? null : <>
     {release.highlights.map((highlight, index) => <box key={`highlight-${index}`} style={{ flexDirection: "column", marginBottom: 1, flexShrink: 0 }}>

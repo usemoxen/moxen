@@ -3,7 +3,7 @@ import { OverflowText } from "../../ui/overflowtext.js";
 import { t, tx } from "../../i18n/index.js";
 import { useEffect, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { useHover } from "../../hooks/useHover.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -56,7 +56,7 @@ export function WebOrderEditor({
     setCursor(to);
   };
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     key.preventDefault();
     const escape = key.name === "escape" || key.name === "esc";
     const enter = key.name === "return" || key.name === "enter";
@@ -66,7 +66,7 @@ export function WebOrderEditor({
     if (enter || key.name === "space" || key.name === "right") return toggle(rows[at]);
     if (!key.ctrl && !key.meta && key.name === "u") return move(rows[at], -1);
     if (!key.ctrl && !key.meta && key.name === "d") return move(rows[at], 1);
-  });
+  }, { capture: true });
 
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   useEffect(() => {

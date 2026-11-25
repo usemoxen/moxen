@@ -73,11 +73,10 @@ export function resolveSpawnedServerPassword(
  * The `OPENCODE_CONFIG_CONTENT` for a spawned server: the user's own content
  * plus `share: "disabled"` and `update: "disable"` (we never share sessions or
  * let the server update itself under us). Every other user key is kept as is.
- * Permissions are deliberately not injected: v2's default (allow all) matches
- * what moxen has always run with.
- * `disabledNativeTools` (the provider's setting) switches OpenCode's own tools
- * off: `websearch: false`, and a `deny` rule per other tool, appended to the
- * user's own `permissions` (the last matching rule wins, so ours hold).
+ * Permissions default to OpenCode v2's allow-all except for Moxen's always-denied
+ * native `subagent` rule (so delegation stays in Moxen threads) plus any tools in
+ * `disabledNativeTools` (`websearch: false`, and a `deny` rule per other tool,
+ * appended to the user's own `permissions` so the last matching rule holds).
  * `moxenPrompt` sets the `system` of the `build` agent (the one Moxen's sessions run) to Moxen's prompt, which replaces the base
  * prompt OpenCode picks for the model family; an agent the user already gave a `system` keeps theirs.
  * Unparseable content is replaced, not merged — a corrupt config would

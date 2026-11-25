@@ -8,6 +8,11 @@ import { runStandaloneMode } from "../server/standalone.js";
 // become the autostarted daemon, the MCP server, or the embedding worker.
 // Anything else is the CLI.
 const mode = standaloneMode();
+if (process.argv[2] === "--moxen-internal-desktop") {
+  const { runDesktopBridge } = await import("../server/desktop.js");
+  await runDesktopBridge(process.env.MOXEN_DESKTOP_SERVER);
+  process.exit(process.exitCode ?? 0);
+}
 if (mode === null) {
   // Bare `moxen` opens the TUI; anything else is parsed as CLI args.
   const decision = decideBareInvocation(process.argv.slice(2), process.stdout.isTTY === true);

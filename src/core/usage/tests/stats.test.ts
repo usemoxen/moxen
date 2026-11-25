@@ -133,8 +133,67 @@ describe("computeUsageStats", () => {
     // The user's rows price Muse; the shipped list prices the Codex model; mystery stays unpriced.
     expect(stats.costUsd).toBeCloseTo(12 + 12, 9);
     expect(stats.unpricedTurns).toBe(1);
-    expect(stats.byModel.find((bucket) => bucket.key === "opencode-go/muse-spark-1.3-contributor")?.costUsd).toBeCloseTo(12, 9);
+    expect(stats.byModel.find((bucket) => bucket.key === "muse-spark-1.3-contributor")?.costUsd).toBeCloseTo(12, 9);
     expect(stats.byModel.find((bucket) => bucket.key === "mystery")?.costUsd).toBeNull();
+  });
+
+  it("unifies multi-account and legacy provider IDs into canonical provider buckets and merges identical model IDs across providers", () => {
+    const config = {
+      providers: {
+        opencode: {
+          modelInputPrices: { "opencode-go/gpt-6-luna": 0.1 },
+          modelOutputPrices: { "opencode-go/gpt-6-luna": 0.5 },
+        },
+      },
+    };
+    const options: StatsOptions = {
+      runningTotals: new Set(["claudeAgent", "claude/default", "claude/work"]),
+      priceFor: (kind, model, instanceId) => modelPriceFor(config, kind, model, instanceId),
+    };
+    const ten = { input: 10, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 };
+    const stats = computeUsageStats(
+      [
+        thread("t1", [turn(at(0), "claude-opus-5-5", ten, { modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" } })]),
+        thread("t2", [turn(at(0), "claude-opus-5-5", ten, { modelSelection: { instanceId: "claude/default", model: "claude-opus-5-5" } })]),
+        thread("t3", [turn(at(0), "claude-opus-5-5", ten, { modelSelection: { instanceId: "claude/work", model: "claude-opus-5-5" } })]),
+        thread("t4", [turn(at(0), "claude-opus-5-5", ten, { modelSelection: { instanceId: "antigravity", model: "claude-opus-5-5" } })]),
+        thread("t5", [turn(at(0), "claude-opus-5-5", ten, { modelSelection: { instanceId: "antigravity/default", model: "claude-opus-5-5" } })]),
+        thread("t6", [turn(at(0), "claude-opus-5-5", ten, { modelSelection: { instanceId: "opencode/anthropic", model: "anthropic/claude-opus-5-5" } })]),
+        thread("t7", [turn(at(0), "gpt-6-luna", ten, { modelSelection: { instanceId: "codex", model: "gpt-6-luna" } })]),
+        thread("t8", [turn(at(0), "gpt-6-luna", ten, { modelSelection: { instanceId: "codex/work", model: "gpt-6-luna" } })]),
+        thread("t9", [turn(at(0), "gpt-6-luna", ten, { modelSelection: { instanceId: "chatgpt/default", model: "gpt-6-luna" } })]),
+        thread("t10", [turn(at(0), "gpt-6-luna", ten, { modelSelection: { instanceId: "chatgpt/trial", model: "gpt-6-luna" } })]),
+        thread("t11", [turn(at(0), "gpt-6-luna", ten, { modelSelection: { instanceId: "opencode/opencode-go", model: "opencode-go/gpt-6-luna" } })]),
+        thread("t12", [turn(at(0), "glm-5-free", ten, { modelSelection: { instanceId: "opencode", model: "glm-5-free" } })]),
+        thread("t13", [turn(at(0), "glm-5-free", ten, { modelSelection: { instanceId: "opencode/opencode", model: "opencode/glm-5-free" } })]),
+        thread("t14", [turn(at(0), "prism-ml/bonsai-27b", ten, { modelSelection: { instanceId: "harness/lmstudio", model: "prism-ml/bonsai-27b" } })]),
+      ],
+      "all",
+      NOW,
+      options,
+    );
+
+    expect(stats.byProvider.map((p) => [p.key, p.sessions, p.tokens])).toEqual([
+      ["claude", 3, 30],
+      ["antigravity", 2, 20],
+      ["chatgpt", 2, 20],
+      ["codex", 2, 20],
+      ["opencode/opencode", 2, 20],
+      ["harness/lmstudio", 1, 10],
+      ["opencode/anthropic", 1, 10],
+      ["opencode/opencode-go", 1, 10],
+    ]);
+
+    expect(stats.byModel.map((m) => [m.key, m.sessions, m.tokens])).toEqual([
+      ["claude-opus-5-5", 6, 60],
+      ["gpt-6-luna", 5, 50],
+      ["glm-5-free", 2, 20],
+      ["prism-ml/bonsai-27b", 1, 10],
+    ]);
+
+    // Pricing still matched raw OpenCode slug before stripping its prefix.
+    const luna = stats.byModel.find((m) => m.key === "gpt-6-luna");
+    expect(luna?.unpricedTurns).toBe(0);
   });
 
   it("keeps a reported cost where one was recorded, even with prices at hand", () => {

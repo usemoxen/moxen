@@ -9,7 +9,7 @@
 import type { StoredMessage, StoredThread, StoredTurn, TurnUsage } from "../threads/types.js";
 import { driverKindOfInstance } from "../types.js";
 import { type UsageTotals, emptyUsageTotals, summarizeUsage } from "./usage.js";
-import { usageCost, type ModelPrice, type ModelPriceKind } from "./prices.js";
+import { isFastSelection, usageCost, type ModelPrice, type ModelPriceKind } from "./prices.js";
 
 export type StatsRange = "7d" | "30d" | "all";
 
@@ -59,9 +59,9 @@ export interface UsageStats {
   readonly peakHour: number | null;
   /** The model with the most tokens; null with none. */
   readonly favoriteModel: string | null;
-  /** Sorted by tokens, largest first. Key is the provider instance id. */
+  /** Sorted by tokens, largest first. Key is the canonical provider bucket id. */
   readonly byProvider: readonly StatsBucket[];
-  /** Sorted by tokens, largest first. Key is the model id, `unknown` when a turn never recorded it. */
+  /** Sorted by tokens, largest first. Key is the canonical model id, `unknown` when a turn never recorded it. */
   readonly byModel: readonly StatsBucket[];
   /** Active days only, oldest first. */
   readonly daily: readonly DailyStats[];
@@ -83,10 +83,46 @@ export interface StatsOptions {
    * priced with this at the current values. Absent, only reported costs
    * count, as before.
    */
-  readonly priceFor?: (kind: ModelPriceKind | null, model: string) => ModelPrice | null;
+  readonly priceFor?: (kind: ModelPriceKind | null, model: string, instanceId?: string) => ModelPrice | null;
 }
 
 export const UNKNOWN_MODEL = "unknown";
+
+/**
+ * Canonical `byProvider` bucket key for a turn's `instanceId`:
+ * - Multi-account providers (`claude/*`, `codex/*`, `chatgpt/*`, `antigravity/*`)
+ *   and their legacy singleton ids (`claudeAgent`, `agy`, etc.) roll up into one
+ *   provider bucket per kind (`claude`, `codex`, `chatgpt`, `antigravity`).
+ * - Legacy `"opencode"` folds into `"opencode/opencode"`, while distinct OpenCode
+ *   sub-providers (e.g. `"opencode/opencode-go"`) stay separate.
+ * - Distinct Harness profiles (`harness/<id>`) and ACP agents (`acp/<id>`) keep
+ *   their own bucket keys.
+ */
+export function statsProviderKey(instanceId: string): string {
+  const lower = instanceId.trim().toLowerCase();
+  if (lower === "claude" || lower === "claudeagent" || lower.startsWith("claude/")) return "claude";
+  if (lower === "codex" || lower.startsWith("codex/")) return "codex";
+  if (lower === "chatgpt" || lower.startsWith("chatgpt/")) return "chatgpt";
+  if (lower === "antigravity" || lower === "agy" || lower.startsWith("antigravity/")) return "antigravity";
+  if (lower === "vibe" || lower.startsWith("vibe/")) return "vibe";
+  if (lower === "opencode") return "opencode/opencode";
+  return instanceId;
+}
+
+/**
+ * Canonical `byModel` bucket key so identical model IDs count together across
+ * providers and accounts: strips OpenCode's `<subprovider>/` routing prefix
+ * (e.g. `opencode-go/gpt-6-luna` -> `gpt-6-luna`, `anthropic/claude-opus-5-5`
+ * -> `claude-opus-5-5`) while pricing lookup still runs on the raw slug.
+ */
+export function statsModelKey(instanceId: string, model: string): string {
+  if (model === UNKNOWN_MODEL) return UNKNOWN_MODEL;
+  if (driverKindOfInstance(instanceId) === "opencode") {
+    const slash = model.lastIndexOf("/");
+    if (slash > 0 && slash < model.length - 1) return model.slice(slash + 1);
+  }
+  return model;
+}
 
 export function totalTokens(usage: UsageTotals): number {
   return usage.input + usage.cacheRead + usage.cacheCreate + usage.output + usage.thinking;
@@ -153,11 +189,12 @@ function turnCost(
   instanceId: string,
   model: string,
   priceFor: StatsOptions["priceFor"],
+  fast = false,
 ): number | null {
   const usage = turn.usage;
   if (!usage) return null;
   if (typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd) && usage.costUsd >= 0) return usage.costUsd;
-  const estimated = priceFor === undefined ? null : usageCost(priceFor(driverKindOfInstance(instanceId), model), usage);
+  const estimated = priceFor === undefined ? null : usageCost(priceFor(driverKindOfInstance(instanceId), model, instanceId), usage, fast);
   return estimated?.usd ?? null;
 }
 
@@ -249,11 +286,13 @@ export function computeUsageStats(
       if (!ran(turn)) continue;
       const time = activityTime(turn);
       if (!time || !inRange(time)) continue;
-      const provider = (turn.modelSelection ?? thread.modelSelection).instanceId;
-      const model = turn.modelSelection?.model ?? UNKNOWN_MODEL;
+      const rawProvider = (turn.modelSelection ?? thread.modelSelection).instanceId;
+      const rawModel = turn.modelSelection?.model ?? UNKNOWN_MODEL;
+      const provider = statsProviderKey(rawProvider);
+      const model = statsModelKey(rawProvider, rawModel);
       sessions.add(thread.id);
       counted.push(turn);
-      costs.set(turn, turnCost(turn, provider, model, options.priceFor));
+      costs.set(turn, turnCost(turn, rawProvider, rawModel, options.priceFor, isFastSelection(turn.modelSelection ?? thread.modelSelection)));
       add(providers, provider, turn, thread.id);
       add(models, model, turn, thread.id);
       hours[time.getHours()] = (hours[time.getHours()] ?? 0) + 1;

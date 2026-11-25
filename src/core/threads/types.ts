@@ -252,6 +252,13 @@ export interface StoredTurn {
   readonly scheduleReason?: "user" | "usage-reset" | "usage-hold" | null;
   /** For an automatic continue after a usage limit: which attempt in a row (1-based). */
   readonly continueAttempt?: number;
+  /**
+   * The prompt's origin, as on its message: absent for the user's own sends.
+   * Recorded on the turn so admission can tell an automatic turn from a user
+   * turn without reading the message ledger. Absent on turns written before
+   * it existed.
+   */
+  readonly origin?: MessageOrigin;
   readonly error: string | null;
   /**
    * The turn was the first the provider's conversation was given and it ended with no output (a usage limit).
@@ -321,8 +328,8 @@ export interface StoredMessage {
   readonly notification?: { readonly tasks: readonly TaskNotification[] };
 }
 
-/** Internal inputs: task results, usage reset continuations, answer-panel replies, and a message from the thread that delegated the task. `agent-message` is one an agent queued with `message_queue`, for itself or a task it delegated. */
-export type MessageOrigin = "task-notification" | "background-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "question-answer" | "task-message" | "agent-message";
+/** Internal inputs: task results, usage reset continuations, answer-panel replies, a message from the thread that delegated the task, and Moxen's own compaction prompts. `agent-message` is one an agent queued with `message_queue`, for itself or a task it delegated. */
+export type MessageOrigin = "task-notification" | "background-notification" | "usage-continue" | "usage-protection" | "handoff-summary" | "compaction" | "question-answer" | "task-message" | "agent-message";
 
 export interface StoredActivity {
   readonly id: string;

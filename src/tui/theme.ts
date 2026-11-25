@@ -196,16 +196,27 @@ export function applyTheme(name: string | undefined): boolean {
  * hashed project badge colors. Cosmetic; retune the hexes freely.
  */
 const PROVIDER_COLOR_BY_KEYWORD: readonly [keyword: string, color: string][] = [
+  ["antigravity", "#4C8DF6"],
+  ["gemini", "#4C8DF6"],
   ["claude", "#DE7356"],
   ["openai", "#74AA9C"],
   ["opencode", "#8B5CF6"],
+  ["vibe", "#FF7000"],
+  ["mistral", "#FF7000"],
 ];
 
-/** Matches on `driver`/`instanceId`/model slug — whatever names the provider. */
+/**
+ * Matches on `driver`/`instanceId`/model slug in priority order so a provider's
+ * own color (e.g. Antigravity hosting Claude Sonnet 5.5) wins over a hosted
+ * model's family word.
+ */
 export function providerColor(...candidates: readonly (string | null | undefined)[]): string | null {
-  const haystack = candidates.filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
-  for (const [keyword, color] of PROVIDER_COLOR_BY_KEYWORD) {
-    if (haystack.includes(keyword)) return color;
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const text = candidate.toLowerCase();
+    for (const [keyword, color] of PROVIDER_COLOR_BY_KEYWORD) {
+      if (text.includes(keyword)) return color;
+    }
   }
   return null;
 }

@@ -2,7 +2,7 @@ import { overflowColumns } from "../../model/textoverflow.js";
 import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
@@ -52,7 +52,7 @@ export function PermissionPanel({
     { key: "decline", label: "3. No" },
   ];
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (suspended) return;
     if (key.name === "up") {
       setHighlight((current) => (current - 1 + rows.length) % rows.length);
@@ -71,7 +71,7 @@ export function PermissionPanel({
     const digit = /^([1-3])$/.exec(key.name);
     const row = digit?.[1] === undefined ? undefined : rows[Number.parseInt(digit[1], 10) - 1];
     if (row !== undefined) onDecide(row.key);
-  });
+  }, { active: !suspended, capture: (key) => !(key.name === "c" && key.ctrl) });
 
   const inner = Math.max(10, width - 6);
 

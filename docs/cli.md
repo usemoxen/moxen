@@ -180,18 +180,18 @@ A bad thread record reads as missing, a bad ledger line is skipped with its file
 
 The settings page files every key under General, Defaults, Sessions, Long threads, Agent context, Interface, Git and forges, one tab per provider (each in the same order: Defaults, Tools, Long threads, Sessions, Model prices, Setup, then what is particular to it), and MCP servers. Where a setting lives on the page never changes its key.
 
-**Model prices.** `providers.<claude|codex|opencode|harness>.model{Input,Output,CacheRead,CacheWrite}Prices` value a model's tokens in USD per million, as `model=price` pairs, one per line or comma-separated:
+**Model prices.** `providers.<claude|codex|opencode|antigravity|acp|harness>.model{Input,Output,CacheRead,CacheWrite}Prices` value a model's tokens in USD per million, as `model=price` pairs, one per line or comma-separated:
 
 ```bash
 moxen config set providers.opencode.modelInputPrices 'opencode-go/muse-spark-1.3-contributor=2'
 moxen config set providers.opencode.modelOutputPrices 'opencode-go/muse-spark-1.3-contributor=10'
 ```
 
-A row you set beats Moxen's shipped price list for that model on that provider; clearing a row, or a model from it, returns to the shipped price. Stats and usage protection price turns that recorded no cost at these current values; a turn with a recorded cost keeps it, and a model with no price anywhere stays unpriced. A partial price values the fields it names and counts the rest as zero. The same rows are on each provider's settings page under Model prices.
+A price you set beats Moxen's shipped price list (API-equivalent prices, including generated OpenCode Go / Zen rows from `bun run update:opencode-prices` with per-turn context-size tiers) for that model on that provider; clearing a field or resetting a model returns to the shipped price. Stats and usage protection price turns that recorded no cost at these current values; a turn with a recorded cost keeps it, free models priced at zero display as `free`, and a model with no price anywhere stays unpriced. A partial price values the fields it names and counts the rest as zero. On each provider's settings page, Model prices → Prices per model opens a per-model editor backed by these four keys.
 
-**Theme.** `ui.theme` picks the TUI colours: `moxen` (default), `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `dracula`, `nord`, `gruvbox` or `tokyo-night`. A running TUI picks up a change without restarting.
+**Theme.** `ui.theme` picks the interface colours: `moxen` (default), `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`, `dracula`, `nord`, `gruvbox` or `tokyo-night`. Settings changes apply without restarting. The desktop maps these palettes onto its design-system colour roles.
 
-**Language.** `ui.language` picks the TUI language: `auto` (default; follows `LC_ALL`, `LC_MESSAGES` or `LANG`, then the runtime's locale, and falls back to English), `en` or `es-ES`. A running TUI picks up a change without restarting. CLI output and `--json` stay in English.
+**Language.** `ui.language` picks the interface language: `auto` (default; follows `LC_ALL`, `LC_MESSAGES` or `LANG`, then the runtime's locale, and falls back to English), `en` or `es-ES`. Settings changes apply without restarting. CLI output and `--json` stay in English.
 
 `projectPolicy: "existing"` makes a missing project a hard error. `workspaceMode: "folder"` uses the exact current folder instead of walking up to the Git root. Whether a thread from `moxen handover` or `moxen threads create` gets a worktree is decided by the command (`--checkout`), then the project, then its `moxen.json`, then `threadEnvMode`. Explicit CLI config values remain overrides.
 
@@ -246,6 +246,7 @@ provider (`providers.<claude|opencode|codex>.…`):
   covered, since they are the tools whose options Moxen knows; any other search server is left to the model.
 - `disabledNativeTools`: the provider's own tools to switch off, comma-separated (`WebSearch,WebFetch` for Claude
   Code; `websearch,webfetch` for OpenCode). Claude Code drops them from the model's list when the session starts.
+  Its native subagent tool (both names, `Agent` and `Task`) is always off and is not among them; a stored `Agent` or `Task` entry changes nothing.
   OpenCode reads them when its server starts and takes them out of the model's list. A change waits until nothing runs on that server (no turn, background
   command or subagent, nothing waiting on you), then restarts it; the next message meets the new one.
 

@@ -21,18 +21,26 @@ import * as Stream from "effect/Stream";
 import type { SkillInventory } from "../catalog/summary.js";
 import type { BackgroundTaskSummary, RateLimitWindow } from "../providers/spi.js";
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
+import { chatgptHarnessConfigFor } from "./longthreads.js";
 import { armScheduledTurn } from "./schedule.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
+import { resolveContextCostUsd } from "../usage/prices.js";
 import type { McpServerSpec } from "../mcp.js";
 
+import { resolveAcpAgentsMap } from "../providers/acp/config.js";
+import { AcpDriver } from "../providers/acp/driver.js";
+import { resolveAntigravityAccount, resolveChatGptAccount, resolveClaudeAccount } from "../providers/accounts.js";
+import { createChatGptHarnessDriver } from "../providers/chatgpt/catalog.js";
 import { CodexDriver } from "../providers/codex/driver.js";
 import { ClaudeDriver } from "../providers/claude/driver.js";
 import { locateSkillsMod } from "../providers/claude/skillsmod.js";
 import { HarnessDriver } from "../providers/harness/driver.js";
 import { OpenCodeDriver } from "../providers/opencode/driver.js";
+import { VibeDriver } from "../providers/vibe/driver.js";
 import type {
   ContextBreakdown,
   ContextWindowUsage,
+  ProviderAdapterCapabilities,
   ProviderApprovalDecision,
   ProviderImage,
   ProviderRuntimeEvent,
@@ -47,7 +55,7 @@ import type {
   UnconfirmedSteer,
 } from "../providers/spi.js";
 import { CliError } from "../errors.js";
-import type { InteractionMode, ModelSelection, ProvidersConfig, RuntimeMode } from "../types.js";
+import { driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type ProvidersConfig, type RuntimeMode } from "../types.js";
 import {
   captureWorktree,
   diffCheckpointStat,
@@ -67,6 +75,7 @@ import type { StoredAttachment, StoredThread, StoredTurn, TurnUsage } from "./ty
 
 /** Structural driver surface the runner needs. All four drivers satisfy it. */
 export interface TurnDriver extends ProviderSessionTitles {
+  readonly capabilities?: ProviderAdapterCapabilities;
   hasSession(threadId: string): Effect.Effect<boolean, CliError>;
   startSession(input: ProviderSessionStartInput): Effect.Effect<unknown, CliError>;
   sendTurn(input: ProviderSendTurnInput): Effect.Effect<{ threadId: string; turnId: string }, CliError>;
@@ -98,6 +107,13 @@ export interface TurnDriver extends ProviderSessionTitles {
   resumeCursor?(threadId: string): string | null;
   contextUsage?(threadId: string): Promise<ContextWindowUsage | null>;
   /**
+   * The thread's live turn usage, or — with a driver turn id — that specific
+   * turn's usage (its settled outcome usage once it terminated): an interrupted
+   * run always asks for its own turn, never whatever turn the session happens
+   * to have open (LOCAL-009).
+   */
+  liveTurnUsage?(threadId: string, driverTurnId?: string): TurnUsage | null;
+  /**
    * A cheap, usage-free re-read of the provider's subscription windows for an
    * explicit freshness ask (usage.refresh, behind the usage_status tool):
    * the same probe a live session already runs, on a session or connection
@@ -106,7 +122,7 @@ export interface TurnDriver extends ProviderSessionTitles {
    * (the Harness, a non-Go OpenCode provider). Key is the usage-registry
    * entry the windows belong under (an account, or one OpenCode Go instance).
    */
-  refreshUsage?(): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow> } | null>;
+  refreshUsage?(options?: { readonly force?: boolean }): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow>; readonly credits?: number | null } | null>;
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
   steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[], steerId?: string): Effect.Effect<void, CliError>;
@@ -179,7 +195,7 @@ export interface TurnDriver extends ProviderSessionTitles {
    * conversation. Resolves to the copy's handle. Absent where the provider
    * cannot fork.
    */
-  forkSession?(cursor: string, workingDirectory: string): Promise<string>;
+  forkSession?(cursor: string, workingDirectory: string, instanceId?: string): Promise<string>;
   /** Drop the provider's last `numTurns` prompts. */
   rollbackThread?(threadId: string, numTurns: number): Effect.Effect<unknown, CliError>;
   /**
@@ -207,8 +223,12 @@ export interface TurnOutcome {
 export interface TurnDriverFactories {
   readonly codex?: () => TurnDriver;
   readonly claude?: () => TurnDriver;
+  readonly chatgpt?: () => TurnDriver;
   readonly opencode?: () => TurnDriver;
   readonly harness?: () => TurnDriver;
+  readonly acp?: () => TurnDriver;
+  readonly antigravity?: () => TurnDriver;
+  readonly vibe?: () => TurnDriver;
 }
 
 const driverCache = new WeakMap<object, WeakMap<object, Map<string, TurnDriver>>>();
@@ -216,21 +236,28 @@ const driverCache = new WeakMap<object, WeakMap<object, Map<string, TurnDriver>>
 const defaultFactories: TurnDriverFactories = {};
 
 /**
- * The driver an instance id routes to. `opencode/<provider>` entries share
- * one driver (the provider address travels in the model slug), `harness/<profile>`
- * entries share the harness driver (the profile is resolved per send), and
- * `claudeAgent` is the historical id for the Claude surface that existing
- * threads and configs still carry.
+ * The driver cache & resume-cursor key an instance id routes to.
+ * - `opencode/<provider>`, `harness/<profile>`, and `acp/<agent>` share one
+ *   driver per kind (the target rides per session/send).
+ * - Multi-account instances (`claude/<id>`, `chatgpt/<id>`, `codex/<id>`,
+ *   `antigravity/<id>`) keep their own account-scoped key so separate accounts
+ *   never share credentials, environment variables, sessions, or resume cursors.
+ * - Legacy singleton ids (`claudeAgent`, `codex`, `antigravity`, `agy`) keep
+ *   their historical keys (`claude`, `codex`, `antigravity`).
  */
 export function driverKey(instanceId: string): string {
   const rawKey = instanceId.trim().toLowerCase();
-  return rawKey === "opencode" || rawKey.startsWith("opencode/")
-    ? "opencode"
-    : rawKey === "harness" || rawKey.startsWith("harness/")
-      ? "harness"
-      : rawKey === "claudeagent"
-        ? "claude"
-        : rawKey;
+  if (rawKey === "opencode" || rawKey.startsWith("opencode/")) return "opencode";
+  if (rawKey === "harness" || rawKey.startsWith("harness/")) return "harness";
+  if (rawKey === "acp" || rawKey.startsWith("acp/")) return "acp";
+  if (rawKey === "antigravity" || rawKey === "agy") return "antigravity";
+  if (rawKey.startsWith("antigravity/")) return rawKey;
+  if (rawKey === "vibe" || rawKey.startsWith("vibe/")) return "vibe";
+  if (rawKey === "claudeagent" || rawKey === "claude") return "claude";
+  if (rawKey.startsWith("claude/")) return rawKey;
+  if (rawKey === "codex" || rawKey.startsWith("codex/")) return rawKey;
+  if (rawKey === "chatgpt" || rawKey.startsWith("chatgpt/")) return rawKey;
+  return rawKey;
 }
 
 /**
@@ -244,6 +271,7 @@ export function driverForInstance(
   providers?: ProvidersConfig,
 ): TurnDriver {
   const key = driverKey(instanceId);
+  const kind = driverKindOfInstance(instanceId);
   let byFactories = driverCache.get(owner);
   if (!byFactories) {
     byFactories = new WeakMap();
@@ -258,6 +286,14 @@ export function driverForInstance(
   const secretEnv = (providers?.harness?.profiles ?? []).map((profile) => profile.apiKeyEnv).filter((name): name is string => typeof name === "string" && name !== "");
   if (existing) {
     if (existing instanceof CodexDriver) existing.setSecretEnv(secretEnv);
+    if (existing instanceof AcpDriver && providers !== undefined) {
+      if (existing.provider === "antigravity") {
+        const resolved = resolveAntigravityAccount(providers.antigravity, instanceId);
+        existing.setAgents({ [resolved.instanceId]: resolved.spec, antigravity: resolved.spec });
+      } else {
+        existing.setAgents(resolveAcpAgentsMap(providers.acp));
+      }
+    }
     return existing;
   }
   let driver: TurnDriver | undefined;
@@ -265,10 +301,46 @@ export function driverForInstance(
   // spawned process: an already-running session cannot be moved to a
   // different binary or config directory. The schema says as much
   // (`appliesAt: "server-restart"`), so a change applies to the next server start.
-  if (key === "claude") driver = factories.claude?.() ?? new ClaudeDriver({ ...(providers?.claude ? { settings: providers.claude } : {}), skillsMod: locateSkillsMod() });
-  else if (key === "codex") driver = factories.codex?.() ?? new CodexDriver({ ...(providers?.codex ? { settings: providers.codex } : {}) });
-  else if (key === "opencode") driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
-  else if (key === "harness") driver = factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
+  if (kind === "claude") {
+    const resolved = resolveClaudeAccount(providers?.claude, instanceId);
+    driver = factories.claude?.() ?? new ClaudeDriver({
+      settings: resolved.settings,
+      env: resolved.env,
+      instanceId: resolved.usageKey,
+      skillsMod: locateSkillsMod(),
+    });
+  } else if (kind === "codex") {
+    const companionId = key.startsWith("codex/") ? key.slice("codex/".length) : null;
+    const companion = companionId !== null
+      ? resolveChatGptAccount(providers?.chatgpt, providers?.codex, `chatgpt/${companionId}`).codexSettings
+      : null;
+    const settings = companion ?? providers?.codex;
+    driver = factories.codex?.() ?? new CodexDriver({
+      ...(settings ? { settings } : {}),
+      ...(key !== "codex" ? { instanceId: key } : {}),
+    });
+  } else if (kind === "chatgpt") {
+    driver = factories.chatgpt?.() ?? factories.harness?.() ?? createChatGptHarnessDriver({ config: chatgptHarnessConfigFor(providers, instanceId) });
+  } else if (kind === "opencode") {
+    driver = factories.opencode?.() ?? new OpenCodeDriver({ ...(providers?.opencode ? { settings: providers.opencode } : {}) });
+  } else if (kind === "harness") {
+    driver = factories.harness?.() ?? new HarnessDriver({ config: providers?.harness });
+  } else if (kind === "acp") {
+    driver = factories.acp?.() ?? new AcpDriver({ agents: resolveAcpAgentsMap(providers?.acp) });
+  } else if (kind === "antigravity") {
+    const resolved = resolveAntigravityAccount(providers?.antigravity, instanceId);
+    driver = factories.antigravity?.() ?? new AcpDriver({
+      provider: "antigravity",
+      ...(resolved.accountId ? { instanceId: resolved.instanceId } : {}),
+      env: resolved.env,
+      agents: { [resolved.instanceId]: resolved.spec, antigravity: resolved.spec },
+    });
+  } else if (kind === "vibe") {
+    driver = factories.vibe?.() ?? new VibeDriver({
+      ...(providers?.vibe ? { settings: providers.vibe } : {}),
+      instanceId: "vibe",
+    });
+  }
   if (!driver) {
     throw new CliError("PROVIDER_UNKNOWN", `No direct driver for provider "${instanceId}".`, {
       details: { instanceId },
@@ -387,7 +459,7 @@ function ensureDriverPump(driver: TurnDriver): Map<string, Set<EventSubscriber>>
       Effect.sync(() => {
         // Plan usage belongs to the account, not the thread: recorded here,
         // once per event, whoever (if anyone) watches the thread.
-        if (event.type === "rate-limits.updated") recordUsageWindows(event.instanceId ?? event.provider, event.windows);
+        if (event.type === "rate-limits.updated") recordUsageWindows(event.instanceId ?? event.provider, event.windows, undefined, { credits: event.credits });
         trackLiveText(buffers, event);
         for (const subscriber of subscribers.get("*") ?? []) deliverEvent(subscriber, event);
         for (const subscriber of subscribers.get(event.threadId) ?? []) deliverEvent(subscriber, event);
@@ -485,6 +557,8 @@ export interface ExecuteTurnArgs {
   /** Images sent with the prompt. */
   readonly images?: readonly ProviderImage[];
   readonly modelSelection?: ModelSelection;
+  /** Provider pricing config used to estimate `costUsd` on recorded context readings when the driver reports none. */
+  readonly config?: Pick<CliConfig, "providers">;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: InteractionMode;
   /** Worktree root for checkpoint capture; checkpoints skipped when empty. */
@@ -596,7 +670,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // the next queued message now would only fail it against the same wall
     // (and then the next, until the whole queue is failed turns), so hold
     // it for just after the reset instead — it runs then like a scheduled one.
-    const standing = standingLimit(usageKeyForInstance(selection.instanceId));
+    const standing = standingLimit(usageKeyForInstance(selection.instanceId), Date.now(), selection.model);
     if (standing !== null) {
       const until = new Date(Date.parse(standing.resetsAt) + USAGE_CONTINUE_GRACE_MS).toISOString();
       store.untrackRunning(next.id);
@@ -621,7 +695,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // moment's registrations, and the next send or admission refreshes again,
     // so only an edit landing mid-turn waits one extra turn. Rule files need
     // no setup, so they do refresh above.
-    const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
+    const rules = await pendingRuleUpdate(driver, threadId, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), thread.env.path).catch(() => null);
     claimed = null;
     void executeTurn({
       store,
@@ -632,6 +706,8 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       ...(rules ? { afterAnswer: async () => rules.commit() } : {}),
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
+      ...(args.config ? { config: args.config } : {}),
+      runtimeMode: thread.runtimeMode,
       interactionMode: next.interactionMode,
       workingDirectory: thread.env.path,
       ...(args.onEvent ? { onEvent: args.onEvent } : {}),
@@ -665,6 +741,7 @@ export async function ensureDriverSession(
   thread: StoredThread,
   options: {
     readonly modelSelection?: ModelSelection;
+    readonly config?: Pick<CliConfig, "providers">;
     readonly workingDirectory?: string;
     readonly mcpServers?: readonly McpServerSpec[];
     readonly disabledMcpTools?: readonly string[];
@@ -679,6 +756,8 @@ export async function ensureDriverSession(
     readonly store?: ThreadStore;
     /** After a turn the provider starts itself settles (`ExecuteTurnArgs.afterSettle`). */
     readonly afterSettle?: () => Promise<void>;
+    /** Called when a background turn hits a usage limit (`ExecuteTurnArgs.onUsageLimit`). */
+    readonly onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void;
     /** End the session after this long with nothing happening on it (`idle.ts`); null or absent: never. */
     readonly idleTtlMs?: number | null;
   } = {},
@@ -715,18 +794,60 @@ export async function ensureDriverSession(
   // conversation identity must already be durable when that question appears.
   if (options.store) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
-  await captureRuleBaseline(driver, thread.id, driverKey(selection.instanceId), cwd);
-  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null);
+  await captureRuleBaseline(driver, thread.id, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), cwd);
+  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onUsageLimit, options.config);
 }
 
 const watching = new WeakMap<TurnDriver, Map<string, () => void>>();
 
 /**
- * Threads whose events a turn run is recording right now, counted per
- * thread. Checked synchronously by the session watcher, so an event is
- * recorded by exactly one of the two listeners that both see it.
+ * Active turn runners recording events per thread, with each runner's driver
+ * turn id once known. Checked synchronously by the session watcher so an event
+ * for one driver turn is recorded by its own turn runner and never duplicated
+ * or swallowed by a different settling turn.
  */
-const recordingTurns = new Map<string, number>();
+interface ActiveTurnRecorder {
+  driverTurnId: string | null;
+}
+const recordingTurns = new Map<string, Set<ActiveTurnRecorder>>();
+/** Maps a driver turn id back to its originating store turn id for late out-of-turn events. */
+const driverTurnIds = new WeakMap<TurnDriver, Map<string, Map<string, string>>>();
+const MAX_TRACKED_DRIVER_TURNS = 64;
+
+function rememberDriverTurn(driver: TurnDriver, threadId: string, driverTurnId: string, storeTurnId: string): void {
+  let byThread = driverTurnIds.get(driver);
+  if (!byThread) {
+    byThread = new Map();
+    driverTurnIds.set(driver, byThread);
+  }
+  let map = byThread.get(threadId);
+  if (!map) {
+    map = new Map();
+    byThread.set(threadId, map);
+  }
+  map.set(driverTurnId, storeTurnId);
+  while (map.size > MAX_TRACKED_DRIVER_TURNS) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+function storeTurnForDriverTurn(driver: TurnDriver, threadId: string, driverTurnId: string | null | undefined): string | null {
+  if (!driverTurnId) return null;
+  return driverTurnIds.get(driver)?.get(threadId)?.get(driverTurnId) ?? null;
+}
+
+function isRecordedByActiveTurn(threadId: string, driverTurnId: string | null): boolean {
+  const recorders = recordingTurns.get(threadId);
+  if (!recorders || recorders.size === 0) return false;
+  for (const recorder of recorders) {
+    if (recorder.driverTurnId === null || driverTurnId === null || recorder.driverTurnId === driverTurnId) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function subagentPayload(event: Extract<ProviderRuntimeEvent, { type: "subagent.updated" }>): Record<string, unknown> {
   // Folds per agent (`toolCallId`) into one row that goes started → stopped.
@@ -750,7 +871,16 @@ function subagentPayload(event: Extract<ProviderRuntimeEvent, { type: "subagent.
  * - background tasks starting and ending, and the live set of them, become
  *   activity rows the transcript and the tasks panel read.
  */
-export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threadId: string, cwd: string, afterSettle?: () => Promise<void>, idleTtlMs: number | null = null): void {
+export function watchDriverSession(
+  store: ThreadStore,
+  driver: TurnDriver,
+  threadId: string,
+  cwd: string,
+  afterSettle?: () => Promise<void>,
+  idleTtlMs: number | null = null,
+  onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void,
+  config?: Pick<CliConfig, "providers">,
+): void {
   let byThread = watching.get(driver);
   if (!byThread) {
     byThread = new Map();
@@ -765,19 +895,30 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
   let lastTasks = "";
   let capturedWakeUp = false;
   const lateQuestions = new Set<string>();
+  const taskOriginTurn = new Map<string, string | null>();
   let chain: Promise<void> = Promise.resolve();
   const latestTurnId = async (): Promise<string | null> => {
     const turns = await store.readTurns(threadId);
     return (openTurn(turns) ?? turns.at(-1))?.id ?? null;
   };
-  const record = (kind: string, summary: string, payload: Record<string, unknown>): void => {
+  const record = (
+    kind: string,
+    summary: string,
+    payload: Record<string, unknown>,
+    options?: { readonly driverTurnId?: string | null; readonly storeTurnId?: string | null; readonly onResolvedTurnId?: (turnId: string | null) => void },
+  ): void => {
     chain = chain.then(async () => {
       const createdAt = store.nowIso();
+      const resolvedTurnId =
+        options?.storeTurnId !== undefined
+          ? options.storeTurnId
+          : storeTurnForDriverTurn(driver, threadId, options?.driverTurnId) ?? (await latestTurnId());
+      options?.onResolvedTurnId?.(resolvedTurnId);
       await store
         .appendLedger(threadId, "activity", {
           id: store.newId(),
           threadId,
-          turnId: await latestTurnId(),
+          turnId: resolvedTurnId,
           kind,
           summary,
           payload,
@@ -807,7 +948,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       chain = chain.then(async () => {
         const captured = capturedWakeUp;
         capturedWakeUp = false;
-        const turn = await claimBackgroundTurn(store, driver, threadId, event.turnId, captured, event.wakeUpPrompt).catch(() => null);
+        const turn = await claimBackgroundTurn(store, driver, threadId, event.turnId, captured, event.wakeUpPrompt, config).catch(() => null);
         if (turn !== null) {
           void executeTurn({
             store,
@@ -817,7 +958,9 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
             prompt: "",
             driverTurnId: event.turnId,
             ...(turn.modelSelection ? { modelSelection: turn.modelSelection } : {}),
+            ...(config ? { config } : {}),
             workingDirectory: cwd,
+            ...(onUsageLimit ? { onUsageLimit } : {}),
             ...(afterSettle ? { afterSettle } : {}),
           }).catch(() => undefined);
         }
@@ -829,7 +972,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
         const thread = await store.readThreadRecord(threadId);
         if (!thread?.usagePause || thread.usagePause.phase === "resuming" || thread.archivedAt || thread.deletedAt) return;
         await sendTurn(store, threadId, { prompt: event.prompt, origin: "background-notification", delivery: "queue", wakeSettled: false,
-          queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: event.requestId } });
+          queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: event.requestId } }, config);
         capturedWakeUp = true;
       }).catch(() => undefined); // Uncaptured: a refused turn still queues its own fallback.
       return;
@@ -838,15 +981,34 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
     if (event.type === "turn.started") chain = chain.then(() => { capturedWakeUp = false; });
     if (event.type === "background.task") {
       const verb = event.status === "started" ? "Started" : event.status === "completed" ? "Finished" : event.status === "failed" ? "Failed" : "Stopped";
-      record(`background.${event.status}`, `${verb} in the background: ${event.description || event.taskId}`, {
-        title: event.description || event.taskId,
-        taskId: event.taskId,
-        status: event.status,
-        description: event.description,
-        taskType: event.taskType,
-        toolUseId: event.toolUseId,
-        summary: event.summary,
-      });
+      const mappedStoreTurn =
+        event.status === "started"
+          ? storeTurnForDriverTurn(driver, threadId, event.turnId)
+          : (taskOriginTurn.get(event.taskId) ?? storeTurnForDriverTurn(driver, threadId, event.turnId));
+      if (event.status !== "started") taskOriginTurn.delete(event.taskId);
+      record(
+        `background.${event.status}`,
+        `${verb} in the background: ${event.description || event.taskId}`,
+        {
+          title: event.description || event.taskId,
+          taskId: event.taskId,
+          status: event.status,
+          description: event.description,
+          taskType: event.taskType,
+          toolUseId: event.toolUseId,
+          summary: event.summary,
+        },
+        {
+          ...(mappedStoreTurn !== null ? { storeTurnId: mappedStoreTurn } : { driverTurnId: event.turnId }),
+          ...(event.status === "started"
+            ? {
+                onResolvedTurnId: (resolved) => {
+                  if (resolved !== null) taskOriginTurn.set(event.taskId, resolved);
+                },
+              }
+            : {}),
+        },
+      );
       return;
     }
     if (event.type === "background.tasks.changed") {
@@ -862,11 +1024,30 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
       // Mid-turn the turn runner records it. A background subagent can
       // finish after its turn closed, when only this watcher is listening
       // — without this its row stayed "running" for good.
-      if ((recordingTurns.get(threadId) ?? 0) > 0) return;
+      if (isRecordedByActiveTurn(threadId, event.turnId)) return;
       record("subagent", `${event.agentType} ${event.status}`, subagentPayload(event));
       return;
     }
-    if (event.type === "user-input.request.opened" && (recordingTurns.get(threadId) ?? 0) === 0) {
+    if (
+      (event.type === "tool.execute.updated" || event.type === "tool.execute.completed") &&
+      !isRecordedByActiveTurn(threadId, event.turnId)
+    ) {
+      // A backgrounded tool call (e.g. an ACP `run_command` that exceeded
+      // `WaitMsBeforeAsync`) can finish after its turn settled. Record the
+      // completion row here so `collapseToolActivities` transitions the card
+      // from `"inProgress"` to `"completed"`.
+      let row: ReturnType<typeof toolActivityRow>;
+      try {
+        row = toolActivityRow(event);
+      } catch {
+        return;
+      }
+      if (row !== null) {
+        record(row.kind, row.summary, row.payload, { driverTurnId: event.turnId });
+      }
+      return;
+    }
+    if (event.type === "user-input.request.opened" && (recordingTurns.get(threadId)?.size ?? 0) === 0) {
       const row = userInputActivityRow(event);
       if (row?.payload.delivery === "async" && !lateQuestions.has(row.key)) {
         lateQuestions.add(row.key);
@@ -885,6 +1066,7 @@ export function watchDriverSession(store: ThreadStore, driver: TurnDriver, threa
   const stop = (): void => {
     unsubscribe();
     byThread!.delete(threadId);
+    driverTurnIds.get(driver)?.delete(threadId);
     forgetSession(driver, threadId);
   };
   byThread.set(threadId, stop);
@@ -918,6 +1100,7 @@ async function claimBackgroundTurn(
   driverTurnId: string,
   capturedWakeUp = false,
   wakeUpPrompt?: string,
+  config?: Pick<CliConfig, "providers">,
 ): Promise<StoredTurn | null> {
   try {
     const thread = await store.readThreadRecord(threadId);
@@ -937,7 +1120,7 @@ async function claimBackgroundTurn(
           prompt: `A provider-native background turn was paused by thread protection. Resume its pending notification in this conversation.\n${wakeUpPrompt ?? JSON.stringify({ turnId: driverTurnId })}`,
           origin: "background-notification", delivery: "queue",
           queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: `native-turn:${driverTurnId}` },
-        }).catch(() => undefined);
+        }, config).catch(() => undefined);
       }
       await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       if (driver.stopSession) await Effect.runPromise(driver.stopSession(threadId)).catch(() => undefined);
@@ -956,7 +1139,7 @@ async function claimBackgroundTurn(
           prompt: `A provider-native background turn arrived while another turn was running. Resume its pending notification in this conversation.\n${wakeUpPrompt ?? JSON.stringify({ turnId: driverTurnId })}`,
           origin: "background-notification", delivery: "queue",
           queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true, wakeUp: true, requestId: `native-turn:${driverTurnId}` },
-        }).catch(() => undefined);
+        }, config).catch(() => undefined);
       }
       return null;
     }
@@ -1088,8 +1271,8 @@ function recordTurnActivity(
   onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void,
 ): { onEvent: (event: ProviderRuntimeEvent) => void; flush: () => Promise<void>; saveUnfinishedText: () => Promise<void>; noteFailure: () => void; outputSeen: () => boolean } {
   const written = new Map<string, string>();
-  // Whether the provider showed any output this turn (streamed text or a tool call).
-  let outputSeen = false;
+  // Whether the provider showed any non-retracted output this turn (streamed text or a tool call).
+  let toolOutputSeen = false;
   let limitRecorded = false;
   // Appends are chained rather than fired in parallel: the ledger is an
   // append-only file and the rows must land in the order they happened.
@@ -1117,7 +1300,6 @@ function recordTurnActivity(
       const message = unfinished.get(id) ?? { text: "", createdAt: store.nowIso() };
       message.text += event.text;
       unfinished.set(id, message);
-      if (event.text.trim()) outputSeen = true;
       return;
     }
     if (event.type === "reasoning.updated") {
@@ -1284,7 +1466,7 @@ function recordTurnActivity(
     if (row === null) return;
     if (written.get(row.callId) === row.signature) return;
     written.set(row.callId, row.signature);
-    outputSeen = true;
+    toolOutputSeen = true;
     append(row.kind, row.summary, row.payload);
   };
   /**
@@ -1298,7 +1480,7 @@ function recordTurnActivity(
   const noteFailure = (): void => {
     if (limitRecorded || modelSelection === null) return;
     const provider = usageKeyForInstance(modelSelection.instanceId);
-    const standing = standingLimit(provider);
+    const standing = standingLimit(provider, Date.now(), modelSelection.model);
     if (standing === null) return;
     limitRecorded = true;
     append("usage.limit", "Usage limit reached", {
@@ -1323,7 +1505,11 @@ function recordTurnActivity(
     unfinished.clear();
     return chain;
   };
-  return { onEvent, flush: () => chain, saveUnfinishedText, noteFailure, outputSeen: () => outputSeen };
+  const outputSeen = (): boolean =>
+    toolOutputSeen ||
+    notes.size > 0 ||
+    [...unfinished.values()].some((message) => message.text.trim().length > 0);
+  return { onEvent, flush: () => chain, saveUnfinishedText, noteFailure, outputSeen };
 }
 
 async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -1344,23 +1530,41 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     if (liveReading) return;
     liveReading = true;
     lastLiveAt = Date.now();
-    void recordContextUsage(store, driver, threadId, storeTurnId, (usage) => {
-      // Cost moves on its own (a long tool run between requests does not
-      // grow the context, but the requests before it cost something).
-      const reading = `${usage.usedTokens}:${usage.costUsd ?? ""}`;
-      if (reading === lastLiveReading) return false;
-      lastLiveReading = reading;
-      return true;
-    }, args.onContextReading).finally(() => {
+    void recordContextUsage(store, driver, threadId, storeTurnId, {
+      shouldRecord: (usage) => {
+        // Cost moves on its own (a long tool run between requests does not
+        // grow the context, but the requests before it cost something).
+        const reading = `${usage.usedTokens}:${usage.costUsd ?? ""}`;
+        if (reading === lastLiveReading) return false;
+        lastLiveReading = reading;
+        return true;
+      },
+      ...(args.onContextReading ? { onRecorded: args.onContextReading } : {}),
+      ...(args.config ? { config: args.config } : {}),
+      ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+    }).finally(() => {
       liveReading = false;
     });
   };
+  const recorder: ActiveTurnRecorder = { driverTurnId: args.driverTurnId ?? null };
+  if (args.driverTurnId) {
+    rememberDriverTurn(driver, threadId, args.driverTurnId, storeTurnId);
+  }
   const unsubscribe = subscribeDriverThread(driver, threadId, (event) => {
+    const eventTurnId = "turnId" in event ? event.turnId : null;
+    if (recorder.driverTurnId !== null && eventTurnId !== null && eventTurnId !== recorder.driverTurnId) {
+      return;
+    }
     recordTools.onEvent(event);
     onEvent?.(event);
     if (event.type === "token-usage.updated" && args.onContextReading !== undefined && Date.now() - lastLiveAt >= EVENT_CONTEXT_MS) readLive();
   });
-  recordingTurns.set(threadId, (recordingTurns.get(threadId) ?? 0) + 1);
+  let recorders = recordingTurns.get(threadId);
+  if (!recorders) {
+    recorders = new Set();
+    recordingTurns.set(threadId, recorders);
+  }
+  recorders.add(recorder);
   // Pre-turn capture first: the diff base must predate any provider write.
   const pre = cwd ? await captureWorktree(cwd, `moxen ${threadId}/${storeTurnId} pre`) : null;
   const controller = new AbortController();
@@ -1368,10 +1572,22 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   let answered = false;
   // Stopped by an interrupt: the provider may well have read the prompt, so its handle stays.
   let interrupted = false;
+  // Final observed usage of an interrupted run (LOCAL-009): captured at the
+  // abort signal, before the driver's interrupt settles its turn and the open
+  // turn's live usage is gone, and read by THIS run's driver turn id so
+  // another turn's usage can never stand in.
+  let finalObservedUsage: TurnUsage | null = null;
+  const captureFinalObservedUsage = (): void => {
+    if (finalObservedUsage === null) finalObservedUsage = driver.liveTurnUsage?.(threadId, recorder.driverTurnId ?? undefined) ?? null;
+  };
   store.trackRunning(storeTurnId, () => controller.abort());
   const liveContext = setInterval(readLive, LIVE_CONTEXT_MS);
   liveContext.unref?.();
   const onAbort = (): void => {
+    // The executor's abort listener registers before the driver's waiters, so
+    // this runs before `interruptTurn` settles the driver turn: the last
+    // observed live usage is still readable here.
+    captureFinalObservedUsage();
     // Detached, as before — but a failed interrupt is reported instead of
     // dropped: `runFork` leaves nobody to hear it.
     void Effect.runPromise(driver.interruptTurn(threadId)).catch((cause) => {
@@ -1403,15 +1619,19 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
             prompt: args.prompt,
             ...(args.images?.length ? { images: args.images } : {}),
             ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+            ...(args.runtimeMode ? { runtimeMode: args.runtimeMode } : {}),
             ...(args.interactionMode ? { interactionMode: args.interactionMode } : {}),
           }),
         );
+    recorder.driverTurnId = sent.turnId;
+    rememberDriverTurn(driver, threadId, sent.turnId, storeTurnId);
     if (!args.driverTurnId && controller.signal.aborted) {
       // The stop landed while the prompt was going out: `onAbort`'s
       // interrupt found no open turn yet. Stop the run that just started —
       // unless a newer turn has since taken the thread: its run is not ours.
       const turns = await store.readTurns(threadId);
       if (!turns.some((turn) => turn.id !== storeTurnId && turn.status === "running")) {
+        captureFinalObservedUsage();
         await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       }
     }
@@ -1423,25 +1643,47 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     interrupted = outcome.status === "interrupted";
     // Delivered before the outcome is recorded: whoever sees the turn settle sees the delivery too.
     if (answered && !args.driverTurnId) await args.afterAnswer?.();
-    await recordContextUsage(store, driver, threadId, storeTurnId);
+    await recordContextUsage(store, driver, threadId, storeTurnId, {
+      ...(args.config ? { config: args.config } : {}),
+      ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+      inFlightUsage: outcome.usage,
+    });
     if (outcome.status === "failed") recordTools.noteFailure();
     if (outcome.status !== "completed" || !outcome.text) await recordTools.saveUnfinishedText();
     // Steers the provider never confirmed reach the conversation go out
     // again first, as queued turns of their own: still running, they are
     // promoted by the settle below and the next runner takes them at once.
-    await redeliverSteers(store, driver, threadId, storeTurnId);
+    await redeliverSteers(store, driver, threadId, storeTurnId, args.config);
     await settleTurn(store, args, outcome, cwd, pre);
     completedWithText = outcome.status === "completed" && !!outcome.text;
   } catch (cause) {
     await recordTools.saveUnfinishedText();
     if (cause instanceof CliError && cause.code === "TURN_ABORTED") {
       interrupted = true;
+      // The abort bypassed the normal outcome path: keep the final observed
+      // usage (captured at the abort, by this run's driver turn id, before the
+      // driver interrupt settles it) on the stored turn so interrupted spend
+      // stays in the ledger (LOCAL-009).
+      const observed = finalObservedUsage ?? driver.liveTurnUsage?.(threadId, recorder.driverTurnId ?? undefined) ?? null;
       // As in `settleTurn`: the checkpoint and the context reading land
       // before the outcome, so whoever sees the turn stop sees both — but
       // bounded, so a hung checkpoint cannot hold the outcome (MXN-290 review).
       await recordPreOutcome(store, driver, args, cwd, pre);
-      const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
-      const interruption = await interruptTurn(store, threadId, storeTurnId).catch(() => null);
+      const copies = await redeliverSteers(store, driver, threadId, storeTurnId, args.config);
+      const interruption = await interruptTurn(store, threadId, storeTurnId, undefined, observed === null ? {} : { usage: observed }).catch(() => null);
+      if (observed !== null && (interruption === null || interruption.interrupted === false)) {
+        // An explicit stop already committed this interruption without the
+        // usage: retain it on that row only, under the same lock, never
+        // rewriting the ledger from an older snapshot and never touching the
+        // status or a usage the stop finalized (LOCAL-009).
+        await store
+          .withThreadLock(threadId, async () => {
+            const row = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
+            if (!row || row.usage !== null || row.status !== "interrupted") return;
+            await store.updateTurn(threadId, storeTurnId, { usage: observed });
+          })
+          .catch(() => undefined);
+      }
       // Already terminal: the interrupt promoted nothing, so run the copies' promotion here.
       if (interruption === null || interruption.interrupted === false) await runStrandedRedelivery(args, copies);
       return;
@@ -1449,7 +1691,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     const message = cause instanceof Error ? cause.message : String(cause);
     recordTools.noteFailure();
     await recordPreOutcome(store, driver, args, cwd, pre);
-    const copies = await redeliverSteers(store, driver, threadId, storeTurnId);
+    const copies = await redeliverSteers(store, driver, threadId, storeTurnId, args.config);
     let settled = false;
     try {
       await failTurn(store, threadId, storeTurnId, { error: message.slice(0, 500) });
@@ -1465,9 +1707,11 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     store.untrackRunning(storeTurnId);
     unsubscribe();
     if (!completedWithText) await recordTools.saveUnfinishedText();
-    const recording = (recordingTurns.get(threadId) ?? 1) - 1;
-    if (recording > 0) recordingTurns.set(threadId, recording);
-    else recordingTurns.delete(threadId);
+    const active = recordingTurns.get(threadId);
+    if (active) {
+      active.delete(recorder);
+      if (active.size === 0) recordingTurns.delete(threadId);
+    }
     // Drain queued tool rows before the run is considered over.
     await recordTools.flush();
     // Again at the end: some providers only report the handle once the
@@ -1497,20 +1741,46 @@ async function recordContextUsage(
   driver: TurnDriver,
   threadId: string,
   turnId: string,
-  /** Live readings pass this to skip writing a row when nothing moved. */
-  shouldRecord: (usage: ContextWindowUsage) => boolean = () => true,
-  /** Told of each reading that was written. */
-  onRecorded?: (usage: ContextWindowUsage) => void,
+  options: {
+    /** Live readings pass this to skip writing a row when nothing moved. */
+    readonly shouldRecord?: (usage: ContextWindowUsage) => boolean;
+    /** Told of each reading that was written. */
+    readonly onRecorded?: (usage: ContextWindowUsage) => void;
+    readonly config?: Pick<CliConfig, "providers">;
+    readonly modelSelection?: ModelSelection;
+    /** Settled outcome usage when called right before `settleTurn`; falls back to `driver.liveTurnUsage`. */
+    readonly inFlightUsage?: TurnUsage | null;
+  } = {},
 ): Promise<void> {
   if (!driver.contextUsage) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const usage = await Promise.race([
+  const raw = await Promise.race([
     driver.contextUsage(threadId).catch(() => null),
     new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), CONTEXT_USAGE_TIMEOUT_MS);
     }),
   ]).finally(() => clearTimeout(timer));
-  if (usage === null || !shouldRecord(usage)) return;
+  if (raw === null) return;
+  let usage: ContextWindowUsage = raw;
+  const isClaude = options.modelSelection !== undefined && driverKindOfInstance(options.modelSelection.instanceId) === "claude";
+  if (usage.costUsd === undefined || isClaude) {
+    const [thread, turns] = await Promise.all([
+      store.readThreadRecord(threadId).catch(() => null),
+      store.readTurns(threadId).catch(() => []),
+    ]);
+    if (thread) {
+      const liveUsage = options.inFlightUsage ?? driver.liveTurnUsage?.(threadId) ?? null;
+      const costUsd = resolveContextCostUsd(
+        thread,
+        turns,
+        options.config ?? { providers: {} },
+        usage.costUsd,
+        liveUsage ? { turnId, modelSelection: options.modelSelection ?? null, usage: liveUsage } : null,
+      );
+      if (costUsd !== null) usage = { ...usage, costUsd };
+    }
+  }
+  if (options.shouldRecord && !options.shouldRecord(usage)) return;
   const summary =
     usage.maxTokens === null
       ? `${usage.usedTokens} tokens in context`
@@ -1526,7 +1796,7 @@ async function recordContextUsage(
       createdAt: store.nowIso(),
     })
     .catch(() => undefined);
-  onRecorded?.(usage);
+  options.onRecorded?.(usage);
 }
 
 /** How long a failed or aborted turn waits for its context reading and checkpoint before writing its outcome. */
@@ -1550,7 +1820,10 @@ async function recordPreOutcome(
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
     (async () => {
-      await recordContextUsage(store, driver, args.threadId, args.storeTurnId).catch(() => undefined);
+      await recordContextUsage(store, driver, args.threadId, args.storeTurnId, {
+        ...(args.config ? { config: args.config } : {}),
+        ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
+      }).catch(() => undefined);
       await settleCheckpoints(store, args, cwd, pre).catch(() => undefined);
     })(),
     new Promise<void>((resolve) => {
@@ -1566,7 +1839,7 @@ async function recordPreOutcome(
  * a throwing one must never rewrite the turn's outcome, so failures are
  * swallowed — the ledger still holds the steer for orphan recovery.
  */
-async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId: string, storeTurnId: string): Promise<string[]> {
+async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId: string, storeTurnId: string, config?: Pick<CliConfig, "providers">): Promise<string[]> {
   let pending: ReadonlyArray<UnconfirmedSteer> = [];
   try {
     pending = driver.takeUnconfirmedSteers?.(threadId) ?? [];
@@ -1579,6 +1852,7 @@ async function redeliverSteers(store: ThreadStore, driver: TurnDriver, threadId:
     threadId,
     storeTurnId,
     pending.map((steer) => ({ messageId: steer.id, text: steer.text, images: steer.images })),
+    config,
   ).catch(() => []);
 }
 
@@ -1617,7 +1891,32 @@ async function settleTurn(
       ...(outcome.generation !== undefined ? { generation: outcome.generation } : {}),
     });
   } else if (outcome.status === "interrupted") {
-    await interruptTurn(store, threadId, storeTurnId).catch(() => undefined);
+    // A run stopped without Moxen's interrupt recording the stop first: the
+    // process closed its provider sessions (a server shutdown or restart) or
+    // the provider ended the turn. Record why, rather than leave an
+    // interruption nothing explains. The driver's final observed usage (spend
+    // it booked for the interrupted turn) commits inside the same locked
+    // interruption transaction — before the interruption event and the queue
+    // promotion — so a turn admitted by the promotion is never erased, and a
+    // later priced turn cannot make this spend disappear (LOCAL-009).
+    const live = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
+    const reason = live?.status === "running" ? "Moxen or the provider stopped this run before it finished." : undefined;
+    const interruption = await interruptTurn(store, threadId, storeTurnId, undefined, {
+      ...(reason ? { reason } : {}),
+      ...(outcome.usage ? { usage: outcome.usage } : {}),
+    }).catch(() => null);
+    if (outcome.usage && (interruption === null || interruption.interrupted === false)) {
+      // An explicit stop already committed the interruption without the usage:
+      // retain it on that row only, under the same lock, never rewriting the
+      // ledger from an older snapshot (LOCAL-009).
+      await store
+        .withThreadLock(threadId, async () => {
+          const row = (await store.readTurns(threadId)).find((turn) => turn.id === storeTurnId);
+          if (!row || row.usage !== null || row.status !== "interrupted") return;
+          await store.updateTurn(threadId, storeTurnId, { usage: outcome.usage! });
+        })
+        .catch(() => undefined);
+    }
   } else {
     await failTurn(store, threadId, storeTurnId, {
       error: outcome.error ?? "Turn failed.",

@@ -32,8 +32,9 @@
     "tui": "bun scripts/build.ts && bun scripts/tui.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
+    "test:sqlite": "bun --bun x vitest run src/core/threads/sqlite/tests",
     "test:watch": "vitest",
-    "check": "bun run typecheck && bun run test",
+    "check": "bun run typecheck && bun run test && bun run test:sqlite",
     "check:tui": "bun src/tui/render-check.tsx",
     "check:tui:shots": "bun src/tui/render-check/shots.tsx",
     "check:tui:frames": "bun src/tui/render-check/shots.tsx --mode frames",
@@ -42,6 +43,7 @@
     "test:inventory": "bun ./scripts/test-inventory.ts",
     "stats:sheet": "bun ./scripts/stats-sheet.ts",
     "update:docs": "bun ./scripts/update-docs.ts",
+    "update:opencode-prices": "bun ./scripts/update-opencode-prices.ts",
     "update:tree-sitter-assets": "bun ./scripts/update-tree-sitter-assets.ts --config ./parsers-config.json --assets ./src/core/syntax --output ./src/core/syntax/parsers.ts && bun ./scripts/fetch-tree-sitter-licenses.ts",
     "review:settings": "npm --prefix tools/settings-review run dev"
   },

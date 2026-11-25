@@ -46,6 +46,20 @@ it("rechecks Codex reserves before dispatch, then runs and reads a native image 
     const { taskId } = JSON.parse(result.text) as { taskId: string };
     await vi.waitFor(() => expect(transport.sessions.some((session) => session.server.requestsTo("turn/start").length > 0)).toBe(true), SLOW_RUNNER);
     const server = transport.sessions.find((session) => session.server.requestsTo("turn/start").length > 0)!.server;
+    expect(server.requestsTo("thread/start")[0]?.params).toMatchObject({
+      config: expect.objectContaining({
+        "features.shell_tool": false,
+        "features.multi_agent": false,
+        web_search: "disabled",
+        "features.browser_use": false,
+        "features.computer_use": false,
+        "features.apps": false,
+        "features.sleep_tool": false,
+        "features.goals": false,
+      }),
+    });
+    const startConfig = (server.requestsTo("thread/start")[0]?.params as { config?: Record<string, unknown> } | undefined)?.config;
+    expect(startConfig?.["features.image_generation"]).not.toBe(false);
     expect(server.requestsTo("turn/start")[0]?.params).toMatchObject({ model: "gpt-6-luna", effort: "low" });
     expect(await harness.store.readThreadRecord(taskId)).toMatchObject({ hidden: true, archivedAt: null, deletedAt: null });
     await vi.waitFor(() => {

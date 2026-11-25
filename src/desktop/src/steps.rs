@@ -1,8 +1,5 @@
+use crate::theme::{self, color};
 use crate::ui::{self, Control};
-use crate::{
-    theme::{self, color},
-    workspace::Workspace,
-};
 use gpui::{prelude::*, *};
 
 /// A step row's height (`.b-row` in the mockup: min-height 32px).
@@ -14,42 +11,50 @@ pub struct Step {
     pub name: String,
     pub summary: String,
     pub output: String,
-    pub id: usize,
+    /// The right-hand column: time taken, lines read or lines changed.
+    pub meta: String,
+    pub failed: bool,
+    pub running: bool,
     pub index: usize,
+    /// Fixed width of the verb column, as in the thread view (58pt). None
+    /// lets the verb take its natural width so the target keeps the rest of
+    /// a narrow column.
+    pub verb_width: Option<f32>,
     /// How far the row itself has appeared, 0 to 1 (the fold opening).
     pub shown: f32,
     /// How far its output has opened, 0 to 1, or `None` when closed.
     pub open: Option<f32>,
 }
 
-pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
+pub fn render(step: Step, on_toggle: impl Fn(&mut App) + 'static) -> impl IntoElement {
     let Step {
         name,
         summary,
         output,
-        id,
+        meta,
+        failed,
+        running,
         index,
+        verb_width,
         shown,
         open,
     } = step;
-    let (icon, verb, token, meta) = match name.as_str() {
-        "thought" => ("asterisk", "Thought", "ink-2", "6s"),
-        "command" => ("dollar-sign", "Ran", "tool-command", "3.4s"),
-        "edit" => ("pencil", "Edited", "tool-edit", "+5 −1"),
-        _ => ("file", "Read", "tool-read", "551 lines"),
+    let (icon, verb, token) = match name.as_str() {
+        "thought" => ("asterisk", "Thought", "ink-2"),
+        "command" => ("dollar-sign", "Ran", "tool-command"),
+        "edit" => ("pencil", "Edited", "tool-edit"),
+        "search" => ("search", "Searched", "tool-read"),
+        "tool" => ("wrench", "Used", "ink-2"),
+        "error" => ("x", "Error", "broken"),
+        _ => ("file", "Read", "tool-read"),
+    };
+    let token = if failed { "broken" } else { token };
+    let verb = if running && name == "thought" {
+        "Thinking"
+    } else {
+        verb
     };
     let thought = name == "thought";
-    let meta = if name == "read" {
-        output
-            .lines()
-            .next()
-            .unwrap_or(meta)
-            .split(" · ")
-            .next()
-            .unwrap_or(meta)
-    } else {
-        meta
-    };
     let mut highlights = vec![];
     if name == "command" {
         highlights.push((
@@ -72,7 +77,11 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
         }
     }
     let target = StyledText::new(summary.clone()).with_highlights(highlights);
-    let meta = meta.to_string();
+    let meta: SharedString = if running {
+        "running".into()
+    } else {
+        meta.into()
+    };
     div()
         .flex()
         .flex_col()
@@ -102,8 +111,8 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
                 )
                 .child(
                     div()
-                        .w(px(58.))
                         .flex_shrink_0()
+                        .when_some(verb_width, |s, width| s.w(px(width)))
                         .font_family(theme::FONT)
                         .text_size(px(14.))
                         .text_color(color("ink-2"))
@@ -128,17 +137,17 @@ pub fn render(step: Step, entity: Entity<Workspace>) -> impl IntoElement {
                         .flex_shrink_0()
                         .font_family(theme::MONO)
                         .text_size(px(12.))
-                        .text_color(color("ink-2"))
+                        .text_color(color(if failed {
+                            "broken"
+                        } else if running {
+                            "live"
+                        } else {
+                            "ink-2"
+                        }))
                         .child(meta),
                 )
                 .on_click(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        if this.expanded.remove(&(id, index)).is_none() {
-                            this.expanded.insert((id, index), std::time::Instant::now());
-                        }
-                        this.lists[id].splice(index..index + 1, 1);
-                        cx.notify();
-                    });
+                    on_toggle(cx);
                 }),
         )
         .when_some(open, |s, p| {

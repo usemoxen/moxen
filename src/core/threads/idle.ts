@@ -15,7 +15,7 @@
  */
 import * as Effect from "effect/Effect";
 
-import type { CliConfig } from "../types.js";
+import { resolveProfileProviderConfig, type CliConfig } from "../types.js";
 import type { ThreadStore } from "./store.js";
 import { failureMessage, reportThreadFailure } from "./failures.js";
 import { openTurn } from "./threads.js";
@@ -32,9 +32,13 @@ export function durationMs(text: string | undefined): number | null {
   return value * unit;
 }
 
-/** The idle lifetime for one provider's sessions: its own, else the global one. Null: never ended. */
-export function sessionTtlFor(config: CliConfig, kind: "claude" | "codex" | "opencode" | "harness" | null): number | null {
-  const own = kind === null ? undefined : config.providers?.[kind]?.sessionTtl;
+/** The idle lifetime for one provider's (or account profile's) sessions: its own, else the global one. Null: never ended. */
+export function sessionTtlFor(config: CliConfig, kindOrInstance: string | null): number | null {
+  if (kindOrInstance === null) return durationMs(config.sessionTtl);
+  const resolved = resolveProfileProviderConfig(config, kindOrInstance);
+  const own = resolved !== undefined
+    ? resolved.sessionTtl
+    : (config.providers as Record<string, { readonly sessionTtl?: string } | undefined> | undefined)?.[kindOrInstance]?.sessionTtl;
   return durationMs(own ?? config.sessionTtl);
 }
 

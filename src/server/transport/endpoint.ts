@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { appEnv, appHomeDir, APP_NAME } from "../../core/config.js";
+import { CliError } from "../../core/errors.js";
 
 const BACKSLASH = String.fromCharCode(92);
 
@@ -32,8 +33,24 @@ export function isNamedPipe(endpoint: string): boolean {
   return endpoint.startsWith(`${BACKSLASH}${BACKSLASH}.${BACKSLASH}pipe${BACKSLASH}`);
 }
 
+export function validateEndpoint(endpoint: string, platform = process.platform): void {
+  if (platform === "win32" || isNamedPipe(endpoint)) return;
+  // One byte of sockaddr_un.sun_path is reserved for the terminating NUL.
+  // Linux, Android and SunOS give sun_path 108 bytes; macOS and the BSDs 104.
+  const limit = platform === "linux" || platform === "android" || platform === "sunos" ? 107 : 103;
+  const bytes = Buffer.byteLength(endpoint, "utf8");
+  if (bytes > limit) {
+    throw new CliError(
+      "SERVER_SOCKET_PATH_TOO_LONG",
+      `Unix socket path "${endpoint}" is ${bytes} bytes; the limit is ${limit} bytes. Set MOXEN_SERVER_ENDPOINT to a shorter path.`,
+      { details: { endpoint, bytes, limit } },
+    );
+  }
+}
+
 /** Whether a server accepts connections at `endpoint` right now. */
 export async function probe(endpoint: string, timeoutMs = 500): Promise<boolean> {
+  validateEndpoint(endpoint);
   return await new Promise<boolean>((resolve) => {
     const socket = net.connect(endpoint);
     const done = (alive: boolean): void => {

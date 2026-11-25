@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer, useTextInputCapture } from "../../hooks/useKeyLayer.js";
 import type { ClientApi } from "../../../server/api.js";
 import { t, type MessageKey } from "../../i18n/index.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -34,10 +34,19 @@ type Screen =
 const DEFAULT_POLICY: QueuePolicy = { conditions: [], held: false, order: 0, sequential: true, continuation: "same-thread" };
 
 /** "At least [ 10 ] %": a number from 0 to 100, enter adds the condition. */
-function MinimumStep({ onSubmit }: { onSubmit: (minimum: number) => void }) {
+function MinimumStep({ onSubmit, onBack }: { onSubmit: (minimum: number) => void; onBack: () => void }) {
   const [text, setText] = useState("10");
   const valid = /^\d{1,3}$/u.test(text) && Number(text) <= 100;
-  useKeyboard((key) => { if (key.name === "return" || key.name === "kpenter") { if (valid) onSubmit(Number(text)); } });
+  useTextInputCapture({ onCancel: onBack });
+  useKeyLayer(
+    (key) => {
+      if (key.name === "return" || key.name === "kpenter") {
+        key.preventDefault();
+        if (valid) onSubmit(Number(text));
+      }
+    },
+    { capture: true, allowDuringTextInput: (key) => key.name === "return" || key.name === "kpenter" },
+  );
   return <box style={{ flexDirection: "column", flexGrow: 1 }}>
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, gap: 1 }}>
       <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("queue.minimum")}</text>
@@ -198,7 +207,7 @@ export function WorkQueueModal({ client, threads, screenWidth, screenHeight, onC
     } else if (screen.name === "minimum") {
       sub = t("queue.ask.minimum", { provider: providerName(screen.provider), window: windowChoice(screen.window).toLowerCase() });
       hints = [{ key: "enter", label: t("queue.cond.add") }, { key: "esc", label: t("queue.key.back"), onClick: pop }];
-      body = <MinimumStep onSubmit={(minimum) => addCondition({ type: "usage", provider: screen.provider, window: screen.window, minimum })} />;
+      body = <MinimumStep onBack={pop} onSubmit={(minimum) => addCondition({ type: "usage", provider: screen.provider, window: screen.window, minimum })} />;
     } else if (screen.name === "state") {
       sub = t("queue.ask.state", { provider: providerName(screen.provider) });
       body = list((["exhausted", "protected"] as const).map((state) => ({ key: state, label: t(state === "exhausted" ? "queue.pick.exhausted" : "queue.pick.protected"), onPick: () => push({ name: "mode", provider: screen.provider, state }) })));

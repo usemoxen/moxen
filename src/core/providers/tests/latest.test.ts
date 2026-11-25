@@ -1,17 +1,30 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { updateState } from "../../catalog/update.js";
-import { claudeChannel, forgetLatestVersions, latestVersions, type LatestDeps } from "../latest.js";
+import { ANTIGRAVITY_LATEST_RELEASE_URL, claudeChannel, forgetLatestVersions, latestVersions, VIBE_LATEST_RELEASE_URL, type LatestDeps } from "../latest.js";
 
 afterEach(() => forgetLatestVersions());
 
 const DOCTOR = (channel: string) => `Claude Code doctor\n\nRunning: native (2.1.293)\nAuto-updates: enabled\nAuto-update channel: ${channel}\n`;
 
-function world(tags: Record<string, string | null>, channel = "latest") {
+function world(
+  tags: Record<string, string | null>,
+  channel = "latest",
+  githubRelease?: Record<string, unknown> | null,
+  vibeRelease?: Record<string, unknown> | null,
+) {
   const urls: string[] = [];
   const deps: LatestDeps = {
     fetchJson: async (url) => {
       urls.push(url);
+      if (url === ANTIGRAVITY_LATEST_RELEASE_URL) {
+        if (githubRelease === undefined) throw new Error("404");
+        return githubRelease;
+      }
+      if (url === VIBE_LATEST_RELEASE_URL) {
+        if (vibeRelease === undefined) throw new Error("404");
+        return vibeRelease;
+      }
       const key = url.replace("https://registry.npmjs.org/", "");
       const version = tags[key];
       if (version === undefined) throw new Error("404");
@@ -39,16 +52,29 @@ describe("latestVersions", () => {
     "@openai%2Fcodex/latest": "0.164.0",
   };
 
-  it("asks the registry for the channel the install follows, and for OpenCode's newest", async () => {
-    const latest = world(TAGS, "latest");
+  it("asks the registry for Claude, OpenCode, Codex and GitHub Releases for Antigravity and Vibe", async () => {
+    const latest = world(TAGS, "latest", { tag_name: "v1.5.14" }, { tag_name: "v3.1.4" });
     expect(await latestVersions({}, latest.deps)).toEqual({
       claude: { latest: "2.1.293", channel: "latest" },
       opencode: { latest: "2.0.24", channel: null },
       codex: { latest: "0.164.0", channel: null },
+      antigravity: { latest: "1.5.14", channel: null },
+      vibe: { latest: "3.1.4", channel: null },
     });
     forgetLatestVersions();
-    const stable = world(TAGS, "stable");
-    expect((await latestVersions({}, stable.deps)).claude).toEqual({ latest: "2.1.285", channel: "stable" });
+    const stable = world(TAGS, "stable", { tag_name: "1.5.13" }, { tag_name: "3.1.3" });
+    const res = await latestVersions({}, stable.deps);
+    expect(res.claude).toEqual({ latest: "2.1.285", channel: "stable" });
+    expect(res.antigravity).toEqual({ latest: "1.5.13", channel: null });
+    expect(res.vibe).toEqual({ latest: "3.1.3", channel: null });
+  });
+
+  it("ignores Antigravity draft and prerelease entries", async () => {
+    const draft = world(TAGS, "latest", { tag_name: "1.6.0", draft: true });
+    expect((await latestVersions({}, draft.deps)).antigravity).toEqual({ latest: null, channel: null });
+    forgetLatestVersions();
+    const pre = world(TAGS, "latest", { tag_name: "1.6.0-beta.1", prerelease: true });
+    expect((await latestVersions({}, pre.deps)).antigravity).toEqual({ latest: null, channel: null });
   });
 
   it("answers null for what it could not read, never an error", async () => {
@@ -57,16 +83,20 @@ describe("latestVersions", () => {
       claude: { latest: null, channel: "latest" },
       opencode: { latest: null, channel: null },
       codex: { latest: null, channel: null },
+      antigravity: { latest: null, channel: null },
+      vibe: { latest: null, channel: null },
     });
-    const garbage = world({ "@opencode%2Fcli/latest": null, "@anthropic-ai%2Fclaude-code/latest": "not a version" });
+    const garbage = world({ "@opencode%2Fcli/latest": null, "@anthropic-ai%2Fclaude-code/latest": "not a version" }, "latest", { tag_name: "bad" }, { tag_name: "bad" });
     const result = await latestVersions({}, garbage.deps);
     expect(result.claude.latest).toBeNull();
     expect(result.opencode.latest).toBeNull();
+    expect(result.antigravity?.latest).toBeNull();
+    expect(result.vibe?.latest).toBeNull();
   });
 
   it("keeps an answer for a few minutes, and asks again for one it could not get", async () => {
     let clock = 0;
-    const first = world(TAGS);
+    const first = world(TAGS, "latest", { tag_name: "1.5.13" }, { tag_name: "3.1.4" });
     await latestVersions({}, { ...first.deps, now: () => clock });
     const asked = first.urls.length;
     clock += 5 * 60_000;

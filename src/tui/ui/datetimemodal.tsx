@@ -1,6 +1,6 @@
 import { t } from "../i18n/index.js";
 import { useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../hooks/useKeyLayer.js";
 
 import { DATE_FIELDS, FIELD_WIDTH, atLeast, earliestSchedule, fieldText, moveField, stepField, typeDigit, type DateField } from "../model/datepicker.js";
 import { markModalDismissed } from "../model/modalDismiss.js";
@@ -90,7 +90,7 @@ export function DateTimeModal({
     select(target);
   };
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") {
       markModalDismissed();
       onClose();
@@ -127,7 +127,7 @@ export function DateTimeModal({
         setTyped(result.typed);
       }
     }
-  });
+  }, { capture: true });
 
   const when = describeScheduled(at, new Date());
   const day = at.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });

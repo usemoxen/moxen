@@ -74,7 +74,7 @@ describe("list settings", () => {
     const model = field("models").items![0]!;
     expect(model.fields.find((entry) => entry.path === "family")?.effective).toEqual({ value: "qwen3", origin: "the model's name" });
     // Every other kind has no items.
-    expect(describeSettings(config).filter((entry) => entry.items).map((entry) => entry.descriptor.key)).toEqual([PROFILES, "mcpServers"]);
+    expect(describeSettings(config).filter((entry) => entry.items).map((entry) => entry.descriptor.key)).toEqual(["providers.acp.agents", PROFILES, "mcpServers"]);
   });
 
   it("lets the summary effort be only one its models list, and offers those", () => {

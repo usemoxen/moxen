@@ -4,8 +4,10 @@ import type { TestRendererSetup } from "@opentui/core/testing";
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import { DEFAULT_CONFIG, setConfigValue } from "../../../core/config.js";
 import type { CliConfig } from "../../../core/types.js";
-import { SETTINGS, describeSettings, type SettingDescriptor } from "../../../core/configschema.js";
+import { SETTINGS, describeAllAccountSettings, describeSettings, type SettingDescriptor } from "../../../core/configschema.js";
+import { summarizeProviderAccounts } from "../../../core/providers/accounts.js";
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
+import { AccountUsageRows, ProfileAccountHeader, ProvidersOverviewPanel } from "../../features/settings/providersoverview.js";
 import { SkillsPanel } from "../../features/settings/skillspanel.js";
 import { skillsClient } from "../skillsfixture.js";
 import { tx } from "../../i18n/index.js";
@@ -42,19 +44,21 @@ const slug = (text: string): string => text.toLowerCase().replace(/[^a-z0-9]+/g,
 const ref = (name: string, label: string, ...steps: Step[]): PageRef => ({ name: slug(name), label, steps });
 const page = (label: string): PageRef => ref(label, label, side(label));
 
-/** The sidebar, top to bottom, as the page lists it with no profiles or servers set. */
-export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex", "Model servers", "MCP servers", "Skills"].map(page);
+/** The sidebar, top to bottom, as the page lists it with no profiles or servers set (zero default providers). */
+export const DEFAULT_PAGES: readonly PageRef[] = ["General", "Defaults", "Sessions", "Long threads", "Agent context", "Memory", "Interface", "Git and forges", "Overview", "ACP agents", "Model servers", "MCP servers", "Skills"].map(page);
 
 const PROFILE_PAGES = ["Endpoint", "Models", "Sampling", "Compaction", "Behaviour", "Prompt", "Template quirks"];
 const SERVER_PAGES = ["Connection", "Who gets it", "In force"];
 
 /**
- * With things set the page grows: the Harness gets pages of its own (its
- * Defaults, Long threads and Sessions are the second rows of those labels),
- * and every profile and MCP server gets pages, wizards and editors.
+ * With things set the page grows: configured provider profiles appear directly
+ * under Providers (`Claude · Personal`, `ChatGPT · Personal`, `Antigravity · Personal`,
+ * plus opt-in `OpenCode`), the Harness gets pages of its own (its Defaults,
+ * Long threads and Sessions are the second rows of those labels), and every
+ * profile and MCP server gets pages, wizards and editors.
  */
 export const CONFIGURED_PAGES: readonly PageRef[] = [
-  ...["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Claude Code", "OpenCode", "Codex"].map(page),
+  ...["General", "Defaults", "Sessions", "Long threads", "Agent context", "Interface", "Git and forges", "Overview", "Antigravity · Main", "ChatGPT · Personal", "Claude · Personal", "Mistral Vibe", "OpenCode"].map(page),
   ref("Harness Defaults", "Defaults (Harness)", side("Defaults", 1)),
   page("Tools"),
   ref("Harness Long threads", "Long threads (Harness)", side("Long threads", 1)),
@@ -92,6 +96,60 @@ export const SETTINGS_PROVIDERS: ProviderSummary[] = [
   { instanceId: "codex", driver: "codex", displayName: "Codex", enabled: true, installed: true, status: null, authStatus: "chatgpt", models: models(["Codex model"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   { instanceId: "claudeAgent", driver: "claudeAgent", displayName: "Claude", enabled: true, installed: true, status: null, authStatus: null, models: models(["Claude Opus 5", "Claude Sonnet 5.5"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
   { instanceId: "opencode", driver: "opencode", displayName: "OpenCode", enabled: true, installed: true, status: null, authStatus: null, models: models(["GPT-5.5", "Kimi K3"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
+  { instanceId: "vibe", driver: "vibe", displayName: "Mistral Vibe", enabled: true, installed: true, status: null, authStatus: "os_keyring", models: models(["Mistral Large 4", "Mistral Medium"]), supportedRuntimeModes: null, usageLimits: null, skills: [] },
+  {
+    instanceId: "antigravity",
+    driver: "antigravity",
+    displayName: "Antigravity",
+    enabled: true,
+    installed: true,
+    status: null,
+    authStatus: "oauth",
+    models: [
+      {
+        slug: "gemini-4-neon",
+        name: "Gemini 4 Neon",
+        isCustom: false,
+        isDefault: true,
+        isHidden: false,
+        efforts: [
+          {
+            id: "effort",
+            label: "Effort",
+            currentValue: "high",
+            choices: [
+              { id: "low", label: "Low", isDefault: false },
+              { id: "medium", label: "Medium", isDefault: false },
+              { id: "high", label: "High", isDefault: true },
+              { id: "xhigh", label: "Extra", isDefault: false },
+            ],
+          },
+        ],
+      },
+      {
+        slug: "gemini-4-argon",
+        name: "Gemini 4 Argon",
+        isCustom: false,
+        isDefault: false,
+        isHidden: false,
+        efforts: [
+          {
+            id: "effort",
+            label: "Effort",
+            currentValue: "medium",
+            choices: [
+              { id: "low", label: "Low", isDefault: false },
+              { id: "medium", label: "Medium", isDefault: true },
+              { id: "high", label: "High", isDefault: false },
+            ],
+          },
+        ],
+      },
+    ],
+    supportedRuntimeModes: null,
+    usageLimits: null,
+    skills: [],
+  },
 ];
 
 const noop = (): void => {};
@@ -112,6 +170,21 @@ export const CONFIGURED: CliConfig = (() => {
       filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "."], disabled: true },
     },
     providers: {
+      claude: {
+        accounts: [{ id: "personal", label: "Personal" }],
+      },
+      chatgpt: {
+        accounts: [{ id: "personal", label: "Personal", email: "dev@example.test", planType: "plus" }],
+      },
+      antigravity: {
+        accounts: [{ id: "main", label: "Main" }],
+      },
+      opencode: {
+        enabled: true,
+      },
+      vibe: {
+        enabled: true,
+      },
       harness: {
         profiles: [
           { id: "local", label: "Local llama.cpp", apiFormat: "chat", baseUrl: "http://localhost:8080/v1", models: [{ id: "qwen3-coder", contextWindow: 131_072, vision: false }, { id: "gemma-4", contextWindow: 262_144, vision: true }] },
@@ -124,8 +197,8 @@ export const CONFIGURED: CliConfig = (() => {
     ["ui.theme", "catppuccin-mocha"],
     ["ui.backdrop", "static"],
     ["instructions", "Prefer small commits and say what you did not run."],
-    ["providers.claude.compactAtModels", "claude-opus-5=400k"],
-    ["providers.claude.webSearchOrder", "brave,native"],
+    ["providers.claude.accounts[personal].compactAtModels", "claude-opus-5=400k"],
+    ["providers.claude.accounts[personal].webSearchOrder", "brave,native"],
     ["longThreads.handoff", "auto"],
     ["git.historyLimit", "200"],
   ];
@@ -149,12 +222,19 @@ export const CONFIGURED: CliConfig = (() => {
 
 /** The settings page at `height`, taking up the whole stage. */
 export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG) {
-  const snapshot = { path: "/home/dev/.moxen/config.json", exists: true, settings: describeSettings(config) };
+  const snapshot = {
+    path: "/home/dev/.moxen/config.json",
+    exists: true,
+    settings: describeSettings(config),
+    accountSettings: describeAllAccountSettings(config),
+  };
+  const accounts = summarizeProviderAccounts(config.providers);
   return (
     <Stage width={WIDTH} height={height}>
       <SettingsModal
         client={skillsClient().api}
         snapshot={snapshot}
+        accounts={accounts}
         loading={false}
         saving={null}
         error={null}
@@ -172,8 +252,10 @@ export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG)
           codex: { ok: true, installed: true, version: "codex-cli 0.164.0", login: "inherit", minVersion: "0.164.0" },
           claude: { ok: true, installed: true, version: "2.1.293 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
           opencode: { ok: true, installed: true, version: "opencode v2.0.22", login: "inherit", minVersion: "2.0.0" },
+          antigravity: { ok: true, installed: true, version: "1.5.13", login: "inherit" },
+          vibe: { ok: true, installed: true, version: "3.1.4", login: "inherit" },
         }}
-        latest={{ enabled: true, claude: { latest: "2.1.293", channel: "latest" }, opencode: { latest: "2.0.24", channel: null } }}
+        latest={{ enabled: true, claude: { latest: "2.1.293", channel: "latest" }, opencode: { latest: "2.0.24", channel: null }, antigravity: { latest: "1.5.14", channel: null }, vibe: { latest: "3.1.4", channel: null } }}
         updating={new Set()}
         onUpdate={noop}
         providers={SETTINGS_PROVIDERS}
@@ -247,8 +329,12 @@ function pageOf(descriptor: SettingDescriptor): string {
     interface: "Interface",
     git: "Git and forges",
     "provider:codex": "Codex",
-    "provider:claude": "Claude Code",
+    "provider:claude": "Claude · Personal",
     "provider:opencode": "OpenCode",
+    "provider:antigravity": "Antigravity · Main",
+    "provider:vibe": "Mistral Vibe",
+    "provider:chatgpt": "ChatGPT · Personal",
+    "provider:acp": "ACP agents",
     "provider:harness": "Model servers",
     mcp: "MCP servers",
   };
@@ -335,4 +421,178 @@ export const SETTINGS_GALLERY: GalleryEntry[] = [...pageEntries, ...editorEntrie
   width: 90,
   height: 32,
   element: () => <Stage width={90} height={32}><SkillsPanel client={skillsClient().api} width={88} /></Stage>,
+}, {
+  id: "providers-overview",
+  group: "settings",
+  title: "Providers overview: multi-account logins and CLI updaters",
+  width: 90,
+  height: 30,
+  element: () => (
+    <Stage width={90} height={30}>
+      <ProvidersOverviewPanel
+        accounts={[
+          {
+            kind: "claude",
+            id: "personal",
+            instanceId: "claude/personal",
+            label: "Personal",
+            enabled: true,
+            homePath: "~/.claude-personal",
+            binaryPath: null,
+            launchArgs: null,
+            env: {},
+            model: null,
+            thinkingEffort: null,
+            email: null,
+            workspaceName: null,
+            planType: "Claude Pro",
+            signedIn: null,
+            codexHomePath: null,
+            codexBinaryPath: null,
+            codexLaunchArgs: null,
+            codexVerified: false,
+          },
+          {
+            kind: "chatgpt",
+            id: "work",
+            instanceId: "chatgpt/work",
+            label: "Work",
+            enabled: true,
+            homePath: null,
+            binaryPath: null,
+            launchArgs: null,
+            env: {},
+            model: null,
+            thinkingEffort: null,
+            email: "dev@example.test",
+            workspaceName: "Acme",
+            planType: "ChatGPT Plus",
+            signedIn: true,
+            codexHomePath: "~/.codex-work",
+            codexBinaryPath: null,
+            codexLaunchArgs: null,
+            codexVerified: true,
+          },
+        ]}
+        selectedInstance={null}
+        onSelectAccount={noop}
+        providers={SETTINGS_PROVIDERS}
+        usageByInstance={{
+          "chatgpt/work": {
+            checkedAt: "2026-11-22T02:00:00.000Z",
+            windows: [
+              { id: "session", kind: "session", label: "5h", usedPercent: 22, resetsAt: "2026-11-22T05:00:00.000Z" },
+              { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 45, resetsAt: null },
+            ],
+            unavailable: null,
+          },
+        }}
+        versions={{
+          claude: { ok: true, installed: true, version: "2.1.330 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
+          opencode: { ok: true, installed: true, version: "opencode v2.3.2", login: "inherit", minVersion: "2.0.0" },
+          codex: { ok: true, installed: true, version: "codex-cli 0.171.0", login: "inherit", minVersion: "0.164.0" },
+          antigravity: { ok: true, installed: true, version: "agy 1.5.14", login: "inherit", minVersion: "1.0.0" },
+          vibe: { ok: true, installed: true, version: "3.1.4", login: "inherit" },
+        }}
+        latest={{ enabled: true, claude: { latest: "2.1.330", channel: "latest" }, opencode: { latest: "2.3.2", channel: null }, codex: { latest: "0.171.0", channel: null }, antigravity: { latest: "1.5.14", channel: null }, vibe: { latest: "3.1.4", channel: null } }}
+        updating={new Set()}
+        updatingAll={false}
+        updateAllResults={null}
+        saving={false}
+        error={null}
+        width={86}
+        onSaveAccount={async () => true}
+        onToggleAccount={async () => undefined}
+        onRemoveAccount={async () => undefined}
+        onUpdate={noop}
+        onUpdateAll={noop}
+        onOpenSection={noop}
+        onClose={noop}
+      />
+    </Stage>
+  ),
+}, {
+  id: "profile-account-header",
+  group: "settings",
+  title: "Provider profile header: identity, auth, env, and remove",
+  width: 90,
+  height: 14,
+  element: () => (
+    <Stage width={90} height={14}>
+      <ProfileAccountHeader
+        account={{
+          kind: "chatgpt",
+          id: "work",
+          instanceId: "chatgpt/work",
+          label: "Work",
+          enabled: true,
+          homePath: null,
+          binaryPath: null,
+          launchArgs: null,
+          env: {},
+          model: null,
+          thinkingEffort: null,
+          email: "dev@example.test",
+          workspaceName: "Acme",
+          planType: "ChatGPT Plus",
+          signedIn: true,
+          codexHomePath: "~/.codex-work",
+          codexBinaryPath: null,
+          codexLaunchArgs: null,
+          codexVerified: true,
+        }}
+        providers={SETTINGS_PROVIDERS}
+        usageByInstance={{
+          "chatgpt/work": {
+            checkedAt: "2026-11-22T02:00:00.000Z",
+            windows: [
+              { id: "session", kind: "session", label: "5h", usedPercent: 22, resetsAt: "2026-11-22T05:00:00.000Z" },
+              { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 45, resetsAt: null },
+            ],
+            unavailable: null,
+          },
+        }}
+        versions={{
+          claude: { ok: true, installed: true, version: "2.1.330 (Claude Code)", login: "inherit", minVersion: "2.1.292" },
+          opencode: { ok: true, installed: true, version: "opencode v2.3.2", login: "inherit", minVersion: "2.0.0" },
+          codex: { ok: true, installed: true, version: "codex-cli 0.171.0", login: "inherit", minVersion: "0.164.0" },
+          antigravity: { ok: true, installed: true, version: "agy 1.5.14", login: "inherit", minVersion: "1.0.0" },
+          vibe: { ok: true, installed: true, version: "3.1.4", login: "inherit" },
+        }}
+        latest={{ enabled: true, claude: { latest: "2.1.330", channel: "latest" }, opencode: { latest: "2.3.2", channel: null }, codex: { latest: "0.171.0", channel: null }, antigravity: { latest: "1.5.14", channel: null }, vibe: { latest: "3.1.4", channel: null } }}
+        updating={new Set()}
+        saving={false}
+        error={null}
+        width={86}
+        onSaveAccount={async () => true}
+        onToggleAccount={async () => undefined}
+        onRemoveAccount={async () => undefined}
+        onUpdate={noop}
+        onRemoved={noop}
+      />
+    </Stage>
+  ),
+}, {
+  id: "account-usage-rows",
+  group: "settings",
+  title: "Account usage rows: aligned 0%, partial, and 100% quota bars",
+  width: 72,
+  height: 10,
+  element: () => (
+    <Stage width={72} height={10}>
+      <AccountUsageRows
+        heading="OpenCode Go"
+        width={68}
+        limits={{
+          checkedAt: "2026-11-22T02:00:00.000Z",
+          windows: [
+            { id: "session", kind: "session", label: "Session", usedPercent: 0, resetsAt: "2026-11-22T05:00:00.000Z" },
+            { id: "weekly", kind: "weekly", label: "Weekly", usedPercent: 60, resetsAt: "2026-11-28T05:00:00.000Z" },
+            { id: "monthly", kind: "monthly", label: "Monthly", usedPercent: 100, resetsAt: null },
+          ],
+          unavailable: null,
+        }}
+      />
+    </Stage>
+  ),
 }];

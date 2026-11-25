@@ -3,7 +3,7 @@ import { t } from "../../i18n/index.js";
 import { startPolling } from "../../hooks/poll.js";
 import { useTerminalVisible } from "../../hooks/useTerminalVisible.js";
 import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import type { ClientApi } from "../../../server/api.js";
 import {
@@ -125,7 +125,7 @@ export function BackgroundTasksModal({
   // Runtimes tick while anything shown is still running.
   const now = useAnimTick(detailTaskId === null ? ordered.length > 0 : !detailFinished, 1000);
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") {
       markModalDismissed();
       if (detailTaskId !== null) closeDetail();
@@ -154,7 +154,7 @@ export function BackgroundTasksModal({
     if (key.name === "down" || key.name === "j") {
       setIndex((current) => (ordered.length === 0 ? 0 : (current + 1) % ordered.length));
     }
-  });
+  }, { capture: true });
 
   const inner = Math.max(20, width - 4);
   const shell = (children: ReactNode) => (
@@ -215,7 +215,6 @@ export function BackgroundTasksModal({
             </box>
           </>
         ) : null}
-        {liveDetail?.stoppable === false ? <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("bgm.independentStopUnavailable")}</text> : null}
         <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1, justifyContent: "space-between" }}>
           <text fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{t("bgm.output_29c2")}</text>
           <text fg={COLOR.faint} bg={SURFACE.raised} selectable={false}>
@@ -318,7 +317,13 @@ export function BackgroundTasksModal({
         </scrollbox>
       )}
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
-        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>{ordered.length === 0 ? t("bgm.esc_close_dcf7") : t("bgm.select_enter_view_x_2458")}</OverflowText>
+        <OverflowText fg={COLOR.faint} bg={SURFACE.raised} selectable={false} width={inner}>
+          {ordered.length === 0
+            ? t("bgm.esc_close_dcf7")
+            : ordered[safeIndex]?.stoppable === false
+              ? t("bgm.select_enter_view_esc")
+              : t("bgm.select_enter_view_x_2458")}
+        </OverflowText>
       </box>
     </>,
   );

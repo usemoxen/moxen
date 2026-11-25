@@ -26,7 +26,7 @@ import {
 } from "./git/git.js";
 import { cliClient } from "./infra/client.js";
 import { doctor } from "./doctor.js";
-import { parseUpdatable, updateCommand } from "./update.js";
+import { parseUpdatable, updateAllCommand, updateCommand } from "./update.js";
 import { describeInstall, describeProgress, describeRollback, describeSelfUpdate, describeUpdate, selfUpdateCheck, selfUpdateInstall, selfUpdateMode, selfUpdateRollback, selfUpdateRun } from "./selfupdate.js";
 import { activeRemoteServer, configFlagGiven, useRemoteServer } from "./infra/client.js";
 import { describeStatus, disableRemote, enableRemote, forgetServer, listDevices, listServers, pairingCode, pairServer, remoteStatus, revokeDevice } from "./remote.js";
@@ -47,11 +47,21 @@ import {
   resolveProject,
 } from "./projects/projects.js";
 import {
+  chatgptLoginCli,
+  chatgptLogoutCli,
+  chatgptPairCodexCli,
   listEfforts,
   listModels,
+  listProviderAccounts,
+  loginProviderAccountCli,
   listProviders,
   listSkills,
+  parseAccountKind,
+  parseEnvAssignments,
+  removeProviderAccountCli,
+  saveProviderAccount,
   setModelHidden,
+  toggleProviderAccount,
 } from "./catalog/providers.js";
 import type { ProviderUsageLimits } from "../core/catalog/summary.js";
 import {
@@ -597,11 +607,23 @@ program.command("doctor").description("Check provider binaries, auth, store, and
 
 program
   .command("update")
-  .description("Update Claude Code, OpenCode or Codex with its own updater, and report the version before and after.")
-  .argument("<provider>", "claude | opencode | codex")
-  .action((provider: string) =>
+  .description("Update Claude Code, OpenCode, Codex, Antigravity or Mistral Vibe with its own updater, and report the version before and after.")
+  .argument("[provider]", "claude | opencode | codex | antigravity | vibe")
+  .option("--all", "Update all provider CLIs in parallel.")
+  .action((provider: string | undefined, options: { all?: boolean }) =>
     action(async () => {
       const context = await commandContext();
+      if (options.all === true) {
+        if (provider !== undefined) {
+          throw new CliError("INVALID_THREAD_OPTION", "Specify either a provider name or --all, not both.", { exitCode: 2 });
+        }
+        const { results, text } = await updateAllCommand(context.config);
+        writeSuccess({ results }, context, text);
+        return;
+      }
+      if (provider === undefined) {
+        throw new CliError("INVALID_THREAD_OPTION", "Specify a provider (claude, opencode, codex, antigravity, vibe) or --all.", { exitCode: 2 });
+      }
       const { update, text } = await updateCommand(context.config, parseUpdatable(provider));
       writeSuccess(update, context, text);
     }),
@@ -688,8 +710,13 @@ configCommand
       const context = await commandContext();
       await (await cliClient(context.config)).dispatch({ type: "settings.set", key, value });
       const { path: file, config } = await serverConfig(context);
+      // Turning Antigravity delegation on is the user's choice against
+      // Google's consumer terms: say plainly what it risks.
+      const antigravityWarning = key === "providers.antigravity.allowUnsupportedUse" && config.providers?.antigravity?.allowUnsupportedUse === true
+        ? "\nWarning: Google does not support delegation, automatic prompts or multiple accounts on Antigravity consumer plans and may suspend the account."
+        : "";
       // A secret is never echoed back.
-      writeSuccess({ path: file, config }, context, secretKeyName(key) !== null ? `Saved ${key} to the OS keychain.` : `Saved ${key}=${value}.`);
+      writeSuccess({ path: file, config }, context, secretKeyName(key) !== null ? `Saved ${key} to the OS keychain.` : `Saved ${key}=${value}.${antigravityWarning}`);
     }),
   );
 
@@ -1713,7 +1740,7 @@ skills.command("providers")
   .description("Choose providers for a skill package; all means every provider.")
   .requiredOption("--source <source>", "Skill source: agents or claude.")
   .requiredOption("--folder <folder>", "Skill package folder name.")
-  .requiredOption("--providers <kinds>", "Comma-separated claude,codex,opencode,harness; all for every provider.")
+  .requiredOption("--providers <kinds>", "Comma-separated claude,codex,opencode,harness,acp,antigravity,vibe; all for every provider.")
   .option("--project <project-id>", "Registered project; omit for global skills.")
   .action((options: { source: string; folder: string; providers: string; project?: string }) => action(async () => {
     const context = await commandContext();
@@ -1733,7 +1760,7 @@ usage.command("status").description("Show forecasts and the durable recovery que
     ...result.queue.map((row, index) => `${index + 1}\t${row.threadId}\t${row.phase}\t${row.title}${row.error ? `\t${row.error}` : ""}`),
   ].join("\n") || "No usage forecasts or protected threads.");
 }));
-usage.command("wrap").description("Pause and wrap up every running thread on a provider account.").requiredOption("--provider <driver>", "The quota owner: claude or codex.").action((options: { provider: string }) => action(async () => {
+usage.command("wrap").description("Pause and wrap up every running thread on a provider account.").requiredOption("--provider <driver>", "The quota owner: claude, codex, antigravity or vibe.").action((options: { provider: string }) => action(async () => {
   const context = await commandContext();
   const client = await cliClient(context.config);
   const result = await client.dispatch({ type: "usage.wrap", provider: options.provider });
@@ -1777,6 +1804,246 @@ providers
         ...result.commands.map((command) => `command\t/${command.name}\t${command.description ?? ""}`),
       ];
       writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No skills or commands.");
+    }),
+  );
+
+const providerAccounts = providers
+  .command("accounts")
+  .description("Manage configured multi-account logins (claude/<id>, chatgpt/<id>, antigravity/<id>).");
+
+providerAccounts
+  .command("list")
+  .description("List configured provider accounts.")
+  .action(() =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await listProviderAccounts(context.config);
+      const lines = result.accounts.map((account) => {
+        const detail = account.email ?? account.homePath ?? account.codexHomePath ?? "-";
+        const plan = account.planType ? ` (${account.planType})` : "";
+        // A gated Antigravity account is disabled by the off-by-default
+        // setting, not by the user's own toggle: the reason says how to fix it.
+        const state = account.disabledReason !== undefined && account.disabledReason !== null
+          ? `disabled - ${account.disabledReason}`
+          : account.enabled
+            ? "enabled"
+            : "disabled";
+        return `${account.instanceId}\t${account.label}\t${state}\t${detail}${plan}\t${account.model ?? "-"}`;
+      });
+      writeSuccess(result, context, lines.length > 0 ? lines.join("\n") : "No configured accounts.");
+    }),
+  );
+
+providerAccounts
+  .command("save")
+  .alias("add")
+  .description("Create or update a provider account.")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug (e.g. personal, work)")
+  .option("--label <name>", "Human-readable display name.")
+  .option("--home <path>", "Isolated config/home directory (Claude CLAUDE_CONFIG_DIR or Antigravity HOME).")
+  .option("--binary <path>", "Override executable path for this account.")
+  .option("--launch-args <args>", "Additional CLI launch arguments.")
+  .option("--env <KEY=VALUE>", "Non-secret environment variable (repeatable).", (value: string, prev: string[]) => [...prev, value], [] as string[])
+  .option("--model <slug>", "Default model slug for this account.")
+  .option("--effort <level>", "Default thinking effort for this account.")
+  .option("--codex-home <path>", "Paired Codex companion CODEX_HOME (ChatGPT accounts only).")
+  .option("--codex-binary <path>", "Paired Codex binary path override (ChatGPT accounts only).")
+  .option("--codex-launch-args <args>", "Paired Codex launch arguments (ChatGPT accounts only).")
+  .option("--disabled", "Create or save this account disabled.")
+  .action(
+    (
+      kind: string,
+      id: string,
+      options: {
+        label?: string;
+        home?: string;
+        binary?: string;
+        launchArgs?: string;
+        env?: string[];
+        model?: string;
+        effort?: string;
+        codexHome?: string;
+        codexBinary?: string;
+        codexLaunchArgs?: string;
+        disabled?: boolean;
+      },
+    ) =>
+      action(async () => {
+        const context = await commandContext();
+        const env = options.env && options.env.length > 0 ? parseEnvAssignments(options.env) : undefined;
+        const result = await saveProviderAccount(context.config, {
+          kind: parseAccountKind(kind),
+          id,
+          ...(options.label !== undefined ? { label: options.label } : {}),
+          ...(options.disabled === true ? { enabled: false } : {}),
+          ...(options.home !== undefined ? { homePath: options.home } : {}),
+          ...(options.binary !== undefined ? { binaryPath: options.binary } : {}),
+          ...(options.launchArgs !== undefined ? { launchArgs: options.launchArgs } : {}),
+          ...(env !== undefined ? { env } : {}),
+          ...(options.model !== undefined ? { model: options.model } : {}),
+          ...(options.effort !== undefined ? { thinkingEffort: options.effort } : {}),
+          ...(options.codexHome !== undefined ? { codexHomePath: options.codexHome } : {}),
+          ...(options.codexBinary !== undefined ? { codexBinaryPath: options.codexBinary } : {}),
+          ...(options.codexLaunchArgs !== undefined ? { codexLaunchArgs: options.codexLaunchArgs } : {}),
+        });
+        writeSuccess(
+          result,
+          context,
+          `${result.created ? "Added" : "Updated"} ${result.account.instanceId} (${result.account.label}).`,
+        );
+      }),
+  );
+
+providerAccounts
+  .command("enable")
+  .description("Enable a configured provider account.")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug")
+  .action((kind: string, id: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await toggleProviderAccount(context.config, parseAccountKind(kind), id, true);
+      writeSuccess(result, context, `Enabled ${result.account.instanceId}.`);
+    }),
+  );
+
+providerAccounts
+  .command("disable")
+  .description("Disable a configured provider account without removing it.")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug")
+  .action((kind: string, id: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await toggleProviderAccount(context.config, parseAccountKind(kind), id, false);
+      writeSuccess(result, context, `Disabled ${result.account.instanceId}.`);
+    }),
+  );
+
+providerAccounts
+  .command("remove")
+  .description("Remove a configured provider account.")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug")
+  .action((kind: string, id: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await removeProviderAccountCli(context.config, parseAccountKind(kind), id);
+      writeSuccess(result, context, result.removed ? `Removed ${kind}/${id}.` : `No account ${kind}/${id} was configured.`);
+    }),
+  );
+
+providerAccounts
+  .command("login")
+  .description("Sign in a configured account's CLI inside its isolated profile folder (claude, antigravity, or chatgpt Codex companion).")
+  .argument("<kind>", "claude | chatgpt | antigravity")
+  .argument("<id>", "Account slug")
+  .option("--home <path>", "Optional isolated profile folder override (defaults to Moxen's managed folder).")
+  .option("--no-open", "Print the login URL without opening a browser.")
+  .action((kind: string, id: string, options: { home?: string; open?: boolean }) =>
+    action(async () => {
+      const context = await commandContext();
+      const parsedKind = parseAccountKind(kind);
+      const result = await loginProviderAccountCli(context.config, {
+        kind: parsedKind,
+        id,
+        ...(options.home !== undefined ? { homePath: options.home } : {}),
+        noOpen: options.open === false || context.json,
+      });
+      const text =
+        parsedKind === "chatgpt"
+          ? result.verified
+            ? `Signed in and paired Codex companion for chatgpt/${id}${result.homePath ? ` (${result.homePath})` : ""}.`
+            : `${result.reason ?? "Signed in Codex companion, pending verification."}${result.needsConfirmation ? " Re-run `moxen providers chatgpt pair-codex --confirm-workspace` to confirm." : ""}`
+          : `Signed in ${parsedKind}/${id}${result.homePath ? ` (${result.homePath})` : ""}.`;
+      writeSuccess(result, context, text);
+    }),
+  );
+
+const chatgptCli = providers
+  .command("chatgpt")
+  .description("Sign in with ChatGPT (OAuth 2.0 + OIDC) and pair a verified Codex companion.");
+
+chatgptCli
+  .command("login")
+  .description("Sign in to a ChatGPT account via OAuth 2.0 PKCE + OIDC.")
+  .argument("<id>", "Account slug (e.g. personal, work)")
+  .option("--label <name>", "Human-readable display name.")
+  .option("--no-open", "Print the authorization URL without opening a browser.")
+  .option("--callback-url <url>", "Complete login from a pasted callback URL instead of waiting on loopback.")
+  .action((id: string, options: { label?: string; open?: boolean; callbackUrl?: string }) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await chatgptLoginCli(context.config, {
+        accountId: id,
+        ...(options.label ? { label: options.label } : {}),
+        noOpen: options.open === false || context.json,
+        ...(options.callbackUrl ? { callbackUrl: options.callbackUrl } : {}),
+      });
+      const who = result.account.email ?? result.account.instanceId;
+      writeSuccess(result, context, `Signed in ${result.account.instanceId} (${who}).`);
+    }),
+  );
+
+chatgptCli
+  .command("logout")
+  .description("Revoke tokens and clear OS keychain credentials for a ChatGPT account.")
+  .argument("<id>", "Account slug")
+  .action((id: string) =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await chatgptLogoutCli(context.config, id);
+      writeSuccess(result, context, `Signed out chatgpt/${id}.`);
+    }),
+  );
+
+chatgptCli
+  .command("pair-codex")
+  .description("Pair and verify a Codex companion (CODEX_HOME) for live usage windows and image generation.")
+  .argument("<id>", "Account slug")
+  .option("--codex-home <path>", "Path to the Codex companion CODEX_HOME directory.")
+  .option("--codex-binary <path>", "Optional codex binary override.")
+  .option("--codex-launch-args <args>", "Optional codex launch arguments.")
+  .option("--confirm-workspace", "Confirm workspace pairing when email matches without a shared workspace ID.")
+  .action(
+    (
+      id: string,
+      options: { codexHome?: string; codexBinary?: string; codexLaunchArgs?: string; confirmWorkspace?: boolean },
+    ) =>
+      action(async () => {
+        const context = await commandContext();
+        const result = await chatgptPairCodexCli(context.config, {
+          accountId: id,
+          ...(options.codexHome !== undefined ? { codexHomePath: options.codexHome } : {}),
+          ...(options.codexBinary !== undefined ? { codexBinaryPath: options.codexBinary } : {}),
+          ...(options.codexLaunchArgs !== undefined ? { codexLaunchArgs: options.codexLaunchArgs } : {}),
+          ...(options.confirmWorkspace === true ? { confirmWorkspace: true } : {}),
+        });
+        const text = result.verified
+          ? `Paired verified Codex companion for chatgpt/${id}${result.codexWorkspaceName ? ` (${result.codexWorkspaceName})` : ""}.`
+          : `${result.reason ?? "Could not verify Codex companion."}${result.needsConfirmation ? " Re-run with --confirm-workspace to confirm." : ""}`;
+        writeSuccess(result, context, text);
+      }),
+  );
+
+chatgptCli
+  .command("status")
+  .description("Show Sign in with ChatGPT account status and Codex companion pairing.")
+  .argument("[id]", "Optional account slug")
+  .action((id: string | undefined) =>
+    action(async () => {
+      const context = await commandContext();
+      const { accounts } = await listProviderAccounts(context.config);
+      const filtered = accounts.filter(
+        (account) => account.kind === "chatgpt" && (id === undefined || account.id === id.trim().toLowerCase()),
+      );
+      const lines = filtered.map((account) => {
+        const auth = account.signedIn ? `signed-in (${account.email ?? "verified"})` : "not-signed-in";
+        const codex = account.codexVerified ? `codex-verified (${account.codexHomePath ?? "default"})` : "codex-unpaired";
+        return `${account.instanceId}\t${account.label}\t${auth}\t${account.planType ?? "-"}\t${codex}`;
+      });
+      writeSuccess({ accounts: filtered }, context, lines.length > 0 ? lines.join("\n") : "No ChatGPT accounts configured.");
     }),
   );
 

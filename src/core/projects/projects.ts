@@ -152,6 +152,15 @@ export function projectTitle(workspaceRoot: string): string {
   return path.basename(workspaceRoot) || "project";
 }
 
+/**
+ * Project-title equality: trim and collapse inner whitespace runs, like the
+ * `oneLine` helper in `src/core/memory/memory.ts` and the desktop's rename
+ * field. Comparisons stay case-sensitive.
+ */
+export function normalizeProjectTitle(title: string): string {
+  return title.replace(/\s+/gu, " ").trim();
+}
+
 /** Non-deleted projects. Pure; kept for envelope assembly over ProjectEnvelope rows. */
 export function activeProjects<P extends ProjectEnvelope>(projects: readonly P[]): P[] {
   return projects.filter((project) => project.deletedAt == null);
@@ -172,10 +181,27 @@ export async function ensureStoredProject(root: string, input: EnsureProjectInpu
       details: { workspaceRoot: normalized, projectPolicy: policy },
     });
   }
+  const all = await loadAll(root);
+  // A removed project is a soft delete: reopening its folder revives it with
+  // its id, so its threads and per-project settings come back. A supplied
+  // title renames the revived row; a supplied id that differs from the
+  // revived row's id is ignored — the revived row keeps its id.
+  const deleted = all.find(
+    (entry) => entry.deletedAt != null && workspaceRootsEqual(entry.workspaceRoot, normalized),
+  );
+  if (deleted) {
+    const now = input.now ?? (() => new Date().toISOString());
+    const title = normalizeProjectTitle(input.title ?? "") || deleted.title;
+    const revived: StoredProject = { ...deleted, title, workspaceRoot: normalized, deletedAt: null, updatedAt: now() };
+    await saveAll(
+      root,
+      all.map((entry) => (entry.id === deleted.id ? revived : entry)),
+    );
+    return { project: revived, created: false, command: null };
+  }
   const now = input.now ?? (() => new Date().toISOString());
   const createdAt = now();
-  const title = input.title?.trim() || projectTitle(normalized);
-  const all = await loadAll(root);
+  const title = normalizeProjectTitle(input.title ?? "") || projectTitle(normalized);
   const id = input.id?.trim() || randomUUID();
   if (input.id?.trim() && all.some((entry) => entry.id === id)) {
     throw new CliError("PROJECT_ALREADY_EXISTS", `A project already exists with id ${id}.`, {
@@ -196,6 +222,73 @@ export async function ensureStoredProject(root: string, input: EnsureProjectInpu
   };
   await saveAll(root, [...all, project]);
   return { project, created: true, command: buildProjectCreateCommand(normalized, title, createdAt, project.id) };
+}
+
+/** Renames a project: only its title changes, threads keep pointing at it. */
+export async function renameStoredProject(
+  root: string,
+  projectId: string,
+  title: string,
+  now: () => string = () => new Date().toISOString(),
+): Promise<StoredProject> {
+  const normalized = normalizeProjectTitle(title);
+  if (!normalized) {
+    throw new CliError("INVALID_PROJECT", "A project title cannot be empty.", { exitCode: 2 });
+  }
+  const all = await loadAll(root);
+  const at = all.findIndex((entry) => entry.id === projectId);
+  if (at < 0 || all[at]?.deletedAt != null) {
+    throw new CliError("PROJECT_NOT_FOUND", `No moxen project exists with id ${projectId}.`, {
+      details: { projectId },
+    });
+  }
+  const conflict = all.find(
+    (entry) => entry.id !== projectId && entry.deletedAt == null && normalizeProjectTitle(entry.title) === normalized,
+  );
+  if (conflict) {
+    throw new CliError("PROJECT_ALREADY_EXISTS", `A project already exists with title "${normalized}".`, {
+      exitCode: 4,
+      details: { projectId, title: normalized, conflictingProjectId: conflict.id },
+    });
+  }
+  const renamed: StoredProject = { ...all[at]!, title: normalized, updatedAt: now() };
+  await saveAll(root, all.map((entry, index) => (index === at ? renamed : entry)));
+  return renamed;
+}
+
+/** Rewrite stored projects in place when a migration updates fields like `defaultModelSelection`. */
+export async function rewriteStoredProjects(
+  root: string,
+  transform: (project: StoredProject) => StoredProject | null,
+): Promise<number> {
+  const all = await loadAll(root);
+  let changed = 0;
+  const next = all.map((entry) => {
+    const updated = transform(entry);
+    if (updated === null) return entry;
+    changed += 1;
+    return updated;
+  });
+  if (changed > 0) await saveAll(root, next);
+  return changed;
+}
+
+/** Removes a project: a soft delete, so its threads stay readable. */
+export async function removeStoredProject(
+  root: string,
+  projectId: string,
+  now: () => string = () => new Date().toISOString(),
+): Promise<StoredProject> {
+  const all = await loadAll(root);
+  const at = all.findIndex((entry) => entry.id === projectId);
+  if (at < 0 || all[at]?.deletedAt != null) {
+    throw new CliError("PROJECT_NOT_FOUND", `No moxen project exists with id ${projectId}.`, {
+      details: { projectId },
+    });
+  }
+  const removed: StoredProject = { ...all[at]!, deletedAt: now(), updatedAt: now() };
+  await saveAll(root, all.map((entry, index) => (index === at ? removed : entry)));
+  return removed;
 }
 
 function buildProjectCreateCommand(

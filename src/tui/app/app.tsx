@@ -5,7 +5,8 @@ import os from "node:os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CliRenderer, ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
-import { useKeyboard, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
+import { useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
+import { useKeyLayer } from "../hooks/useKeyLayer.js";
 
 import { applyShellFrame, emptyShellState, threadStatus, visibleThreads, type ShellState } from "../model/shell.js";
 import { Timeline } from "../features/timeline/timeline.js";
@@ -77,7 +78,7 @@ import {
 } from "../../core/attachments.js";
 import type { ImageAttachmentUpload } from "../../core/attachments.js";
 import { clipboardFileName } from "../model/hostClipboard.js";
-import { defaultEffortId, describeEffort, isEffortDescriptor, modelRowDetail, turnModelSelection } from "../model/display.js";
+import { defaultEffortId, describeEffort, findProviderForInstance, isEffortDescriptor, modelRowDetail, turnModelSelection } from "../model/display.js";
 import { configuredDefaultModel } from "../model/settings.js";
 import { formatContextUsage, formatTokenCount, groupTurns } from "../model/turns.js";
 import { waitSpans } from "../model/waits.js";
@@ -156,7 +157,7 @@ import { useTerminalVisible } from "../hooks/useTerminalVisible.js";
 import { useContextBreakdown, usePlanUsage, useSidePanel, useUsageProtection } from "../features/sidepanel/useSidePanel.js";
 import { isProtectCommand } from "../model/usagepause.js";
 import { threadProtectionNotice, usageProtectionNotices } from "../model/usageprotection.js";
-import { agentThreads, effectiveContextBreakdown, nativeSubagents, planUsageGauges, type SideTab } from "../model/sidepanel.js";
+import { agentThreads, compactPlanUsage, effectiveContextBreakdown, nativeSubagents, planUsageGauges, providerUsageLimitsFor, type SideTab } from "../model/sidepanel.js";
 import { useComposer } from "../features/composer/useComposer.js";
 import { useProviderCatalog } from "../features/pickers/useProviderCatalog.js";
 import { NO_PROJECT, useThreadCreation } from "./hooks/useThreadCreation.js";
@@ -867,22 +868,19 @@ export function App({
   };
 
   /**
-   * Reports a dispatched turn: toasts on acceptance, and on rejection the
-   * prompt it carried — text and images both — back in the draft. Chips and
-   * pending images are only cleared once the turn is accepted, so a rejection
-   * loses nothing.
+   * Reports a dispatched turn: toasts on acceptance, and on rejection puts the
+   * prompt it carried — text, images, and attached paths — back in the draft.
+   * Draft, pending images, and path chips are consumed when `send` fires so a
+   * follow-up message sent while this request is still in flight never re-sends
+   * them (nor does a late ACK wipe out images pasted into the next draft).
    */
   const delivered = (
     sent: ReturnType<typeof dispatchTurn>,
-    sourceId: string,
     restoreUnsent: () => void,
-    attachments: readonly ImageAttachmentUpload[],
     busyDelivery: "steer" | "queue",
     scheduledFor?: Date,
   ): void => {
     void sent.then((result) => {
-      filePaths.clear(sourceId);
-      writePending(sourceId, []);
       const continueAt = usageBanner.banner?.continueAt ?? null;
       if (scheduledFor === undefined && result.status === "queued" && !sessionRunningRef.current && continueAt !== null) {
         toasts.push("queued", "info", t("send.queuedAfterContinue", { at: clock(continueAt) }), COPY_TOAST_MS);
@@ -898,7 +896,6 @@ export function App({
     }).catch((cause: unknown) => {
       setError(String(cause).slice(0, 120));
       restoreUnsent();
-      restoreUnsentAttachments(sourceId, attachments);
     });
   };
 
@@ -941,11 +938,20 @@ export function App({
     const sourceId = selected.id;
     const parsed = extractMentions(trimmed);
     const attachedPaths = filePaths.items;
-    // Enter consumes the draft at once, so every Enter below is single-flight:
-    // a second Enter finds an empty draft. Anything typed while the send waits
-    // lands in a fresh draft and is kept after the restored text on a drop.
+    const pendingAttachments = pending;
+    // Enter consumes the draft, pending images, and attached paths at once, so
+    // every Enter below is single-flight: a follow-up send while this request
+    // is in flight finds an empty draft and empty attachments, and never sends
+    // the same images twice. Anything typed or pasted while the send waits is
+    // preserved beside the restored prompt on a drop.
     resetDraft(sourceId);
-    const restoreUnsent = () => restoreUnsentDraft(sourceId, trimmed);
+    writePending(sourceId, []);
+    filePaths.clear(sourceId);
+    const restoreUnsent = () => {
+      restoreUnsentDraft(sourceId, trimmed);
+      restoreUnsentAttachments(sourceId, pendingAttachments);
+      filePaths.restore(sourceId, attachedPaths);
+    };
     // A send started while the Shift+Tab switch is still reaching the server
     // waits for it, so the prompt runs in the mode the composer shows. A send
     // the gate drops disarms its one-off and restores its text instead of
@@ -953,12 +959,12 @@ export function App({
     // why, except a hung switch, which names itself here. A dropped scheduled
     // or queued send says its schedule went with it, so the retry is a choice.
     void interaction.gateSend(() => {
-      if (parsed.paths.length === 0 && pending.length === 0) {
-        delivered(dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue), sourceId, restoreUnsent, [], busyDelivery, scheduledFor);
+      if (parsed.paths.length === 0 && pendingAttachments.length === 0) {
+        delivered(dispatchTurn(promptWithPaths(trimmed, attachedPaths), [], busyDelivery, scheduledFor, queue), restoreUnsent, busyDelivery, scheduledFor);
         return;
       }
       void buildImageAttachments(parsed.paths, cwd ?? process.cwd(), (name, mimeType, bytes) =>
-        shrinkForAttach(name, mimeType, bytes, pending.length + parsed.paths.length > IMAGE_LIMITS.manyImages),
+        shrinkForAttach(name, mimeType, bytes, pendingAttachments.length + parsed.paths.length > IMAGE_LIMITS.manyImages),
       ).then((built) => {
         if (built.error !== null) {
           setError(built.error.slice(0, 120));
@@ -967,14 +973,14 @@ export function App({
         }
         // Pasted and @-mentioned together: the server refuses the same, but
         // here the text is restored and nothing is sent.
-        const imageError = imageSetError([...pending, ...built.attachments]);
+        const imageError = imageSetError([...pendingAttachments, ...built.attachments]);
         if (imageError !== null) {
           setError(t("send.cannot", { why: tx(imageError) }).slice(0, 160));
           restoreUnsent();
           return;
         }
-        const attachments = [...pending, ...built.attachments];
-        delivered(dispatchTurn(promptWithPaths(parsed.text, attachedPaths), attachments, busyDelivery, scheduledFor, queue), sourceId, restoreUnsent, attachments, busyDelivery, scheduledFor);
+        const attachments = [...pendingAttachments, ...built.attachments];
+        delivered(dispatchTurn(promptWithPaths(parsed.text, attachedPaths), attachments, busyDelivery, scheduledFor, queue), restoreUnsent, busyDelivery, scheduledFor);
       });
     }).then((result) => {
       if (result === "sent") return;
@@ -1096,7 +1102,7 @@ export function App({
       closePicker,
     });
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     // Esc closes the full-screen image from any pane (the composer's own Esc goes through `escapeComposer`).
     if (key.name === "escape" && focus !== "composer" && !quitConfirmOpen && picker === null && closeImageViewer()) return;
     // The full-size quit confirm owns its keys exactly like a modal does:
@@ -1285,7 +1291,7 @@ export function App({
       return;
     }
     scrollPane(chatScrollRef.current, key.name);
-  });
+  }, { priority: -10 });
 
   // Cancelling a delegated task's automatic continue asks whether its parent
   // hears about it; the modal below owns that choice.
@@ -1388,6 +1394,7 @@ export function App({
     providersError,
     reload: reloadProviders,
     model,
+    accountLabel,
     effort,
     permission,
     permissionChoices,
@@ -1434,7 +1441,7 @@ export function App({
   // -- side panel (Diff / Agents / Context / Background) --------------------
   const sidePanelOpen = sidePanel.tab !== null && !creating && !showRunView;
   const turnKey = `${selected?.latestTurn?.turnId ?? ""}:${selected?.latestTurn?.state ?? ""}`;
-  const currentProvider = providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId) ?? null;
+  const currentProvider = findProviderForInstance(providers, effectiveModelSelection?.instanceId) ?? null;
   const [planUsageRead, setPlanUsageRead] = useState(false);
   const planUsage = usePlanUsage(
     client,
@@ -2271,16 +2278,18 @@ export function App({
                       onPick: () => (setBackgroundTaskId(undefined), setPicker("background-tasks")),
                     },
                   ]),
-              // One row per background task running in the session.
-              ...background.map((task) => ({
-                key: `background:stop:${task.taskId}`,
-                label: t("bg.stop", { title: backgroundTaskTitle(task) }),
-                meta: task.taskType === "local_agent" ? "agent" : "shell",
-                onPick: () => {
-                  closePicker("chat");
-                  stopBackgroundTask(task);
-                },
-              })),
+              // One row per stoppable background task running in the session.
+              ...background
+                .filter((task) => task.stoppable !== false)
+                .map((task) => ({
+                  key: `background:stop:${task.taskId}`,
+                  label: t("bg.stop", { title: backgroundTaskTitle(task) }),
+                  meta: task.taskType === "local_agent" ? "agent" : "shell",
+                  onPick: () => {
+                    closePicker("chat");
+                    stopBackgroundTask(task);
+                  },
+                })),
               deleteSupported
                 ? {
                     key: "thread:delete",
@@ -2413,6 +2422,15 @@ export function App({
                   providerUpdates.update("codex");
                 },
               },
+              {
+                key: "update:vibe",
+                label: t("app.update_vibe"),
+                meta: "uv tool upgrade mistral-vibe", // i18n-exempt: executable command
+                onPick: () => {
+                  closePicker("chat");
+                  providerUpdates.update("vibe");
+                },
+              },
             ],
           },
           helpSection(),
@@ -2517,9 +2535,9 @@ export function App({
     }
     if (picker === "effort") {
       const current = effectiveModelSelection;
-      const catalogModel = providers
-        .find((provider) => provider.instanceId === current?.instanceId)
-        ?.models.find((model) => model.slug === current?.model);
+      const catalogModel = findProviderForInstance(providers, current?.instanceId)?.models.find(
+        (model) => model.slug === current?.model,
+      );
       const descriptors = catalogModel?.efforts ?? [];
       return {
         kind: "sliders",
@@ -2553,6 +2571,18 @@ export function App({
     // Hidden models (`providerModelPreferences`) are skipped except the
     // current one, which stays marked so a since-hidden selection still
     // reads.
+    const modelHeaderUsage = (provider: (typeof providers)[number]) => {
+      const limits = providerUsageLimitsFor(planUsage, provider);
+      const summary = compactPlanUsage(limits, (resetsAt) => {
+        const target = new Date(resetsAt);
+        return Number.isNaN(target.getTime()) ? null : `↻ ${untilLabel(target, now).replace(/^in /u, "")}`;
+      });
+      if (!summary) return {};
+      return {
+        headerMeta: summary.text,
+        headerMetaColor: summary.tone === "danger" ? COLOR.danger : summary.tone === "warn" ? COLOR.warn : COLOR.dim,
+      };
+    };
     if (creating) {
       return {
         kind: "list",
@@ -2573,6 +2603,7 @@ export function App({
           })
           .map(({ provider, models, pinned }) => ({
             header: provider.displayName ?? provider.instanceId,
+            ...modelHeaderUsage(provider),
             rows: models.map((model) => ({
               key: `${provider.instanceId}:${model.slug}`,
               label: model.name,
@@ -2587,18 +2618,22 @@ export function App({
     // no in-picker provider switch, so only that provider's models are offered
     // (even when the instance has since been disabled — the thread is already
     // on it). Hidden models are skipped except the current one.
-    const provider = providers.find((candidate) => candidate.instanceId === current?.instanceId);
+    const provider = findProviderForInstance(providers, current?.instanceId);
     const offered = provider === undefined ? [] : offerableModels(provider, current?.model);
+    const activeUsageHeader = provider === undefined ? {} : modelHeaderUsage(provider);
     return {
       kind: "list",
       sections: [
         {
+          ...(provider !== undefined && activeUsageHeader.headerMeta !== undefined
+            ? { header: provider.displayName ?? provider.instanceId, ...activeUsageHeader }
+            : {}),
           rows: offered.map((model) => ({
             key: `${provider?.instanceId}:${model.slug}`,
             label: model.name,
             ...modelRowDetail(model),
             selected: current?.model === model.slug,
-            onPick: () => pickModel({ instanceId: provider!.instanceId, model: model.slug }),
+            onPick: () => pickModel({ instanceId: current?.instanceId ?? provider!.instanceId, model: model.slug }),
           })),
         },
       ],
@@ -2938,14 +2973,13 @@ export function App({
           >
             {/* Behind the empty state only, unmounted (zero cost) in
                 thread view: the selected model's scene when it has one
-                (`ui/scenes/`, a reading well dimmed under the composer),
-                else the faint control-plane texture — grid + drifting
-                status dots, zinc palette — easing between them as the
-                model changes. offsetX is the pane's raw terminal
-                origin (the builder mods it) and the field spans the whole
-                screen with the sidebar's — one lattice, one swarm.
-                Foreground column sits above at zIndex 1 with its own opaque
-                surfaces so text never seams. */}
+                (`ui/scenes/`, scoped to this pane with a reading well dimmed
+                under the composer), else the faint control-plane texture —
+                grid + drifting status dots, zinc palette, sharing the full
+                terminal field with the sidebar's lattice and swarm — easing
+                between them as the model changes. Foreground column sits
+                above at zIndex 1 with its own opaque surfaces so text never
+                seams. */}
             {ui?.backdrop === "off" ? null : (
               <SceneBackdrop
                 scene={creatingScene ?? "grid"}
@@ -3011,6 +3045,7 @@ export function App({
                 focused={composerFocused}
                 placeholder={composerPlaceholder}
                 model={model}
+                accountLabel={accountLabel}
                 modelColor={modelColor}
                 effort={effort === null || effort === undefined ? effort : tx(effort)}
                 permission={permission}
@@ -3195,6 +3230,7 @@ export function App({
             placeholder={composerPlaceholder}
             suggestion={suggestedPrompt}
             model={model}
+            accountLabel={accountLabel}
             modelColor={modelColor}
             effort={effort === null || effort === undefined ? effort : tx(effort)}
             permission={permission}
@@ -3283,7 +3319,7 @@ export function App({
                   sidePanel.tab === "git" ? (
                     <GitFooter overview={gitPanel.overview} forge={gitPanel.forge} width={diffPanel.diffWidth} />
                   ) : sidePanel.tab === "agents" && delegatedInfo !== null ? null : sidePanel.tab === "agents" ? (
-                    <text fg={COLOR.dim} selectable={false}>{t("agents.summary", { delegated: agentRows.length, subagents: subagentRows.length })}</text>
+                    <text fg={COLOR.dim} selectable={false}>{subagentRows.length === 0 ? t("agents.summaryDelegated", { delegated: agentRows.length }) : t("agents.summary", { delegated: agentRows.length, subagents: subagentRows.length })}</text>
                   ) : sidePanel.tab === "context" && effectiveBreakdown !== null ? (
                     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }} backgroundColor={SURFACE.panel}>
                       <ActionText label={t("app.compact_now_08f8")} onClick={() => compactSession(() => undefined)} />
@@ -3362,13 +3398,13 @@ export function App({
                 ) : (
                   <BackgroundTab
                     tasks={background}
-                    partial={currentProvider?.driver === "opencode"}
+                    partial={currentProvider?.driver === "opencode" || currentProvider?.driver === "acp" || currentProvider?.driver === "antigravity"}
                     width={diffPanel.diffWidth}
                     now={now}
                     onOpen={(taskId) => (setBackgroundTaskId(taskId), setPicker("background-tasks"))}
                     onStop={(taskId) => {
                       const task = background.find((row) => row.taskId === taskId);
-                      if (task !== undefined) stopBackgroundTask(task);
+                      if (task !== undefined && task.stoppable !== false) stopBackgroundTask(task);
                     }}
                   />
                 )}
@@ -3783,7 +3819,7 @@ export function App({
               ? creating
                 ? t("app.select_model_8631")
                 : t("picker.selectModelOf", { provider: 
-                    providers?.find((candidate) => candidate.instanceId === effectiveModelSelection?.instanceId)
+                    findProviderForInstance(providers, effectiveModelSelection?.instanceId)
                       ?.displayName ?? t("app.current_provider_8fb0")
                   })
               : picker === "effort"

@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
 import {
   defaultEffortChoice,
+  displayAccountLabel,
   displayEffort,
   displayModelName,
+  findProviderForInstance,
   isEffortDescriptor,
   isTerminalTooSmall,
   describeEffort,
@@ -105,6 +107,29 @@ describe("displayModelName", () => {
 
   it("renders a dash without a selection", () => {
     expect(displayModelName(providers(), undefined)).toBe("-");
+  });
+});
+
+describe("displayAccountLabel", () => {
+  it("shows the account qualifier only when multiple accounts of the same provider exist", () => {
+    const base = {
+      enabled: true,
+      installed: true,
+      status: null,
+      authStatus: null,
+      models: [],
+      usageLimits: null,
+      supportedRuntimeModes: null,
+      skills: [],
+    };
+    const multi = [
+      { ...base, instanceId: "chatgpt/default", driver: "chatgpt", displayName: "ChatGPT (Default)" },
+      { ...base, instanceId: "chatgpt/trial", driver: "chatgpt", displayName: "ChatGPT (Trial)" },
+      { ...base, instanceId: "claude/default", driver: "claude", displayName: "Claude Code (Default)" },
+    ];
+    expect(displayAccountLabel(multi, { instanceId: "chatgpt/trial", model: "gpt-6.2-astra" })).toBe("Trial");
+    expect(displayAccountLabel(multi, { instanceId: "chatgpt/default", model: "gpt-6.2-astra" })).toBe("Default");
+    expect(displayAccountLabel(multi, { instanceId: "claude/default", model: "claude-opus-5-5" })).toBeNull();
   });
 });
 
@@ -256,9 +281,41 @@ describe("describeEffort", () => {
     expect(describeEffort("medium", false)).toBe("Balanced speed and depth");
     expect(describeEffort("medium", true)).toBe("Balanced speed and depth · default for this model");
     expect(describeEffort("HIGH", false)).toBe("Deeper reasoning for harder tasks");
+    expect(describeEffort("ultra", false)).toBe("Maximum reasoning with automatic task delegation");
   });
   it("has nothing to say about a level it does not know, except that it is the default", () => {
     expect(describeEffort("turbo", false)).toBeUndefined();
     expect(describeEffort("turbo", true)).toBe("The default effort for this model");
+  });
+});
+
+describe("findProviderForInstance", () => {
+  const catalog: ProviderSummary[] = [
+    {
+      ...providers()[0]!,
+      instanceId: "antigravity/default",
+      driver: "antigravity",
+      displayName: "Antigravity (Default)",
+    },
+    {
+      ...providers()[0]!,
+      instanceId: "antigravity/work",
+      driver: "antigravity",
+      displayName: "Antigravity (Work)",
+    },
+    {
+      ...providers()[1]!,
+      instanceId: "claude/default",
+      driver: "claude",
+      displayName: "Claude Code (Default)",
+    },
+  ];
+
+  it("matches explicit account instanceIds strictly and resolves legacy bare IDs to <driver>/default", () => {
+    expect(findProviderForInstance(catalog, "antigravity/work")?.instanceId).toBe("antigravity/work");
+    expect(findProviderForInstance(catalog, "antigravity/missing")).toBeUndefined();
+    expect(findProviderForInstance(catalog, "antigravity")?.instanceId).toBe("antigravity/default");
+    expect(findProviderForInstance(catalog, "claudeAgent")?.instanceId).toBe("claude/default");
+    expect(findProviderForInstance(catalog, "claude")?.instanceId).toBe("claude/default");
   });
 });

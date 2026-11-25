@@ -46,7 +46,7 @@ export async function doctor(config: CliConfig) {
         problems,
         server: { ok: true, mode: "remote" as const, endpoint: connection.endpoint, running: true, name: paired.name, fingerprint: paired.fingerprint },
       };
-      return { ok: checks.git.ok && checks.store.ok && (checks.providers.codex?.ok || checks.providers.claude.ok || checks.providers.opencode.ok), checks };
+      return { ok: checks.git.ok && checks.store.ok && (checks.providers.codex?.ok || checks.providers.claude.ok || checks.providers.opencode.ok || checks.providers.antigravity?.ok || checks.providers.vibe?.ok), checks };
     } finally {
       await connection.close();
     }
@@ -71,7 +71,7 @@ export async function doctor(config: CliConfig) {
     ok:
       checks.git.ok &&
       checks.store.ok &&
-      (providers.codex?.ok || providers.claude.ok || providers.opencode.ok),
+      (providers.codex?.ok || providers.claude.ok || providers.opencode.ok || providers.antigravity?.ok || providers.vibe?.ok),
     checks,
   };
 }

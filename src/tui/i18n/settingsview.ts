@@ -59,5 +59,18 @@ function localizeView(view: SettingView): SettingView {
  */
 export function localizeSnapshot(snapshot: SettingsSnapshot | null): SettingsSnapshot | null {
   if (snapshot === null) return null;
-  return { ...snapshot, settings: snapshot.settings.map(localizeView) };
+  const accountSettings =
+    snapshot.accountSettings === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(snapshot.accountSettings).map(([instanceId, views]) => [
+            instanceId,
+            views.map(localizeView),
+          ]),
+        );
+  return {
+    ...snapshot,
+    settings: snapshot.settings.map(localizeView),
+    ...(accountSettings === undefined ? {} : { accountSettings }),
+  };
 }

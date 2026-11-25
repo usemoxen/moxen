@@ -43,6 +43,116 @@ describe("stdio JSON-RPC peer", () => {
     });
   });
 
+  it("idle timeout restarts on peer traffic and fires only when the peer goes silent", async () => {
+    const { client, server } = createLinkedPair();
+    const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });
+    const serverPeer = new JsonRpcPeer(server, { forceKillAfterMs: 0 });
+    serverPeer.onRequest(async () => {
+      for (let i = 0; i < 5; i++) {
+        await sleep(30);
+        serverPeer.notify("progress", { i });
+      }
+      return "done";
+    });
+    // 150ms of work total, but never more than ~30ms silent against a 80ms idle limit.
+    await expect(clientPeer.request("busy", {}, 80, { idle: true })).resolves.toBe("done");
+
+    serverPeer.onRequest(async () => {
+      await sleep(500);
+      return null;
+    });
+    await expect(clientPeer.request("silent", {}, 30, { idle: true })).rejects.toMatchObject({
+      code: "PEER_REQUEST_TIMEOUT",
+    });
+    clientPeer.close();
+    serverPeer.close();
+  });
+
+  it("idle timeout restarts only on valid JSON-RPC messages and still honors a hard deadline (LOCAL-009)", async () => {
+    const { client, server } = createLinkedPair();
+    const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });
+    const serverPeer = new JsonRpcPeer(server, { forceKillAfterMs: 0 });
+    // The server takes requests but never answers them.
+    serverPeer.onRequest(() => new Promise(() => {}));
+
+    // Malformed / non-JSON-RPC lines are not attributable to the session: they never restart the idle timer.
+    const garbage = setInterval(() => server.writeLine("agy: warning -- some non-JSON log line"), 20);
+    const outcome = await Promise.race([
+      clientPeer.request("hung", {}, 80, { idle: true }).then(
+        () => "answered",
+        (error: unknown) => (error as { code: string }).code,
+      ),
+      sleep(400).then(() => "still-pending"),
+    ]);
+    clearInterval(garbage);
+    expect(outcome).toBe("PEER_REQUEST_TIMEOUT");
+
+    // Valid session traffic restarts the idle timer, but the hard deadline still fires.
+    const ticks = setInterval(() => serverPeer.notify("session/update", { n: 1 }), 30);
+    const startedAt = Date.now();
+    await expect(clientPeer.request("long", {}, 80, { idle: true, deadlineMs: 250 })).rejects.toMatchObject({
+      code: "PEER_REQUEST_TIMEOUT",
+    });
+    clearInterval(ticks);
+    // It outlived several 80ms idle windows thanks to the traffic, then died at the deadline.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(240);
+    clientPeer.close();
+    serverPeer.close();
+  });
+
+  it("idle timeout restarts only on messages the caller attributes to the session, and clamps timer values above 2^31-1 ms (LOCAL-009)", async () => {
+    const { client, server } = createLinkedPair();
+    const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });
+    const serverPeer = new JsonRpcPeer(server, { forceKillAfterMs: 0 });
+    // The server takes requests but never answers them.
+    serverPeer.onRequest(() => new Promise(() => {}));
+
+    const match = (message: Record<string, unknown>): boolean => {
+      const params = message["params"];
+      return (
+        params !== null &&
+        typeof params === "object" &&
+        !Array.isArray(params) &&
+        (params as Record<string, unknown>)["sessionId"] === "s1"
+      );
+    };
+
+    // Valid frames for ANOTHER session, a bare unrelated id, and garbage never restart this request's idle timer.
+    const noise = setInterval(() => {
+      serverPeer.notify("session/update", { sessionId: "s2", update: { sessionUpdate: "agent_message_chunk" } });
+      server.writeLine("not json at all");
+      server.writeLine(JSON.stringify({ jsonrpc: "2.0", id: "req-999", result: null }));
+    }, 20);
+    const outcome = await Promise.race([
+      clientPeer
+        .request("prompt", {}, 120, { idle: true, activityMatch: match })
+        .then(
+          () => "answered",
+          (error: unknown) => (error as { code: string }).code,
+        ),
+      sleep(500).then(() => "still-pending"),
+    ]);
+    clearInterval(noise);
+    expect(outcome).toBe("PEER_REQUEST_TIMEOUT");
+
+    // Same-session traffic does restart the idle timer, and a deadline above
+    // 2147483647 ms must not fire immediately (the platform clamps it to 1ms).
+    const ticks = setInterval(() => serverPeer.notify("session/update", { sessionId: "s1", update: { sessionUpdate: "agent_message_chunk" } }), 30);
+    const clamped = await Promise.race([
+      clientPeer
+        .request("prompt2", {}, 80, { idle: true, deadlineMs: 2 ** 31, activityMatch: match })
+        .then(
+          () => "answered",
+          (error: unknown) => (error as { code: string }).code,
+        ),
+      sleep(400).then(() => "still-pending"),
+    ]);
+    clearInterval(ticks);
+    expect(clamped).toBe("still-pending");
+    clientPeer.close();
+    serverPeer.close();
+  });
+
   it("times out and closes cleanly", async () => {
     const { client, server } = createLinkedPair();
     const clientPeer = new JsonRpcPeer(client, { forceKillAfterMs: 0 });

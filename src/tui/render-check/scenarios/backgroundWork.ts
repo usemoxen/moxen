@@ -126,6 +126,64 @@ export async function runBackgroundWork(setup: TestRendererSetup): Promise<void>
   await act(async () => setup.mockInput.pressEscape());
   await setup.flush();
 
+  // Non-stoppable task (e.g. ACP agent-internal run_command): sidepanel,
+  // palette, and modal list must omit stop actions, and modal details must
+  // show the independent-stop notice exactly once.
+  await act(async () => {
+    emitLiveRef.current?.(
+      activityFrame("bg-set-nonstop", "background.tasks", "1 background task running", {
+        tasks: [
+          {
+            taskId: "bg-2",
+            taskType: "local_bash",
+            description: "run agent build",
+            toolName: "Bash",
+            command: "bun run build",
+            stoppable: false,
+          },
+        ],
+      }),
+    );
+  });
+  await setup.flush();
+  const nonStopSegment = await waitFor("composer footer did not show the non-stoppable task", () => frame().includes("1 shell"));
+  const nonStopSegRows = nonStopSegment.split("\n");
+  const nonStopSegRow = nonStopSegRows.findIndex((row) => row.includes("1 shell"));
+  const nonStopSegCol = nonStopSegRows[nonStopSegRow]!.indexOf("1 shell");
+  await act(async () => setup.mockMouse.click(nonStopSegCol + 2, nonStopSegRow));
+  const nonStopTab = await waitFor("Background tab did not show the non-stoppable task", () => frame().includes("run agent build") && frame().includes("bun run build"));
+  const nonStopCmdRow = nonStopTab.split("\n").find((row) => row.includes("bun run build")) ?? "";
+  if (/\bstop\b/u.test(nonStopCmdRow)) fail(`sidepanel rendered stop control for stoppable:false task:\n${nonStopCmdRow}`);
+
+  const nonStopTabRows = nonStopTab.split("\n");
+  const nonStopTaskRow = nonStopTabRows.findIndex((row) => row.includes("Shell · run agent build"));
+  const nonStopTaskCol = nonStopTabRows[nonStopTaskRow]!.indexOf("Shell · run agent build");
+  await act(async () => setup.mockMouse.click(nonStopTaskCol + 2, nonStopTaskRow));
+  const nonStopDetails = await waitFor("details view did not open for non-stoppable task", () => frame().includes("Shell · run agent build") && frame().includes("independently of its turn"));
+  const noticeCount = nonStopDetails.split("cannot stop this command").length - 1;
+  if (noticeCount !== 1) fail(`expected independentStopUnavailable notice once, saw ${noticeCount}:\n${nonStopDetails}`);
+  if (nonStopDetails.includes("x stop") || nonStopDetails.includes("■ stop")) fail(`details view showed stop control for stoppable:false task:\n${nonStopDetails}`);
+
+  await act(async () => setup.mockInput.pressEscape());
+  const nonStopList = await waitFor("esc from non-stoppable details did not return to list", () => frame().includes("Background work") && frame().includes("run agent build"));
+  if (nonStopList.includes("x stop")) fail(`modal list footer showed x stop for stoppable:false task:\n${nonStopList}`);
+  await act(async () => setup.mockInput.pressEscape());
+  await waitFor("esc from non-stoppable list did not close browser", () => !frame().includes("Background work"));
+  await act(async () => setup.mockInput.pressEscape());
+  await waitFor("esc did not close side panel after non-stoppable check", () => !frame().includes("Running in the background"));
+
+  await act(async () => setup.mockInput.pressKey("p", { ctrl: true }));
+  await setup.flush();
+  for (const char of "background") {
+    await act(async () => setup.mockInput.pressKey(char));
+    await setup.flush();
+  }
+  const nonStopPalette = setup.captureCharFrame();
+  if (!nonStopPalette.includes("View background tasks")) fail("palette does not offer to view non-stoppable background tasks");
+  if (nonStopPalette.includes("Stop background: run agent build")) fail(`palette offered to stop stoppable:false task:\n${nonStopPalette}`);
+  await act(async () => setup.mockInput.pressEscape());
+  await setup.flush();
+
   // The set empties: the footer segment and both palette rows go.
   await act(async () => {
     emitLiveRef.current?.(activityFrame("bg-set-2", "background.tasks", "0 background tasks running", { tasks: [] }));

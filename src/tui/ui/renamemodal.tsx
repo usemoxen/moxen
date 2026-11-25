@@ -1,7 +1,7 @@
 import { OverflowText } from "./overflowtext.js";
 import { t } from "../i18n/index.js";
 import { useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer, useTextInputCapture } from "../hooks/useKeyLayer.js";
 
 import { ModalShell } from "./modalshell.js";
 import { markModalDismissed } from "../model/modalDismiss.js";
@@ -51,14 +51,13 @@ export function RenameModal({
   // `value` below stays pinned to the initial title (uncontrolled input,
   // same pattern as Composer's textarea) — this state never flows back in.
   const [text, setText] = useState(initialTitle);
-  useKeyboard((key) => {
-    // "esc" alias included: some inputs report the raw alias instead of the
-    // canonical "escape" — same handling as PickerModal.
-    if (key.name === "escape" || key.name === "esc") {
+  useTextInputCapture({
+    onCancel: () => {
       markModalDismissed();
       onClose();
-    }
+    },
   });
+  useKeyLayer(() => undefined, { capture: true });
 
   const inner = Math.max(10, width - 4);
 

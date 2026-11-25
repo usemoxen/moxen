@@ -353,10 +353,10 @@ async function checkToolCall(probe: Probe): Promise<void> {
     probe.system("When asked to call a tool, call it and say nothing else."),
     { role: "user", content: `Call the echo tool. Its text argument must be exactly the characters between <<< and >>> (the quotes, the line break and the backslashes are part of it):\n<<<${AWKWARD_TEXT}>>>` },
   ];
-  let attempt = await probe.send(messages, { tools: [ECHO_TOOL], maxTokens: 300, omitToolChoice: false });
+  let attempt = await probe.send(messages, { tools: [ECHO_TOOL], maxTokens: 1500, omitToolChoice: false });
   let omitted = false;
   if (!attempt.ok && attempt.failure.kind === "rejected") {
-    const retry = await probe.send(messages, { tools: [ECHO_TOOL], maxTokens: 300, omitToolChoice: true });
+    const retry = await probe.send(messages, { tools: [ECHO_TOOL], maxTokens: 1500, omitToolChoice: true });
     if (retry.ok) {
       omitted = true;
       attempt = retry;

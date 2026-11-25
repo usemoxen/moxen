@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { t } from "../../i18n/index.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -33,12 +33,12 @@ export function ProblemsModal({
   onStop: (threadId: string, turnId: string) => void;
   onCopy: (text: string) => void;
 }) {
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") {
       markModalDismissed();
       onClose();
     }
-  });
+  }, { capture: true });
   // The last fix clears the list: nothing left to show, so go back to the thread.
   useEffect(() => {
     if (rows.length === 0) onClose();

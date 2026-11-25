@@ -121,6 +121,8 @@ import {
 
 export interface ClaudeDriverOptions {
   readonly settings?: Partial<ClaudeSettings>;
+  /** Account-addressed instance id (`claude/<id>`) when running a named Claude account. */
+  readonly instanceId?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly transport?: ClaudeTransport;
   readonly sessionApi?: ClaudeSessionApi;
@@ -422,6 +424,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    */
   private readonly stopTimeoutMs: number;
   private readonly skillsMod: SkillsMod | null;
+  private readonly usageKey: string;
+  private readonly rateLimitInstanceId: string | undefined;
   private readonly sessions = new Map<ThreadId, ClaudeSession>();
   /**
    * Last resumable CLI session id per thread, kept past session teardown.
@@ -452,6 +456,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.usageProbeTimeoutMs = options.usageProbeTimeoutMs ?? 15_000;
     this.stopTimeoutMs = options.stopTimeoutMs ?? 2_000;
     this.skillsMod = options.skillsMod ?? null;
+    const rawId = options.instanceId?.trim().toLowerCase();
+    this.rateLimitInstanceId = rawId && rawId !== "claude" && rawId !== "claudeagent" ? rawId : undefined;
+    this.usageKey = this.rateLimitInstanceId ?? "claude";
   }
 
   get streamEvents(): Stream.Stream<ProviderRuntimeEvent> {
@@ -716,17 +723,78 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     return mapped === null ? null : { ...mapped, costUsd: session.usage.costUsd };
   };
 
+  private standaloneUsageCache: { readonly fetchedAt: number; readonly windows: readonly RateLimitWindow[] } | null = null;
+  private standaloneUsageInFlight: Promise<readonly RateLimitWindow[]> | null = null;
+
   /**
-   * Explicit freshness ask: probe an already-open session, never start one.
-   * The probe publishes through the normal event path too; the returned
-   * windows let the caller record them without waiting for the pump.
+   * Explicit freshness ask: probe an already-open session when one exists;
+   * otherwise run a lightweight session-less `never`-prompt query (the same
+   * pattern as `skillInventory`: no prompt sent, no session written, 60s cache)
+   * so Settings and `usage_status` show live Claude quotas before the first turn.
    */
   readonly refreshUsage = async (): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
     const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
-    if (!session) return null;
-    const windows = await this.probeUsage(session);
-    return windows.length > 0 ? { key: "claude", windows } : null;
+    if (session) {
+      const windows = await this.probeUsage(session);
+      return windows.length > 0 ? { key: this.usageKey, windows } : null;
+    }
+    const windows = await this.probeStandaloneUsage();
+    return windows.length > 0 ? { key: this.usageKey, windows } : null;
   };
+
+  private async probeStandaloneUsage(): Promise<readonly RateLimitWindow[]> {
+    const now = Date.now();
+    if (this.standaloneUsageCache && now - this.standaloneUsageCache.fetchedAt < 60_000) {
+      return this.standaloneUsageCache.windows;
+    }
+    if (this.standaloneUsageInFlight) return await this.standaloneUsageInFlight;
+    const work = (async (): Promise<readonly RateLimitWindow[]> => {
+      const never: AsyncIterable<SDKUserMessage> = {
+        [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<SDKUserMessage>>(() => undefined) }),
+      };
+      const stringEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(makeClaudeEnv({ homePath: this.settings.homePath }, this.baseEnv))) {
+        if (typeof value === "string") stringEnv[key] = value;
+      }
+      const query = this.transport.query(never, {
+        cwd: process.cwd(),
+        permissionMode: "default",
+        env: stringEnv,
+        pathToClaudeCodeExecutable: resolveClaudeExecutable(this.settings.binaryPath, this.baseEnv),
+      });
+      try {
+        if (typeof query.usageExperimental !== "function") return [];
+        const response = (await Promise.race([
+          query.usageExperimental({ skipBehaviors: true }),
+          new Promise<never>((_, reject) => {
+            const timer = setTimeout(() => reject(new Error("usage probe timed out")), this.usageProbeTimeoutMs);
+            timer.unref?.();
+          }),
+        ])) as Parameters<typeof mapUsageProbe>[0];
+        const mapped = mapUsageProbe(response);
+        if (!mapped.available) return [];
+        const windows: RateLimitWindow[] = mapped.windows.map((window) => ({
+          id: window.id,
+          label: window.label,
+          resetsAt: window.resetsAt,
+          exhausted: window.usedPercent >= 100,
+          usedPercent: window.usedPercent,
+        }));
+        this.standaloneUsageCache = { fetchedAt: Date.now(), windows };
+        return windows;
+      } catch {
+        return [];
+      } finally {
+        query.close?.();
+      }
+    })();
+    this.standaloneUsageInFlight = work;
+    try {
+      return await work;
+    } finally {
+      if (this.standaloneUsageInFlight === work) this.standaloneUsageInFlight = null;
+    }
+  }
 
   /**
    * Claude Code's own `/context` breakdown: system prompt, tools, memory
@@ -797,7 +865,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     const failureCode = instructions === undefined ? "SIDE_QUESTION_FAILED" : "TEXT_COMPLETION_FAILED";
     const label = instructions === undefined ? "The side question" : "Text completion";
     const stringEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(this.baseEnv)) if (typeof value === "string") stringEnv[key] = value;
+    for (const [key, value] of Object.entries(makeClaudeEnv({ homePath: this.settings.homePath }, this.baseEnv))) if (typeof value === "string") stringEnv[key] = value;
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     const prompt: AsyncIterable<SDKUserMessage> = {
@@ -874,7 +942,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    */
   readonly regenerateSessionTitle = async (cursor: string, workingDirectory: string): Promise<string | null> => {
     const stringEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(this.baseEnv)) if (typeof value === "string") stringEnv[key] = value;
+    for (const [key, value] of Object.entries(makeClaudeEnv({ homePath: this.settings.homePath }, this.baseEnv))) if (typeof value === "string") stringEnv[key] = value;
     const query = this.transport.query("/rename", {
       cwd: workingDirectory,
       permissionMode: "default",
@@ -2100,6 +2168,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.publish({
       type: "rate-limits.updated",
       provider: "claude",
+      ...(this.rateLimitInstanceId ? { instanceId: this.rateLimitInstanceId } : {}),
       threadId: session.threadId,
       windows,
       raw: { rateLimitType, status: info.status },
@@ -2414,6 +2483,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       this.publish({
         type: "rate-limits.updated",
         provider: "claude",
+        ...(this.rateLimitInstanceId ? { instanceId: this.rateLimitInstanceId } : {}),
         threadId: session.threadId,
         windows,
         raw: { subscriptionType: mapped.subscriptionType, costUsd: mapped.costUsd },
@@ -2608,10 +2678,16 @@ function summarizeToolInput(input: unknown): string {
 /**
  * Claude Code's own plan mode, never offered in Moxen's sessions: Moxen has no
  * plan mode (MXN-136), and a mode the model could enter would leave it unable to
- * change anything. Not the user's to switch on, so `CLAUDE_NATIVE_TOOLS` (the
+ * change anything. Its native subagent tool is never offered either: fan out
+ * through Moxen's `delegate` instead, which Moxen tracks. Both of its names are
+ * denied: the tool appears as `Agent` in `tool_use` blocks but as `Task` in the
+ * `system:init` tools list (and in `tool_use` blocks before Claude Code 2.1.63),
+ * so only denying one leaves the other usable. Both are bare exact names, so
+ * the checklist tools (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`) are
+ * unaffected. None is the user's to switch on, so `CLAUDE_NATIVE_TOOLS` (the
  * Settings list of tools that can be switched off) must not list them.
  */
-export const ALWAYS_DISALLOWED_TOOLS: readonly string[] = ["EnterPlanMode", "ExitPlanMode"];
+export const ALWAYS_DISALLOWED_TOOLS: readonly string[] = ["EnterPlanMode", "ExitPlanMode", "Agent", "Task"];
 
 const CHECKLIST_TOOLS: readonly string[] = ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"];
 

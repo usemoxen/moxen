@@ -4,7 +4,7 @@ import { CliError } from "../errors.js";
 import type { McpProviderKind } from "../mcp.js";
 
 export const SKILL_ROUTING_FILE = ".moxen-skill-routing.json";
-const PROVIDERS: readonly McpProviderKind[] = ["claude", "codex", "opencode", "harness"];
+const PROVIDERS: readonly McpProviderKind[] = ["claude", "codex", "opencode", "harness", "acp", "antigravity", "vibe"];
 
 /** Like MCP routing, an absent or empty list offers the skill to every provider. */
 export function parseSkillProviders(value: unknown): readonly McpProviderKind[] {

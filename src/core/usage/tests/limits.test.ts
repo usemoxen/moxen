@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { captureUsageProtectionOverride, usageProtectionOverrideActive, persistUsageLimits, recordUsageWindows, resetUsageLimitsForTests, usageLimitsSnapshot, standingLimit } from "../limits.js";
+import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive, persistUsageLimits, recordUsageWindows, resetUsageLimitsForTests, usageLimitsSnapshot, standingLimit } from "../limits.js";
 
 const NOW = Date.parse("2026-09-25T10:00:00.000Z");
 const IN_2H = new Date(NOW + 2 * 3_600_000).toISOString();
@@ -31,6 +31,24 @@ describe("usage limits registry", () => {
       { id: "secondary", label: "Weekly", usedPercent: 100, exhausted: true, resetsAt: weekly },
     ], NOW);
     expect(standingLimit("codex", NOW)).toEqual({ label: "Weekly", resetsAt: weekly });
+  });
+
+  it("scopes Antigravity standingLimit to the model's quota pool so 3p exhaustion does not block Gemini", () => {
+    const weekly = new Date(NOW + 24 * 3_600_000).toISOString();
+    recordUsageWindows("antigravity", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 40, exhausted: false, resetsAt: IN_2H },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 100, exhausted: true, resetsAt: IN_2H },
+      { id: "gemini-argon-wtu-weekly", label: "Weekly – Argon", usedPercent: 100, exhausted: true, resetsAt: weekly },
+    ], NOW);
+    expect(standingLimit("antigravity", NOW, "gemini-4-neon")).toBeNull();
+    expect(standingLimit("antigravity", NOW, "gemini-4-argon")).toEqual({ label: "Weekly – Argon", resetsAt: weekly });
+    expect(standingLimit("antigravity", NOW, "claude-sonnet-5-5")).toEqual({ label: "Session – Claude & GPT", resetsAt: IN_2H });
+    expect(standingLimit("antigravity", NOW, "gpt-oss-120b-medium")).toEqual({ label: "Session – Claude & GPT", resetsAt: IN_2H });
+    // Without a model, secondary 3p pool does not block primary account.
+    recordUsageWindows("antigravity", [
+      { id: "gemini-argon-wtu-weekly", label: "Weekly – Argon", usedPercent: 0, exhausted: false, resetsAt: weekly },
+    ], NOW);
+    expect(standingLimit("antigravity", NOW)).toBeNull();
   });
   it("keeps the probe's windows and refreshes one from a live event", () => {
     recordUsageWindows(
@@ -66,6 +84,28 @@ describe("usage limits registry", () => {
     recordUsageWindows("claude", [{ id: "session", label: "Session", resetsAt: IN_2H, exhausted: true, usedPercent: 100 }], NOW);
     const later = usageLimitsSnapshot(NOW + 3 * 3_600_000).claude!.windows[0]!;
     expect(later).toMatchObject({ usedPercent: 0, resetsAt: null });
+  });
+
+  it("isolates usage keys and standing limits per account for claude/<id>, chatgpt/<id>, and antigravity/<id>", () => {
+    expect(usageKeyForInstance("claude/personal")).toBe("claude/personal");
+    expect(usageKeyForInstance("claude/work")).toBe("claude/work");
+    expect(usageKeyForInstance("claudeAgent")).toBe("claude");
+    expect(usageKeyForInstance("chatgpt/personal")).toBe("chatgpt/personal");
+    expect(usageKeyForInstance("antigravity/main")).toBe("antigravity/main");
+    expect(usageKeyForInstance("antigravity/alt")).toBe("antigravity/alt");
+
+    recordUsageWindows("claude/personal", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: IN_2H }], NOW);
+    recordUsageWindows("claude/work", [{ id: "session", label: "Session", usedPercent: 10, exhausted: false, resetsAt: IN_2H }], NOW);
+    expect(standingLimit("claude/personal", NOW)).toEqual({ label: "Session", resetsAt: IN_2H });
+    expect(standingLimit("claude/work", NOW)).toBeNull();
+
+    recordUsageWindows("antigravity/alt", [
+      { id: "gemini-5h", label: "Session – Gemini", usedPercent: 25, exhausted: false, resetsAt: IN_2H },
+      { id: "3p-5h", label: "Session – Claude & GPT", usedPercent: 100, exhausted: true, resetsAt: IN_2H },
+    ], NOW);
+    expect(standingLimit("antigravity/alt", NOW, "gemini-4-neon")).toBeNull();
+    expect(standingLimit("antigravity/alt", NOW, "claude-sonnet-5-5")).toEqual({ label: "Session – Claude & GPT", resetsAt: IN_2H });
+    expect(standingLimit("antigravity/main", NOW, "claude-sonnet-5-5")).toBeNull();
   });
 
   it("persists next to the store and loads it in a fresh registry", async () => {

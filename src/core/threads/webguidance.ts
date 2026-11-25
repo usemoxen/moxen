@@ -80,8 +80,8 @@ const toolName = (label: string): string => label.split(" ")[0]!;
 /** The part of the instructions about web tools; empty when there is nothing to say. */
 export function buildWebGuidance(input: WebGuidanceInput): string {
   const claude = input.provider === "claude";
-  const nativeSearch = input.provider === "codex" ? "web_search" : claude ? "WebSearch" : "websearch";
-  const nativeFetch = input.provider === "codex" ? "web_search" : claude ? "WebFetch" : "webfetch";
+  const nativeSearch = input.provider === "codex" || input.provider === "vibe" ? "web_search" : claude ? "WebSearch" : "websearch";
+  const nativeFetch = input.provider === "codex" ? "web_search" : input.provider === "vibe" ? "web_fetch" : claude ? "WebFetch" : "webfetch";
   const searchOn = !isNativeToolDisabled(input.disabledNativeTools, nativeSearch, input.provider);
   const fetchOn = !isNativeToolDisabled(input.disabledNativeTools, nativeFetch, input.provider);
 

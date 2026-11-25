@@ -2,7 +2,7 @@ import { overflowColumns } from "../../model/textoverflow.js";
 import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { PICK_BG, PICK_FG } from "../pickers/pickermodal.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
@@ -107,7 +107,7 @@ export function AnswerPanel({
   // Option rows come first, so a highlight inside them names its option.
   const preview = safe >= 0 && safe < question.options.length ? question.options[safe]?.preview ?? null : null;
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (suspended || rows.length === 0) return;
     // No escape here: this listener is global, so it would take esc from whichever
     // panel is focused. The × in the header dismisses.
@@ -142,7 +142,7 @@ export function AnswerPanel({
         else onPickOption(value);
       }
     }
-  });
+  }, { active: !suspended && rows.length > 0, capture: (key) => !(key.name === "c" && key.ctrl) });
 
   const inner = Math.max(10, width - 4);
 

@@ -1,6 +1,6 @@
 import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import { ModalShell } from "../../ui/modalshell.js";
 import { HoverButton } from "../../ui/hoverbutton.js";
@@ -39,14 +39,14 @@ export function SideQuestionModal({
   const asking = entry.status === "asking";
   const tick = useAnimTick(asking, 100);
   const frame = SPINNER_FRAMES[Math.floor(tick / 100) % SPINNER_FRAMES.length] ?? "⠋";
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") {
       markModalDismissed();
       onClose();
       return;
     }
     if (key.name === "c" && !key.ctrl && entry.answer !== null) onCopy(entry.answer);
-  });
+  }, { capture: true });
   const inner = Math.max(10, width - 4);
   return (
     <ModalShell screenWidth={screenWidth} screenHeight={screenHeight} left={left} top={top} width={width} height={height} onClose={onClose}>

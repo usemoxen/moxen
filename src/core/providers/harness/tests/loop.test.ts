@@ -190,12 +190,58 @@ describe("runTurn", () => {
     expect((await stubborn.run()).status).toBe("failed");
   });
 
-  it("ends a turn that repeats the same call", async () => {
+  it("ends a turn that repeats the same call consecutively, including unknown tools, without stopping non-consecutive checks between edits", async () => {
     const file = path.join(dir, "r.txt");
     fs.writeFileSync(file, "x");
     const script: Script = Array.from({ length: 10 }, () => toolCall("read", { file_path: file }));
     const { run } = setup(script);
     expect(await run()).toMatchObject({ status: "failed", error: expect.stringMatching(/same read call/) });
+
+    // Unknown tools / invalid args repeated consecutively are caught too.
+    const badToolScript: Script = Array.from({ length: 8 }, (_, i) => toolCall("nope", {}, `bad_${i}`));
+    expect(await setup(badToolScript).run()).toMatchObject({ status: "failed", error: expect.stringMatching(/same nope call/) });
+
+    // Running the same read/check with the same result between different writes must NOT trip the guard.
+    const checkTool: HarnessTool<never> = {
+      readOnly: true,
+      definition: { name: "typecheck", description: "check", parameters: { type: "object", properties: {} } },
+      intent: () => ({ action: "read", paths: [] }),
+      run: async () => ({ content: "" }),
+    } as unknown as HarnessTool<never>;
+    const interleaved: Script = [];
+    for (let i = 0; i < 8; i += 1) {
+      interleaved.push(toolCall("write", { file_path: path.join(dir, `f${i}.txt`), content: `v${i}` }, `w_${i}`));
+      interleaved.push(toolCall("typecheck", {}, `tc_${i}`));
+    }
+    interleaved.push(text("All eight files written and checked cleanly without any loop false positives."));
+    const ok = setup(interleaved, { tools: [...builtinTools(), checkTool] });
+    expect(await ok.run()).toMatchObject({ status: "completed" });
+  });
+
+  it("streams normal replies past 50 characters without tripping the text guard, and aborts the request when text actually loops", async () => {
+    const normal = "I'm **Moxen Harness**, a coding agent running in your terminal. I can inspect files, make edits, and run commands.";
+    const deltas: ModelEvent[] = [
+      ...(normal.match(/.{1,8}/g) ?? []).map((chunk): ModelEvent => ({ type: "text.delta", text: chunk })),
+      { type: "finish", reason: "stop" },
+    ];
+    expect(await setup([deltas]).run("Hey, who are you?")).toMatchObject({ status: "completed", text: normal });
+
+    let streamAborted = false;
+    const unit = "I will now re-read the exact same configuration line again. ";
+    const looping = setup([], {
+      loopGuard: { textRepeats: 5 },
+      transport: (request) => {
+        request.signal?.addEventListener("abort", () => {
+          streamAborted = true;
+        });
+        return (async function* () {
+          for (let i = 0; i < 20; i += 1) yield { type: "text.delta", text: unit } as ModelEvent;
+          yield { type: "finish", reason: "stop" } as ModelEvent;
+        })();
+      },
+    });
+    expect(await looping.run()).toMatchObject({ status: "failed", error: expect.stringMatching(/repeating the same text/) });
+    expect(streamAborted).toBe(true);
   });
 
   it("records the usage of every request and what the last one held", async () => {

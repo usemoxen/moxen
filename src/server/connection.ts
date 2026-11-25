@@ -32,23 +32,34 @@ import { searchThreadsView } from "../core/threads/search.js";
 import { turnThroughput } from "../core/threads/throughput.js";
 import * as Effect from "effect/Effect";
 
+import { loadAcpRegistryCatalog, toRegistryPreset } from "../core/providers/acp/registry.js";
 import { buildDirectProviders } from "../core/catalog/direct.js";
 import { fetchLiveModels } from "../core/providers/claude/livemodels.js";
 import { SdkTransport } from "../core/providers/claude/transport.js";
 import { diagnose } from "../core/diagnostics/doctor.js";
 import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
+import type { AccountProviderKind } from "../core/types.js";
+import { managedAccountHomeDisplayPath, probeAntigravityAccountAuth, probeClaudeAccountAuth, removeProviderAccount, resolveChatGptAccount, resolveProfileProviderConfig, setProviderAccountEnabled, summarizeAccount, summarizeProviderAccounts, upsertProviderAccount, type AccountAuthProbe } from "../core/providers/accounts.js";
+import { startProviderAccountLoginSession, type ProviderAccountLoginDeps, type ProviderAccountLoginSession } from "../core/providers/accountlogin.js";
+import { migrateProviderProfiles } from "../core/providers/migrate.js";
+import { codexProvider } from "../core/providers/codex/catalog.js";
+import { hydrateChatGptModelsCache } from "../core/providers/chatgpt/catalog.js";
+import { probeCodexCompanion, verifyCodexCompanion, type CodexCompanionProbeResult } from "../core/providers/chatgpt/companion.js";
+import { startChatGptLoginSession, type ChatGptLoginSession } from "../core/providers/chatgpt/login.js";
+import { clearChatGptAuth, loadChatGptAuthBundle, type OAuthDeps } from "../core/providers/chatgpt/oauth.js";
+import { hasSecret, isSecretRef, refName, writeSecret } from "../core/secrets.js";
 import { latestVersions } from "../core/providers/latest.js";
 import { checkForUpdate } from "../core/selfupdate/check.js";
 import { rollbackRelease, updateRelease, type UpdateOptions } from "../core/selfupdate/update.js";
 import type { RollbackResult, UpdateCheck, UpdateProgress, UpdateResult } from "../core/selfupdate/vocabulary.js";
 import { readInstall } from "../core/selfupdate/install.js";
-import type { LatestVersions } from "../core/catalog/update.js";
+import { UPDATABLE_PROVIDERS, type LatestVersions, type ProviderUpdateAllItem } from "../core/catalog/update.js";
 import { EMPTY_SKILL_INVENTORY, type ProviderSummary, type ProviderUsageLimits } from "../core/catalog/summary.js";
 import { loadModelPrefs, providerModelPreferences, setModelHidden } from "../core/catalog/prefs.js";
 import { defaultRuntimeMode, followUpSelection, resolveModelSelection, type ModelRequest } from "../core/catalog/selection.js";
 import { appHomeDir, applyEnvironmentOverrides, defaultConfigPath, loadConfig, normalizeFileConfig, saveConfig, setConfigValueSecure, type ConfigProblem, type LoadedConfig, type SkippedConfigEntry, configKeyCoversPath } from "../core/config.js";
 import { duplicateListItem } from "../core/configlist.js";
-import { DEFAULT_REMOTE_PORT, describeSettings, listTarget } from "../core/configschema.js";
+import { DEFAULT_REMOTE_PORT, describeAllAccountSettings, describeSettings, listTarget } from "../core/configschema.js";
 import { HarnessDriver } from "../core/providers/harness/driver.js";
 import { CodexDriver } from "../core/providers/codex/driver.js";
 import { imageGenerationAvailability, imageGenerationModel, type ImageGenerationModel } from "../core/providers/codex/imagegeneration.js";
@@ -77,9 +88,9 @@ import { MOXEN_MCP_INSTRUCTIONS } from "./mcp/stdio.js";
 import { callMoxenTool, moxenToolsFor, type MemoryAccess } from "./mcp/tools.js";
 import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
-import { driverProviders } from "../core/threads/longthreads.js";
+import { chatgptHarnessConfigFor, driverProviders } from "../core/threads/longthreads.js";
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
-import { ensureStoredProject, listStoredProjects, workspaceRootsEqual } from "../core/projects/projects.js";
+import { ensureStoredProject, listStoredProjects, removeStoredProject, renameStoredProject, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
 import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, searchMemories, type MemoryLocation } from "../core/memory/memory.js";
 import { EmbeddingRuntime } from "../core/memory/embedding-runtime.js";
@@ -94,11 +105,13 @@ import { CliError } from "../core/errors.js";
 import { buildIdentity } from "../core/build.js";
 import {
   archiveThread,
+  restoreThread,
   createThread,
   deleteThread,
   inspectThread,
   interruptTurn,
   listThreads,
+  openTurn,
   readThread,
   settleThread,
   snoozeThread,
@@ -153,6 +166,7 @@ import {
   resolveProjectView,
   retitleThread,
   removeThreadWorktree,
+  restoreThreadWorktree,
   revertThread,
   runDueScheduledTurn,
   queueAgentMessage,
@@ -164,19 +178,20 @@ import {
   type OperationContext,
   type StartedTurn,
 } from "../core/threads/operations.js";
-import { toThreadEnvelope } from "../core/threads/project.js";
+import { ranTurns, toThreadEnvelope } from "../core/threads/project.js";
 import { backfillNativeSubagents, subagentTranscript } from "../core/threads/subagents.js";
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
 import { isKnownTurnStatus } from "../core/threads/problems.js";
-import type { ProviderRuntimeEvent } from "../core/providers/spi.js";
+import type { ContextBreakdown, ContextWindowUsage, ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { isCompactCommand } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
-import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredCheckpoint, StoredThread, StoredTurn, TurnStatus } from "../core/threads/types.js";
-import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
-import { driverKindOfInstance } from "../core/types.js";
+import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredActivity, StoredCheckpoint, StoredThread, StoredTurn, TurnStatus } from "../core/threads/types.js";
+import type { AntigravityAccountConfig, CliConfig, ForgeConfig, ModelSelection, ProviderAccountSummary, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
+import { antigravityAccountBlockedReason, antigravityOffUseLaunchBlockedReason, antigravityUnsupportedUseAllowed, driverKindOfInstance, parseAccountInstanceId } from "../core/types.js";
 import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
+import { resolveContextCostUsd, threadCostUsd } from "../core/usage/prices.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
 import type { ClientApi } from "./api.js";
 import type { RemoteAccess } from "./transport/remoteaccess.js";
@@ -199,10 +214,12 @@ import {
   type QueryType,
   type ShellFrame,
   type StartedTurnSummary,
+  type ThreadDetail,
   type ThreadFrame,
   type PermissionDecision,
   type UserInputAnswers,
 } from "./protocol.js";
+import { nativeSubagents } from "./subagentrows.js";
 
 /** How often finished worktree threads are tidied while the server runs. */
 const PRUNE_INTERVAL_MS = 6 * 3_600_000;
@@ -214,6 +231,10 @@ const PRUNE_INTERVAL_MS = 6 * 3_600_000;
  * the normal event path.
  */
 const USAGE_DRIVER_PROBE_TIMEOUT_MS = 6_000;
+/** Minimum gap between automatic post-turn companion usage probes for one ChatGPT account. */
+const CHATGPT_POST_TURN_USAGE_COOLDOWN_MS = 15_000;
+/** How old a verified ChatGPT account's recorded usage may be before background refresh re-probes its Codex companion. */
+const CHATGPT_STALE_USAGE_REFRESH_MS = 120_000;
 
 /**
  * Bound for every driver's `stopAll` inside `close()`: shutdown (SIGTERM,
@@ -358,6 +379,12 @@ export interface DirectConnectionOptions {
   readonly rollbackApp?: (options: UpdateOptions) => Promise<RollbackResult>;
   /** The `fetch` the harness test and probe use; tests hand in a fake server. */
   readonly harnessFetch?: typeof fetch;
+  /** Optional OAuth dependencies override (tests) for Sign in with ChatGPT login/logout. */
+  readonly chatgptOAuth?: OAuthDeps & { readonly bindLoopback?: boolean };
+  /** Optional Codex companion probe override (tests) for `chatgpt.codex.pair`. */
+  readonly probeCodexCompanion?: (driver: CodexDriver, cwd: string) => Promise<CodexCompanionProbeResult>;
+  /** Optional CLI login dependencies override (tests) for `provider.account.login.*`. */
+  readonly providerAccountLoginDeps?: ProviderAccountLoginDeps;
 }
 
 export class DirectConnection implements ClientApi {
@@ -392,6 +419,11 @@ export class DirectConnection implements ClientApi {
   private readonly readLatestVersions: (claudeBinaryPath?: string) => Promise<Omit<LatestVersions, "enabled">>;
   private readonly runProviderUpdate: (provider: UpdatableProvider, binaryPath?: string) => Promise<ProviderUpdate>;
   private readonly harnessFetch: typeof fetch | undefined;
+  private readonly chatgptOAuth: (OAuthDeps & { readonly bindLoopback?: boolean }) | undefined;
+  private readonly probeCodexCompanionFn: ((driver: CodexDriver, cwd: string) => Promise<CodexCompanionProbeResult>) | undefined;
+  private readonly providerAccountLoginDeps: ProviderAccountLoginDeps | undefined;
+  private readonly chatgptLogins = new Map<string, { readonly session: ChatGptLoginSession; readonly label?: string }>();
+  private readonly accountLogins = new Map<string, { readonly session: ProviderAccountLoginSession; readonly kind: AccountProviderKind; readonly id: string }>();
   private readonly checkAppUpdate: () => Promise<UpdateCheck>;
   private readonly updateApp: (options: UpdateOptions) => Promise<UpdateResult>;
   private readonly rollbackApp: (options: UpdateOptions) => Promise<RollbackResult>;
@@ -402,12 +434,19 @@ export class DirectConnection implements ClientApi {
   /** Profiles with a probe running: two at once would fight over a single-slot server. */
   private readonly probing = new Set<string>();
   private storePromise: Promise<ThreadStore> | null = null;
+  private migrationPromise: Promise<void> | null = null;
   /** Set once an update or rollback has landed: the running code is stale. */
   private restartPending = false;
   /** Distinguishes this connection's claim from another's in the same process. */
   private readonly claimToken = randomUUID();
   private readonly driversOwner = {};
   private readonly ownedDrivers = new Set<TurnDriver>();
+  private readonly driverInstanceIds = new WeakMap<TurnDriver, string>();
+  /** Antigravity drivers this connection owns, by instance id: the accounts the off-by-default gate can revoke while the server runs. */
+  private readonly antigravityDrivers = new Map<TurnDriver, string>();
+  private readonly chatGptUsageInFlight = new Map<string, Promise<void>>();
+  private readonly chatGptUsageLastProbedAt = new Map<string, number>();
+  private lastChatGptStaleSweepAt = 0;
   private closed = false;
   private readonly researchResponders = new Map<string, number>();
   private readonly researchProposals = new Map<string, {
@@ -423,18 +462,32 @@ export class DirectConnection implements ClientApi {
     this.embeddingRuntime = new EmbeddingRuntime(this.storeRoot);
     this.semanticMemory = new SemanticMemory(this.embeddingRuntime);
     persistUsageLimits(this.storeRoot);
+    hydrateChatGptModelsCache(this.storeRoot);
     this.factories = options.drivers ?? {};
     this.harnessFetch = options.harnessFetch;
+    this.chatgptOAuth = options.chatgptOAuth;
+    this.probeCodexCompanionFn = options.probeCodexCompanion;
+    this.providerAccountLoginDeps = options.providerAccountLoginDeps;
     this.shellPollMs = options.shellPollMs ?? 1500;
     this.threadPollMs = options.threadPollMs ?? 750;
     this.closeDriverTimeoutMs = options.closeDriverTimeoutMs ?? CLOSE_DRIVER_TIMEOUT_MS;
     this.providers = options.providers ?? (async () => {
       // A config that cannot be read must not hide the providers that need none of it.
       const providers = await this.readConfigFile().then((read) => read.config.providers, () => undefined);
-      const claudeBinary = providers?.claude?.binaryPath || "claude";
+      const claudeBinary =
+        providers?.claude?.accounts?.find((entry) => entry.binaryPath)?.binaryPath ||
+        providers?.claude?.binaryPath ||
+        "claude";
       return await buildDirectProviders({
+        storeRoot: this.storeRoot,
         harness: providers?.harness,
+        ...(providers?.claude ? { claude: providers.claude } : {}),
+        ...(providers?.chatgpt ? { chatgpt: providers.chatgpt } : {}),
         ...(providers?.codex ? { codex: providers.codex } : {}),
+        ...(providers?.opencode ? { opencode: providers.opencode } : {}),
+        ...(providers?.antigravity ? { antigravity: providers.antigravity } : {}),
+        ...(providers?.vibe ? { vibe: providers.vibe } : {}),
+        ...(providers?.acp ? { acp: providers.acp } : {}),
         fetchClaudeModels: () => fetchLiveModels({ transport: new SdkTransport(), binaryPath: claudeBinary }),
       });
     });
@@ -444,22 +497,29 @@ export class DirectConnection implements ClientApi {
     // overrides the config supplies values only, so its path falls back to
     // the resolved default and is never written unless it asks for one.
     const override = options.config;
+    const configPath = options.configPath ?? defaultConfigPath();
     this.readConfigFile = override
       ? async () => {
         const config = await override();
         const fileConfig = normalizeFileConfig(config);
-        return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: config, path: options.configPath ?? defaultConfigPath(), exists: true, skipped: [], problems: [] };
+        return { config: applyEnvironmentOverrides(fileConfig), fileConfig, raw: config, path: configPath, exists: true, skipped: [], problems: [] };
       }
-      : async () => await loadConfig(options.configPath);
+      : async () => {
+        await this.ensureProfilesMigrated(configPath);
+        return await loadConfig(options.configPath);
+      };
     this.loadConfig = async () => {
       const { config } = await this.readConfigFile();
       // What the drivers read, with the long-thread lines already resolved (global ones included).
       this.lastProviders = driverProviders(config);
       this.lastWeb = config.web;
+      // A config edit must not need a restart to apply: an Antigravity
+      // account gated by the config just read loses its driver (and with
+      // it its live sessions) before anything can probe it again.
+      await this.revokeGatedAntigravityDrivers(config);
       return config;
     };
     void this.applyEmbeddingPolicy().catch(() => undefined);
-    this.harnessFetch = options.harnessFetch;
     this.readLatestVersions = options.latestVersions ?? ((claudeBinaryPath) => latestVersions(claudeBinaryPath === undefined ? {} : { claudeBinaryPath }));
     this.checkAppUpdate = options.checkAppUpdate ?? (() => checkForUpdate({ install: readInstall() }));
     this.updateApp = options.updateApp ?? updateRelease;
@@ -596,17 +656,20 @@ export class DirectConnection implements ClientApi {
     // providers over loopback HTTP served here — so a delegation always runs
     // in the process that owns its parent's session. Until the HTTP server
     // is up (or in a process that never starts it), the stdio child.
+    const stdioBase = { ...this.moxenStdioFor(threadId), alwaysLoad: true };
     const base = this.mcpHttp
       ? { name: MOXEN_MCP_SERVER_NAME, type: "http" as const, ...this.mcpHttp.specFor(threadId), alwaysLoad: true }
-      : { ...this.moxenStdioFor(threadId), alwaysLoad: true };
+      : stdioBase;
     // A delegated task asks for the tools without the delegation ones; the server holds to it as well.
     const flags = [
       ...(delegated ? [{ query: MOXEN_DELEGATED_QUERY, arg: MOXEN_DELEGATED_ARG }] : []),
       ...(webFetch ? [] : [{ query: MOXEN_NO_WEB_FETCH_QUERY, arg: MOXEN_NO_WEB_FETCH_ARG }]),
       ...(memory === "write" ? [] : [{ query: `${MOXEN_MEMORY_QUERY}=${memory}`, arg: `${MOXEN_MEMORY_ARG}${memory}` }]),
     ];
+    const stdioFallback =
+      flags.length === 0 ? stdioBase : { ...stdioBase, args: [...stdioBase.args, ...flags.map((flag) => flag.arg)] };
     const fallback =
-      flags.length === 0 ? base : base.type === "http" ? { ...base, url: `${base.url}?${flags.map((flag) => flag.query).join("&")}` } : { ...base, args: [...base.args, ...flags.map((flag) => flag.arg)] };
+      flags.length === 0 ? base : base.type === "http" ? { ...base, url: `${base.url}?${flags.map((flag) => flag.query).join("&")}` } : stdioFallback;
     // The same endpoint, also offering `todos`: for a provider with no checklist.
     const checklist =
       fallback.type === "http"
@@ -619,6 +682,7 @@ export class DirectConnection implements ClientApi {
       tools: moxenToolsFor({ delegated, webFetch, memory, imageGeneration, handoff: handoff !== null, researchLead, researchMember: isResearchRunActive(researchRun) }),
       call: (tool, args) => callMoxenTool(this, threadId, tool, args, { delegated, webFetch, memory }),
       fallback,
+      ...(fallback.type === "http" ? { stdioFallback } : {}),
       checklist,
       // Delegation is what these tools are for: never behind a tool search.
       alwaysLoad: true,
@@ -627,25 +691,39 @@ export class DirectConnection implements ClientApi {
 
   private async imageAvailability(threadId: string): Promise<
     { readonly available: false; readonly reason: string } |
-    { readonly available: true; readonly reason: null; readonly selection: ImageGenerationModel }
+    { readonly available: true; readonly reason: null; readonly selection: ImageGenerationModel; readonly codexInstanceId: string }
   > {
     const ctx = await this.context();
     const thread = await ctx.store.readThreadRecord(threadId);
     const unavailable = (reason: string) => ({ available: false as const, reason });
-    if (!thread || thread.modelSelection.instanceId === "codex") return unavailable("Codex threads use their native image-generation tool.");
+    if (!thread || driverKindOfInstance(thread.modelSelection.instanceId) === "codex") return unavailable("Codex threads use their native image-generation tool.");
     const kind = driverKindOfInstance(thread.modelSelection.instanceId);
-    if (!moxenToolsOf(kind === null ? undefined : ctx.config.providers?.[kind]).orchestration ||
+    if (!moxenToolsOf(resolveProfileProviderConfig(ctx.config, thread.modelSelection.instanceId)).orchestration ||
         (await ctx.store.readDelegations()).some((row) => row.childThreadId === threadId)) return unavailable("Image generation is unavailable in delegated tasks or with orchestration switched off.");
     if (isNativeToolDisabled(ctx.config.providers?.codex?.disabledNativeTools, "image_generation", "codex")) return unavailable("Codex image generation is switched off.");
+
+    // ChatGPT threads require a verified paired Codex companion for their account.
+    let codexInstanceId = "codex";
+    let companionSettings = ctx.config.providers?.codex;
+    if (kind === "chatgpt") {
+      const resolved = resolveChatGptAccount(ctx.config.providers?.chatgpt, ctx.config.providers?.codex, thread.modelSelection.instanceId);
+      if (!resolved.account?.codexVerified) {
+        return unavailable("Link a verified Codex companion in Settings → Providers to enable image generation for this ChatGPT account.");
+      }
+      codexInstanceId = resolved.accountId ? `codex/${resolved.accountId}` : "codex";
+      companionSettings = resolved.codexSettings ?? undefined;
+    }
     try {
-      const driver = this.driverFor("codex");
+      const driver = this.driverFor(codexInstanceId);
       if (!(driver instanceof CodexDriver)) return unavailable("The Codex driver cannot check image-generation eligibility.");
-      const provider = (await this.providers()).find((entry) => entry.instanceId === "codex");
-      if (!provider?.enabled || !provider.installed) return unavailable("Codex must be installed and enabled for image generation.");
+      const provider =
+        (await this.providers()).find((entry) => entry.instanceId === "codex") ??
+        (await codexProvider(companionSettings, process.env, thread.env.path));
+      if (!provider?.installed) return unavailable("Codex must be installed as a companion for image generation.");
       const selection = imageGenerationModel(provider.models);
       if (!selection) return unavailable("Image generation requires a released Luna model in Codex's catalog with a supported reasoning effort other than none.");
       const availability = await driver.withPeer(thread.env.path, imageGenerationAvailability);
-      return availability.available ? { available: true, reason: null, selection } : unavailable(availability.reason!);
+      return availability.available ? { available: true, reason: null, selection, codexInstanceId } : unavailable(availability.reason!);
     }
     catch { return unavailable("Could not verify Codex subscription and usage; check Codex login and try again."); }
   }
@@ -807,9 +885,57 @@ export class DirectConnection implements ClientApi {
     return { profile, model, config, path };
   }
 
+  private async ensureProfilesMigrated(configPath: string): Promise<void> {
+    if (!this.migrationPromise) {
+      this.migrationPromise = (async () => {
+        try {
+          const store = await this.store();
+          await migrateProviderProfiles({ configPath, storeRoot: this.storeRoot, store });
+        } catch (cause) {
+          void this.logThreadFailure("profiles-migration", cause instanceof Error ? cause.message : String(cause));
+        }
+      })();
+    }
+    await this.migrationPromise;
+  }
+
+  /** Fast local-file auth/email probes for Claude and Antigravity profiles (no Keychain IPC). */
+  private probeCliAccountAuth(providers: CliConfig["providers"]): Map<string, boolean | AccountAuthProbe> {
+    const auth = new Map<string, boolean | AccountAuthProbe>();
+    for (const account of providers?.claude?.accounts ?? []) {
+      auth.set(`claude/${account.id.trim().toLowerCase()}`, probeClaudeAccountAuth(account));
+    }
+    for (const account of providers?.antigravity?.accounts ?? []) {
+      // A gated account's folder is never read: while multiple Antigravity
+      // accounts are off (`providers.antigravity.allowUnsupportedUse`), the
+      // only account Moxen may observe is the host-login one.
+      const gated = antigravityAccountBlockedReason(providers?.antigravity, `antigravity/${account.id.trim().toLowerCase()}`) !== null;
+      if (!gated) auth.set(`antigravity/${account.id.trim().toLowerCase()}`, probeAntigravityAccountAuth(account));
+    }
+    return auth;
+  }
+
+  /**
+   * One configured Antigravity account's public summary: a gated account
+   * (multiple accounts off, the default) is reported disabled with the
+   * reason and without probing its home folder.
+   */
+  private antigravityAccountSummary(account: AntigravityAccountConfig, providers: CliConfig["providers"]): ProviderAccountSummary {
+    const instanceId = `antigravity/${account.id.trim().toLowerCase()}`;
+    const reason = antigravityAccountBlockedReason(providers?.antigravity, instanceId);
+    const auth = reason === null ? probeAntigravityAccountAuth(account) : undefined;
+    return { ...summarizeAccount("antigravity", account, auth), disabledReason: reason };
+  }
+
   private async settingsSnapshot(): Promise<SettingsSnapshot> {
     const { config, path, exists } = await this.readConfigFile();
-    return { path, exists, settings: describeSettings(config) };
+    return {
+      path,
+      exists,
+      settings: describeSettings(config),
+      accountSettings: describeAllAccountSettings(config),
+      accounts: summarizeProviderAccounts(config.providers, this.probeCliAccountAuth(config.providers)),
+    };
   }
 
   /**
@@ -922,11 +1048,14 @@ export class DirectConnection implements ClientApi {
   startScheduling(): void {
     if (this.schedulingStarted || this.closed) return;
     this.schedulingStarted = true;
-    for (const driver of this.ownedDrivers) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
+    for (const driver of this.ownedDrivers) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.observeDriverEvent(driver, event)));
     const usageTick = async (): Promise<void> => {
       if (this.closed || this.usageTickRunning) return;
       this.usageTickRunning = true;
-      try { await this.usageProtection.tick(); }
+      try {
+        await this.usageProtection.tick();
+        void this.refreshStaleChatGptUsage().catch(() => undefined);
+      }
       catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         if (!this.usageFailures.has(message)) {
@@ -997,10 +1126,111 @@ export class DirectConnection implements ClientApi {
     const driver = driverForInstance(this.driversOwner, instanceId, this.factories, this.lastProviders);
     // The harness reads its profiles on every turn, so it is handed the config this operation saw.
     // Profiles are edited while the server runs; the harness driver reads its config on every use.
-    if (driver instanceof HarnessDriver) driver.setConfig(this.lastProviders?.harness, this.lastWeb);
-    if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.usageProtection.observe(event)));
+    if (driver instanceof HarnessDriver) {
+      const harnessConfig = driverKindOfInstance(instanceId) === "chatgpt"
+        ? chatgptHarnessConfigFor(this.lastProviders, instanceId)
+        : this.lastProviders?.harness;
+      driver.setConfig(harnessConfig, this.lastWeb);
+    }
+    this.driverInstanceIds.set(driver, instanceId);
+    if (driverKindOfInstance(instanceId) === "antigravity") this.antigravityDrivers.set(driver, instanceId);
+    if (this.schedulingStarted && !this.ownedDrivers.has(driver)) this.usageSubscriptions.push(subscribeDriverUsage(driver, (event) => this.observeDriverEvent(driver, event)));
     this.ownedDrivers.add(driver);
     return driver;
+  }
+
+  private observeDriverEvent(driver: TurnDriver, event: ProviderRuntimeEvent): void {
+    this.usageProtection.observe(event);
+    if (event.type !== "turn.completed" && event.type !== "turn.failed" && event.type !== "turn.interrupted") return;
+    const instanceId = this.driverInstanceIds.get(driver);
+    const parsed = instanceId ? parseAccountInstanceId(instanceId) : null;
+    if (parsed?.kind === "chatgpt") {
+      void this.refreshChatGptCompanionUsage(parsed.accountId, {
+        force: true,
+        minIntervalMs: CHATGPT_POST_TURN_USAGE_COOLDOWN_MS,
+      }).catch(() => undefined);
+    }
+  }
+
+  private async refreshChatGptCompanionUsage(
+    accountId: string,
+    options: { readonly force?: boolean; readonly minIntervalMs?: number } = {},
+  ): Promise<void> {
+    if (this.closed) return;
+    const normalizedId = accountId.trim().toLowerCase();
+    if (!normalizedId) return;
+    const now = Date.now();
+    const lastProbed = this.chatGptUsageLastProbedAt.get(normalizedId);
+    if (options.minIntervalMs !== undefined && lastProbed !== undefined && now - lastProbed < options.minIntervalMs) {
+      return;
+    }
+    const existing = this.chatGptUsageInFlight.get(normalizedId);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const work = (async (): Promise<void> => {
+      try {
+        const config = await this.loadConfig();
+        if (this.closed) return;
+        this.lastProviders = driverProviders(config);
+        const account = config.providers?.chatgpt?.accounts?.find(
+          (entry) => entry.id.trim().toLowerCase() === normalizedId,
+        );
+        if (!account || account.enabled === false || account.codexVerified !== true) return;
+        this.chatGptUsageLastProbedAt.set(normalizedId, Date.now());
+        const companion = this.driverFor(`codex/${normalizedId}`);
+        if (this.probeCodexCompanionFn && companion instanceof CodexDriver) {
+          const probed = await this.probeCodexCompanionFn(companion, process.cwd()).catch(() => null);
+          if (!this.closed && probed && probed.rateLimits.windows.length > 0) {
+            recordUsageWindows(`chatgpt/${normalizedId}`, [...probed.rateLimits.windows]);
+          }
+          return;
+        }
+        const refreshed = await companion.refreshUsage?.({ force: options.force === true }).catch(() => null);
+        if (!this.closed && refreshed && (refreshed.windows.length > 0 || typeof refreshed.credits === "number")) {
+          recordUsageWindows(`chatgpt/${normalizedId}`, refreshed.windows, undefined, { credits: refreshed.credits });
+        }
+      } catch {
+        // Companion probe is best-effort; keep last recorded windows.
+      }
+    })();
+    this.chatGptUsageInFlight.set(normalizedId, work);
+    try {
+      await work;
+    } finally {
+      if (this.chatGptUsageInFlight.get(normalizedId) === work) {
+        this.chatGptUsageInFlight.delete(normalizedId);
+      }
+    }
+  }
+
+  private async refreshStaleChatGptUsage(now = Date.now()): Promise<void> {
+    if (this.closed || now - this.lastChatGptStaleSweepAt < 30_000) return;
+    this.lastChatGptStaleSweepAt = now;
+    const config = await this.loadConfig().catch(() => null);
+    if (!config || this.closed) return;
+    const accounts = (config.providers?.chatgpt?.accounts ?? []).filter(
+      (account) => account.enabled !== false && account.codexVerified === true,
+    );
+    if (accounts.length === 0) return;
+    const snapshot = usageLimitsSnapshot(now);
+    for (const account of accounts) {
+      const normalizedId = account.id.trim().toLowerCase();
+      const current = snapshot[`chatgpt/${normalizedId}`];
+      const checkedMs = current ? Date.parse(current.checkedAt) : Number.NaN;
+      const stale =
+        !current ||
+        !Number.isFinite(checkedMs) ||
+        now - checkedMs >= CHATGPT_STALE_USAGE_REFRESH_MS ||
+        current.windows.some((window) => window.resetsAt === null);
+      if (stale) {
+        void this.refreshChatGptCompanionUsage(normalizedId, {
+          force: true,
+          minIntervalMs: CHATGPT_STALE_USAGE_REFRESH_MS,
+        }).catch(() => undefined);
+      }
+    }
   }
 
   /**
@@ -1013,13 +1243,53 @@ export class DirectConnection implements ClientApi {
    * never stops the rest. Drivers with nothing cheap to read sit the round out.
    */
   private async refreshUsageWindows(): Promise<Record<string, ProviderUsageLimits>> {
+    const config = await this.loadConfig();
+    this.lastProviders = driverProviders(config);
+    const targets = new Set<TurnDriver>(this.ownedDrivers);
+    for (const driver of [...targets]) {
+      // Owned Antigravity drivers acquired while the setting was on lose
+      // their probe the moment the account is gated: eligibility is checked
+      // before probing, not only at acquisition.
+      const instanceId = this.antigravityDrivers.get(driver);
+      if (instanceId !== undefined && antigravityAccountBlockedReason(config.providers?.antigravity, instanceId) !== null) targets.delete(driver);
+    }
+    for (const account of config.providers?.claude?.accounts ?? []) {
+      if (account.enabled === false) continue;
+      if (!probeClaudeAccountAuth(account).signedIn) continue;
+      try {
+        targets.add(this.driverFor(`claude/${account.id.trim().toLowerCase()}`));
+      } catch {
+        // Unusable or unknown driver config: skip cleanly.
+      }
+    }
+    for (const account of config.providers?.antigravity?.accounts ?? []) {
+      if (account.enabled === false) continue;
+      // A gated account (multiple accounts off, the default) is never
+      // launched or probed: not even its home folder is read.
+      if (antigravityAccountBlockedReason(config.providers?.antigravity, `antigravity/${account.id.trim().toLowerCase()}`) !== null) continue;
+      if (!probeAntigravityAccountAuth(account).signedIn) continue;
+      try {
+        targets.add(this.driverFor(`antigravity/${account.id.trim().toLowerCase()}`));
+      } catch {
+        // Unusable or unknown driver config: skip cleanly.
+      }
+    }
+    if (config.providers?.vibe?.enabled === true) {
+      try {
+        targets.add(this.driverFor("vibe"));
+      } catch {
+        // Unusable or unknown driver config: skip cleanly.
+      }
+    }
     await Promise.allSettled(
-      [...this.ownedDrivers].map(async (driver) => {
+      [...targets].map(async (driver) => {
         // Records on landing, even past the deadline: the round answers from
         // the partial snapshot, and a late probe freshens the next call.
         const landed = (async () => await driver.refreshUsage?.())().then(
           (refreshed) => {
-            if (refreshed && refreshed.windows.length > 0) recordUsageWindows(refreshed.key, refreshed.windows);
+            if (refreshed && (refreshed.windows.length > 0 || typeof refreshed.credits === "number")) {
+              recordUsageWindows(refreshed.key, refreshed.windows, undefined, { credits: refreshed.credits });
+            }
             return refreshed;
           },
           () => null,
@@ -1031,7 +1301,48 @@ export class DirectConnection implements ClientApi {
         await Promise.race([landed, deadline]);
       }),
     );
-    return usageLimitsSnapshot();
+    // Also mirror live usage from verified Codex companions onto their `chatgpt/<id>` usage buckets.
+    const chatgptAccounts = config.providers?.chatgpt?.accounts ?? [];
+    await Promise.allSettled(
+      chatgptAccounts
+        .filter((account) => account.enabled !== false && account.codexVerified === true)
+        .map(async (account) => {
+          const landed = this.refreshChatGptCompanionUsage(account.id, { force: true });
+          const deadline = new Promise<null>((resolve) => {
+            const timer = setTimeout(() => resolve(null), USAGE_DRIVER_PROBE_TIMEOUT_MS);
+            timer.unref?.();
+          });
+          await Promise.race([landed, deadline]);
+        }),
+    );
+    return this.gatedUsageLimitsSnapshot(config);
+  }
+
+  /**
+   * A config edit must not need a restart to apply to Antigravity: an
+   * account this connection acquired while the setting was on (so: an
+   * isolated driver, live sessions, maybe a usage probe away) is revoked
+   * the moment the config just read gates it — the driver stops, its
+   * sessions stop with it, and it is no longer owned, so no probe or
+   * prompt keeps running after the user opts out.
+   */
+  private async revokeGatedAntigravityDrivers(config: CliConfig): Promise<void> {
+    if (this.closed || this.antigravityDrivers.size === 0) return;
+    for (const [driver, instanceId] of [...this.antigravityDrivers]) {
+      if (antigravityAccountBlockedReason(config.providers?.antigravity, instanceId) === null) continue;
+      this.ownedDrivers.delete(driver);
+      this.antigravityDrivers.delete(driver);
+      if (driver.stopAll) await Effect.runPromise(driver.stopAll()).catch(() => undefined);
+    }
+  }
+
+  /** The stored usage snapshot minus gated Antigravity accounts: their windows and credits are not served while the gate is off. */
+  private gatedUsageLimitsSnapshot(config: CliConfig): Record<string, ProviderUsageLimits> {
+    const snapshot = usageLimitsSnapshot();
+    for (const key of Object.keys(snapshot)) {
+      if (driverKindOfInstance(key) === "antigravity" && antigravityAccountBlockedReason(config.providers?.antigravity, key) !== null) delete snapshot[key];
+    }
+    return snapshot;
   }
 
   // -- subscriptions -------------------------------------------------------
@@ -1072,11 +1383,19 @@ export class DirectConnection implements ClientApi {
         if (stopped || this.closed) return;
         const fingerprint = `${version}#${this.researchRevision}#${JSON.stringify(projects)}`;
         if (fingerprint === lastFingerprint && Date.now() < nextDueAt) return;
-        const threads = await listThreads(store, { status: "all" });
+        const records = await listThreads(store, { status: "all", includeArchived: true });
+        const threads = records.filter((thread) => thread.archivedAt == null);
+        const archivedThreads = records
+          .filter((thread) => thread.archivedAt != null && thread.hidden !== true)
+          .sort((a, b) => b.archivedAt!.localeCompare(a.archivedAt!))
+          .map(({ id, title }) => ({ id, title }));
         const now = Date.now();
         nextDueAt = Number.POSITIVE_INFINITY;
         // Who delegated whom: the sidebar nests a task under its parent.
-        const parents = new Map((await store.readDelegations().catch(() => [])).map((row) => [row.childThreadId, row.parentThreadId] as const));
+        const delegations = await store.readDelegations().catch(() => []);
+        const parents = new Map(delegations.map((row) => [row.childThreadId, row.parentThreadId] as const));
+        // Use the latest live link, matching the thread.delegation query.
+        const notifications = new Map(delegations.filter((row) => row.continuedIn === undefined).map((row) => [row.childThreadId, row.notify === true] as const));
         const seen = new Set<string>();
         const rows = await Promise.all(
           threads.map(async (entry) => {
@@ -1106,7 +1425,8 @@ export class DirectConnection implements ClientApi {
             // Threads from before the record kept its native subagents get
             // the list folded from their ledger once; the next poll shows it.
             if (entry.nativeSubagents === undefined) void backfillNativeSubagents(store, entry.id);
-            return toThreadEnvelope(entry, turns, { parentThreadId: parents.get(entry.id) });
+            const envelope = toThreadEnvelope(entry, turns, { parentThreadId: parents.get(entry.id) });
+            return notifications.get(entry.id) ? { ...envelope, delegationNotifies: true as const } : envelope;
           }),
         );
         for (const id of [...turnCache.keys()]) if (!seen.has(id)) turnCache.delete(id);
@@ -1114,12 +1434,12 @@ export class DirectConnection implements ClientApi {
         const researchRuns = threads.flatMap((thread) => [...(thread.pastResearchRuns ?? []), ...(thread.researchRun ? [thread.researchRun] : [])]);
         const researchProposals = [...this.researchProposals.values()].map((entry) => entry.proposal).filter((proposal) => answering.has(proposal.threadId));
         lastFingerprint = fingerprint;
-        const hash = JSON.stringify({ projects, threads: visible, researchRuns, researchProposals });
+        const hash = JSON.stringify({ projects, threads: visible, archivedThreads, researchRuns, researchProposals });
         if (!stopped && !this.closed && hash !== lastHash) {
           lastHash = hash;
           onItem({
             kind: "snapshot",
-            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(researchRuns.length ? { researchRuns } : {}), ...(answering.size ? { researchProposals } : {}) },
+            snapshot: { snapshotSequence: 0, projects, threads: visible, ...(archivedThreads.length ? { archivedThreads } : {}), ...(researchRuns.length ? { researchRuns } : {}), ...(answering.size ? { researchProposals } : {}) },
           });
         }
       } catch (cause) {
@@ -1319,15 +1639,52 @@ export class DirectConnection implements ClientApi {
     };
   }
 
-  private async threadDetail(threadId: string): Promise<ThreadEnvelope | null> {
+  private async threadDetail(threadId: string): Promise<ThreadDetail | null> {
     const store = await this.store();
     const read = await readThread(store, threadId, { view: "messages" }).catch(() => null);
     if (!read) return null;
-    return { ...toThreadEnvelope(read.thread, read.turns, {
+    const thread = toThreadEnvelope(read.thread, read.turns, {
       messages: read.messages,
       activities: read.activities,
       checkpoints: await this.withCheckpointFiles(read.thread.env.path, read.checkpoints),
-    }), turnThroughput: turnThroughput(read.turns) };
+    });
+    const selection = read.turns.findLast((turn) => turn.modelSelection)?.modelSelection ?? thread.modelSelection;
+    const driver = selection ? driverKey(selection.instanceId) : null;
+    const subagentRows = nativeSubagents(thread.activities ?? []).map((row) => ({
+      ...row,
+      stoppable: row.running && (driver === "opencode" || driver === "harness"),
+    }));
+    const recorded = latestRecordedContextUsage(read.activities);
+    const contextUsage = recorded
+      ? await this.priceContext(read.thread, read.turns, recorded, await this.sessionDriver(threadId), true)
+      : undefined;
+    return {
+      ...thread,
+      turnThroughput: turnThroughput(read.turns),
+      ...(subagentRows.length > 0 ? { subagentRows } : {}),
+      ...(contextUsage ? { contextUsage } : {}),
+    };
+  }
+
+  private async priceContext<T extends ContextWindowUsage>(
+    thread: StoredThread,
+    turns: StoredTurn[],
+    reading: T,
+    driver: TurnDriver | null,
+    fromStoredActivity = false,
+  ): Promise<T> {
+    const config = await this.loadConfig();
+    const open = openTurn(turns);
+    const liveUsage = open ? driver?.liveTurnUsage?.(thread.id) ?? null : null;
+    const inFlight = open && liveUsage
+      ? { turnId: open.id, modelSelection: open.modelSelection ?? thread.modelSelection, usage: liveUsage }
+      : null;
+    const activeSelection = inFlight?.modelSelection ?? open?.modelSelection ?? thread.modelSelection;
+    const costUsd =
+      fromStoredActivity && driverKindOfInstance(activeSelection.instanceId) !== "claude"
+        ? (threadCostUsd(thread, turns, config, inFlight) ?? reading.costUsd ?? null)
+        : resolveContextCostUsd(thread, turns, config, reading.costUsd, inFlight);
+    return costUsd === null ? reading : { ...reading, costUsd };
   }
 
   /**
@@ -1427,6 +1784,10 @@ export class DirectConnection implements ClientApi {
         return accepted;
       case "project.create":
         return await this.projectCreate(command);
+      case "project.rename":
+        return await this.projectRename(command);
+      case "project.remove":
+        return await this.projectRemove(command);
       case "thread.create":
         return await this.threadCreate(command);
       case "thread.turn.start":
@@ -1476,7 +1837,10 @@ export class DirectConnection implements ClientApi {
         await unsnoozeThread(await this.store(), command.threadId);
         return accepted;
       case "thread.archive":
-        await this.freeWorktree(await archiveThread(await this.store(), command.threadId));
+        await archiveThread(await this.store(), command.threadId, (thread) => this.freeWorktree(thread));
+        return accepted;
+      case "thread.restore":
+        await restoreThread(await this.store(), command.threadId, (thread) => restoreThreadWorktree(this.storeRoot, thread));
         return accepted;
       case "thread.delete":
         {
@@ -1564,7 +1928,7 @@ export class DirectConnection implements ClientApi {
           ...(references.length ? ["Reference image paths (read these before editing):", ...references.map((file) => JSON.stringify(file))] : []),
           "Image request:", command.prompt,
         ].join("\n\n");
-        return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: "codex", ...availability.selection, isolation: "shared", wait: false }, { hidden: true });
+        return await delegate(await this.context(), { parentThreadId: command.parentThreadId, task, title: "Image generation", provider: availability.codexInstanceId, ...availability.selection, isolation: "shared", wait: false }, { hidden: true });
       }
       case "thread.task.cancel":
         return await cancelTask(await this.context(), command.parentThreadId, command.taskId, { notifyParent: command.notifyParent });
@@ -1671,7 +2035,7 @@ export class DirectConnection implements ClientApi {
       case "prompt.improve":
         return await improvePrompt(await this.loadConfig(), command, async (input, selection) => {
           const driver = this.driverFor(selection.instanceId);
-          if (!driver.completeText) throw new CliError("PROMPT_IMPROVER_UNAVAILABLE", `${selection.provider}/${selection.model} cannot run a completion without tools, so it cannot improve a draft. Your original draft is unchanged. Choose a Claude Code or OpenCode model in the prompt improver settings (promptImprover.provider, promptImprover.model).`);
+          if (!driver.completeText) throw new CliError("PROMPT_IMPROVER_UNAVAILABLE", `${selection.provider}/${selection.model} cannot run a completion without tools, so it cannot improve a draft. Your original draft is unchanged. Choose a Claude Code, ChatGPT, OpenCode, or Moxen Harness model in the prompt improver settings (promptImprover.provider, promptImprover.model).`);
           return await driver.completeText(input);
         });
       case "remote.pairing.start":
@@ -1737,6 +2101,18 @@ export class DirectConnection implements ClientApi {
               await this.remoteAccess.apply(before.remote).catch(() => undefined);
               throw cause;
             }
+          }
+          if (command.key === "providers.antigravity.allowUnsupportedUse" && next.providers?.antigravity?.allowUnsupportedUse === true) {
+            // Turning it on releases what the off default held: task notices
+            // go out now, and an admission pass starts the held wake-ups.
+            void this.context().then((ctx) => recoverTaskNotifications(ctx)).catch(() => undefined);
+            void this.usageProtection.tick().catch(() => undefined);
+          }
+          if (command.key === "providers.antigravity.allowUnsupportedUse" && next.providers?.antigravity?.allowUnsupportedUse !== true) {
+            // Turning it off revokes what the setting allowed immediately:
+            // owned drivers (and their live sessions) of now-gated accounts
+            // stop, without waiting for the next operation to load config.
+            await this.revokeGatedAntigravityDrivers(next);
           }
           return { ...(await this.settingsSnapshot()), accepted: true };
         });
@@ -1807,6 +2183,449 @@ export class DirectConnection implements ClientApi {
         const providers = (await this.loadConfig()).providers;
         return await this.runProviderUpdate(command.provider, providers?.[command.provider]?.binaryPath);
       }
+      case "provider.update-all": {
+        const providers = (await this.loadConfig()).providers;
+        const targets = [...new Set(command.providers ?? UPDATABLE_PROVIDERS)];
+        const results = await Promise.all(
+          targets.map(async (provider): Promise<ProviderUpdateAllItem> => {
+            try {
+              const update = await this.runProviderUpdate(provider, providers?.[provider]?.binaryPath);
+              return { provider, ok: true, update };
+            } catch (cause) {
+              return { provider, ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+            }
+          }),
+        );
+        return { results };
+      }
+      case "provider.account.save": {
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const saved = upsertProviderAccount(fileConfig, command);
+          await saveConfig(path, normalizeFileConfig(saved.config), skipped);
+          let account = saved.account;
+          if (account.kind === "chatgpt") {
+            const stored = saved.config.providers?.chatgpt?.accounts?.find((entry) => entry.id === account.id);
+            const signedIn = await hasSecret(stored?.authRef);
+            account = { ...account, signedIn };
+          } else if (account.kind === "claude") {
+            const stored = saved.config.providers?.claude?.accounts?.find((entry) => entry.id === account.id);
+            if (stored) account = summarizeAccount("claude", stored, probeClaudeAccountAuth(stored));
+          } else if (account.kind === "antigravity") {
+            const stored = saved.config.providers?.antigravity?.accounts?.find((entry) => entry.id === account.id);
+            if (stored) account = this.antigravityAccountSummary(stored, saved.config.providers);
+          }
+          return { account, created: saved.created, settings: await this.settingsSnapshot(), accepted: true };
+        });
+      }
+      case "provider.account.remove": {
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const result = removeProviderAccount(fileConfig, command.kind, command.id);
+          if (result.removed) {
+            await saveConfig(path, normalizeFileConfig(result.config), skipped);
+            if (result.authRef && isSecretRef(result.authRef)) {
+              await writeSecret(refName(result.authRef), "").catch(() => undefined);
+            }
+          }
+          return { removed: result.removed, settings: await this.settingsSnapshot(), accepted: true };
+        });
+      }
+      case "provider.account.toggle": {
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const updated = setProviderAccountEnabled(fileConfig, command.kind, command.id, command.enabled);
+          await saveConfig(path, normalizeFileConfig(updated.config), skipped);
+          let account = updated.account;
+          if (account.kind === "chatgpt") {
+            const stored = updated.config.providers?.chatgpt?.accounts?.find((entry) => entry.id === account.id);
+            const signedIn = await hasSecret(stored?.authRef);
+            account = { ...account, signedIn };
+          } else if (account.kind === "claude") {
+            const stored = updated.config.providers?.claude?.accounts?.find((entry) => entry.id === account.id);
+            if (stored) account = summarizeAccount("claude", stored, probeClaudeAccountAuth(stored));
+          } else if (account.kind === "antigravity") {
+            const stored = updated.config.providers?.antigravity?.accounts?.find((entry) => entry.id === account.id);
+            if (stored) account = this.antigravityAccountSummary(stored, updated.config.providers);
+          }
+          return { account, settings: await this.settingsSnapshot(), accepted: true };
+        });
+      }
+      case "provider.account.login.start": {
+        const normalizedId = command.id.trim().toLowerCase();
+        const config = await this.loadConfig();
+        const existingClaude =
+          command.kind === "claude"
+            ? config.providers?.claude?.accounts?.find((item) => item.id.trim().toLowerCase() === normalizedId)
+            : undefined;
+        const existingAgy =
+          command.kind === "antigravity"
+            ? config.providers?.antigravity?.accounts?.find((item) => item.id.trim().toLowerCase() === normalizedId)
+            : undefined;
+        const existingChatGpt =
+          command.kind === "chatgpt"
+            ? config.providers?.chatgpt?.accounts?.find((item) => item.id.trim().toLowerCase() === normalizedId)
+            : undefined;
+        if (!existingClaude && !existingAgy && !existingChatGpt) {
+          throw new CliError("ACCOUNT_NOT_FOUND", `No ${command.kind} account "${normalizedId}" is configured.`, { exitCode: 4 });
+        }
+        let expectedEmail: string | null = null;
+        if (command.kind === "chatgpt") {
+          const bundle = await loadChatGptAuthBundle(normalizedId, this.chatgptOAuth?.secrets);
+          if (!bundle) {
+            throw new CliError(
+              "CHATGPT_NOT_SIGNED_IN",
+              `ChatGPT account "${normalizedId}" is not signed in. Sign in with ChatGPT before signing in its Codex companion.`,
+            );
+          }
+          expectedEmail = bundle.identity.email ?? null;
+        }
+        const savedHome = existingClaude?.homePath ?? existingAgy?.homePath ?? existingChatGpt?.codexHomePath;
+        // Always assign a Moxen-managed isolated folder for non-default accounts (or when requested)
+        // so signing in a new profile never clobbers the user's primary CLI login.
+        const effectiveHome =
+          command.homePath?.trim() ||
+          savedHome?.trim() ||
+          (normalizedId !== "default" ? managedAccountHomeDisplayPath(command.kind, normalizedId) : undefined);
+        // Signing in an Antigravity account anywhere but the host `agy`
+        // login is a multiple-account use: while the setting is off (the
+        // default) it would write a homePath, an env override, or a
+        // `--gemini-dir` Moxen then refuses to ever run. Every input the
+        // login session will be given passes the one off-mode launch
+        // policy first; nothing is written and nothing is launched.
+        if (command.kind === "antigravity") {
+          const reason = antigravityOffUseLaunchBlockedReason(config.providers?.antigravity, {
+            homePath: effectiveHome,
+            env: existingAgy?.env,
+            // Account-level launch args, with the provider-level ones the
+            // login inherits when the account sets none of its own.
+            launchArgs: existingAgy?.launchArgs ?? config.providers?.antigravity?.launchArgs,
+          });
+          if (reason !== null) {
+            throw new CliError("ANTIGRAVITY_ACCOUNT_OFF", reason, {
+              exitCode: 4,
+              details: { instanceId: `antigravity/${normalizedId}`, setting: "providers.antigravity.allowUnsupportedUse" },
+            });
+          }
+        }
+
+        if (effectiveHome && effectiveHome !== savedHome) {
+          await this.withConfigWrite(async () => {
+            const { fileConfig, path, skipped } = await this.readConfigFile();
+            const saved = upsertProviderAccount(fileConfig, {
+              kind: command.kind,
+              id: normalizedId,
+              ...(command.kind === "chatgpt" ? { codexHomePath: effectiveHome } : { homePath: effectiveHome }),
+            });
+            await saveConfig(path, normalizeFileConfig(saved.config), skipped);
+          });
+        }
+
+        const session = await startProviderAccountLoginSession(
+          {
+            kind: command.kind,
+            accountId: normalizedId,
+            ...(effectiveHome ? { homePath: effectiveHome } : {}),
+            binaryPath:
+              command.kind === "claude"
+                ? existingClaude?.binaryPath
+                : command.kind === "antigravity"
+                  ? existingAgy?.binaryPath
+                  : existingChatGpt?.codexBinaryPath,
+            launchArgs:
+              command.kind === "claude"
+                ? existingClaude?.launchArgs
+                : command.kind === "antigravity"
+                  ? existingAgy?.launchArgs
+                  : existingChatGpt?.codexLaunchArgs,
+            env: existingClaude?.env ?? existingAgy?.env ?? existingChatGpt?.env,
+            ...(expectedEmail ? { expectedEmail } : {}),
+          },
+          this.providerAccountLoginDeps,
+        );
+        this.accountLogins.set(session.sessionId, { session, kind: command.kind, id: normalizedId });
+        return {
+          sessionId: session.sessionId,
+          kind: session.kind,
+          id: session.accountId,
+          homePath: session.homePath,
+          authorizationUrl: session.authorizationUrl,
+          openBrowser: session.openBrowser,
+          needsCodeInput: session.needsCodeInput,
+          message: session.message,
+        };
+      }
+      case "provider.account.login.complete": {
+        const entry = this.accountLogins.get(command.sessionId);
+        if (!entry) {
+          throw new CliError("PROVIDER_LOGIN_NOT_FOUND", `No pending provider login session "${command.sessionId}".`);
+        }
+        try {
+          if (command.code !== undefined) {
+            await entry.session.submitCode?.(command.code);
+          }
+          const completion = await entry.session.waitForCompletion(command.timeoutMs);
+          if (entry.kind === "chatgpt" && completion.probed) {
+            const bundle = await loadChatGptAuthBundle(entry.id, this.chatgptOAuth?.secrets);
+            if (!bundle) {
+              throw new CliError(
+                "CHATGPT_NOT_SIGNED_IN",
+                `ChatGPT account "${entry.id}" is no longer signed in.`,
+              );
+            }
+            const verification = verifyCodexCompanion(bundle.identity, completion.probed.account, completion.probed.rateLimits);
+            if (verification.verified && completion.probed.rateLimits.windows.length > 0) {
+              recordUsageWindows(`chatgpt/${entry.id}`, [...completion.probed.rateLimits.windows]);
+            }
+            return await this.withConfigWrite(async () => {
+              const { fileConfig, path, skipped } = await this.readConfigFile();
+              const list = fileConfig.providers?.chatgpt?.accounts ?? [];
+              const current = list.find((item) => item.id.trim().toLowerCase() === entry.id);
+              if (!current) {
+                return {
+                  account: null,
+                  verified: verification.verified,
+                  needsConfirmation: verification.needsConfirmation,
+                  reason: verification.reason,
+                  settings: await this.settingsSnapshot(),
+                  accepted: true as const,
+                };
+              }
+              const nextEntry = {
+                ...current,
+                ...(completion.homePath ? { codexHomePath: completion.homePath } : {}),
+                ...(verification.verified ? { codexVerified: true } : {}),
+                ...(verification.verified && verification.codexPlanType ? { planType: verification.codexPlanType } : {}),
+                ...(verification.verified && verification.codexWorkspaceName ? { workspaceName: verification.codexWorkspaceName } : {}),
+                ...(verification.verified && verification.codexAccountId ? { accountId: verification.codexAccountId } : {}),
+              };
+              if (!verification.verified) delete nextEntry.codexVerified;
+              const accounts = list.map((item) => (item.id.trim().toLowerCase() === entry.id ? nextEntry : item));
+              const nextConfig = normalizeFileConfig({
+                ...fileConfig,
+                providers: {
+                  ...fileConfig.providers,
+                  chatgpt: { ...fileConfig.providers?.chatgpt, accounts },
+                },
+              });
+              await saveConfig(path, nextConfig, skipped);
+              const stored = nextConfig.providers?.chatgpt?.accounts?.find((item) => item.id === entry.id) ?? nextEntry;
+              return {
+                account: summarizeAccount("chatgpt", stored, true),
+                verified: verification.verified,
+                needsConfirmation: verification.needsConfirmation,
+                reason: verification.reason,
+                settings: await this.settingsSnapshot(),
+                accepted: true as const,
+              };
+            });
+          }
+
+          // Claude or Antigravity: refresh settings snapshot and return the updated account summary.
+          const config = await this.loadConfig();
+          const account =
+            entry.kind === "claude"
+              ? (() => {
+                  const found = config.providers?.claude?.accounts?.find((item) => item.id.trim().toLowerCase() === entry.id);
+                  return found ? summarizeAccount("claude", found, probeClaudeAccountAuth(found)) : null;
+                })()
+              : (() => {
+                  const found = config.providers?.antigravity?.accounts?.find((item) => item.id.trim().toLowerCase() === entry.id);
+                  return found ? this.antigravityAccountSummary(found, config.providers) : null;
+                })();
+          return {
+            account,
+            settings: await this.settingsSnapshot(),
+            accepted: true as const,
+          };
+        } finally {
+          this.accountLogins.delete(command.sessionId);
+        }
+      }
+      case "provider.account.login.cancel": {
+        const entry = this.accountLogins.get(command.sessionId);
+        if (entry) {
+          this.accountLogins.delete(command.sessionId);
+          await entry.session.cancel();
+        }
+        return { accepted: true };
+      }
+      case "chatgpt.login.start": {
+        const session = await startChatGptLoginSession(command.accountId, this.chatgptOAuth);
+        this.chatgptLogins.set(session.sessionId, {
+          session,
+          ...(command.label ? { label: command.label } : {}),
+        });
+        return {
+          sessionId: session.sessionId,
+          accountId: session.accountId,
+          authorizationUrl: session.authorizationUrl,
+          redirectUri: session.redirectUri,
+        };
+      }
+      case "chatgpt.login.complete": {
+        const entry = this.chatgptLogins.get(command.sessionId);
+        if (!entry) {
+          throw new CliError("CHATGPT_LOGIN_NOT_FOUND", `No pending ChatGPT login session "${command.sessionId}".`);
+        }
+        try {
+          const completion = command.callbackUrl
+            ? await entry.session.completeFromUrl(command.callbackUrl)
+            : await entry.session.waitForCallback(command.timeoutMs);
+          return await this.withConfigWrite(async () => {
+            const { fileConfig, path, skipped } = await this.readConfigFile();
+            const existingList = fileConfig.providers?.chatgpt?.accounts ?? [];
+            const existing = existingList.find((item) => item.id.trim().toLowerCase() === completion.accountId);
+            const id = completion.accountId;
+            const nextAccount = {
+              ...(existing ?? {}),
+              id,
+              ...(entry.label ? { label: entry.label } : existing?.label ? { label: existing.label } : {}),
+              authRef: completion.authRef,
+              userId: completion.bundle.identity.userId,
+              ...(completion.bundle.identity.email ? { email: completion.bundle.identity.email } : {}),
+              ...(completion.bundle.identity.accountId ? { accountId: completion.bundle.identity.accountId } : {}),
+              ...(completion.bundle.identity.workspaceName ? { workspaceName: completion.bundle.identity.workspaceName } : {}),
+              ...(completion.bundle.identity.planType ? { planType: completion.bundle.identity.planType } : {}),
+            };
+            const accounts = existing
+              ? existingList.map((item) => (item.id.trim().toLowerCase() === id ? nextAccount : item))
+              : [...existingList, nextAccount];
+            const nextConfig = normalizeFileConfig({
+              ...fileConfig,
+              providers: {
+                ...fileConfig.providers,
+                chatgpt: { ...fileConfig.providers?.chatgpt, accounts },
+              },
+            });
+            await saveConfig(path, nextConfig, skipped);
+            const savedAccount = nextConfig.providers?.chatgpt?.accounts?.find((item) => item.id === id) ?? nextAccount;
+            return {
+              account: summarizeAccount("chatgpt", savedAccount, true),
+              settings: await this.settingsSnapshot(),
+              accepted: true as const,
+            };
+          });
+        } finally {
+          this.chatgptLogins.delete(command.sessionId);
+        }
+      }
+      case "chatgpt.login.cancel": {
+        const entry = this.chatgptLogins.get(command.sessionId);
+        if (entry) {
+          this.chatgptLogins.delete(command.sessionId);
+          await entry.session.cancel();
+        }
+        return { accepted: true };
+      }
+      case "chatgpt.logout": {
+        const normalizedId = command.accountId.trim().toLowerCase();
+        await clearChatGptAuth(normalizedId, this.chatgptOAuth);
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const existingList = fileConfig.providers?.chatgpt?.accounts ?? [];
+          const existing = existingList.find((item) => item.id.trim().toLowerCase() === normalizedId);
+          if (!existing) {
+            return { account: null, settings: await this.settingsSnapshot(), accepted: true as const };
+          }
+          const { authRef: _ref, codexVerified: _ver, ...rest } = existing;
+          const accounts = existingList.map((item) => (item.id.trim().toLowerCase() === normalizedId ? rest : item));
+          const nextConfig = normalizeFileConfig({
+            ...fileConfig,
+            providers: {
+              ...fileConfig.providers,
+              chatgpt: { ...fileConfig.providers?.chatgpt, accounts },
+            },
+          });
+          await saveConfig(path, nextConfig, skipped);
+          const updated = nextConfig.providers?.chatgpt?.accounts?.find((item) => item.id === normalizedId) ?? rest;
+          return {
+            account: summarizeAccount("chatgpt", updated, false),
+            settings: await this.settingsSnapshot(),
+            accepted: true as const,
+          };
+        });
+      }
+      case "chatgpt.codex.pair": {
+        const normalizedId = command.accountId.trim().toLowerCase();
+        const bundle = await loadChatGptAuthBundle(normalizedId, this.chatgptOAuth?.secrets);
+        if (!bundle) {
+          throw new CliError(
+            "CHATGPT_NOT_SIGNED_IN",
+            `ChatGPT account "${normalizedId}" is not signed in. Sign in with ChatGPT before pairing Codex.`,
+          );
+        }
+        const config = await this.loadConfig();
+        const existing = config.providers?.chatgpt?.accounts?.find((item) => item.id.trim().toLowerCase() === normalizedId);
+        if (!existing) {
+          throw new CliError("ACCOUNT_NOT_FOUND", `No chatgpt account "${normalizedId}" is configured.`, { exitCode: 4 });
+        }
+        const codexHomePath =
+          command.codexHomePath ??
+          existing.codexHomePath ??
+          (normalizedId !== "default" ? managedAccountHomeDisplayPath("chatgpt", normalizedId) : undefined);
+        const codexBinaryPath = command.codexBinaryPath ?? existing.codexBinaryPath;
+        const codexLaunchArgs = command.codexLaunchArgs ?? existing.codexLaunchArgs;
+        const companionDriver = new CodexDriver({
+          instanceId: `codex/${normalizedId}`,
+          settings: {
+            ...(config.providers?.codex ?? {}),
+            ...(codexHomePath !== undefined ? { homePath: codexHomePath } : {}),
+            ...(codexBinaryPath !== undefined ? { binaryPath: codexBinaryPath } : {}),
+            ...(codexLaunchArgs !== undefined ? { launchArgs: codexLaunchArgs } : {}),
+          },
+        });
+        let probed: CodexCompanionProbeResult;
+        try {
+          probed = this.probeCodexCompanionFn
+            ? await this.probeCodexCompanionFn(companionDriver, process.cwd())
+            : await companionDriver.withPeer(process.cwd(), probeCodexCompanion);
+        } finally {
+          await Effect.runPromise(companionDriver.stopAll()).catch(() => undefined);
+        }
+        const verification = verifyCodexCompanion(bundle.identity, probed.account, probed.rateLimits, {
+          confirmWorkspace: command.confirmWorkspace,
+        });
+        if (verification.verified && probed.rateLimits.windows.length > 0) {
+          recordUsageWindows(`chatgpt/${normalizedId}`, [...probed.rateLimits.windows]);
+        }
+        return await this.withConfigWrite(async () => {
+          const { fileConfig, path, skipped } = await this.readConfigFile();
+          const list = fileConfig.providers?.chatgpt?.accounts ?? [];
+          const current = list.find((item) => item.id.trim().toLowerCase() === normalizedId) ?? existing;
+          const nextEntry = {
+            ...current,
+            ...(codexHomePath !== undefined ? { codexHomePath } : {}),
+            ...(codexBinaryPath !== undefined ? { codexBinaryPath } : {}),
+            ...(codexLaunchArgs !== undefined ? { codexLaunchArgs } : {}),
+            ...(verification.verified ? { codexVerified: true } : {}),
+            ...(verification.verified && verification.codexPlanType ? { planType: verification.codexPlanType } : {}),
+            ...(verification.verified && verification.codexWorkspaceName ? { workspaceName: verification.codexWorkspaceName } : {}),
+            ...(verification.verified && verification.codexAccountId ? { accountId: verification.codexAccountId } : {}),
+          };
+          if (!verification.verified) delete nextEntry.codexVerified;
+          const accounts = list.map((item) => (item.id.trim().toLowerCase() === normalizedId ? nextEntry : item));
+          const nextConfig = normalizeFileConfig({
+            ...fileConfig,
+            providers: {
+              ...fileConfig.providers,
+              chatgpt: { ...fileConfig.providers?.chatgpt, accounts },
+            },
+          });
+          await saveConfig(path, nextConfig, skipped);
+          const stored = nextConfig.providers?.chatgpt?.accounts?.find((item) => item.id === normalizedId) ?? nextEntry;
+          return {
+            verified: verification.verified,
+            needsConfirmation: verification.needsConfirmation,
+            reason: verification.reason,
+            account: summarizeAccount("chatgpt", stored, true),
+            codexEmail: verification.codexEmail,
+            codexPlanType: verification.codexPlanType,
+            codexWorkspaceName: verification.codexWorkspaceName,
+            settings: await this.settingsSnapshot(),
+          };
+        });
+      }
       case "thread.conversation.revert":
         return {
           ...(await revertThread(await this.context(), command.threadId, command.turnCount, {
@@ -1819,16 +2638,22 @@ export class DirectConnection implements ClientApi {
 
   private async projectCreate(command: CommandOf<"project.create">): Promise<CommandResult<"project.create">> {
     const { workspaceRoot } = command;
-    const existing = await listStoredProjects(this.storeRoot).then(
-      (projects) => projects.find((candidate) => candidate.workspaceRoot === workspaceRoot) ?? null,
-    );
-    if (existing) return { projectId: existing.id, created: false };
     const ensured = await ensureStoredProject(this.storeRoot, {
       ...(command.projectId ? { id: command.projectId } : {}),
       workspaceRoot,
       ...(command.title ? { title: command.title } : {}),
     });
-    return { projectId: ensured.project.id, created: true };
+    return { projectId: ensured.project.id, created: ensured.created };
+  }
+
+  private async projectRename(command: CommandOf<"project.rename">): Promise<CommandResult<"project.rename">> {
+    const renamed = await renameStoredProject(this.storeRoot, command.projectId, command.title);
+    return { projectId: renamed.id, title: renamed.title };
+  }
+
+  private async projectRemove(command: CommandOf<"project.remove">): Promise<CommandResult<"project.remove">> {
+    const removed = await removeStoredProject(this.storeRoot, command.projectId);
+    return { projectId: removed.id };
   }
 
   /**
@@ -2123,7 +2948,7 @@ export class DirectConnection implements ClientApi {
       await this.context();
       return this.driverFor(selection.instanceId);
     }
-    if (driverKey(selection.instanceId) === "codex" && thread.providerSessions?.["codex"] !== undefined) {
+    if (driverKindOfInstance(selection.instanceId) === "codex" && thread.providerSessions?.[driverKey(selection.instanceId)] !== undefined) {
       await this.context();
       return this.driverFor(selection.instanceId);
     }
@@ -2206,7 +3031,7 @@ export class DirectConnection implements ClientApi {
       store.readTurns(threadId).catch(() => []),
       store.readCheckpoints(threadId).catch(() => []),
     ]);
-    const turn = turns[toTurnCount - 1];
+    const turn = ranTurns(turns)[toTurnCount - 1];
     if (!turn) return null;
     const checkpoint = checkpoints.find((row) => row.turnId === turn.id);
     if (!checkpoint || checkpoint.status !== "available" || !checkpoint.ref || !checkpoint.baseRef) return null;
@@ -2321,21 +3146,44 @@ export class DirectConnection implements ClientApi {
       case "thread.turn.await":
         return { status: await this.turnSettled(query.threadId, query.turnId, signal) };
       case "providers.list":
-        return { providers: withLiveUsage(await this.providers()) };
+        return { providers: withLiveUsage(await this.providers(), ctx.config) };
+      case "providers.accounts": {
+        const config = await this.loadConfig();
+        const chatgptAccounts = config.providers?.chatgpt?.accounts ?? [];
+        const authByInstance = this.probeCliAccountAuth(config.providers);
+        await Promise.all(
+          chatgptAccounts.map(async (account) => {
+            authByInstance.set(`chatgpt/${account.id.trim().toLowerCase()}`, await hasSecret(account.authRef));
+          }),
+        );
+        return { accounts: summarizeProviderAccounts(config.providers, authByInstance) };
+      }
+      case "acp.registry.list": {
+        const loaded = await loadAcpRegistryCatalog({
+          storeRoot: this.storeRoot,
+          ...(query.forceRefresh === undefined ? {} : { forceRefresh: query.forceRefresh }),
+        });
+        return {
+          agents: loaded.agents.map((agent) => toRegistryPreset(agent)),
+          source: loaded.source,
+        };
+      }
       case "doctor": {
         const providers = (await this.loadConfig()).providers;
-        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath);
+        return await diagnose(this.storeRoot, providers?.opencode?.binaryPath, providers?.claude?.binaryPath, providers?.codex?.binaryPath, providers?.antigravity?.binaryPath, providers?.vibe?.binaryPath);
       }
       case "thread.background.list": {
         const driver = await this.sessionDriver(query.threadId);
         if (!driver) return { live: false, partial: false, tasks: [] };
-        // OpenCode reports only the background shells and subagents its own
-        // server started: a live empty list from it never proves nothing runs.
+        // OpenCode and ACP/Antigravity cannot report every background process
+        // (OpenCode only sees its own server; ACP cannot see schedule timers or
+        // pre-restart tasks inside agy), so an empty list never proves nothing runs.
         const store = await this.store();
         const thread = await store.readThreadRecord(query.threadId);
         const turns = await store.readTurns(query.threadId);
         const latest = [...turns].reverse().find((turn) => turn.modelSelection)?.modelSelection ?? thread?.modelSelection;
-        const partial = latest !== undefined && driverKey(latest.instanceId) === "opencode";
+        const latestKind = latest !== undefined ? driverKindOfInstance(latest.instanceId) : null;
+        const partial = latestKind === "opencode" || latestKind === "acp" || latestKind === "antigravity";
         return { live: true, partial, tasks: driver.backgroundTasks?.(query.threadId) ?? [] };
       }
       case "thread.context-reading":
@@ -2343,11 +3191,17 @@ export class DirectConnection implements ClientApi {
       case "thread.context": {
         const driver = await this.sessionDriver(query.threadId);
         if (!driver) return { live: false, breakdown: null };
-        const breakdown = driver.contextBreakdown ? await driver.contextBreakdown(query.threadId).catch(() => null) : null;
-        if (breakdown) return { live: true, breakdown };
-        // Totals only: the reading without categories.
-        const usage = driver.contextUsage ? await driver.contextUsage(query.threadId).catch(() => null) : null;
-        return { live: true, breakdown: usage ? { ...usage, categories: [], estimated: false } : null };
+        const rawBreakdown = driver.contextBreakdown ? await driver.contextBreakdown(query.threadId).catch(() => null) : null;
+        const rawUsage = rawBreakdown ? null : driver.contextUsage ? await driver.contextUsage(query.threadId).catch(() => null) : null;
+        const base: ContextBreakdown | null = rawBreakdown ?? (rawUsage ? { ...rawUsage, categories: [], estimated: false } : null);
+        if (!base) return { live: true, breakdown: null };
+        const store = await this.store();
+        const [thread, turns] = await Promise.all([
+          store.readThreadRecord(query.threadId).catch(() => null),
+          store.readTurns(query.threadId).catch(() => []),
+        ]);
+        const breakdown = thread ? await this.priceContext(thread, turns, base, driver, false) : base;
+        return { live: true, breakdown };
       }
       case "thread.subagent": {
         // OpenCode keeps each subagent as a child session only a driver holding the thread's session can read.
@@ -2355,9 +3209,10 @@ export class DirectConnection implements ClientApi {
         const store = await this.store();
         const thread = await store.readThreadRecord(query.threadId);
         const selection = [...(await store.readTurns(query.threadId))].reverse().find((turn) => turn.modelSelection)?.modelSelection ?? thread?.modelSelection;
-        const harness = selection !== undefined && driverKey(selection.instanceId) === "harness";
-        const historyProvider = harness ? "harness" : selection && driverKey(selection.instanceId) === "codex" ? "codex" : "opencode";
-        const cursor = thread?.providerSessions?.[historyProvider] ?? null;
+        const kind = selection !== undefined ? driverKindOfInstance(selection.instanceId) : null;
+        const historyProvider = kind === "harness" ? "harness" : kind === "codex" ? "codex" : "opencode";
+        const sessionKey = selection !== undefined ? driverKey(selection.instanceId) : historyProvider;
+        const cursor = thread?.providerSessions?.[sessionKey] ?? thread?.providerSessions?.[historyProvider] ?? null;
         const readHistory = driver?.subagentHistory ? (agentId: string) => driver.subagentHistory!(query.threadId, agentId, cursor) : undefined;
         return await subagentTranscript(store, query.threadId, query.agentId, readHistory, historyProvider);
       }
@@ -2365,14 +3220,21 @@ export class DirectConnection implements ClientApi {
         // Off by choice (`updates.checkLatest`): nothing is asked, and the answer says so.
         const config = await this.loadConfig();
         if (config.updates?.checkLatest === false) {
-          return { enabled: false, claude: { latest: null, channel: null }, opencode: { latest: null, channel: null }, codex: { latest: null, channel: null } };
+          return {
+            enabled: false,
+            claude: { latest: null, channel: null },
+            opencode: { latest: null, channel: null },
+            codex: { latest: null, channel: null },
+            antigravity: { latest: null, channel: null },
+            vibe: { latest: null, channel: null },
+          };
         }
         return { enabled: true, ...(await this.readLatestVersions(config.providers?.claude?.binaryPath)) };
       }
       case "app.update.check":
         return await this.checkAppUpdate();
       case "usage.limits":
-        return { providers: usageLimitsSnapshot() };
+        return { providers: this.gatedUsageLimitsSnapshot(ctx.config) };
       case "usage.refresh":
         return { providers: await this.refreshUsageWindows() };
       case "usage.protection":
@@ -2572,6 +3434,14 @@ export class DirectConnection implements ClientApi {
         }
       }),
     );
+    for (const pending of this.chatgptLogins.values()) {
+      await pending.session.cancel().catch(() => undefined);
+    }
+    this.chatgptLogins.clear();
+    for (const pending of this.accountLogins.values()) {
+      await pending.session.cancel().catch(() => undefined);
+    }
+    this.accountLogins.clear();
     this.ownedDrivers.clear();
     // The store is free for the next server: without this a fast restart
     // would meet this process's own lock and have to take it over.
@@ -2586,13 +3456,44 @@ export class DirectConnection implements ClientApi {
  * is recorded under its instance id; every other provider shares its
  * driver's account.
  */
-function withLiveUsage(providers: readonly ProviderSummary[]): ProviderSummary[] {
+function withLiveUsage(providers: readonly ProviderSummary[], config: CliConfig): ProviderSummary[] {
   const live = usageLimitsSnapshot();
   return providers.map((provider) => {
     if (provider.usageLimits !== null) return provider;
-    const limits = live[usageKeyForInstance(provider.instanceId)] ?? live[provider.driver];
+    const key = usageKeyForInstance(provider.instanceId);
+    // A gated Antigravity account serves no stored usage either: its numbers
+    // are not reported once the account is off.
+    if (antigravityAccountBlockedReason(config.providers?.antigravity, provider.instanceId) !== null) return provider;
+    const lower = provider.instanceId.trim().toLowerCase();
+    const isMultiAccount =
+      lower.startsWith("claude/") ||
+      lower.startsWith("chatgpt/") ||
+      lower.startsWith("antigravity/") ||
+      lower.startsWith("codex/");
+    const limits = isMultiAccount ? live[key] : (live[key] ?? live[provider.driver]);
     return limits === undefined ? provider : { ...provider, usageLimits: limits };
   });
+}
+
+function latestRecordedContextUsage(activities: readonly StoredActivity[]): ContextWindowUsage | null {
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index]!;
+    if (activity.kind !== "context-window.updated") continue;
+    const payload = activity.payload;
+    if (!payload || typeof payload["usedTokens"] !== "number") continue;
+    return {
+      usedTokens: payload["usedTokens"],
+      maxTokens: typeof payload["maxTokens"] === "number" ? payload["maxTokens"] : null,
+      cachedInputTokens: typeof payload["cachedInputTokens"] === "number" ? payload["cachedInputTokens"] : null,
+      autoCompactThreshold: typeof payload["autoCompactThreshold"] === "number" ? payload["autoCompactThreshold"] : null,
+      compactsAutomatically: typeof payload["compactsAutomatically"] === "boolean" ? payload["compactsAutomatically"] : null,
+      ...(payload["estimated"] === true ? { estimated: true } : {}),
+      ...(typeof payload["costUsd"] === "number" && Number.isFinite(payload["costUsd"]) && payload["costUsd"] >= 0
+        ? { costUsd: payload["costUsd"] }
+        : {}),
+    };
+  }
+  return null;
 }
 
 /** A thread's latest context reading (`context-window.updated`), or null when its provider never reported one. */

@@ -42,17 +42,28 @@ function tmpStore(): string {
 }
 
 describe("buildDirectProviders", () => {
+  it("exposes zero providers by default when no accounts or opt-in providers are configured", async () => {
+    const providers = await buildDirectProviders({
+      env: { PATH: binDir(["claude", "opencode", "codex", "agy"]) },
+      storeRoot: tmpStore(),
+      modelsDev: async () => MODELS_DEV,
+    });
+    expect(providers).toEqual([]);
+  });
+
   it("marks missing binaries as not installed without spawning anything", async () => {
     const providers = await buildDirectProviders({
       env: { PATH: "/nonexistent" },
       storeRoot: tmpStore(),
+      claude: { accounts: [{ id: "default" }] },
+      opencode: { enabled: true },
       modelsDev: async () => MODELS_DEV,
     });
-    const claude = providers.find((entry) => entry.instanceId === "claudeAgent");
+    const claude = providers.find((entry) => entry.instanceId === "claude/default");
     expect(claude?.installed).toBe(false);
     expect(claude?.enabled).toBe(false);
     expect(claude?.status).toBe("not installed");
-    expect(providers.find((entry) => entry.driver === "codex")).toMatchObject({ installed: false, enabled: false, status: "not installed" });
+    expect(providers.find((entry) => entry.driver === "codex")).toBeUndefined();
     expect(providers.map((entry) => entry.driver)).not.toContain("grok");
     const opencode = providers.find((entry) => entry.instanceId === "opencode");
     expect(opencode?.installed).toBe(false);
@@ -69,9 +80,10 @@ describe("buildDirectProviders", () => {
     const providers = await buildDirectProviders({
       env: { PATH: dir },
       storeRoot: tmpStore(),
+      claude: { accounts: [{ id: "default" }] },
       modelsDev: async () => ({ catalog: [], source: "live" }),
     });
-    const claude = providers.find((entry) => entry.instanceId === "claudeAgent");
+    const claude = providers.find((entry) => entry.instanceId === "claude/default");
     expect(claude?.enabled).toBe(true);
     expect(claude?.models.length).toBeGreaterThan(0);
     const opus = claude?.models.find((model) => model.slug === "claude-opus-4-6");
@@ -85,6 +97,7 @@ describe("buildDirectProviders", () => {
         ANTHROPIC_API_KEY: "k",
       },
       storeRoot: tmpStore(),
+      opencode: { enabled: true },
       modelsDev: async () => MODELS_DEV,
     });
     // Categorized per-provider entry (credentialed: everything) …
@@ -110,6 +123,7 @@ describe("buildDirectProviders", () => {
     const providers = await buildDirectProviders({
       env: { PATH: binDir(["opencode"]) },
       storeRoot: tmpStore(),
+      opencode: { enabled: true },
       modelsDev: async () => MODELS_DEV,
     });
     const section = providers.find((entry) => entry.instanceId === "opencode/anthropic");
@@ -135,7 +149,7 @@ describe("buildDirectProviders", () => {
     source: "live" as const,
   };
   const zenOf = async (env: NodeJS.ProcessEnv, served: () => Promise<LoadedServedModels>) =>
-    (await buildDirectProviders({ env: { PATH: binDir(["opencode"]), ...env }, storeRoot: tmpStore(), modelsDev: async () => ZEN, opencodeServed: served })).find((entry) => entry.instanceId === "opencode/opencode");
+    (await buildDirectProviders({ env: { PATH: binDir(["opencode"]), ...env }, storeRoot: tmpStore(), opencode: { enabled: true }, modelsDev: async () => ZEN, opencodeServed: served })).find((entry) => entry.instanceId === "opencode/opencode");
 
   it("keeps OpenCode's own free tier without a login: zero-cost models it still serves", async () => {
     const zen = await zenOf({}, async () => ({ ids: new Set(["free-one", "paid-one"]), source: "live" }));
@@ -179,6 +193,7 @@ describe("buildDirectProviders", () => {
     const providers = await buildDirectProviders({
       env: { PATH: binDir(["opencode"]) },
       storeRoot: tmpStore(),
+      opencode: { enabled: true },
       modelsDev: async () => ({
         catalog: [
           { id: "zen", name: "Zen", env: ["ZEN_KEY"], models: [{ id: "bare-model", name: "Bare", reasoningOptions: [], cost: null }] },
@@ -194,6 +209,7 @@ describe("buildDirectProviders", () => {
     const providers = await buildDirectProviders({
       env: { PATH: "/nonexistent" },
       storeRoot: tmpStore(),
+      opencode: { enabled: true },
       modelsDev: async () => MODELS_DEV,
     });
     expect(() => selectProvider(providers, "nope")).toThrowError(expect.objectContaining({ code: "PROVIDER_NOT_FOUND" }));

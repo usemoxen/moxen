@@ -320,6 +320,11 @@ describe("settlement and snooze", () => {
       [running.turn.id, "interrupted"],
       [queued.turn.id, "interrupted"],
     ]);
+    // Both stops say who stopped them, so the ledger has no unexplained interrupt.
+    expect((await store.readActivities(child.id)).filter((row) => row.kind === "turn.interrupted").map((row) => row.summary)).toEqual([
+      "The thread was settled, stopping its work.",
+      "The thread was settled, stopping its work.",
+    ]);
   });
 
   it("stopping a task to settle it leaves its running parent alone", async () => {

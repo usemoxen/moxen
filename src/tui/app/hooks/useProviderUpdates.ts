@@ -6,7 +6,7 @@ import { dispatchErrorMessage } from "../../../core/errors.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { ToastTone } from "../../hooks/useToasts.js";
 
-const LABELS: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex" };
+const LABELS: Record<UpdatableProvider, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity", vibe: "Mistral Vibe" };
 /** The updater can take a while (a package-manager install): the "Updating…" toast stays until the answer replaces it. */
 const RESULT_TOAST_MS = 9_000;
 

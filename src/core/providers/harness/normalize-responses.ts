@@ -5,6 +5,7 @@
  * server-side id, and messages and calls carry none. A round's tool calls are
  * `function_call` items and their results `function_call_output` items.
  */
+import { imageDimensionsFromBase64 } from "../../attachments.js";
 import { replaysReasoning, portableToolId } from "./normalize-anthropic.js";
 import { wrapSystemReminder } from "./normalize.js";
 import type { ModelQuirks } from "./quirks.js";
@@ -21,16 +22,50 @@ function validJsonObjectText(text: string): string {
   }
 }
 
-const inputImage = (image: { mimeType: string; data: string }): ResponsesItem => ({ type: "input_image", image_url: `data:${image.mimeType};base64,${image.data}` });
+export interface BuildResponsesInputOptions {
+  readonly replayReasoning?: boolean | undefined;
+  /**
+   * Place leading system instructions as a leading `role: "developer"` message
+   * inside `input` instead of top-level `instructions`. Required for prompt
+   * caching on GPT-6.2+ (which appends top-level `instructions` after `input`
+   * uncached) and keeps the system prompt inside the WebSocket continuation prefix.
+   */
+  readonly developerInstructions?: boolean | undefined;
+  /**
+   * Treat leading `system` messages as mid-conversation `<system-reminder>` user
+   * items rather than extracting them into `instructions` (used for incremental
+   * WebSocket `previous_response_id` continuation deltas).
+   */
+  readonly leadingSystemAsReminder?: boolean | undefined;
+}
 
-export function buildResponsesInput(transcript: readonly TranscriptMessage[], quirks: ModelQuirks, options: { readonly replayReasoning?: boolean } = {}): { instructions: string; input: ResponsesItem[] } {
+export function buildResponsesInput(
+  transcript: readonly TranscriptMessage[],
+  quirks: ModelQuirks,
+  options: BuildResponsesInputOptions = {},
+): { instructions: string; input: ResponsesItem[] } {
+  const inputImage = (image: { mimeType: string; data: string }): ResponsesItem => {
+    const item: ResponsesItem = { type: "input_image", image_url: `data:${image.mimeType};base64,${image.data}` };
+    if (quirks.chatgptOAuth) {
+      const size = imageDimensionsFromBase64(image.data);
+      // Auto can keep original resolution and reject an oversized image. High asks OpenAI to downsample it.
+      if (size && Math.ceil(size.width / 32) * Math.ceil(size.height / 32) > 30_000) item.detail = "high";
+    }
+    return item;
+  };
   const replay = options.replayReasoning !== false;
   const input: ResponsesItem[] = [];
   let index = 0;
   const lead: string[] = [];
-  while (index < transcript.length && transcript[index]!.role === "system") {
-    lead.push((transcript[index] as Extract<TranscriptMessage, { role: "system" }>).content);
-    index += 1;
+  if (!options.leadingSystemAsReminder) {
+    while (index < transcript.length && transcript[index]!.role === "system") {
+      lead.push((transcript[index] as Extract<TranscriptMessage, { role: "system" }>).content);
+      index += 1;
+    }
+  }
+  const leadText = lead.join("\n\n");
+  if (options.developerInstructions && leadText !== "") {
+    input.push({ role: "developer", content: [{ type: "input_text", text: leadText }] });
   }
   for (; index < transcript.length; index += 1) {
     const message = transcript[index]!;
@@ -70,7 +105,7 @@ export function buildResponsesInput(transcript: readonly TranscriptMessage[], qu
       }
     }
   }
-  return { instructions: lead.join("\n\n"), input };
+  return { instructions: options.developerInstructions ? "" : leadText, input };
 }
 
 export function responsesTools(tools: readonly ToolDefinition[]): ResponsesItem[] {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { COLOR, DIFF_BG, MODE_COLOR, SURFACE, activeTheme, applyTheme } from "../../theme.js";
+import { COLOR, DIFF_BG, MODE_COLOR, SURFACE, activeTheme, applyTheme, providerColor } from "../../theme.js";
 import { THEMES, THEME_NAMES } from "../../themes.js";
 import { SETTINGS } from "../../../core/configschema.js";
 
@@ -81,4 +81,13 @@ describe("theme contrast", () => {
       expect(problems).toEqual([]);
     });
   }
+});
+
+describe("providerColor", () => {
+  test("colors Antigravity blue and prefers the provider over a hosted model name", () => {
+    expect(providerColor("antigravity", "antigravity", "Gemini 4 Neon")).toBe("#4C8DF6");
+    expect(providerColor("antigravity", "antigravity", "Claude Sonnet 5.5 (Antigravity)")).toBe("#4C8DF6");
+    expect(providerColor("claude", "claudeAgent", "Claude Sonnet 5.5")).toBe("#DE7356");
+    expect(providerColor(undefined, undefined, "Gemini 4 Carbon")).toBe("#4C8DF6");
+  });
 });

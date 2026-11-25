@@ -28,6 +28,47 @@ describe("provider.update on the wire", () => {
   });
 });
 
+describe("provider.update-all and account CRUD on the wire", () => {
+  it("decodes provider.update-all with or without an explicit provider list", () => {
+    expect(decodeCommand({ type: "provider.update-all" })).toEqual({ type: "provider.update-all" });
+    expect(decodeCommand({ type: "provider.update-all", providers: ["claude", "antigravity"] })).toEqual({
+      type: "provider.update-all",
+      providers: ["claude", "antigravity"],
+    });
+    expect(() => decodeCommand({ type: "provider.update-all", providers: "claude" })).toThrow(/must be an array/);
+    expect(() => decodeCommand({ type: "provider.update-all", providers: ["grok"] })).toThrow(/providers\[\]/);
+  });
+
+  it("decodes providers.accounts and account save/toggle/remove commands", () => {
+    expect(decodeQuery({ type: "providers.accounts" })).toEqual({ type: "providers.accounts" });
+    expect(
+      decodeCommand({
+        type: "provider.account.save",
+        kind: "claude",
+        id: "work",
+        label: "Work",
+        homePath: "~/.claude-work",
+        env: { FOO: "bar" },
+      }),
+    ).toEqual({
+      type: "provider.account.save",
+      kind: "claude",
+      id: "work",
+      label: "Work",
+      homePath: "~/.claude-work",
+      env: { FOO: "bar" },
+    });
+    expect(
+      decodeCommand({ type: "provider.account.toggle", kind: "antigravity", id: "alt", enabled: false }),
+    ).toEqual({ type: "provider.account.toggle", kind: "antigravity", id: "alt", enabled: false });
+    expect(
+      decodeCommand({ type: "provider.account.remove", kind: "chatgpt", id: "personal" }),
+    ).toEqual({ type: "provider.account.remove", kind: "chatgpt", id: "personal" });
+    expect(() => decodeCommand({ type: "provider.account.save", kind: "codex", id: "x" })).toThrow(/kind/);
+    expect(() => decodeCommand({ type: "provider.account.toggle", kind: "claude", id: "work", enabled: "no" })).toThrow(/boolean/);
+  });
+});
+
 describe("app.update.check on the wire", () => {
   it("is a query with no arguments", () => {
     expect(decodeQuery({ type: "app.update.check" })).toEqual({ type: "app.update.check" });

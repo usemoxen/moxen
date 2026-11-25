@@ -138,6 +138,10 @@ describe("buildWireMessages", () => {
 
 describe("quirks", () => {
   it("picks a preset from the model id and lets the profile's family win", () => {
+    expect(detectQuirkFamily("qwen4-max-preview")).toBe("qwen4");
+    expect(detectQuirkFamily("qwen4.0-max-preview")).toBe("qwen4");
+    expect(detectQuirkFamily("qwen4-max")).toBe("qwen4");
+    expect(resolveQuirks({ modelId: "qwen4-max-preview" })).toMatchObject({ effortParam: "reasoning_effort", effortKwarg: null, images: "native" });
     expect(detectQuirkFamily("qwen3.8-flash-next")).toBe("qwen3");
     expect(detectQuirkFamily("unsloth/Mistral-7B")).toBe("mistral");
     expect(detectQuirkFamily("llama-3")).toBe("generic");

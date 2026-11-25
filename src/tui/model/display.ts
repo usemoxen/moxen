@@ -1,7 +1,30 @@
 import { type MessageKey, t } from "../i18n/index.js";
 import type { ProviderSummary } from "../../core/catalog/summary.js";
 import type { EffortDescriptor, ModelSummary } from "../../core/catalog/summary.js";
-import type { ModelSelection, ThreadEnvelope } from "../../core/types.js";
+import { driverKindOfInstance, parseAccountInstanceId, type ModelSelection, type ThreadEnvelope } from "../../core/types.js";
+
+/**
+ * Resolve a thread or selection's `instanceId` against the live provider catalog.
+ * Matches exact `instanceId` first so multi-account profiles (`antigravity/work`)
+ * stay strictly separated, and falls back to `<driver>/default` (or the sole/first
+ * account of that driver) only for legacy bare provider IDs (`"antigravity"`,
+ * `"claude"`, `"claudeAgent"`, `"chatgpt"`).
+ */
+export function findProviderForInstance(
+  providers: readonly ProviderSummary[] | null | undefined,
+  instanceId: string | null | undefined,
+): ProviderSummary | undefined {
+  if (!providers || !instanceId) return undefined;
+  const exact = providers.find((provider) => provider.instanceId === instanceId);
+  if (exact !== undefined) return exact;
+  if (instanceId.includes("/")) return undefined;
+  const kind = driverKindOfInstance(instanceId);
+  if (kind === null) return undefined;
+  return (
+    providers.find((provider) => provider.instanceId === `${kind}/default`) ??
+    providers.find((provider) => driverKindOfInstance(provider.instanceId) === kind)
+  );
+}
 
 /**
  * btop-style viewport floor enforced by `MinSizeGate`. Below either
@@ -43,11 +66,32 @@ export function displayModelName(
   selection: ModelSelection | undefined,
 ): string {
   if (selection === undefined) return "-";
-  const model = providers
-    ?.find((provider) => provider.instanceId === selection.instanceId)
-    ?.models.find((candidate) => candidate.slug === selection.model);
+  const model = findProviderForInstance(providers, selection.instanceId)?.models.find(
+    (candidate) => candidate.slug === selection.model,
+  );
   if (model !== undefined) return model.name;
   return prettifyModelSlug(selection.model);
+}
+
+/**
+ * Account qualifier for a model selection (e.g. `"Default"`, `"Trial"`) when
+ * more than one account of the same provider kind is configured in the catalog,
+ * so the composer header distinguishes accounts without adding clutter for
+ * single-account setups.
+ */
+export function displayAccountLabel(
+  providers: readonly ProviderSummary[] | null | undefined,
+  selection: ModelSelection | undefined,
+): string | null {
+  if (!providers || !selection) return null;
+  const provider = findProviderForInstance(providers, selection.instanceId);
+  if (!provider) return null;
+  const parsed = parseAccountInstanceId(provider.instanceId);
+  if (!parsed) return null;
+  const siblings = providers.filter((entry) => parseAccountInstanceId(entry.instanceId)?.kind === parsed.kind);
+  if (siblings.length < 2) return null;
+  const match = /\(([^)]+)\)\s*$/u.exec(provider.displayName ?? "");
+  return match?.[1]?.trim() || parsed.accountId;
 }
 
 /**
@@ -90,6 +134,7 @@ const EFFORT_HINTS: Readonly<Record<string, MessageKey>> = {
   high: "effort.high",
   xhigh: "effort.xhigh",
   max: "effort.max",
+  ultra: "effort.ultra",
 };
 
 /** The line under a reasoning level: what it means, and that it is the model's default when it is. */
@@ -146,9 +191,9 @@ export function displayEffort(
     (option): option is { id: string; value: string } => typeof option.value === "string",
   );
 
-  const model = providers
-    ?.find((provider) => provider.instanceId === selection.instanceId)
-    ?.models.find((candidate) => candidate.slug === selection.model);
+  const model = findProviderForInstance(providers, selection.instanceId)?.models.find(
+    (candidate) => candidate.slug === selection.model,
+  );
   if (model !== undefined) {
     for (const effort of model.efforts) {
       const explicit = strings.find((option) => option.id === effort.id)?.value;

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 
 import type { ClientApi, QueryResult } from "../../../server/api.js";
 import { t } from "../../i18n/index.js";
@@ -335,7 +335,7 @@ export function MemoryManagerModal({
   type Field = (typeof FIELDS)[number];
   const activeField: Field = FIELDS[Math.min(fieldIndex, FIELDS.length - 1)]!;
 
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.name === "escape" || key.name === "esc") {
       markModalDismissed();
       if (editingField !== null) {
@@ -489,7 +489,7 @@ export function MemoryManagerModal({
         }
       }
     }
-  });
+  }, { capture: true });
 
   const formTitle = formKey !== null ? t("mem.edit") : t("mem.new");
 
@@ -605,12 +605,14 @@ export function MemoryManagerModal({
               onActivate={() => { setFieldIndex(0); setEditingField("name"); }} onHover={() => setFieldIndex(0)} />
             {editingField === "name" ? (
               <TextField key={`name:${formKey?.name ?? "new"}`} initial={draft.name} width={inner}
+                onCancel={() => setEditingField(null)}
                 onSubmit={(text) => { setDraft({ ...draft, name: text }); setEditingField(null); }} />
             ) : null}
             <FormField id="memory-field-1" label={t("mem.field.description")} value={draft.description} active={activeField === "description"} editing={editingField === "description"} width={inner}
               onActivate={() => { setFieldIndex(1); setEditingField("description"); }} onHover={() => setFieldIndex(1)} />
             {editingField === "description" ? (
               <TextField key={`description:${formKey?.name ?? "new"}`} initial={draft.description} width={inner}
+                onCancel={() => setEditingField(null)}
                 onSubmit={(text) => { setDraft({ ...draft, description: text }); setEditingField(null); }} />
             ) : null}
             <FormField id="memory-field-2" label={t("mem.field.type")} value={typeLabel(draft.type)} active={activeField === "type"} editing={false} width={inner}
@@ -626,6 +628,7 @@ export function MemoryManagerModal({
               onActivate={() => { setFieldIndex(4); setEditingField("body"); }} onHover={() => setFieldIndex(4)} />
             {editingField === "body" ? (
               <TextField key={`body:${formKey?.name ?? "new"}`} initial={draft.body} multiline width={inner}
+                onCancel={() => setEditingField(null)}
                 onSubmit={(text) => { setDraft({ ...draft, body: text }); setEditingField(null); }} />
             ) : null}
             <box style={{ flexDirection: "row", flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>

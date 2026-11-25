@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { DEFAULT_PROMPT_IMPROVER_MODEL, DEFAULT_PROMPT_IMPROVER_PROVIDER } from "../configschema.js";
 import { CliError } from "../errors.js";
-import { driverKindOfInstance, type CliConfig, type ModelSelection } from "../types.js";
+import { driverKindOfInstance, resolveProfileProviderConfig, type CliConfig, type ModelSelection } from "../types.js";
 import type { TextCompletionInput } from "../providers/spi.js";
 import { projectInstructions } from "./instructions.js";
 import { readHarnessRuleFiles } from "./rulefiles.js";
@@ -31,7 +31,7 @@ export interface ImprovePromptInput {
 /** The provider and model the improver runs on, resolved from its own settings. */
 export interface PromptImproverSelection {
   readonly instanceId: string;
-  readonly provider: "claude" | "codex" | "opencode" | "harness";
+  readonly provider: "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe";
   readonly model: string;
 }
 
@@ -64,8 +64,7 @@ export async function improvePrompt(
   const selection = promptImproverSelection(config);
   const { provider, model } = selection;
   const destination = input.modelSelection?.instanceId ?? config.provider;
-  const kind = destination ? driverKindOfInstance(destination) : null;
-  const providerInstructions = kind ? config.providers?.[kind]?.instructions : undefined;
+  const providerInstructions = destination ? resolveProfileProviderConfig(config, destination)?.instructions : undefined;
   const profileInstructions = destination?.startsWith("harness/") ? config.providers?.harness?.profiles?.find((profile) => `harness/${profile.id}` === destination)?.systemPromptAppend : undefined;
   const [rules, project] = await Promise.all([readHarnessRuleFiles(directory), projectInstructions(directory)]);
   let remaining = MAX_CONTEXT;
@@ -79,7 +78,7 @@ export async function improvePrompt(
   const request = JSON.stringify({ draft: input.prompt, customInstructions, projectRules, protectedText: input.protectedText ?? [] });
   let reply: string;
   try {
-    reply = await complete({ workingDirectory: directory, model, prompt: request, instructions: PROMPT_IMPROVER_INSTRUCTIONS, signal: AbortSignal.timeout(90_000) }, selection);
+    reply = await complete({ workingDirectory: directory, model, instanceId: selection.instanceId, prompt: request, instructions: PROMPT_IMPROVER_INSTRUCTIONS, signal: AbortSignal.timeout(90_000) }, selection);
   } catch (cause) {
     if (cause instanceof CliError && cause.code === "PROMPT_IMPROVER_UNAVAILABLE") throw cause;
     const detail = cause instanceof Error ? cause.message : String(cause);

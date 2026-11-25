@@ -47,6 +47,11 @@ and a lock from a crashed server is taken over once its process is gone,
 not left behind. It also carries a format version (`store.json`, like the
 config file's): a build refuses data newer than it knows.
 
+On Unix, the server and local clients reject socket paths longer than
+103 UTF-8 bytes on macOS and BSD, or 107 on Linux. If the path is too long,
+set `MOXEN_SERVER_ENDPOINT` to a shorter socket path for both the server
+and its clients. Windows named pipes do not have this byte limit.
+
 Clients never change anything themselves. The TUI and every CLI command
 connect to this machine's server, starting it in the background when none
 is running (`moxen server start` runs it in the foreground instead), or
@@ -188,7 +193,9 @@ no data, which is not the same as unlimited.
 
 `thread_read` never floods the caller's context: it returns an outline (one
 line per turn, newest first), then the turns asked for (each tool call one
-line, numbered `12.3`), then one tool call in full, in pages. An answer is
+line, numbered `12.3`), then one tool call in full, in pages. Turns are
+numbered by the order they ran: a queued message that has not run, or was
+taken back before it ran, is not one of them. An answer is
 held to 16 K characters, at most 40 K, and to about 5% of the caller's free
 context, so a caller that is nearly full gets only the outline and is told
 why. Every cut names the call that fetches the rest, and the thread's text

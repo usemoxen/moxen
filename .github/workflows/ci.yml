@@ -51,3 +51,45 @@ jobs:
 
       - name: Local semantic memory search (production bundle)
         run: bun scripts/verify-memory-embeddings.ts
+
+  desktop:
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
+        # Git Bash on Windows, so the same commands run everywhere.
+        shell: bash
+        working-directory: src/desktop
+    steps:
+      # Windows would otherwise check files out with CRLF endings. Runs
+      # before checkout, when src/desktop doesn't exist yet.
+      - name: Keep line endings as committed
+        working-directory: .
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/desktop
+
+      # The build embeds only tracked files (fonts, icons, tokens.json and
+      # the logo in design-system/). The sync script that refreshes them
+      # needs the private design-system repo and never runs here.
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test

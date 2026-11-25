@@ -56,9 +56,10 @@ describe("sliderChoices", () => {
 
 describe("effortTones", () => {
   it("colours the named levels cool to hot, each its own", () => {
-    const tones = effortTones(["low", "medium", "high", "xhigh", "max"]);
-    expect(new Set(tones).size).toBe(5);
+    const tones = effortTones(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(new Set(tones).size).toBe(6);
     expect(effortTones(["max", "low"])).toEqual([tones[4], tones[0]]);
+    expect(effortTones(["ultra"])).toEqual([tones[5]]);
   });
   it("spreads unnamed levels along the same ramp by position", () => {
     const tones = effortTones(["a", "b", "c"]);

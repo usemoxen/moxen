@@ -7,7 +7,7 @@ import { TextAttributes } from "@opentui/core";
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
 import { useHover } from "../../hooks/useHover.js";
 import { prettyToolName } from "../../model/activity.js";
-import { contextShares, subagentPreview, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab } from "../../model/sidepanel.js";
+import { contextShares, planUsageGroups, subagentPreview, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab } from "../../model/sidepanel.js";
 import { backgroundTaskKind, backgroundTaskTitle, untilLabel, type BackgroundTaskRow, type ContextUsage } from "../../model/thread.js";
 import { formatDuration, formatTokenCount, formatUsd } from "../../model/turns.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -342,10 +342,11 @@ export function AgentsTab({
           );
         })
       )}
-      <Heading text={t("side.subagents_in_this_thread_7d16")} meta={subagents.length === 0 ? t("side.noneYet") : `${subagents.length}`} />
-      {subagents.length === 0 ? (
-        <Empty glyph="○" text={t("side.the_providers_own_subagents_a1b3")} />
-      ) : (
+      {/* Moxen blocks Claude's native subagents, so the section only appears
+          for subagents a thread actually has (another provider's, or an older
+          thread's): an empty one would advertise a tool Moxen turns off. */}
+      {subagents.length === 0 ? null : <Heading text={t("side.subagents_in_this_thread_7d16")} meta={`${subagents.length}`} />}
+      {subagents.length === 0 ? null : (
         subagents.map((agent) => {
           const took = agent.stoppedAt === null ? null : Math.max(1000, Date.parse(agent.stoppedAt) - Date.parse(agent.at));
           const state = agent.running ? formatDuration(Math.max(1000, now - Date.parse(agent.at))) : took === null || !Number.isFinite(took) ? t("side.done") : t("side.doneIn", { time: formatDuration(took) });
@@ -613,38 +614,55 @@ export function ContextTab({
         </>
       )}
       <Heading text={t("side.plan_usage_48f7")} {...(providerName === null ? {} : { meta: providerName })} />
-      {usageLimits === null || usageLimits.windows.length === 0 ? (
+      {usageLimits === null || (usageLimits.windows.length === 0 && typeof usageLimits.credits !== "number") ? (
         <text fg={COLOR.dim} wrapMode="word">
           {usageLimits?.unavailable?.message ?? t("side.no_subscription_usage_reported_fa47")}
         </text>
       ) : (
-        (() => {
-          // Inline like the heaviest tools: label, bar, reading in columns
-          // shared by every window, so the bars start and end together.
-          const rows = usageLimits.windows.map((window) => {
-            const resets = window.resetsAt === null ? null : new Date(window.resetsAt);
-            const resetLabel =
-              resets === null || Number.isNaN(resets.getTime()) ? null : `↻ ${untilLabel(resets, now).replace(/^in /u, "")}`;
-            return { window, percent: `${Math.round(window.usedPercent)}%`, resetLabel };
-          });
-          const labelWidth = Math.min(Math.max(...rows.map((row) => row.window.label.length)), Math.max(6, Math.floor(inner * 0.3)));
-          const percentWidth = Math.max(...rows.map((row) => row.percent.length));
-          const resetWidth = Math.max(0, ...rows.map((row) => row.resetLabel?.length ?? 0));
-          const valueWidth = percentWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
-          const barWidth = Math.max(4, inner - labelWidth - valueWidth - 2);
-          return rows.map(({ window, percent, resetLabel }) => {
-            const fraction = window.usedPercent / 100;
-            const color = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
-            return (
-              <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
-                <OverflowText fg={COLOR.text} width={labelWidth + 1} padToWidth suffix=" ">{window.label}</OverflowText>
-                <BarRow width={barWidth} fraction={fraction} filledColor={color} />
-                <text fg={COLOR.dim}>{` ${percent.padStart(percentWidth)}`}</text>
-                {resetWidth > 0 ? <text fg={COLOR.faint}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
+        <>
+          {usageLimits.windows.length === 0 ? null : (() => {
+            // Inline like the heaviest tools: label, bar, reading in columns
+            // shared by every window, so the bars start and end together.
+            const groups = planUsageGroups(usageLimits.windows).map((group) => ({
+              title: group.title,
+              rows: group.rows.map(({ window, label }) => {
+                const resets = window.resetsAt === null ? null : new Date(window.resetsAt);
+                const resetLabel =
+                  resets === null || Number.isNaN(resets.getTime()) ? null : `↻ ${untilLabel(resets, now).replace(/^in /u, "")}`;
+                return { window, label, percent: `${Math.round(window.usedPercent)}%`, resetLabel };
+              }),
+            }));
+            const rows = groups.flatMap((group) => group.rows);
+            const labelWidth = Math.min(Math.max(...rows.map((row) => row.label.length)), Math.max(6, Math.floor(inner * 0.3)));
+            const percentWidth = Math.max(...rows.map((row) => row.percent.length));
+            const resetWidth = Math.max(0, ...rows.map((row) => row.resetLabel?.length ?? 0));
+            const valueWidth = percentWidth + (resetWidth > 0 ? resetWidth + 1 : 0);
+            const barWidth = Math.max(4, inner - labelWidth - valueWidth - 2);
+            return groups.map((group, groupIndex) => (
+              <box key={group.title ?? "default"} style={{ flexDirection: "column", flexShrink: 0, ...(groupIndex > 0 ? { marginTop: 1 } : {}) }}>
+                {group.title === null ? null : <text fg={COLOR.dim}>{group.title}</text>}
+                {group.rows.map(({ window, label, percent, resetLabel }) => {
+                  const fraction = window.usedPercent / 100;
+                  const color = fraction >= 0.9 ? COLOR.danger : fraction >= 0.7 ? COLOR.warn : COLOR.accent;
+                  return (
+                    <box key={window.id} style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
+                      <OverflowText fg={COLOR.text} width={labelWidth + 1} padToWidth suffix=" ">{label}</OverflowText>
+                      <BarRow width={barWidth} fraction={fraction} filledColor={color} />
+                      <text fg={COLOR.dim}>{` ${percent.padStart(percentWidth)}`}</text>
+                      {resetWidth > 0 ? <text fg={COLOR.faint}>{` ${(resetLabel ?? "").padEnd(resetWidth)}`}</text> : null}
+                    </box>
+                  );
+                })}
               </box>
-            );
-          });
-        })()
+            ));
+          })()}
+          {typeof usageLimits.credits === "number" ? (
+            <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between", ...(usageLimits.windows.length > 0 ? { marginTop: 1 } : {}) }}>
+              <text fg={COLOR.dim}>{t("side.remaining_credits_9c4e")}</text>
+              <text fg={COLOR.text}>{usageLimits.credits.toLocaleString()}</text>
+            </box>
+          ) : null}
+        </>
       )}
     </box>
   );
@@ -692,8 +710,8 @@ export function BackgroundTab({
                 {started === null ? null : <text fg={COLOR.faint}>{started}</text>}
               </box>
               <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
-                <OverflowText fg={COLOR.faint} width={Math.max(4, inner - 12) + 2}>{`  ${task.command?.split("\n")[0] ?? ""}`}</OverflowText>
-                <ActionText label="stop" color={COLOR.danger} onClick={() => onStop(task.taskId)} />
+                <OverflowText fg={COLOR.faint} width={task.stoppable === false ? Math.max(4, inner - 2) : Math.max(4, inner - 12) + 2}>{`  ${task.command?.split("\n")[0] ?? ""}`}</OverflowText>
+                {task.stoppable === false ? null : <ActionText label="stop" color={COLOR.danger} onClick={() => onStop(task.taskId)} />}
               </box>
             </Row>
           );

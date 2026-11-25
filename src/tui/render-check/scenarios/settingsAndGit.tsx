@@ -6,6 +6,8 @@ import { GitFooter, GitTab, type RequestOpener } from "../../features/gitpanel/g
 import type { OpenCommit } from "../../features/gitpanel/useGitPanel.js";
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
 import { SidePanelFrame, SideTabBar } from "../../features/sidepanel/sidepanel.js";
+import { describeAllAccountSettings } from "../../../core/configschema.js";
+import { summarizeProviderAccounts } from "../../../core/providers/accounts.js";
 import { describeSettings, DEFAULTS_FOR_RENDER_CHECK } from "./settingsFixture.js";
 import type { ForgeDetection, ForgeRequest, ForgeRequestStatus, GitOverview, MergeStrategy } from "../../../server/api.js";
 import { baseChoices, resolveBase } from "../../model/gitpanel.js";
@@ -45,15 +47,26 @@ const PROVIDERS: ProviderSummary[] = [
 async function runSettings(): Promise<void> {
   const written: Array<{ key: string; value: string }> = [];
   const updated: string[] = [];
+  const configWithProfile = {
+    ...DEFAULTS_FOR_RENDER_CHECK,
+    providers: {
+      ...DEFAULTS_FOR_RENDER_CHECK.providers,
+      claude: { accounts: [{ id: "personal", label: "Personal" }] },
+      opencode: { enabled: true },
+    },
+  };
   const snapshot = {
     path: "/home/dev/.moxen/config.json",
     exists: true,
-    settings: describeSettings(DEFAULTS_FOR_RENDER_CHECK),
+    settings: describeSettings(configWithProfile),
+    accountSettings: describeAllAccountSettings(configWithProfile),
   };
+  const accounts = summarizeProviderAccounts(configWithProfile.providers);
   function Harness() {
     return (
       <SettingsModal
         snapshot={snapshot}
+        accounts={accounts}
         loading={false}
         saving={null}
         error={null}
@@ -98,7 +111,7 @@ async function runSettings(): Promise<void> {
   console.log("--- settings page ---");
   console.log(frame);
   // Every section is a tab down the left; the first one's settings show.
-  for (const expected of ["Settings", "config.json", "General", "Defaults", "Sessions", "Long threads", "Agent context", "Git and forges", "Claude Code", "Unknown folders"]) {
+  for (const expected of ["Settings", "config.json", "General", "Defaults", "Sessions", "Long threads", "Agent context", "Git and forges", "Overview", "Claude · Personal", "Unknown folders"]) {
     if (!frame.includes(expected)) fail(`settings page is missing "${expected}"`);
   }
   if (frame.includes("Idle session lifetime")) fail("settings page shows another section's settings under General");
@@ -181,20 +194,20 @@ async function runSettings(): Promise<void> {
   // The later sections: a restart-only setting says so, and a boolean
   // flips in place on click.
   const sideRows = setup.captureCharFrame().split("\n");
-  const claudeTab = sideRows.findIndex((row) => row.includes("Claude Code") && row.indexOf("Claude Code") < 28);
-  if (claudeTab < 0) fail("the settings sidebar has no Claude Code tab");
-  await act(async () => setup.mockMouse.click(sideRows[claudeTab]!.indexOf("Claude Code") + 1, claudeTab));
+  const claudeTab = sideRows.findIndex((row) => row.includes("Claude · Personal") && row.indexOf("Claude · Personal") < 28);
+  if (claudeTab < 0) fail("the settings sidebar has no Claude · Personal tab");
+  await act(async () => setup.mockMouse.click(sideRows[claudeTab]!.indexOf("Claude · Personal") + 1, claudeTab));
   await setup.flush();
   const claude = setup.captureCharFrame();
-  console.log("--- settings page, Claude Code tab ---");
+  console.log("--- settings page, Claude profile tab ---");
   console.log(claude);
-  if (!claude.includes("Permissions") || !claude.includes("Effort")) fail("the Claude Code tab does not lead with its thread defaults");
-  // The update card: the version, where it stands against the floor, and the button.
-  if (!claude.includes("2.1.280") || !claude.includes("Older than the 2.1.292")) fail("the Claude Code tab does not say its install is older than the floor");
-  if (!claude.includes("[ Update ]") || !claude.includes("claude update")) fail("the Claude Code tab has no update button naming what it runs");
+  if (!claude.includes("Permissions") || !claude.includes("Effort")) fail("the Claude profile tab does not lead with its thread defaults");
+  // The profile header card: the version, where it stands against the floor, and the update action.
+  if (!claude.includes("2.1.280") || !claude.includes("Older than the 2.1.292")) fail("the Claude profile tab does not say its install is older than the floor");
+  if (!claude.includes("Update")) fail("the Claude profile tab has no update button");
   await act(async () => setup.mockInput.pressKey("u"));
   await setup.flush();
-  if (updated.join() !== "claude") fail(`pressing u on the Claude Code tab updated ${JSON.stringify(updated)}`);
+  if (updated.join() !== "claude") fail(`pressing u on the Claude profile tab updated ${JSON.stringify(updated)}`);
 
   // A provider's Model lists that provider's catalog rather than asking for a slug.
   const claudeRows = setup.captureCharFrame().split("\n");
@@ -222,7 +235,7 @@ async function runSettings(): Promise<void> {
   const seenOn = (text: string) => claudeFrames.findIndex((frame) => frame.includes(text));
   console.log("--- settings page, Claude Code tab, last row ---");
   console.log(claudeFrames.at(-1));
-  for (const expected of ["Claude executable", "next server start", "Compaction", "Hand off at", "Long threads", "Setup", "Model prices", "Input price"]) {
+  for (const expected of ["Claude executable", "next server start", "Compaction", "Hand off at", "Long threads", "Setup", "Model prices", "Prices per model"]) {
     if (seenOn(expected) < 0) fail(`the Claude Code tab never shows "${expected}"`);
   }
   if (!claudeFrames.some((frame) => frame.split("\n").some((row) => row.includes("Compaction") && row.includes("Default (Moxen asks)")))) fail("the Claude Code tab does not say who compacts");
@@ -230,25 +243,25 @@ async function runSettings(): Promise<void> {
   if (seenOn("Moxen's skills") >= 0) fail("the Claude Code tab still offers Moxen's skills, which Moxen no longer ships");
   // Under the same headings, in the same order, as the other providers: Long threads before Setup.
   if (!(seenOn("Long threads") <= seenOn("Setup"))) fail("the Claude Code tab files Setup before Long threads");
-  if (!claudeFrames.some((frame) => frame.split("\n").some((row) => row.includes("Input price") && row.includes("Moxen's shipped")))) fail("the Claude Code tab does not price models at Moxen's shipped list by default");
-  // A price row opens its editor: walk back up to its label (not a fixed
-  // row) and click it — a multiline box with the pair format said under it.
-  for (let step = 0; step < 30 && !setup.captureCharFrame().includes("Input price"); step += 1) {
+  if (!claudeFrames.some((frame) => frame.split("\n").some((row) => row.includes("Prices per model") && row.includes("Shipped prices")))) fail("the Claude Code tab does not price models at Moxen's shipped list by default");
+  // The per-model prices row opens its editor: walk back up to its label (not
+  // a fixed row) and click it.
+  for (let step = 0; step < 30 && !setup.captureCharFrame().includes("Prices per model"); step += 1) {
     await act(async () => setup.mockInput.pressArrow("up"));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     await setup.flush();
   }
   const priceRows = setup.captureCharFrame().split("\n");
-  const priceRow = priceRows.findIndex((row) => row.includes("Input price"));
-  if (priceRow < 0) fail("the Claude Code tab has no input price row to click");
-  await act(async () => setup.mockMouse.click(priceRows[priceRow]!.indexOf("Input price") + 1, priceRow));
+  const priceRow = priceRows.findIndex((row) => row.includes("Prices per model"));
+  if (priceRow < 0) fail("the Claude Code tab has no Prices per model row to click");
+  await act(async () => setup.mockMouse.click(priceRows[priceRow]!.indexOf("Prices per model") + 1, priceRow));
   await setup.flush();
   await act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
   await setup.flush();
   const priceEditor = setup.captureCharFrame();
   console.log("--- settings page, a model price editor ---");
   console.log(priceEditor);
-  if (!priceEditor.includes("model=USD pairs")) fail("the model price editor does not say the pair format");
+  if (!priceEditor.includes("← back") || !priceEditor.includes("Prices per model")) fail("the model price editor did not open");
   await act(async () => setup.mockInput.pressEscape());
   await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
   await setup.flush();
@@ -277,20 +290,16 @@ async function runSettings(): Promise<void> {
   }
   if (!sawExecutable) fail("the OpenCode tab does not show its executable");
   if (!sawDefaultOn) fail("the OpenCode tab does not read an unset 'Compaction' as Default (OpenCode)");
-  await act(async () => setup.mockInput.pressTab());
-  await setup.flush();
-  const codex = setup.captureCharFrame();
-  console.log("--- settings page, Codex tab ---");
-  console.log(codex);
-  if (!codex.includes("0.164.0") || !codex.includes("Permissions") || !codex.includes("Effort")) fail("the Codex tab is missing its version or shared defaults");
-  if (!codex.includes("codex update") || !codex.includes("[ Update ]")) fail("the Codex tab has no native update action");
-  await act(async () => setup.mockInput.pressKey("u"));
-  if (updated.at(-1) !== "codex") fail("the Codex tab does not dispatch its own updater");
   await act(async () => setup.mockInput.pressTab({ shift: true }));
   await setup.flush();
-
   await act(async () => setup.mockInput.pressTab({ shift: true }));
   await setup.flush();
+  const overview = setup.captureCharFrame();
+  console.log("--- settings page, Providers Overview tab ---");
+  console.log(overview);
+  if (!overview.includes("Providers") || !overview.includes("+ Add provider") || !overview.includes("Update all") || !overview.includes("Installed CLIs")) {
+    fail("the Providers Overview tab is missing its heading, add button, update-all button, or CLI cards");
+  }
   await act(async () => setup.mockInput.pressTab({ shift: true }));
   await setup.flush();
   const rows = setup.captureCharFrame().split("\n");

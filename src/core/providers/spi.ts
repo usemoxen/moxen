@@ -14,14 +14,18 @@ import type { McpServerSpec } from "../mcp.js";
 import type { WorktreeIsolation } from "../threads/isolation.js";
 import type { InteractionMode, ModelSelection, RuntimeMode } from "../types.js";
 
-/** Provider surfaces we own. Cursor and Antigravity are out of scope. */
-export type ProviderDriverKind = "claude" | "codex" | "opencode" | "harness";
+/** Provider surfaces we own. */
+export type ProviderDriverKind = "claude" | "codex" | "chatgpt" | "opencode" | "harness" | "acp" | "antigravity" | "vibe";
 
 export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = [
   "claude",
   "codex",
+  "chatgpt",
   "opencode",
   "harness",
+  "acp",
+  "antigravity",
+  "vibe",
 ];
 
 export function isProviderDriverKind(value: unknown): value is ProviderDriverKind {
@@ -106,9 +110,10 @@ export interface ContextWindowUsage {
   /** True when `usedTokens` is moxen's own count rather than one the provider reported. Absent means reported. */
   readonly estimated?: boolean;
   /**
-   * Running session total in USD, from the provider's own accounting
-   * (Claude: the SDK's `total_cost_usd`) — an estimate, not a bill.
-   * Absent when the provider reports no cost figure.
+   * Running thread total in USD — from the provider's own accounting where
+   * reported (Claude: the SDK's `total_cost_usd`, ACP `cost`), or estimated
+   * from Moxen's model prices when the provider reports none. Always an
+   * estimate, not a bill; absent when no turn can be priced.
    */
   readonly costUsd?: number;
 }
@@ -440,13 +445,15 @@ export type ProviderRuntimeEvent =
        * or its auto mode refused a tool call (`detail` is why). A harness
        * session whose automatic compaction gave up says so too, in `title`, and one
        * whose MCP servers did not all come up, or were reconfigured while it ran, says
-       * that as `mcp`.
+       * that as `mcp`. A turn the provider accepted whose deferred interrupt failed
+       * says so as `interrupt-failed` (`detail` is the provider's error): the turn
+       * keeps running under its own completion tracking.
        */
       readonly type: "session.notice";
       readonly provider: ProviderDriverKind;
       readonly threadId: ThreadId;
       readonly turnId: TurnId | null;
-      readonly notice: "compacted" | "permission-denied" | "compaction-stopped" | "mcp";
+      readonly notice: "compacted" | "permission-denied" | "compaction-stopped" | "mcp" | "interrupt-failed";
       readonly title: string;
       readonly detail: string | null;
     }
@@ -502,6 +509,8 @@ export type ProviderRuntimeEvent =
        * OpenCode provider). Absent means the driver's own account.
        */
       readonly instanceId?: string;
+      /** Optional remaining credit balance reported alongside quota windows (e.g. Antigravity `/credits`). */
+      readonly credits?: number | null;
       readonly raw?: unknown;
     }
   | {
@@ -584,6 +593,16 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
    * indicator shows. Omitted by drivers whose provider reports nothing.
    */
   readonly contextUsage?: (threadId: ThreadId) => Promise<ContextWindowUsage | null>;
+
+  /**
+   * Tokens the currently running turn has spent so far, before it settles into
+   * the thread store — or, with a driver turn id, that specific turn's usage
+   * (its settled outcome usage once it terminated), so an interrupted run can
+   * ask for its own turn and never whatever turn the session happens to have
+   * open (LOCAL-009). Null when the turn is unknown or the driver has not
+   * observed any usage for it yet.
+   */
+  readonly liveTurnUsage?: (threadId: ThreadId, driverTurnId?: ThreadId) => TokenUsageDelta | null;
 
   /**
    * Hand the running turn more input without interrupting it: the model
@@ -677,5 +696,6 @@ export interface TextCompletionInput {
   readonly model: string;
   readonly prompt: string;
   readonly instructions: string;
+  readonly instanceId?: string;
   readonly signal?: AbortSignal;
 }

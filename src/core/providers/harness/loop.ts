@@ -13,12 +13,13 @@ import { randomUUID } from "node:crypto";
 import { CONTINUE_AFTER_COMPACTION } from "./compactprompt.js";
 import { isContextOverflow, type CompactReason } from "./compact.js";
 import { estimateTokens, messagesTokens } from "./context.js";
-import { EMPTY_REPLY_REMINDER, LOOP_WARNING, LoopGuard, OUTPUT_LIMIT_REMINDER, RepeatWatch, type LoopGuardSettings } from "./guards.js";
+import { CYCLE_LOOP_WARNING, EMPTY_REPLY_REMINDER, LOOP_WARNING, LoopGuard, OUTPUT_LIMIT_REMINDER, RepeatWatch, type LoopGuardSettings } from "./guards.js";
 import type { ModelQuirks } from "./quirks.js";
 import type { HarnessTranscript } from "./session.js";
 import type { HarnessTool, ToolContext, ToolIntent, ToolResult } from "./tools/index.js";
 import { validateToolArguments } from "./tools/index.js";
 import { ChatHttpError, retryDelayMs, type ChatRequest } from "./transport/chat.js";
+import type { ResponsesWsSession } from "./transport/responses-ws.js";
 import { conversationFields, streamModel } from "./transport/model.js";
 import type { HarnessApiFormat } from "../../types.js";
 import type { ModelEvent, ModelUsage, ReasoningItem, ToolCall } from "./types.js";
@@ -66,6 +67,10 @@ export interface TurnConfig {
   readonly sampling?: ChatRequest["sampling"];
   readonly effort?: string | undefined;
   readonly maxOutput?: number | undefined;
+  /** Stable per-session prompt cache key forwarded to OpenAI Responses (`prompt_cache_key`). */
+  readonly promptCacheKey?: string | undefined;
+  /** Persistent WebSocket session for OpenAI Responses continuation. */
+  readonly responsesSession?: ResponsesWsSession | undefined;
   /** The tools offered; a function when the set can change mid-turn. Read before every request. */
   readonly tools: readonly HarnessTool<never>[] | (() => readonly HarnessTool<never>[]);
   readonly toolContext: Omit<ToolContext, "signal">;
@@ -203,7 +208,7 @@ export async function runTurn(
     const reasoningItems: ReasoningItem[] = [];
     let finish: string = "stop";
     let emitted = false;
-    let repeated = false;
+    let repeated: "text" | "reasoning" | null = null;
     // Reasoning ends where the answer starts: closing it then keeps its row above the text instead of "running" under it.
     let reasoningClosedAt = -1;
     const closeReasoning = () => {
@@ -221,6 +226,8 @@ export async function runTurn(
       // Whatever a failed attempt got as far as is not part of the reply that finally comes.
       calls.length = 0;
       reasoningItems.length = 0;
+      const attemptAbort = new AbortController();
+      const attemptSignal = AbortSignal.any([signal, attemptAbort.signal]);
       try {
         const request: ChatRequest = {
           baseUrl: config.baseUrl,
@@ -232,7 +239,9 @@ export async function runTurn(
           sampling: config.sampling,
           maxTokens: config.maxOutput,
           effort: config.effort,
-          signal,
+          ...(config.promptCacheKey !== undefined ? { promptCacheKey: config.promptCacheKey } : {}),
+          ...(config.responsesSession !== undefined ? { responsesSession: config.responsesSession } : {}),
+          signal: attemptSignal,
         };
         for await (const event of transport(request)) {
           if (event.type === "reasoning.delta") {
@@ -241,7 +250,7 @@ export async function runTurn(
             emitted = true;
             emit({ type: "reasoning.delta", reasoningId, text: event.text });
             if (watchText && reasoningWatch.push(event.text)) {
-              repeated = true;
+              repeated = "reasoning";
               break;
             }
           } else if (event.type === "text.delta") {
@@ -250,7 +259,7 @@ export async function runTurn(
             emitted = true;
             emit({ type: "text", messageId, text: event.text });
             if (watchText && textWatch.push(event.text)) {
-              repeated = true;
+              repeated = "text";
               break;
             }
           } else if (event.type === "tool.call") {
@@ -271,8 +280,13 @@ export async function runTurn(
             finish = event.reason;
           }
         }
+        if (repeated !== null) attemptAbort.abort();
         break;
       } catch (error) {
+        if (repeated !== null) {
+          attemptAbort.abort();
+          break;
+        }
         if (isAbort(error, signal)) return done("interrupted");
         if (error instanceof ChatHttpError) {
           if (isContextOverflow(error, estimatedTokens(), window)) {
@@ -302,7 +316,10 @@ export async function runTurn(
     }
 
     closeReasoning();
-    if (repeated) return done("failed", "Stopped: the model got stuck repeating the same text. Send another message to continue; rewording the request or compacting the conversation usually clears it.");
+    if (repeated !== null) {
+      const what = repeated === "reasoning" ? "reasoning" : "text";
+      return done("failed", `Stopped: the model got stuck repeating the same ${what}. Send another message to continue; rewording the request or compacting the conversation usually clears it.`);
+    }
     transcript.append({ role: "assistant", content: text, ...(reasoning.trim() ? { reasoning } : {}), ...(reasoningItems.length > 0 ? { reasoningItems } : {}), ...(calls.length > 0 ? { toolCalls: calls } : {}) });
     if (reportedFresh) {
       reportedAt = transcript.messages.length;
@@ -374,23 +391,26 @@ async function runCalls(
   signal: AbortSignal,
 ): Promise<{ stopReason: string | null; endTurn: ToolResult["endTurn"] }> {
   const results = new Map<string, ToolResult>();
+  const rawOutcomes = new Map<string, { readonly args: Record<string, unknown>; readonly result: ToolResult; readonly interrupted: boolean }>();
   let stopReason: string | null = null;
   let endTurn: ToolResult["endTurn"];
 
-  const runOne = async (call: ToolCall): Promise<void> => {
+  const runOne = async (call: ToolCall, emitCompletedImmediately: boolean): Promise<void> => {
     try {
-      await runChecked(call);
+      await runChecked(call, emitCompletedImmediately);
     } catch (error) {
       // Whatever went wrong, the transcript still needs a result for this call.
-      results.set(call.id, { content: `${call.name} failed: ${(error as Error).message}`, isError: true });
+      const result: ToolResult = { content: `${call.name} failed: ${(error as Error).message}`, isError: true };
+      rawOutcomes.set(call.id, { args: {}, result, interrupted: signal.aborted });
+      if (emitCompletedImmediately) emit({ type: "tool.completed", call, args: {}, result });
     }
   };
 
-  const runChecked = async (call: ToolCall): Promise<void> => {
+  const runChecked = async (call: ToolCall, emitCompletedImmediately: boolean): Promise<void> => {
     const tool = tools.get(call.name);
-    const finishWith = (args: Record<string, unknown>, result: ToolResult): void => {
-      results.set(call.id, result);
-      emit({ type: "tool.completed", call, args, result });
+    const finishWith = (args: Record<string, unknown>, result: ToolResult, interrupted = false): void => {
+      rawOutcomes.set(call.id, { args, result, interrupted });
+      if (emitCompletedImmediately) emit({ type: "tool.completed", call, args, result });
     };
     if (!tool) {
       emit({ type: "tool.started", call, args: {}, intent: null });
@@ -404,28 +424,21 @@ async function runCalls(
     }
     const intent = tool.intent(checked.args, context);
     emit({ type: "tool.started", call, args: checked.args, intent });
-    const verdict = guard.record(call.name, call.arguments);
-    if (verdict === "stop") {
-      stopReason = `Stopped: the model made the same ${call.name} call too many times in one turn.`;
-      return finishWith(checked.args, { content: LOOP_WARNING, isError: true });
-    }
-    if (signal.aborted) return finishWith(checked.args, { content: "[Interrupted before it ran.]", isError: true });
+    if (signal.aborted) return finishWith(checked.args, { content: "[Interrupted before it ran.]", isError: true }, true);
     const allowed = await config.authorize(call, intent);
-    if (!allowed.allow) return finishWith(checked.args, { content: allowed.reason, isError: true });
-    if (signal.aborted) return finishWith(checked.args, { content: "[Interrupted before it ran.]", isError: true });
+    if (!allowed.allow) return finishWith(checked.args, { content: allowed.reason, isError: true }, signal.aborted);
+    if (signal.aborted) return finishWith(checked.args, { content: "[Interrupted before it ran.]", isError: true }, true);
     let result: ToolResult;
     try {
       result = await tool.run(checked.args, { ...context, callId: call.id });
     } catch (error) {
       result = { content: `${call.name} failed: ${(error as Error).message}`, isError: true };
     }
-    guard.observe(call.name, call.arguments, result.content);
-    if (verdict === "warn") result = { ...result, content: `${result.content}\n\n[${LOOP_WARNING}]` };
-    finishWith(checked.args, result);
+    finishWith(checked.args, result, signal.aborted);
   };
 
   let index = 0;
-  while (index < calls.length) {
+  while (index < calls.length && stopReason === null) {
     const first = tools.get(calls[index]!.name);
     const batch = [calls[index]!];
     // Reads run together, and so do several calls of one tool that says it can (subagents).
@@ -437,11 +450,33 @@ async function runCalls(
       while (index + batch.length < calls.length && together(calls[index + batch.length]!.name)) batch.push(calls[index + batch.length]!);
     }
     index += batch.length;
-    await Promise.all(batch.map(runOne));
+    // Multi-call batches emit completion as each finishes (e.g. parallel subagents); loop observation always runs in call order.
+    const emitImmediately = batch.length > 1;
+    await Promise.all(batch.map((call) => runOne(call, emitImmediately)));
+    for (const call of batch) {
+      const outcome = rawOutcomes.get(call.id) ?? { args: {}, result: { content: "[Interrupted before it ran.]", isError: true }, interrupted: true };
+      let result = outcome.result;
+      if (!outcome.interrupted && stopReason === null) {
+        const verdict = guard.observe(call.name, call.arguments, result.content, result.isError === true);
+        if (verdict === "stop") {
+          stopReason =
+            guard.lastKind === "cycle"
+              ? "Stopped: the model repeated the same sequence of tool calls too many times in a row with the same results."
+              : `Stopped: the model made the same ${call.name} call too many times in a row with the same result.`;
+          const warning = guard.lastKind === "cycle" ? CYCLE_LOOP_WARNING : LOOP_WARNING;
+          result = { ...result, content: `${result.content}\n\n[${warning}]` };
+        } else if (verdict === "warn") {
+          const warning = guard.lastKind === "cycle" ? CYCLE_LOOP_WARNING : LOOP_WARNING;
+          result = { ...result, content: `${result.content}\n\n[${warning}]` };
+        }
+      }
+      results.set(call.id, result);
+      if (!emitImmediately) emit({ type: "tool.completed", call, args: outcome.args, result });
+    }
   }
   // The model sees results in the order it made the calls, however they finished.
   for (const call of calls) {
-    const result = results.get(call.id) ?? { content: "[Interrupted before it ran.]", isError: true };
+    const result = results.get(call.id) ?? { content: stopReason ?? "[Interrupted before it ran.]", isError: true };
     transcript.append({ role: "tool", toolCallId: call.id, name: call.name, content: result.content, ...(result.isError ? { isError: true } : {}), ...(result.images && result.images.length > 0 ? { images: result.images } : {}) });
   }
   for (const result of results.values()) endTurn ??= result.endTurn;

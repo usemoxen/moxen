@@ -6,16 +6,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 
-const TABS: [(&str, &str); 5] = [
-    ("Diff", "2"),
-    ("Git", ""),
-    ("Context", "66%"),
-    ("Agents", "5"),
-    ("Background", ""),
-];
-const TASK_TIMES: [&str; 6] = ["42m", "1h 10m", "2h 3m", "38m", "", ""];
-/// Task 3 is the running one; those before it are done.
-const LIVE_TASK: usize = 3;
+const TABS: [&str; 5] = ["Diff", "Git", "Context", "Agents", "Background"];
 
 /// The `.ib` icon button: 28pt square, 6pt corners.
 fn icon_button(id: &'static str) -> Stateful<Div> {
@@ -41,26 +32,12 @@ pub fn delta(text: &str) -> Div {
         .child(div().text_color(color("broken")).child(removed.to_string()))
 }
 
-fn chip(label: &'static str, token: &str) -> Div {
-    div()
-        .px(px(7.))
-        .py(px(4.))
-        .rounded(px(5.))
-        .bg(color("sunk"))
-        .font_family(theme::MONO)
-        .text_size(px(11.5))
-        .line_height(px(12.))
-        .text_color(color(token))
-        .child(label)
-}
-
-fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let tasks = w.source.inspector(w.selected).tasks;
-    let state = |i: usize| match i {
-        _ if i < LIVE_TASK => Status::Idle,
-        LIVE_TASK => Status::Running,
-        _ => Status::Queued,
-    };
+fn tasks(
+    id: crate::model::ThreadId,
+    tasks: &[crate::work::Step],
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let done = crate::work::completed(tasks);
     div()
         .flex_shrink_0()
         .border_b_1()
@@ -80,7 +57,7 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .text_size(px(13.))
                         .line_height(px(13.))
                         .font_weight(FontWeight::BOLD)
-                        .child("Tasks"),
+                        .child(crate::language::tr("Tasks").into_owned()),
                 )
                 .child(
                     div()
@@ -88,7 +65,7 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .text_size(px(11.5))
                         .line_height(px(12.))
                         .text_color(color("ink-2"))
-                        .child(format!("{LIVE_TASK} of {}", tasks.len())),
+                        .child(crate::language::step_count(done, tasks.len())),
                 )
                 .child(
                     div()
@@ -96,12 +73,12 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .flex()
                         .gap(px(3.))
                         .px(px(4.))
-                        .children((0..tasks.len()).map(|i| {
+                        .children(tasks.iter().map(|step| {
                             div()
                                 .flex_1()
                                 .h(px(3.))
                                 .rounded(px(2.))
-                                .bg(color(match state(i) {
+                                .bg(color(match step.status {
                                     Status::Idle => "ink-2",
                                     Status::Running => "live",
                                     _ => "rule",
@@ -114,13 +91,16 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         )
         .child(
             div()
+                .id(("checklist", id))
+                .max_h(px(224.))
+                .overflow_y_scroll()
                 .px(px(8.))
                 .pb(px(10.))
                 .flex()
                 .flex_col()
                 .gap(px(1.))
-                .children(tasks.into_iter().enumerate().map(|(i, t)| {
-                    let live = state(i) == Status::Running;
+                .children(tasks.iter().map(|step| {
+                    let live = step.status == Status::Running;
                     div()
                         .flex()
                         .items_start()
@@ -130,27 +110,25 @@ fn tasks(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .rounded(px(6.))
                         .text_size(px(13.))
                         .line_height(px(18.))
-                        .text_color(color(if state(i) == Status::Idle {
+                        .text_color(color(if step.status == Status::Idle {
                             "ink-2"
                         } else {
                             "ink"
                         }))
                         .when(live, |s| s.bg(color("sunk")))
-                        .child(div().pt(px(2.)).child(ui::state(state(i))))
-                        .child(div().flex_1().min_w_0().child(t))
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .font_family(theme::MONO)
-                                .text_size(px(11.5))
-                                .text_color(color(if live { "live" } else { "ink-2" }))
-                                .child(TASK_TIMES.get(i).copied().unwrap_or("")),
-                        )
+                        .child(div().pt(px(2.)).child(ui::state(step.status)))
+                        .child(div().flex_1().min_w_0().child(step.title.clone()))
                 })),
         )
 }
 
+/// A tab badge's count, hidden at zero: only live information earns the slot.
+fn nonzero(count: usize) -> Option<String> {
+    (count > 0).then(|| count.to_string())
+}
+
 fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let info = w.source.delegated(w.selected).is_some();
     div()
         .flex_shrink_0()
         .pt(px(12.))
@@ -159,10 +137,26 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         .child(
             div()
                 .flex()
+                .flex_wrap()
                 .gap(px(16.))
                 .border_b_1()
                 .border_color(color("rule"))
-                .children(TABS.into_iter().enumerate().map(|(i, (label, count))| {
+                .children(TABS.into_iter().enumerate().map(|(i, label)| {
+                    let count: Option<String> = match i {
+                        0 => nonzero(w.source.turn_diffs(w.selected).len()),
+                        1 => nonzero(w.source.git(w.selected).requests.len()),
+                        // The mockup names the share on the tab: "Context 66%".
+                        2 => {
+                            let data = w.source.context(w.selected);
+                            let snapshot = w.source.snapshot_usage(w.selected);
+                            crate::usage::context_percent(data.as_deref(), snapshot.as_ref())
+                                .map(|percent| format!("{percent}%"))
+                        }
+                        3 if !info => nonzero(crate::work_view::agent_count(w)),
+                        4 => nonzero(crate::work_view::background_count(w)),
+                        _ => None,
+                    };
+                    let label = if i == 3 && info { "Info" } else { label };
                     let on = w.tab == i;
                     div()
                         .id(("tab", i))
@@ -182,8 +176,8 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
                         .line_height(px(16.))
                         .text_color(color(if on { "ink" } else { "ink-2" }))
                         .when(on, |s| s.font_weight(FontWeight::SEMIBOLD))
-                        .child(label)
-                        .when(!count.is_empty(), |s| {
+                        .child(crate::language::tr(label).into_owned())
+                        .when_some(count, |s, count| {
                             s.child(
                                 div()
                                     .font_family(theme::MONO)
@@ -201,10 +195,50 @@ fn tabs(w: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
         )
 }
 
+/// The Context tab: what fills the thread's window and what the account's
+/// allowance holds, read from the server. Missing readings read as "no
+/// data", never as 0% or unlimited.
+fn context_tab(w: &Workspace) -> impl IntoElement {
+    let selection = w.source.selection(w.selected);
+    let limits = w.source.limits();
+    let catalog = w.catalog();
+    let provider_limits = selection.as_ref().and_then(|selection| {
+        crate::usage::provider_limits(limits.as_deref(), catalog.as_deref(), &selection.instance)
+    });
+    let provider_name = selection.as_ref().and_then(|selection| {
+        w.catalog()
+            .as_ref()
+            .and_then(|catalog| catalog.provider(&selection.instance))
+            .map(|provider| provider.name.clone())
+    });
+    let snapshot = w.source.snapshot_usage(w.selected);
+    match w.source.context(w.selected) {
+        None => crate::work_view::notice("Reading context usage…").into_any_element(),
+        Some(data)
+            if data.error.is_some() && data.breakdown.is_none() && data.reading.is_none() =>
+        {
+            crate::work_view::notice(format!(
+                "Couldn't read context usage: {}",
+                data.error.clone().unwrap_or_default()
+            ))
+            .into_any_element()
+        }
+        Some(data) => crate::usage::render(
+            &data,
+            snapshot.as_ref(),
+            provider_limits,
+            provider_name.as_deref(),
+        )
+        .into_any_element(),
+    }
+}
+
 pub fn render(w: &Workspace, width: f32, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let data = w.source.inspector(w.selected);
     let mut pane = div()
         .id("inspector")
+        // The render-harness tests find the pane by this name, like
+        // `composer-problem` and `status-usage` for their elements.
+        .debug_selector(|| "inspector".into())
         .relative()
         .w(px(width))
         .h_full()
@@ -228,256 +262,49 @@ pub fn render(w: &Workspace, width: f32, cx: &mut Context<Workspace>) -> impl In
                     cx.listener(|this, _, _, _| this.resizing_inspector = true),
                 ),
         );
-    if w.tasks_open {
-        pane = pane.child(tasks(w, cx));
+    let checklist = w.source.inspector(w.selected);
+    if !w.creating && w.tasks_open && !checklist.tasks.is_empty() {
+        pane = pane.child(tasks(w.selected, &checklist.tasks, cx));
     }
     pane = pane.child(tabs(w, cx));
     let body = div()
-        .id("inspector-scroll")
+        .id(("inspector-scroll", w.tab))
         .flex_1()
         .min_h_0()
         .overflow_y_scroll();
     if w.tab == 2 {
-        return pane.child(body.child(crate::usage::render()));
+        return pane.child(body.child(context_tab(w).into_any_element()));
     }
     if w.tab > 2 {
         return pane.child(
-            body.child(
-                div()
-                    .px(px(24.))
-                    .py(px(48.))
-                    .text_center()
-                    .text_size(px(13.5))
-                    .line_height(px(20.))
-                    .text_color(color("ink-2"))
-                    .child(if w.tab == 3 {
-                        "No agents in this preview."
-                    } else {
-                        "Nothing is running in the background. Commands the agent leaves running show here, with their output."
-                    }),
-            ),
+            body.track_focus(&w.work_focus)
+                .child(crate::work_view::render(w, cx)),
         );
     }
-    let (name, when) = data
-        .author
-        .split_once(" · ")
-        .unwrap_or((data.author.as_str(), ""));
-    let (name, when) = (name.to_string(), when.to_string());
-    let initials: String = name
-        .split_whitespace()
-        .filter_map(|w| w.chars().next())
-        .take(2)
-        .collect();
-    pane.child(
-        div()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .py(px(8.))
-            .pl(px(10.))
-            .pr(px(12.))
-            .border_b_1()
-            .border_color(color("rule"))
-            .child(
-                div()
-                    .id("commits-back")
-                    .inert("Commit history is not in this preview")
-                    .h(px(28.))
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .text_color(color("ink-2"))
-                    .child(ui::icon("chevron-left", "ink-2"))
-                    .child("Commits"),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("copy-sha")
-                    .control("Copy the full sha")
-                    .h(px(28.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(px(6.))
-                    .font_family(theme::MONO)
-                    .text_size(px(12.))
-                    .text_color(color("ink-2"))
-                    .child("5a7bee1")
-                    .child(ui::icon("copy", "ink-2"))
-                    .on_click(|_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string("5a7bee1".into()))
-                    }),
-            )
-            .child(
-                icon_button("open-forge")
-                    .disabled("No remote for this preview commit")
-                    .child(ui::icon("external-link", "ink-2")),
-            )
-            .child(
-                icon_button("widen-diff")
-                    .control("Widen")
-                    .child(ui::icon("maximize", "ink-2"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.inspector_width = if this.inspector_width > theme::INSPECTOR {
-                            theme::INSPECTOR
-                        } else {
-                            620.
-                        };
-                        cx.notify();
-                    })),
-            ),
-    )
-    .child(
-        body.child(
-            div()
-                .pt(px(16.))
-                .px(px(16.))
-                .pb(px(4.))
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .child(
-                    div()
-                        .text_size(px(16.))
-                        .line_height(px(16. * 1.35))
-                        .font_weight(FontWeight::BOLD)
-                        .child(data.subject),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .text_size(px(13.))
-                        .child(
-                            div()
-                                .size(px(20.))
-                                .rounded_full()
-                                .bg(color("sunk"))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(8.5))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(color("ink-2"))
-                                .child(initials),
-                        )
-                        .child(name)
-                        .child(
-                            div()
-                                .font_family(theme::MONO)
-                                .text_size(px(12.))
-                                .text_color(color("ink-2"))
-                                .child(when),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .child(chip("opencode-v2", "ink"))
-                        .child(chip("parent 86553cd", "ink-2"))
-                        .child(chip("co-authored by Claude Opus 5.5", "ink-2")),
-                )
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .line_height(px(14. * 1.6))
-                        .child(data.message),
-                )
-                .child(
-                    div()
-                        .id("full-message")
-                        .inert("The full message is shown")
-                        .py(px(4.))
-                        .text_size(px(13.))
-                        .text_color(color("ink-2"))
-                        .child("Show the full message"),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .pt(px(14.))
-                .px(px(16.))
-                .pb(px(8.))
-                .child(ui::caps("Files").flex_1())
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .font_family(theme::MONO)
-                        .text_size(px(12.))
-                        .text_color(color("ink-2"))
-                        .child(format!("{} ·", data.files.len()))
-                        .child(delta("+68 −9")),
-                ),
-        )
-        .children(
-            data.files
-                .into_iter()
-                .enumerate()
-                .map(|(i, (file, change))| {
-                    let open = w.expanded_files.contains(&i);
-                    div()
-                        .child(
-                            div()
-                                .id(("git-file", i))
-                                .control(format!("src/{file}"))
-                                .px(px(12.))
-                                .py(px(7.))
-                                .flex()
-                                .gap(px(8.))
-                                .items_center()
-                                .when(open, |s| s.bg(color("sunk")))
-                                .font_family(theme::MONO)
-                                .text_size(px(12.5))
-                                .line_height(px(16.))
-                                .child(ui::icon(
-                                    if open {
-                                        "chevron-down"
-                                    } else {
-                                        "chevron-right"
-                                    },
-                                    "ink-2",
-                                ))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(format!("src/{file}")),
-                                )
-                                .when(i == 0, |s| {
-                                    s.child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(color("ink-2"))
-                                            .child("new"),
-                                    )
-                                })
-                                .child(delta(&change))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !this.expanded_files.remove(&i) {
-                                        this.expanded_files.insert(i);
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .when(open, |s| {
-                            s.child(crate::diff::render(i, w.source.file_diff(w.selected, i)))
-                        })
-                }),
-        )
-        .child(div().h(px(18.))),
-    )
+    if w.tab == 0 {
+        return pane.child(body.child(crate::git_view::diff_tab(w, cx)));
+    }
+    let git = w.source.git(w.selected);
+    if let Some(commit) = &git.commit {
+        return pane
+            .child(crate::git_view::commit_header(commit, cx).child(widen(cx)))
+            .child(body.child(crate::git_view::commit_tab(w, commit, cx)));
+    }
+    pane.child(body.child(crate::git_view::git_tab(w, cx)))
+        .children(crate::git_view::footer(w))
+}
+
+/// The button that widens the pane for reading a patch, and narrows it again.
+fn widen(cx: &mut Context<Workspace>) -> Stateful<Div> {
+    icon_button("widen-diff")
+        .control("Widen")
+        .child(ui::icon("maximize", "ink-2"))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.inspector_width = if this.inspector_width > theme::INSPECTOR {
+                theme::INSPECTOR
+            } else {
+                620.
+            };
+            cx.notify();
+        }))
 }

@@ -39,7 +39,11 @@ export class SpawnCodexTransport implements CodexTransport {
     const spawner = options.spawner ?? nodeProcessSpawner();
     const baseEnv = options.env ?? process.env;
     const home = resolveCodexHome(options.settings.homePath, baseEnv);
-    const launch = codexLaunchCommand(options.settings.binaryPath, codexAppServerArgs(options.settings.launchArgs, baseEnv), baseEnv);
+    const launch = codexLaunchCommand(
+      options.settings.binaryPath,
+      codexAppServerArgs(options.settings.launchArgs, baseEnv, options.settings.homePath),
+      baseEnv,
+    );
     const child = spawner.spawn(launch.command, launch.args, {
       cwd: options.cwd,
       env: { ...baseEnv, ...launch.env, CODEX_HOME: home },

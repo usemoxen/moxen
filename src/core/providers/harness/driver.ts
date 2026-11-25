@@ -81,6 +81,7 @@ import { copySessionState, loadSessionState, saveSessionState } from "./sessions
 import { applyToolDescriptions, builtinTools, ReadState } from "./tools/index.js";
 import type { ChatRequest } from "./transport/chat.js";
 import { conversationFields, streamModel } from "./transport/model.js";
+import { ResponsesWsSession } from "./transport/responses-ws.js";
 import type { ModelUsage, ToolCall, ToolDefinition, TranscriptMessage } from "./types.js";
 
 export interface HarnessDriverOptions {
@@ -97,6 +98,10 @@ export interface HarnessDriverOptions {
   readonly home?: string;
   /** How long a stop waits for an in-flight start before abandoning it (default 1 s, well under the server's per-driver stop budget). */
   readonly stopWaitMs?: number;
+  /** Optional external target resolver (used by Sign in with ChatGPT `chatgpt/<id>` instances). */
+  readonly resolveTarget?: (instanceId: string, model: string) => ResolvedHarnessTarget | null;
+  /** Optional async bearer-token provider (used by Sign in with ChatGPT OAuth refresh). */
+  readonly resolveBearerToken?: (instanceId: string) => Promise<string | undefined>;
 }
 
 /** How long a stop waits for an in-flight start before abandoning it (see `stopWaitMs`). */
@@ -121,6 +126,8 @@ interface HarnessTurn {
   usage: TurnUsage | null;
   readonly controller: AbortController;
   readonly reasoningStarted: Set<string>;
+  /** What the main loop has spent so far in this turn (cumulative across rounds). */
+  readonly liveUsage: { input: number; cacheRead: number; output: number; thinking: number };
   /** What the turn's subagents used, which the loop's own totals do not include. */
   readonly subagentUsage: { input: number; cacheRead: number; output: number; thinking: number };
   readonly waiters: Array<{ resolve: (outcome: HarnessTurnOutcome) => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void }>;
@@ -183,6 +190,8 @@ interface HarnessSession {
   wakeStreak: number;
   /** What the model should be told before its next request (a background command ended). */
   readonly modelNotes: Array<{ readonly taskId: string; readonly text: string }>;
+  /** Persistent WebSocket session for OpenAI Responses API continuation (`previous_response_id`). */
+  readonly responsesSession: ResponsesWsSession;
   /** Things to tell the user at the next turn (a server that did not come up); a session has no turn to attach them to before. */
   readonly notices: Array<{ readonly title: string; readonly detail: string | null }>;
 }
@@ -267,6 +276,9 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   private readonly connectMcp: ConnectMcp | undefined;
   private readonly home: string | undefined;
   private readonly stopWaitMs: number;
+  private readonly externalTarget: HarnessDriverOptions["resolveTarget"];
+  private readonly externalBearerToken: HarnessDriverOptions["resolveBearerToken"];
+  private readonly bearerCache = new Map<string, string>();
   private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent, Done>());
   /** Titles being made, by session id, so a second ask waits for the first instead of paying for another request. */
   private readonly titling = new Map<string, Promise<string | null>>();
@@ -282,6 +294,29 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     this.connectMcp = options.connectMcp;
     this.home = options.home;
     this.stopWaitMs = options.stopWaitMs ?? STOP_WAIT_MS;
+    this.externalTarget = options.resolveTarget;
+    this.externalBearerToken = options.resolveBearerToken;
+  }
+
+  private resolveTarget(instanceId: string, model: string): ResolvedHarnessTarget {
+    const external = this.externalTarget?.(instanceId, model);
+    if (external) return external;
+    return resolveHarnessTarget(this.config, instanceId, model);
+  }
+
+  private async primeKey(target: ResolvedHarnessTarget, instanceId: string): Promise<void> {
+    if (this.externalBearerToken) {
+      const token = await this.externalBearerToken(instanceId);
+      if (token) {
+        this.bearerCache.set(instanceId, token);
+        return;
+      }
+    }
+    await primeProfileKey(target.profile).catch(() => undefined);
+  }
+
+  private readKey(target: ResolvedHarnessTarget, instanceId: string): string | undefined {
+    return this.bearerCache.get(instanceId) ?? readProfileApiKey(target.profile, this.env);
   }
 
   /** Profiles and compaction settings are read on every use, so an edit reaches the next turn of a running session. */
@@ -421,6 +456,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         wakeTimer: null,
         wakeStreak: 0,
         modelNotes: [],
+        responsesSession: new ResponsesWsSession(),
         notices: mcp.problems.length > 0 ? [{ title: mcp.problems.length === 1 ? "An MCP server or tool is unavailable" : `${mcp.problems.length} MCP problems`, detail: mcp.problems.join("\n") }] : [],
       };
       if (transcript.messages.length === 0) {
@@ -491,7 +527,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
   private tryTarget(session: HarnessSession): ReturnType<typeof resolveHarnessTarget> | null {
     if (session.modelSlug === null) return null;
     try {
-      return resolveHarnessTarget(this.config, session.instanceId, session.modelSlug);
+      return this.resolveTarget(session.instanceId, session.modelSlug);
     } catch {
       return null;
     }
@@ -521,7 +557,10 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       const first = this.requireSession(input.threadId);
       // A key kept in the OS keychain is read once, here, before anything else: the rest of the call does not wait again.
       const wanted = input.modelSelection ?? (first.modelSlug !== null ? { instanceId: first.instanceId, model: first.modelSlug } : null);
-      if (wanted) await primeProfileKey(resolveHarnessTarget(this.config, wanted.instanceId, wanted.model).profile).catch(() => undefined);
+      if (wanted) {
+        const wantedTarget = this.resolveTarget(wanted.instanceId, wanted.model);
+        await this.primeKey(wantedTarget, wanted.instanceId);
+      }
       const session = this.requireSession(input.threadId);
       if (this.openTurn(session)) {
         throw new CliError("TURN_BUSY", `Thread ${input.threadId} already has a running turn.`, { details: { threadId: input.threadId } });
@@ -534,7 +573,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       if (input.runtimeMode) session.runtimeMode = input.runtimeMode;
       session.wakeStreak = 0;
       if (session.modelSlug === null) throw new CliError("HARNESS_NO_MODEL", "No model is selected for this harness thread.");
-      const target = resolveHarnessTarget(this.config, session.instanceId, session.modelSlug);
+      const target = this.resolveTarget(session.instanceId, session.modelSlug);
 
       const turn = this.newTurn(session);
       for (const notice of session.notices.splice(0)) this.publish({ type: "session.notice", provider: "harness", threadId: session.threadId, turnId: turn.id, notice: "mcp", title: notice.title, detail: notice.detail });
@@ -565,6 +604,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       usage: null,
       controller: new AbortController(),
       reasoningStarted: new Set(),
+      liveUsage: { input: 0, cacheRead: 0, output: 0, thinking: 0 },
       subagentUsage: { input: 0, cacheRead: 0, output: 0, thinking: 0 },
       waiters: [],
     };
@@ -625,13 +665,15 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
     const config: TurnConfig = {
       baseUrl: target.profile.baseUrl,
-      apiKey: () => readProfileApiKey(target.profile, this.env),
+      apiKey: () => this.readKey(target, session.instanceId),
       model: target.model.id,
       format: target.profile.apiFormat,
       quirks: target.quirks,
       sampling: target.profile.sampling,
       effort: typeof effort?.value === "string" ? effort.value : undefined,
       maxOutput: target.model.maxOutput,
+      promptCacheKey: session.sessionId,
+      responsesSession: session.responsesSession,
       tools: () => this.toolsFor(session, turn),
       takeSteering: () => session.steering.splice(0),
       takeNotes: () => session.modelNotes.splice(0).filter((note) => !session.background.endSeen(note.taskId)).map((note) => note.text),
@@ -843,17 +885,15 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         break;
       case "usage":
         session.lastUsage = event.usage;
+        turn.liveUsage.input += Math.max(0, event.usage.inputTokens - event.usage.cachedInputTokens);
+        turn.liveUsage.cacheRead += event.usage.cachedInputTokens;
+        turn.liveUsage.output += event.usage.outputTokens;
+        turn.liveUsage.thinking += event.usage.reasoningTokens;
         this.publish({
           provider: "harness",
           threadId: session.threadId,
           type: "token-usage.updated",
-          usage: {
-            input: Math.max(0, event.usage.inputTokens - event.usage.cachedInputTokens),
-            cacheRead: event.usage.cachedInputTokens,
-            cacheCreate: 0,
-            output: event.usage.outputTokens,
-            thinking: event.usage.reasoningTokens,
-          },
+          usage: this.turnLiveUsage(turn),
         });
         break;
       case "retry":
@@ -965,15 +1005,18 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     }
 
     const unit: CompactionUnit = { transcript, readState: new ReadState(), interactionMode: "default", todos: [], compactFailures: 0, lastUsage: null, definitions: () => tools().map((tool) => tool.definition) };
+    const subagentResponsesSession = new ResponsesWsSession();
     const config: TurnConfig = {
       baseUrl: target.profile.baseUrl,
-      apiKey: () => readProfileApiKey(target.profile, this.env),
+      apiKey: () => this.readKey(target, session.instanceId),
       model: target.model.id,
       format: target.profile.apiFormat,
       quirks: target.quirks,
       sampling: target.profile.sampling,
       effort: this.sessionEffort(session),
       maxOutput: target.model.maxOutput,
+      promptCacheKey: `${session.sessionId}:sub:${agentId}`,
+      responsesSession: subagentResponsesSession,
       tools,
       // Its own read state: an edit is checked against what this agent read, and the parent has to read again what the agent changed.
       toolContext: { cwd: session.workingDirectory, readState: unit.readState, artifactDir: session.artifactDir, acceptsImages: target.quirks.images === "native", secretEnv: this.secretEnvNames(), background: session.background },
@@ -1003,7 +1046,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
             turn.subagentUsage.cacheRead += usage.cacheRead;
             turn.subagentUsage.output += usage.output;
             turn.subagentUsage.thinking += usage.thinking;
-            this.publish({ provider: "harness", threadId: session.threadId, type: "token-usage.updated", usage });
+            this.publish({ provider: "harness", threadId: session.threadId, type: "token-usage.updated", usage: this.turnLiveUsage(turn) });
           }
         },
         signal,
@@ -1018,6 +1061,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       return { content: outcome.report === "" ? "The subagent finished without writing a report." : untrustedContext(outcome.report, "subagent"), ...(outcome.report === "" ? { isError: true } : {}) };
     };
     const stopped = (report: string): void => {
+      subagentResponsesSession.close();
       session.subagents.delete(agentId);
       this.publish({ ...base, type: "subagent.updated", status: "stopped", lastMessage: report === "" ? null : report.slice(0, 2000) });
     };
@@ -1146,7 +1190,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     const definitions = session ? this.toolsFor(session, null).map((tool) => tool.definition) : [];
     const request: ChatRequest = {
       baseUrl: target.profile.baseUrl,
-      apiKey: readProfileApiKey(target.profile, this.env),
+      apiKey: this.readKey(target, session?.instanceId ?? `harness/${target.profile.id}`),
       model: target.model.id,
       ...conversationFields(target.profile.apiFormat, [...settledPrefix(messages), { role: "user", content: instruction }], target.quirks),
       tools: definitions,
@@ -1155,6 +1199,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       sampling: target.profile.sampling,
       maxTokens: options.maxTokens ?? target.model.maxOutput,
       effort: options.effort,
+      ...(session ? { promptCacheKey: session.sessionId } : {}),
       signal: options.signal,
     };
     let text = "";
@@ -1178,21 +1223,24 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       history = HarnessTranscript.open(HarnessTranscript.pathFor(this.sessionsDir, input.cursor)).messages;
     }
     let target: ResolvedHarnessTarget;
+    let targetInstanceId: string;
     try {
       if (session) {
-        target = resolveHarnessTarget(this.config, session.instanceId, input.model ?? session.modelSlug ?? "");
+        targetInstanceId = session.instanceId;
+        target = this.resolveTarget(session.instanceId, input.model ?? session.modelSlug ?? "");
       } else {
         // Without the live session there is no instance id, only the model; it has to name one profile.
         const profiles = (this.config?.profiles ?? []).filter((profile) => input.model !== undefined && profile.models.some((model) => model.id === input.model));
         if (profiles.length !== 1 || input.model === undefined) {
           throw new CliError("SIDE_QUESTION_NO_PROFILE", "Open the thread first: /btw needs to know which harness profile this thread's model belongs to.");
         }
-        target = resolveHarnessTarget(this.config, `harness/${profiles[0]!.id}`, input.model);
+        targetInstanceId = `harness/${profiles[0]!.id}`;
+        target = this.resolveTarget(targetInstanceId, input.model);
       }
     } catch (error) {
       throw toCliError("SIDE_QUESTION_FAILED", "Could not answer the side question", error);
     }
-    await primeProfileKey(target.profile).catch(() => undefined);
+    await this.primeKey(target, targetInstanceId);
     // A server with one slot cannot answer a side question while the turn is using it; with more, the question queues behind the slots.
     if (session && this.openTurn(session) && this.limiterFor(target.profile).capacity === 1) {
       throw new CliError("SIDE_QUESTION_BUSY", "This model server takes one request at a time and a turn is running on it, so /btw has to wait. Ask again when the turn finishes.");
@@ -1208,6 +1256,46 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     }
     if (text === "") throw new CliError("SIDE_QUESTION_EMPTY", "The model sent no answer to the side question.");
     return { text, withContext };
+  };
+
+  /**
+   * True zero-tool text completion (`tools: []`), used by the prompt improver
+   * so untrusted project text is rewritten with zero tool definitions on the wire.
+   */
+  readonly completeText = async (input: import("../spi.js").TextCompletionInput): Promise<string> => {
+    const instanceId = input.instanceId?.trim() || (() => {
+      const matching = (this.config?.profiles ?? []).filter((profile) => profile.models.some((model) => model.id === input.model));
+      return matching.length === 1 ? `harness/${matching[0]!.id}` : "";
+    })();
+    if (!instanceId) {
+      throw new CliError("HARNESS_COMPLETION_FAILED", `Could not resolve a provider instance for model "${input.model}".`);
+    }
+    const target = this.resolveTarget(instanceId, input.model);
+    await this.primeKey(target, instanceId);
+    const messages: readonly TranscriptMessage[] = [
+      { role: "system", content: input.instructions },
+      { role: "user", content: input.prompt },
+    ];
+    const request: ChatRequest = {
+      baseUrl: target.profile.baseUrl,
+      apiKey: this.readKey(target, instanceId),
+      model: target.model.id,
+      ...conversationFields(target.profile.apiFormat, messages, target.quirks),
+      tools: [],
+      quirks: target.quirks,
+      sampling: target.profile.sampling,
+      maxTokens: target.model.maxOutput,
+      signal: input.signal,
+    };
+    let text = "";
+    try {
+      for await (const event of this.transportFor(target.profile)(request)) {
+        if (event.type === "text.delta") text += event.text;
+      }
+    } catch (error) {
+      throw toCliError("HARNESS_COMPLETION_FAILED", "Could not complete text", error);
+    }
+    return text.trim();
   };
 
   private titleFile(sessionId: string): string {
@@ -1257,7 +1345,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     if (!session || !session.transcript.messages.some((message) => message.role === "assistant")) return null;
     const target = this.tryTarget(session);
     if (!target || target.profile.titles === false) return null;
-    await primeProfileKey(target.profile).catch(() => undefined);
+    await this.primeKey(target, session.instanceId).catch(() => undefined);
     try {
       const reply = await this.askAside(target, session, session.transcript.messages, TITLE_INSTRUCTION, {
         maxTokens: Math.min(target.model.maxOutput ?? 4096, 4096),
@@ -1338,7 +1426,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     const summarise: Summarise = async (messages) => {
       const request: ChatRequest = {
         baseUrl: target.profile.baseUrl,
-        apiKey: readProfileApiKey(target.profile, this.env),
+        apiKey: this.readKey(target, session.instanceId),
         model: target.model.id,
         ...conversationFields(target.profile.apiFormat, messages, target.quirks),
         tools: definitions,
@@ -1347,6 +1435,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
         sampling: target.profile.sampling,
         maxTokens: target.model.maxOutput,
         effort: settings.effort,
+        promptCacheKey: session.sessionId,
         signal,
       };
       let text = "";
@@ -1513,6 +1602,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       // only the session this stop closed.
       if (this.sessions.get(threadId) === session) this.sessions.delete(threadId);
       // The servers' processes end with the session; the signals go out now, the wait is only for the tidy-up.
+      session.responsesSession.close();
       session.background.stopAll();
       await this.closeMcp(session);
     });
@@ -1543,6 +1633,7 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
       }
       await Promise.allSettled(
         stopping.map(async (session) => {
+          session.responsesSession.close();
           session.background.stopAll();
           await this.closeMcp(session);
         }),
@@ -1591,9 +1682,27 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
     };
   }
 
+  private turnLiveUsage(turn: HarnessTurn): TurnUsage {
+    return {
+      input: turn.liveUsage.input + turn.subagentUsage.input,
+      cacheRead: turn.liveUsage.cacheRead + turn.subagentUsage.cacheRead,
+      cacheCreate: 0,
+      output: turn.liveUsage.output + turn.subagentUsage.output,
+      thinking: turn.liveUsage.thinking + turn.subagentUsage.thinking,
+    };
+  }
+
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> => {
     const input = this.contextInput(threadId);
     return input ? contextUsageOf(input) : null;
+  };
+
+  readonly liveTurnUsage = (threadId: ThreadId): TurnUsage | null => {
+    const session = this.sessions.get(threadId);
+    const open = session ? this.openTurn(session) : undefined;
+    if (!open) return null;
+    const usage = this.turnLiveUsage(open);
+    return usage.input + usage.cacheRead + usage.cacheCreate + usage.output + usage.thinking > 0 ? usage : null;
   };
 
   readonly contextBreakdown = async (threadId: ThreadId): Promise<ContextBreakdown | null> => {

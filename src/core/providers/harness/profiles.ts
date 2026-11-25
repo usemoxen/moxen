@@ -6,10 +6,10 @@
  */
 import { cachedSecret, isSecretRef, primeSecret } from "../../secrets.js";
 import { CliError } from "../../errors.js";
-import type { HarnessModelConfig, HarnessProbedConfig, HarnessProfileConfig, HarnessProviderConfig } from "../../types.js";
+import { parseAccountInstanceId, type HarnessModelConfig, type HarnessProbedConfig, type HarnessProfileConfig, type HarnessProviderConfig } from "../../types.js";
 import { parseLine } from "../../threads/lines.js";
 import { autoCompactThreshold, DEFAULT_COMPACTION, type CompactionSettings } from "./compactsettings.js";
-import { parseQuirkOverrides, resolveQuirks, type ModelQuirks, type ResolveQuirksInput } from "./quirks.js";
+import { detectQuirkFamily, parseQuirkOverrides, resolveQuirks, type ModelQuirks, type ResolveQuirksInput } from "./quirks.js";
 
 const PROFILE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -31,6 +31,15 @@ function fail(label: string, message: string): never {
   throw new CliError("INVALID_CONFIG", `${label} ${message}`);
 }
 
+export const POSITIVE_PROFILE_INT_MIN = 1;
+export const PROFILE_NUMBER_BOUNDS = {
+  temperature: { min: 0, max: 5 },
+  topP: { min: 0, max: 1 },
+  topK: { min: 0, max: 100_000 },
+  minP: { min: 0, max: 1 },
+  fraction: { min: 0.3, max: 0.95 },
+} as const;
+
 function optionalString(input: Record<string, unknown>, key: string, label: string): string | undefined {
   const value = input[key];
   if (value === undefined || value === null) return undefined;
@@ -41,13 +50,14 @@ function optionalString(input: Record<string, unknown>, key: string, label: stri
 function optionalPositiveInt(input: Record<string, unknown>, key: string, label: string): number | undefined {
   const value = input[key];
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) fail(`${label}.${key}`, "must be a positive whole number.");
+  if (typeof value !== "number" || !Number.isInteger(value) || value < POSITIVE_PROFILE_INT_MIN) fail(`${label}.${key}`, "must be a positive whole number.");
   return value;
 }
 
-function optionalNumber(input: Record<string, unknown>, key: string, label: string, min: number, max: number): number | undefined {
+function optionalNumber(input: Record<string, unknown>, key: keyof typeof PROFILE_NUMBER_BOUNDS, label: string): number | undefined {
   const value = input[key];
   if (value === undefined || value === null) return undefined;
+  const { min, max } = PROFILE_NUMBER_BOUNDS[key];
   if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) fail(`${label}.${key}`, `must be a number from ${min} to ${max}.`);
   return value;
 }
@@ -139,10 +149,10 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
     if (typeof input.sampling !== "object" || input.sampling === null || Array.isArray(input.sampling)) fail(`${here}.sampling`, "must be an object.");
     const raw = input.sampling as Record<string, unknown>;
     const sampling: Record<string, unknown> = {};
-    const temperature = optionalNumber(raw, "temperature", `${here}.sampling`, 0, 5);
-    const topP = optionalNumber(raw, "topP", `${here}.sampling`, 0, 1);
-    const topK = optionalNumber(raw, "topK", `${here}.sampling`, 0, 100_000);
-    const minP = optionalNumber(raw, "minP", `${here}.sampling`, 0, 1);
+    const temperature = optionalNumber(raw, "temperature", `${here}.sampling`);
+    const topP = optionalNumber(raw, "topP", `${here}.sampling`);
+    const topK = optionalNumber(raw, "topK", `${here}.sampling`);
+    const minP = optionalNumber(raw, "minP", `${here}.sampling`);
     if (temperature !== undefined) sampling.temperature = temperature;
     if (topP !== undefined) sampling.topP = topP;
     if (topK !== undefined) sampling.topK = topK;
@@ -170,7 +180,7 @@ function parseProfile(raw: unknown, label: string): HarnessProfileConfig {
       if (typeof raw.auto !== "boolean") fail(`${label}.auto`, "must be true or false.");
       compaction.auto = raw.auto;
     }
-    const fraction = optionalNumber(raw, "fraction", label, 0.3, 0.95);
+    const fraction = optionalNumber(raw, "fraction", label);
     if (fraction !== undefined) compaction.fraction = fraction;
     const tokens = optionalPositiveInt(raw, "tokens", label);
     if (tokens !== undefined) compaction.tokens = tokens;
@@ -303,10 +313,11 @@ export function resolveProfileQuirks(profile: HarnessProfileConfig, model: Harne
 
 export function quirkInputs(profile: HarnessProfileConfig, model: HarnessModelConfig, options: { readonly ignoreProbed?: boolean } = {}): ResolveQuirksInput {
   const label = `providers.harness.profiles(${profile.id})`;
+  const detected = detectQuirkFamily(model.id);
   return {
     modelId: model.id,
-    // Anthropic's API serves Claude models whatever the id is called (a proxy may rename them).
-    family: model.family ?? (profile.apiFormat === "anthropic" ? "claude" : undefined),
+    // Anthropic's API serves Claude models whatever the id is called (a proxy may rename them), unless the id names another known family.
+    family: model.family ?? (profile.apiFormat === "anthropic" && detected === "generic" ? "claude" : undefined),
     vision: model.vision,
     preserveThinking: profile.preserveThinking,
     probed: model.probed && !options.ignoreProbed ? parseQuirkOverrides(model.probed.quirks, `${label}.models(${model.id}).probed.quirks`) : undefined,
@@ -350,6 +361,57 @@ export function readProfileApiKey(profile: HarnessProfileConfig, env: NodeJS.Pro
   return value !== undefined && value.trim() !== "" ? value.trim() : undefined;
 }
 
+const CHATGPT_1M_MODEL_RE = /^(?:gpt-6(?:[.\-]|$)|gpt-5\.6(?:[.\-]|$)|gpt-5\.4(?!-(?:mini|nano)\b)(?:[.\-]|$))/i;
+
+const chatgptKnownWindowsByAccount = new Map<string, Map<string, number>>();
+const chatgptKnownWindowsByModel = new Map<string, number>();
+
+/** Default context window inferred for a Sign in with ChatGPT model when the catalog entry isn't cached locally. */
+export function chatgptDefaultContextWindow(modelId: string): number {
+  const lower = modelId.trim().toLowerCase();
+  if (CHATGPT_1M_MODEL_RE.test(lower)) return 872_000;
+  return lower.startsWith("gpt-5") ? 400_000 : 200_000;
+}
+
+/** Record discovered context windows from ChatGPT `/v1/models` so runtime target synthesis and compaction lines use the real maximum. */
+export function recordChatGptContextWindows(
+  accountId: string | undefined,
+  models: ReadonlyArray<{ readonly id: string; readonly contextWindow: number }>,
+): void {
+  const normAccount = accountId?.trim().toLowerCase();
+  let bucket = normAccount ? chatgptKnownWindowsByAccount.get(normAccount) : undefined;
+  if (normAccount && !bucket) {
+    bucket = new Map<string, number>();
+    chatgptKnownWindowsByAccount.set(normAccount, bucket);
+  }
+  for (const model of models) {
+    const normModel = model.id.trim().toLowerCase();
+    if (!normModel || !Number.isFinite(model.contextWindow) || model.contextWindow <= 0) continue;
+    const window = Math.floor(model.contextWindow);
+    bucket?.set(normModel, window);
+    chatgptKnownWindowsByModel.set(normModel, window);
+  }
+}
+
+/** Resolve the largest known context window for a Sign in with ChatGPT model (account cache -> model cache -> family default). */
+export function chatgptContextWindowFor(modelId: string, accountId?: string): number {
+  const normModel = modelId.trim().toLowerCase();
+  const normAccount = accountId?.trim().toLowerCase();
+  if (normAccount) {
+    const hit = chatgptKnownWindowsByAccount.get(normAccount)?.get(normModel);
+    if (hit !== undefined) return hit;
+  }
+  const shared = chatgptKnownWindowsByModel.get(normModel);
+  if (shared !== undefined) return shared;
+  return chatgptDefaultContextWindow(modelId);
+}
+
+/** Tests only: clear cached Sign in with ChatGPT model context windows. */
+export function resetChatGptContextWindowsForTests(): void {
+  chatgptKnownWindowsByAccount.clear();
+  chatgptKnownWindowsByModel.clear();
+}
+
 /**
  * Where a Harness thread on "ask" is offered compaction: the threshold its
  * loop would use (profile, model, tab, window), as tokens. Null when it does
@@ -366,5 +428,25 @@ export function harnessAskLine(config: HarnessProviderConfig | undefined, instan
   const settings = resolveCompactionSettings(config, target.profile, target.model.id);
   if (!settings.ask) return null;
   const tokens = autoCompactThreshold(target.model.contextWindow, settings);
+  return tokens === null ? null : { tokens };
+}
+
+/**
+ * Where a Sign in with ChatGPT thread on "ask" is offered compaction: the same
+ * loop threshold `HarnessDriver` uses for its synthesized ChatGPT target.
+ */
+export function chatgptAskLine(config: HarnessProviderConfig | undefined, modelId: string, instanceId?: string): { readonly tokens: number } | null {
+  const parsed = instanceId ? parseAccountInstanceId(instanceId) : null;
+  const accountId = parsed?.kind === "chatgpt" ? parsed.accountId : undefined;
+  const contextWindow = chatgptContextWindowFor(modelId, accountId);
+  const profile: HarnessProfileConfig = {
+    id: accountId ?? "chatgpt",
+    baseUrl: "https://api.openai.com/v1",
+    apiFormat: "responses",
+    models: [{ id: modelId, contextWindow }],
+  };
+  const settings = resolveCompactionSettings(config, profile, modelId);
+  if (!settings.ask) return null;
+  const tokens = autoCompactThreshold(contextWindow, settings);
   return tokens === null ? null : { tokens };
 }

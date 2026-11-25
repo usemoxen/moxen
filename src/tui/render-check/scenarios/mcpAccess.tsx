@@ -2,6 +2,8 @@ import { act, useState } from "react";
 import { testRender } from "../testrender.js";
 
 import { SettingsModal } from "../../features/settings/settingsmodal.js";
+import { describeAllAccountSettings } from "../../../core/configschema.js";
+import { summarizeProviderAccounts } from "../../../core/providers/accounts.js";
 import { describeSettings } from "./settingsFixture.js";
 import { normalizeConfig, setConfigValue } from "../../../core/config.js";
 import { fail } from "../helpers.js";
@@ -13,6 +15,9 @@ import { fail } from "../helpers.js";
  */
 export async function runMcpAccess(): Promise<void> {
   const initial = normalizeConfig({
+    providers: {
+      claude: { accounts: [{ id: "personal", label: "Personal" }] },
+    },
     mcpServers: {
       filesystem: { command: "npx", args: ["-y", "fs-mcp"] },
       fetch: { command: "uvx", args: ["mcp-server-fetch"] },
@@ -26,7 +31,13 @@ export async function runMcpAccess(): Promise<void> {
     const [config, setConfig] = useState(initial);
     return (
     <SettingsModal
-      snapshot={{ path: "/home/dev/.moxen/config.json", exists: true, settings: describeSettings(config) }}
+      snapshot={{
+        path: "/home/dev/.moxen/config.json",
+        exists: true,
+        settings: describeSettings(config),
+        accountSettings: describeAllAccountSettings(config),
+      }}
+      accounts={summarizeProviderAccounts(config.providers)}
       loading={false}
       saving={null}
       error={null}
@@ -66,10 +77,10 @@ export async function runMcpAccess(): Promise<void> {
   };
   await settle();
 
-  // Claude Code's page: the MCP servers row says how many it gets.
+  // Claude · Personal profile page: the MCP servers row says how many it gets.
   const side = setup.captureCharFrame().split("\n");
-  const claudeRow = side.findIndex((row) => row.includes("Claude Code") && row.indexOf("Claude Code") < 28 && row.includes("│"));
-  await act(async () => setup.mockMouse.click(side[claudeRow]!.indexOf("Claude Code") + 1, claudeRow));
+  const claudeRow = side.findIndex((row) => row.includes("Claude · Personal") && row.indexOf("Claude · Personal") < 28 && row.includes("│"));
+  await act(async () => setup.mockMouse.click(side[claudeRow]!.indexOf("Claude · Personal") + 1, claudeRow));
   await settle();
   let page = setup.captureCharFrame();
   let rows = page.split("\n");
@@ -95,10 +106,10 @@ export async function runMcpAccess(): Promise<void> {
     if (!list.includes(expected)) fail(`the checklist is missing "${expected}"`);
   }
 
-  // Switching one off writes the names switched off, nothing else.
+  // Switching one off writes the names switched off on this profile, nothing else.
   await act(async () => setup.mockInput.pressKey(" "));
   await settle();
-  if (written.at(-1)?.key !== "providers.claude.mcpExclude" || written.at(-1)?.value !== "fetch") fail(`toggling wrote ${JSON.stringify(written.at(-1))}`);
+  if (written.at(-1)?.key !== "providers.claude.accounts[personal].mcpExclude" || written.at(-1)?.value !== "fetch") fail(`toggling wrote ${JSON.stringify(written.at(-1))}`);
   if (!setup.captureCharFrame().includes("☐ fetch")) fail("the checklist did not show the server switched off");
   // The locked server cannot be ticked here.
   for (let step = 0; step < 3; step += 1) await act(async () => setup.mockInput.pressArrow("down"));

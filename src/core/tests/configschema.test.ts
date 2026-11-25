@@ -170,12 +170,45 @@ describe("where settings live", () => {
   });
 
   it("gives every provider tab the same leading groups, and no catch-all", () => {
-    for (const kind of ["claude", "opencode", "harness"]) {
+    for (const kind of ["claude", "opencode", "codex", "antigravity", "acp", "harness"]) {
       const groups = [...new Set(visible.filter((descriptor) => descriptor.section === `provider:${kind}`).map((descriptor) => descriptor.group))];
-      expect(groups.slice(0, 4)).toEqual(["Defaults", "Tools", "Long threads", "Sessions"]);
+      expect(groups.slice(0, 4), kind).toEqual(["Defaults", "Tools", "Long threads", "Sessions"]);
       expect(groups).not.toContain("Behaviour");
       expect(groups).not.toContain("Concurrency");
     }
+  });
+
+  it("keeps Antigravity and ACP defaults, copy and fallbacks free of OpenCode text", () => {
+    const views = describeSettings(DEFAULT_CONFIG);
+    const view = (key: string) => views.find((entry) => entry.descriptor.key === key)!;
+    expect(view("providers.antigravity.compactAt").effective?.label).toBe("Antigravity's own");
+    expect(view("providers.acp.compactAt").effective?.label).toBe("The ACP agent's own");
+    expect(view("providers.antigravity.compaction").descriptor.appliesAt).toBeUndefined();
+    expect(view("providers.acp.compaction").descriptor.appliesAt).toBeUndefined();
+    expect(view("providers.antigravity.binaryPath").descriptor.group).toBe("Setup");
+    expect(view("providers.antigravity.modelInputPrices").descriptor.description).not.toContain("opencode-go");
+    expect(view("providers.claude.modelInputPrices").descriptor.description).not.toContain("opencode-go");
+    const withGlobalModel = describeSettings(setConfigValue(setConfigValue(DEFAULT_CONFIG, "provider", "antigravity"), "model", "gemini-4-neon"));
+    expect(withGlobalModel.find((entry) => entry.descriptor.key === "providers.antigravity.model")?.effective).toMatchObject({
+      value: "gemini-4-neon",
+      origin: "from 'Model' on the Defaults tab",
+    });
+  });
+
+  it("exposes one per-model prices editor per provider while keeping all four underlying keys settable", () => {
+    const views = describeSettings(DEFAULT_CONFIG);
+    for (const kind of ["claude", "codex", "opencode", "harness", "antigravity", "acp"]) {
+      const input = views.find((entry) => entry.descriptor.key === `providers.${kind}.modelInputPrices`)!;
+      expect(input.descriptor.hidden, kind).not.toBe(true);
+      expect(input.descriptor.label, kind).toBe("Prices per model");
+      expect(input.descriptor.kind, kind).toMatchObject({ type: "string", source: "model-prices", providerKind: kind });
+      expect(input.shippedPrices?.["claude-opus-5"]).toMatchObject({ input: 5, output: 25 });
+      for (const sibling of ["modelOutputPrices", "modelCacheReadPrices", "modelCacheWritePrices"]) {
+        expect(settingDescriptor(`providers.${kind}.${sibling}`)?.hidden, `${kind}.${sibling}`).toBe(true);
+      }
+    }
+    const updated = setConfigValue(DEFAULT_CONFIG, "providers.antigravity.modelOutputPrices", "gemini-4-neon=12");
+    expect(updated.providers?.antigravity?.modelOutputPrices).toEqual({ "gemini-4-neon": 12 });
   });
 
   it("names no tab in a description: a cross-reference is generated where it is shown", () => {

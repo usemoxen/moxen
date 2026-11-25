@@ -1,6 +1,6 @@
 /**
- * `moxen update <claude|opencode|codex>`: runs that provider's own updater
- * (`claude update`, `opencode upgrade`, `codex update`) where the sessions run — on the shared
+ * `moxen update <claude|opencode|codex|antigravity|vibe>`: runs that provider's own updater
+ * (`claude update`, `opencode upgrade`, `codex update`, `agy update`, `uv tool upgrade mistral-vibe`) where the sessions run — on the shared
  * server when there is one, since that is the machine whose binary matters —
  * and reports the version before and after.
  */
@@ -20,4 +20,15 @@ export function parseUpdatable(value: string): UpdatableProvider {
 export async function updateCommand(config: CliConfig, provider: UpdatableProvider) {
   const update = await (await cliClient(config)).dispatch({ type: "provider.update", provider });
   return { update, text: describeUpdate(update) };
+}
+
+export async function updateAllCommand(config: CliConfig, providers?: readonly UpdatableProvider[]) {
+  const result = await (await cliClient(config)).dispatch({
+    type: "provider.update-all",
+    ...(providers && providers.length > 0 ? { providers } : {}),
+  });
+  const lines = result.results.map((item) =>
+    item.ok ? describeUpdate(item.update) : `${item.provider}: ${item.error}`,
+  );
+  return { results: result.results, text: lines.join("\n") };
 }

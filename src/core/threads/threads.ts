@@ -14,15 +14,12 @@ import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
-import type {
-  InteractionMode,
-  ModelSelection,
-  RuntimeMode,
-} from "../types.js";
+import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
 import type {
   CreateThreadInput,
+  MessageOrigin,
   ReadView,
   SendDelivery,
   SendIfBusy,
@@ -332,14 +329,14 @@ export async function createThread(
 
 export async function listThreads(
   store: ThreadStore,
-  options: { status?: ThreadStatus | "all"; projectId?: string } = {},
+  options: { status?: ThreadStatus | "all"; projectId?: string; includeArchived?: boolean } = {},
 ): Promise<StoredThread[]> {
   const status = options.status ?? "active";
   const now = Date.parse(store.nowIso());
   const threads: StoredThread[] = [];
   for (const id of await store.listThreadIds()) {
     const thread = await store.readThreadRecord(id);
-    if (!thread || thread.archivedAt != null || thread.deletedAt != null) continue;
+    if (!thread || thread.deletedAt != null || (thread.archivedAt != null && !options.includeArchived)) continue;
     if (options.projectId !== undefined && thread.projectId !== options.projectId) continue;
     if (status !== "all" && threadStatus(thread, now) !== status) continue;
     threads.push(thread);
@@ -388,6 +385,8 @@ export async function sendTurn(
   store: ThreadStore,
   rawThreadId: string,
   input: SendTurnInput,
+  /** The config in force, when the caller has it: lets admission hold Antigravity automatic prompts while delegation is off. */
+  config?: Pick<CliConfig, "providers">,
 ): Promise<SendTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const prompt = input.prompt.trim();
@@ -428,11 +427,21 @@ export async function sendTurn(
     }
     const manualContinuation = thread.usagePause != null && thread.usagePause.phase !== "resuming" && origin === undefined && input.usageControl !== true && scheduledFor === null && !input.queue && delivery !== "queue";
     const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true && !manualContinuation;
-    if (usageHeld) delivery = "queue";
+    // Antigravity with delegation off holds an automatic prompt the same way
+    // a usage hold does: queued as a wake-up for the user's next message (or
+    // the setting turning on), never started on its own. Task notices are
+    // held upstream in their batch file and ride the user's send, so they
+    // pass here. Usage-control maintenance (wrap-up, recovery) is Moxen's own
+    // prompt too, so it holds for Antigravity like any other: the usage
+    // exemption it keeps elsewhere skips usage pauses, not this gate.
+    const autoHeld = config !== undefined && origin !== undefined && origin !== "task-notification"
+      && driverKindOfInstance((input.modelSelection ?? thread.modelSelection).instanceId) === "antigravity"
+      && !antigravityUnsupportedUseAllowed(config);
+    if (usageHeld || autoHeld) delivery = "queue";
 
     let turns = await store.readTurns(threadId);
 
-    if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled && !usageHeld) {
+    if (threadStatus(thread, Date.parse(now)) === "settled" && !input.wakeSettled && !usageHeld && !autoHeld) {
       throw new CliError(
         "SETTLED_THREAD_CONFIRMATION_REQUIRED",
         `Thread ${threadId} is settled. Re-run with wakeSettled to send and wake it.`,
@@ -455,13 +464,13 @@ export async function sendTurn(
     const joinsExisting = duplicate !== undefined && duplicate.status !== "running";
     const gateWaitingOut = scheduledFor === null && !openTurn(turns) && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
     const gateHoldUntil = gateWaitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
-    const gateHeldQueue = (usageHeld && !input.queue && origin !== undefined) || input.queue !== undefined;
+    const gateHeldQueue = ((usageHeld || autoHeld) && !input.queue && origin !== undefined) || input.queue !== undefined;
     const gateHeldBehind =
-      scheduledFor === null && !openTurn(turns) && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue") &&
+      scheduledFor === null && !openTurn(turns) && !input.queue && !usageHeld && !autoHeld && !manualContinuation && (delivery === "auto" || delivery === "queue") &&
       turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
     const joinsWaitingReset = input.scheduleReason === "usage-reset" && turns.some((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset");
     const gateQueued =
-      gateHeldQueue || usageHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && openTurn(turns) !== null);
+      gateHeldQueue || usageHeld || autoHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && openTurn(turns) !== null);
     if (joinsExisting ? false : live !== null || manualContinuation || !gateQueued) {
       const admission = await continuationInFlight(store, thread);
       thread = admission.thread;
@@ -469,7 +478,7 @@ export async function sendTurn(
         throw continuationBusyError(threadId);
       }
     }
-    if (thread.settledAt != null && input.wakeSettled === true && !usageHeld) {
+    if (thread.settledAt != null && input.wakeSettled === true && !usageHeld && !autoHeld) {
       thread = {
         ...thread,
         settledAt: null,
@@ -622,16 +631,16 @@ export async function sendTurn(
     // come): the new message queues behind it rather than overtaking it, and
     // rides along in its turn when model and mode match. Usage-control turns
     // (wrap-up and other maintenance) are exempt: they run past holds by design.
-    const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
+    const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !autoHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
       && turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
-    let heldQueue = usageHeld && !input.queue && origin !== undefined ? {
+    let heldQueue = (usageHeld || autoHeld) && !input.queue && origin !== undefined ? {
       conditions: [], held: false, order: Math.max(Date.parse(now), ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)),
       sequential: true, continuation: "same-thread" as const, automatic: true, wakeUp: true,
     } : input.queue;
-    if (usageHeld && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
+    if ((usageHeld || autoHeld) && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
-    const status = heldQueue || usageHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    const status = heldQueue || usageHeld || autoHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
     // A manual continuation in flight owns the checkout now: no turn may
     // start beside its destination while it prepares. Queued and scheduled
     // turns are not starting, so they pass; the handoff clears the claim
@@ -658,6 +667,7 @@ export async function sendTurn(
       runtimeMode,
       interactionMode,
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
+      ...(origin !== undefined ? { origin } : {}),
       modelSelection,
       parentTurnId: delivery === "restart" && running ? running.id : null,
       ...(holdUntil !== null
@@ -720,12 +730,20 @@ async function interruptTurnLocked(
   turn: StoredTurn,
   now: string,
   usagePause?: StoredTurn["usagePause"],
+  reason?: string,
+  usage?: StoredTurn["usage"],
 ): Promise<StoredTurn> {
   store.abortRunning(turn.id);
   store.untrackRunning(turn.id);
+  // The interruption and its final observed usage commit as ONE row write
+  // inside the thread lock, before the interruption event and any queue
+  // promotion: rewriting the ledger outside the lock afterwards would erase a
+  // turn admitted in between (LOCAL-009).
   const updated = await store.updateTurn(thread.id, turn.id, {
     status: "interrupted",
     ...(usagePause ? { usagePause } : {}),
+    ...(reason ? { error: reason } : {}),
+    ...(usage !== undefined ? { usage } : {}),
     updatedAt: now,
     completedAt: now,
   });
@@ -734,7 +752,7 @@ async function interruptTurnLocked(
     threadId: thread.id,
     turnId: turn.id,
     kind: "turn.interrupted",
-    summary: turn.id,
+    summary: reason ?? turn.id,
     // A queued or scheduled message taken back before it ran: clients drop
     // it from the transcript rather than show a turn that never happened.
     ...(turn.status === "queued" ? { payload: { beforeStart: true } } : {}),
@@ -968,6 +986,7 @@ export async function redeliverUnconfirmedSteers(
   rawThreadId: string,
   turnId: string,
   steers: readonly RedeliverSteer[],
+  config?: Pick<CliConfig, "providers">,
 ): Promise<string[]> {
   if (steers.length === 0) return [];
   const threadId = requireThreadId(rawThreadId);
@@ -1005,7 +1024,7 @@ export async function redeliverUnconfirmedSteers(
       ...(original?.notification ? { notification: original.notification } : {}),
       ...(uploads.length > 0 ? { attachments: uploads } : {}),
       ...(wakeSettled ? { wakeSettled: true } : {}),
-    }).catch(() => null);
+    }, config).catch(() => null);
     if (!sent) continue;
     copies.push(sent.turn.id);
     redelivered.add(original ? original.id : `text:${steer.text}`);
@@ -1061,14 +1080,14 @@ export function orphanedSteers(
  * it always did — in its runner's prompt build, not here. Returns the new
  * turn ids.
  */
-export async function redeliverOrphanedSteers(store: ThreadStore, rawThreadId: string, turnId: string): Promise<string[]> {
+export async function redeliverOrphanedSteers(store: ThreadStore, rawThreadId: string, turnId: string, config?: Pick<CliConfig, "providers">): Promise<string[]> {
   const threadId = requireThreadId(rawThreadId);
   const activities = await store.readActivities(threadId).catch(() => null);
   if (!activities) return [];
   if (!activities.some((activity) => activity.turnId === turnId && (activity.kind === "turn.steered" || activity.kind === "message.injected"))) return [];
   const messages = await store.readMessages(threadId).catch(() => null);
   if (!messages) return [];
-  return await redeliverUnconfirmedSteers(store, threadId, turnId, orphanedSteers(messages, activities, turnId)).catch(() => []);
+  return await redeliverUnconfirmedSteers(store, threadId, turnId, orphanedSteers(messages, activities, turnId), config).catch(() => []);
 }
 
 /**
@@ -1418,7 +1437,8 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // (The usage-protection tick and the schedule timer admit queue-carrying
     // turns with their conditions; settle only takes bare automatic waits.)
     if (settleStartsHeldTurn(turn)) {
-      return !providerExhausted(usageKeyForInstance((turn.modelSelection ?? thread.modelSelection).instanceId), instant);
+      const selection = turn.modelSelection ?? thread.modelSelection;
+      return !providerExhausted(usageKeyForInstance(selection.instanceId), instant, selection.model);
     }
     if (turn.queue || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return false;
     // Plain turns never pass through the admission path, so their one
@@ -1426,7 +1446,8 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // display built on it — blocks any non-automatic turn on an exhausted
     // provider. Promoting regardless would start a turn the queue shows as
     // blocked, failing it into a hold instead of letting it wait.
-    return !providerExhausted(usageKeyForInstance((turn.modelSelection ?? thread.modelSelection).instanceId), instant);
+    const selection = turn.modelSelection ?? thread.modelSelection;
+    return !providerExhausted(usageKeyForInstance(selection.instanceId), instant, selection.model);
   });
   if (!next && admittedId === undefined) {
     // Settle starts nothing waiting here: hold every plain turn still queued
@@ -1636,6 +1657,7 @@ export async function interruptTurn(
   rawThreadId: string,
   rawTurnId?: string,
   usagePause?: StoredTurn["usagePause"],
+  options: { readonly reason?: string; readonly usage?: StoredTurn["usage"] } = {},
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId?.trim() || undefined;
@@ -1666,7 +1688,7 @@ export async function interruptTurn(
     // it (which claims the turn below before its session starts). Read before
     // the interrupt releases the claim.
     const hasRunner = store.isTracked(target.id);
-    const updated = await interruptTurnLocked(store, thread, target, now, usagePause);
+    const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason, options.usage);
     if (hasRunner) {
       await promoteQueuedLocked(store, threadId, now);
     } else {
@@ -1748,7 +1770,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
         // Every live turn, queued ones included: a queue left behind would start the moment the settled thread woke.
         for (const turn of await store.readTurns(entry.id)) {
           if (turn.status === "running" || turn.status === "queued" || !isKnownTurnStatus(turn.status)) {
-            await interruptTurnLocked(store, entry.thread, turn, now);
+            await interruptTurnLocked(store, entry.thread, turn, now, undefined, "The thread was settled, stopping its work.");
           }
         }
         const index = members.findIndex((member) => member.id === entry.id);
@@ -1844,7 +1866,7 @@ export async function unsnoozeThread(store: ThreadStore, rawThreadId: string): P
   });
 }
 
-export async function archiveThread(store: ThreadStore, rawThreadId: string): Promise<StoredThread> {
+export async function archiveThread(store: ThreadStore, rawThreadId: string, releaseCheckout?: (thread: StoredThread) => Promise<void>): Promise<StoredThread> {
   const threadId = requireThreadId(rawThreadId);
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
@@ -1857,8 +1879,23 @@ export async function archiveThread(store: ThreadStore, rawThreadId: string): Pr
     }
     const next: StoredThread = { ...thread, archivedAt: thread.archivedAt ?? now, updatedAt: now };
     await store.writeThreadRecord(next);
+    await releaseCheckout?.(next);
     store.emit(threadId, "archived");
     return next;
+  });
+}
+
+export async function restoreThread(store: ThreadStore, rawThreadId: string, restoreCheckout: (thread: StoredThread) => Promise<void>): Promise<void> {
+  const threadId = requireThreadId(rawThreadId);
+  await store.withThreadLock(threadId, async () => {
+    const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+    if (thread.deletedAt != null || thread.hidden === true) {
+      throw new CliError("THREAD_ARCHIVED", `Thread ${threadId} cannot be restored.`, { exitCode: 4 });
+    }
+    if (thread.archivedAt == null) return;
+    await restoreCheckout(thread);
+    await store.writeThreadRecord({ ...thread, archivedAt: null, updatedAt: store.nowIso() });
+    store.emit(threadId, "restored");
   });
 }
 

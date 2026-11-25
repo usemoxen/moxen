@@ -26,6 +26,36 @@ export interface SceneWindow {
 }
 
 /**
+ * Resolve the field window for a backdrop layer. The monitoring `"grid"` spans
+ * the whole terminal so its lattice and drifters stay seamless with the
+ * sidebar's `MonitoringBackdrop`; model scenes only paint inside the creating
+ * pane (the sidebar is opaque), so their field is the pane's own visible area.
+ */
+export function sceneWindowFor(
+  scene: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  fieldWidth: number,
+  fieldHeight: number,
+): SceneWindow {
+  if (scene === "grid") {
+    return { x, y, width, height, fieldWidth, fieldHeight };
+  }
+  return { x: 0, y: 0, width, height, fieldWidth: width, fieldHeight: height };
+}
+
+/**
+ * Translate a terminal-space pointer into the layer's own field pixels:
+ * terminal pixels for `"grid"`, pane-local pixels for a model scene.
+ */
+export function scenePointerFor(scene: string, pointer: Pointer | null, x: number, y: number): Pointer | null {
+  if (pointer === null || scene === "grid") return pointer;
+  return { x: pointer.x - x, y: pointer.y - y * 2, strength: pointer.strength };
+}
+
+/**
  * The pointer at a field *pixel*, with `strength` 0..1 easing in while it
  * moves and out after it rests. Each scene decides what it does there:
  * Opus bends light around it, Sol puts a planet in the solar wind.

@@ -7,9 +7,9 @@ import { startTurn, editWorkQueue, flushTaskNotifications, noteAutoContinueCance
 import { interruptTurn, openTurn, sendTurn, isContinuationBusy } from "../threads/threads.js";
 import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
-import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive } from "./limits.js";
+import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive, usageWindowMatchesModel, usageWindowsForModel } from "./limits.js";
 import { UsageForecaster, type UsageForecast } from "./forecast.js";
-import { modelPriceFor, usageCost } from "./prices.js";
+import { isFastSelection, modelPriceFor, usageCost } from "./prices.js";
 
 const wrapUpPrompt = (reason: string, resume: string) => `${reason} Stop expanding the task. Use only essential tools to leave current work safe; do not commit or publish unless already authorized. ${resume} Do not spend allowance on a handoff summary. Leave only brief stopping notes if needed to resume safely; do not claim the task is finished. Preserve the remaining allowance.`;
 export const WRAP_UP_PROMPT = wrapUpPrompt("The provider's shared usage allowance is nearly exhausted.", "You will resume in this same conversation automatically.");
@@ -116,7 +116,7 @@ export class UsageProtection {
     return this.serialize(async () => {
       const ctx = await this.context();
       const rows = await this.rows(ctx);
-      if (provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider") throw new CliError("USAGE_PROVIDER_WRAP_UP", "Claude Code manages wrap-up. Choose Moxen in Usage wrap-up to request it here.");
+      if (driverKindOfInstance(provider) === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider") throw new CliError("USAGE_PROVIDER_WRAP_UP", "Claude Code manages wrap-up. Choose Moxen in Usage wrap-up to request it here.");
       if (!usageLimitsSnapshot()[provider]?.windows.length) throw new CliError("USAGE_UNAVAILABLE", "This provider has not reported usage windows.");
       const triggering = this.snapshot.forecasts.filter((forecast) => forecast.provider === provider && forecast.shouldWrap);
       await this.begin(ctx, rows, provider, Date.now(), triggering.length ? triggering : undefined);
@@ -153,18 +153,18 @@ export class UsageProtection {
       const selection = turn.modelSelection ?? row.thread.modelSelection;
       const provider = usageKeyForInstance(selection.instanceId);
       if (!provider) continue;
-      const fast = selection.options?.some((option) =>
-        (option.id === "fastMode" && option.value === true) || (option.id === "serviceTier" && option.value === "fast")) ?? false;
+      const fast = isFastSelection(selection);
       const reported = turn.usage?.costUsd;
       const key = `${row.thread.id}:${turn.id}`;
       let cost = 0;
-      if (provider === "claude" && reported !== undefined) {
+      const isClaude = driverKindOfInstance(provider) === "claude";
+      if (isClaude && reported !== undefined) {
         const before = previous.get(provider) ?? 0;
         cost = reported >= before ? reported - before : reported;
         previous.set(provider, reported);
-      } else if (provider !== "claude" && turn.usage && !this.counted.has(key)) {
+      } else if (!isClaude && turn.usage && !this.counted.has(key)) {
         // Recorded usage keeps input and cached reads/writes apart already: priced as it is.
-        cost = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), turn.usage, fast)?.usd ?? 0;
+        cost = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model, selection.instanceId), turn.usage, fast)?.usd ?? 0;
       }
       if (turn.status !== "completed" && turn.status !== "failed" && turn.status !== "interrupted") continue;
       if (this.counted.has(key)) continue;
@@ -312,7 +312,7 @@ export class UsageProtection {
    * `ensureRecovery` is about to ask about. Null while that window's reset is
    * still unknown: the work stays held until the provider supplies one.
    */
-  private async recoveryResetAt(ctx: OperationContext, threadId: string, pause: UsagePause, windows: readonly { kind: string }[], now: number): Promise<string | null> {
+  private async recoveryResetAt(ctx: OperationContext, threadId: string, pause: UsagePause, windows: readonly { kind: string }[], now: number, model?: string | null): Promise<string | null> {
     let window: "session" | "weekly" | "all" | null = null;
     if (pause.recoveryTurnId) {
       const turns = await ctx.store.readTurns(threadId).catch(() => []);
@@ -325,20 +325,22 @@ export class UsageProtection {
       }
     }
     window ??= windows.some((candidate) => candidate.kind === "session") ? "session" : windows.some((candidate) => candidate.kind === "weekly") ? "weekly" : "all";
-    return nextReset(pause.provider, window, now);
+    return nextReset(pause.provider, window, now, model);
   }
 
   private async ensureRecovery(ctx: OperationContext, threadId: string, pause: UsagePause): Promise<void> {
-    if (!(await ctx.store.readThreadRecord(threadId))?.usagePause) return;
+    const thread = await ctx.store.readThreadRecord(threadId);
+    if (!thread?.usagePause) return;
     if (pause.forced || pause.recoveryTurnId || pause.error) return;
-    const windows = usageLimitsSnapshot()[pause.provider]?.windows ?? [];
+    const model = thread.modelSelection.model;
+    const windows = usageWindowsForModel(pause.provider, Date.now(), model);
     const recovery = await sendTurn(ctx.store, threadId, {
       prompt: RESUME_PROMPT, origin: "usage-continue",
       queue: { ...parseQueuePolicy({ conditions: [
         { type: "usage", provider: pause.provider, window: "all", minimum: 0 },
         ...(pause.resetsAt ? [{ type: "at", at: new Date(Date.parse(pause.resetsAt) + QUEUE_RESET_GRACE_MS).toISOString() }] : [{ type: "reset", provider: pause.provider, window: windows.some((w) => w.kind === "session") ? "session" : windows.some((w) => w.kind === "weekly") ? "weekly" : "all", resetsAt: null }]),
-      ], order: pause.order, sequential: ctx.config.usageRecovery === "sequential", continuation: pause.handoff ? "stored" : "same-thread" }), automatic: true, requestId: `usage:${pause.order}` },
-    }).catch((cause: unknown) => {
+      ], order: pause.order, sequential: ctx.config.usageRecovery === "sequential", continuation: pause.handoff ? "stored" : "same-thread" }, { model }), automatic: true, requestId: `usage:${pause.order}` },
+    }, ctx.config).catch((cause: unknown) => {
       if (cause instanceof CliError && cause.code === "USAGE_PROTECTION_OVERRIDDEN") return null;
       throw cause;
     });
@@ -347,28 +349,46 @@ export class UsageProtection {
   }
 
   private async begin(ctx: OperationContext, rows: UsageRow[], provider: string, now = Date.now(), triggering?: readonly UsageForecast[]): Promise<void> {
-    const windows = usageLimitsSnapshot()[provider]?.windows ?? [];
+    const windows = usageLimitsSnapshot(now)[provider]?.windows ?? [];
     const heldBefore = new Set(rows.filter(({ thread }) => thread.usagePause).map(({ thread }) => thread.id));
-    const relevant = triggering === undefined ? [...windows].sort((a, b) => b.usedPercent - a.usedPercent
-      || (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)) - (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt))).slice(0, 1)
-      : windows.filter((window) => triggering.some((forecast) => forecast.windowId === window.id) || window.usedPercent >= 100);
-    const resets = (relevant.length ? relevant : windows).map((window) => window.resetsAt);
-    const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
-    const pauseWindows = relevant.map((window) => ({
-      id: window.id, kind: window.kind, label: window.label, resetsAt: window.resetsAt,
-    }));
-    const eligible = rows.filter(({ thread, turns }) =>
-      !thread.archivedAt && !usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now)
-      && !openTurn(turns)?.queue?.summaryFor && (!thread.usagePause || thread.usagePause.phase === "resuming")
-      && usageKeyForInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId) === provider
-      && (openTurn(turns) || this.nativeWrap.has(thread.id))
-      && (provider !== "claude" || ctx.config.providers?.claude?.usageWrapUp !== "provider" || this.nativeWrap.has(thread.id)));
+    const relevantFor = (model?: string | null) => {
+      const scoped = windows.filter((window) => usageWindowMatchesModel(provider, window, model));
+      if (triggering === undefined) {
+        return [...scoped].sort((a, b) => b.usedPercent - a.usedPercent
+          || (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)) - (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt))).slice(0, 1);
+      }
+      return scoped.filter((window) => triggering.some((forecast) => forecast.windowId === window.id) || window.usedPercent >= 100);
+    };
+    const pauseMetaFor = (model?: string | null) => {
+      const scoped = windows.filter((window) => usageWindowMatchesModel(provider, window, model));
+      const relevant = relevantFor(model);
+      const source = relevant.length ? relevant : scoped;
+      const resets = source.map((window) => window.resetsAt);
+      const resetsAt = resets.some((reset) => reset === null) ? null : resets.filter((reset): reset is string => reset !== null).sort().at(-1) ?? null;
+      const pauseWindows = relevant.map((window) => ({
+        id: window.id, kind: window.kind, label: window.label, resetsAt: window.resetsAt,
+      }));
+      return { resetsAt, pauseWindows };
+    };
+    const eligible = rows.filter(({ thread, turns }) => {
+      const selection = openTurn(turns)?.modelSelection ?? thread.modelSelection;
+      if (thread.archivedAt || usageProtectionOverrideActive(thread.usageProtectionOverride, provider, now)) return false;
+      if (openTurn(turns)?.queue?.summaryFor || (thread.usagePause && thread.usagePause.phase !== "resuming")) return false;
+      if (usageKeyForInstance(selection.instanceId) !== provider) return false;
+      if (!openTurn(turns) && !this.nativeWrap.has(thread.id)) return false;
+      if (driverKindOfInstance(provider) === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" && !this.nativeWrap.has(thread.id)) return false;
+      if (triggering !== undefined && triggering.length > 0 && relevantFor(selection.model).length === 0) return false;
+      return true;
+    });
     if (eligible.length) recordUsageProtection(provider);
     // Hold every queue before interrupting anything: settlement must not promote queued work.
-    for (const [index, row] of eligible.entries()) await this.pause(ctx, row.thread.id, {
-      provider, windows: pauseWindows, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: false,
-      ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
-    }, now);
+    for (const [index, row] of eligible.entries()) {
+      const { resetsAt, pauseWindows } = pauseMetaFor((openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model);
+      await this.pause(ctx, row.thread.id, {
+        provider, windows: pauseWindows, phase: this.nativeWrap.has(row.thread.id) ? (openTurn(row.turns) ? "wrapping" : "waiting") : "pending", resetsAt, order: Date.now() + index, handoff: false,
+        ...(this.nativeWrap.has(row.thread.id) ? { native: true, ...(row.turns.at(-1) ? { turnId: row.turns.at(-1)!.id } : {}) } : {}),
+      }, now);
+    }
     for (const row of eligible) {
       await flushTaskNotifications(ctx, row.thread.id);
       const pause = (await ctx.store.readThreadRecord(row.thread.id))?.usagePause;
@@ -377,6 +397,7 @@ export class UsageProtection {
       if (!(await ctx.store.readThreadRecord(row.thread.id))?.usagePause) continue;
       try { await this.stop(ctx, row); }
       catch {
+        const { resetsAt, pauseWindows } = pauseMetaFor((openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model);
         await this.pause(ctx, row.thread.id, { provider, windows: pauseWindows, phase: "waiting", resetsAt, order: Date.now(), handoff: false, error: "Could not pause this thread. Inspect it before continuing." });
       }
     }
@@ -430,13 +451,13 @@ export class UsageProtection {
         const turn = openTurn(turns);
         if (!turn) continue;
         const selection = turn.modelSelection ?? thread.modelSelection;
-        const fast = selection.options?.some((option) => (option.id === "fastMode" && option.value === true) || (option.id === "serviceTier" && option.value === "fast")) ?? false;
+        const fast = isFastSelection(selection);
         const context = this.contexts.get(thread.id);
         const providerTurns = turns.filter((turn) => usageKeyForInstance((turn.modelSelection ?? selection).instanceId) === provider);
         let inFlight = 0;
         // Claude totals include native tasks. Count gains, including session resets,
         // rather than adding cumulative snapshots or native child costs again.
-        if (provider === "claude") {
+        if (driverKindOfInstance(provider) === "claude") {
           let previous = 0;
           for (const turn of providerTurns) {
             if (turn.status === "running" || turn.status === "queued") continue;
@@ -448,7 +469,7 @@ export class UsageProtection {
         }
         else {
           const live = this.live.get(thread.id) ?? turn.usage;
-          if (live) inFlight = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), live, fast)?.usd ?? 0;
+          if (live) inFlight = usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model, selection.instanceId), live, fast)?.usd ?? 0;
         }
         const key = `${thread.id}:${turn.id}`;
         inFlight = Math.max(inFlight, this.runningCost.get(key) ?? 0);
@@ -458,7 +479,7 @@ export class UsageProtection {
         const cached = typeof context?.cachedInputTokens === "number" ? context.cachedInputTokens : 0;
         // One wrap-up request per open thread: its context input plus a short
         // output, not the cumulative spend of its previous turns.
-        const estimate = used === null ? null : usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model), { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
+        const estimate = used === null ? null : usageCost(modelPriceFor(ctx.config, driverKindOfInstance(selection.instanceId), selection.model, selection.instanceId), { input: 0, cacheRead: cached, cacheCreate: Math.max(0, used - cached), output: 4096, thinking: 0 }, fast);
         if (estimate === null) wrapCostUsd = null;
         else if (wrapCostUsd !== null) wrapCostUsd += estimate.usd;
       }
@@ -466,7 +487,7 @@ export class UsageProtection {
       this.costCounter.set(provider, costUsd);
       for (const window of limits.windows) {
         const forecast = this.forecaster.forecast(provider, window, { activeMs, costUsd, wrapCostUsd, running: running.length });
-        forecasts.push(provider === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" ? { ...forecast, shouldWrap: false } : forecast);
+        forecasts.push(driverKindOfInstance(provider) === "claude" && ctx.config.providers?.claude?.usageWrapUp === "provider" ? { ...forecast, shouldWrap: false } : forecast);
       }
     }
     this.snapshot = { forecasts, queue: rows.flatMap(({ thread }) =>
@@ -480,7 +501,7 @@ export class UsageProtection {
     await this.refresh(ctx, now, rows);
     let changed = false;
     for (const { thread } of rows) {
-      if (!thread.archivedAt && thread.usagePause?.phase === "wrapping" && thread.usagePause.provider === "claude" && this.nativeWrap.has(thread.id)) {
+      if (!thread.archivedAt && thread.usagePause?.phase === "wrapping" && driverKindOfInstance(thread.usagePause.provider) === "claude" && this.nativeWrap.has(thread.id)) {
         await this.pause(ctx, thread.id, { ...thread.usagePause, native: true }, now);
       }
     }
@@ -488,7 +509,14 @@ export class UsageProtection {
       const triggering = this.snapshot.forecasts.filter((forecast) => forecast.shouldWrap);
       for (const provider of new Set(triggering.map((forecast) => forecast.provider))) await this.begin(ctx, rows, provider, now, triggering.filter((forecast) => forecast.provider === provider));
       if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
-      if (rows.some(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))) await this.begin(ctx, rows, "claude", now, triggering.filter((forecast) => forecast.provider === "claude"));
+      const nativeWrapProviders = new Set(
+        rows
+          .filter(({ thread }) => !thread.usagePause && this.nativeWrap.has(thread.id))
+          .map(({ thread, turns }) => usageKeyForInstance((openTurn(turns)?.modelSelection ?? thread.modelSelection).instanceId)),
+      );
+      for (const provider of nativeWrapProviders) {
+        await this.begin(ctx, rows, provider, now, triggering.filter((forecast) => forecast.provider === provider));
+      }
     }
     if (this.dirty.size) { rows = await this.rows(ctx, now, true); changed = true; }
     this.nativeWrap.clear();
@@ -515,7 +543,8 @@ export class UsageProtection {
         }
       }
       if (pause.phase === "wrapping") {
-        const exhausted = usageLimitsSnapshot(now)[pause.provider]?.windows.some((window) => window.usedPercent >= 97) === true;
+        const rowModel = (openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model;
+        const exhausted = usageWindowsForModel(pause.provider, now, rowModel).some((window) => window.usedPercent >= 97);
         if (running && (pause.native || (!exhausted && now - Date.parse(running.createdAt) < 120_000))) busy.add(pause.provider);
         else {
           if (running) await this.stop(ctx, row);
@@ -527,7 +556,8 @@ export class UsageProtection {
     for (const row of queue) {
       const pause = row.thread.usagePause!;
       if (row.thread.settledAt || row.thread.snoozedUntil) continue;
-      const windows = usageLimitsSnapshot(now)[pause.provider]?.windows ?? [];
+      const rowModel = (openTurn(row.turns)?.modelSelection ?? row.thread.modelSelection).model;
+      const windows = usageWindowsForModel(pause.provider, now, rowModel);
       if (pause.phase === "pending" && !busy.has(pause.provider)) {
         if (windows.some((window) => window.usedPercent >= 97) || openTurn(await ctx.store.readTurns(row.thread.id))) {
           await this.pause(ctx, row.thread.id, { ...pause, phase: "waiting" });
@@ -558,7 +588,7 @@ export class UsageProtection {
       if (pause.phase !== "waiting" || pause.error) continue;
       let waiting = pause;
       if (!pause.forced && pause.resetsAt === null) {
-        const resetsAt = await this.recoveryResetAt(ctx, row.thread.id, waiting, windows, now);
+        const resetsAt = await this.recoveryResetAt(ctx, row.thread.id, waiting, windows, now, rowModel);
         if (resetsAt !== null) {
           waiting = { ...waiting, resetsAt };
           await this.pause(ctx, row.thread.id, waiting);

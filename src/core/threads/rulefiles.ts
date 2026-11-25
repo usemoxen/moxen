@@ -30,7 +30,7 @@ import path from "node:path";
 import { createPatch } from "diff";
 
 /** Providers whose conversations are told about rule-file edits (see the header for why only these). */
-const WATCHED_PROVIDERS: ReadonlySet<string> = new Set(["claude", "harness"]);
+const WATCHED_PROVIDERS: ReadonlySet<string> = new Set(["claude", "harness", "chatgpt"]);
 
 /** A file bigger than this is not tracked: it could not be shown as a patch anyway. */
 const MAX_FILE_BYTES = 64 * 1024;

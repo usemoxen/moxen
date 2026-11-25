@@ -1,7 +1,8 @@
 # Providers
 
-Moxen drives three provider runtimes through their own CLIs, and runs a fourth
-itself. Each driver is a thin adapter over one runtime implementing the shared
+Moxen drives provider runtimes through their own CLIs (Claude Code, OpenCode,
+Codex, Antigravity, and configured ACP agents), and runs Moxen Harness itself.
+Each driver is a thin adapter over one runtime implementing the shared
 `ProviderAdapter` contract (`core/providers/spi.ts` — the contract itself
 imports only our own root types plus type-level `effect` modules, without the
 upstream reference's Layers or host services). A driver otherwise imports
@@ -16,14 +17,22 @@ but never reaches upward into the server or a client
 | 2 | OpenCode | OpenCode v2 (2.0+): `opencode serve` plus the generated client | API keys; ChatGPT Pro/Plus and SuperGrok logins are built into v2 (`opencode auth login`) |
 | 3 | Codex | `codex app-server` over stdio JSON-RPC (tested on 0.166.0) | Inherited `codex login`; the CLI owns authentication |
 | 4 | Moxen Harness | Our own agent loop over an endpoint you configure (`providers.harness.profiles`): OpenAI Chat Completions, OpenAI Responses or Anthropic Messages | A key kept in the OS keychain, or read from the environment variable a profile names; never in the config file |
+| 5 | Antigravity | Official `agy` CLI unmodified (`agy acp`) over pinned ACP v1 (`protocolVersion: 1`) | Inherited `agy` login; Moxen never reads or stores credentials |
+| 6 | Mistral Vibe | Official `vibe-app-server` over stdio JSON-RPC 2.0 (tested on 3.1.4) | Inherited `vibe` login (OS keyring or `~/.vibe/.env`); Moxen never reads or stores credentials |
+| 7 | ACP | Agent Client Protocol v1 (`protocolVersion: 1`) over stdio JSON-RPC for profiles you configure (`providers.acp.agents`, from the ACP Registry or manually) | Inherited by each ACP CLI; Moxen never reads or stores credentials |
 
 Credentials live with the provider CLIs (OpenCode keeps them in its own
 SQLite, read only as provider type). This CLI never handles their tokens; the
 only keys Moxen holds are a harness profile's and a search key, in the OS
 keychain.
 
-GPT models can run through native Codex or OpenCode. Grok (SuperGrok) models
-run through OpenCode; there is no native Grok driver.
+GPT models can run through native Codex, OpenCode, or Sign in with ChatGPT
+via Moxen Harness. When a ChatGPT attachment or tool image exceeds OpenAI's
+30,000-patch limit at full resolution, Moxen asks OpenAI to resize it using
+high detail. The original image stays unchanged, and smaller images keep the
+model's default detail.
+
+Grok (SuperGrok) models run through OpenCode; there is no native Grok driver.
 
 Subscription windows are reported per account and shown per instance: Claude
 and Codex report for the whole driver, while OpenCode's `opencode-go` plan
@@ -33,6 +42,200 @@ when a Go session starts and after its turns, at most once a minute. Every
 other OpenCode provider reports no plan windows; when the route has nothing
 to say — not signed in, no Go plan, an older server — usage is simply unknown,
 never an error.
+
+## Antigravity and ACP
+
+Moxen speaks **Agent Client Protocol v1** over newline-delimited JSON-RPC 2.0 on
+stdio, pinning **`protocolVersion: 1`** during `initialize`: an agent that
+negotiates any other protocol version is refused loudly
+(`ACP_PROTOCOL_VERSION_UNSUPPORTED`) rather than running in an unverified mode.
+
+- **Antigravity (`antigravity`)**: a first-class provider alongside Claude Code,
+  Codex and OpenCode. It runs the official `agy` CLI unmodified (`agy acp`,
+  configured under `providers.antigravity.binaryPath` and
+  `providers.antigravity.launchArgs`), updates itself via
+  `moxen update antigravity` (`agy update`), and is probed by `moxen doctor`.
+- **Unsupported use (`providers.antigravity.allowUnsupportedUse`, off by
+  default)**: Google's consumer sign-in for Antigravity covers one person, one
+  account, and prompts you type yourself in an ACP client — not another agent
+  delegating to `agy`, app-driven or unattended prompts, or several accounts
+  on one machine. While this is off Moxen refuses to delegate a task to any
+  Antigravity account (`antigravity`, `antigravity/<id>`, legacy `agy`) before
+  a thread or worktree is created, holds automatic prompts on Antigravity
+  threads (task notices, agent-queued messages, continues after a usage
+  limit, usage-protection wrap-ups and recoveries, Moxen's own compaction
+  prompts and their post-compaction resume, automatic hand-offs) in the work
+  queue and notice batch instead of starting them, and never signs in an
+  account with its own isolated home folder. A launch or login input that
+  moves the login off the host environment — an account `env` override of
+  `HOME`, `USERPROFILE`, `SSH_CONNECTION` or the home/profile/config-dir
+  variables, or a `--gemini-dir` launch argument — is refused with
+  `ANTIGRAVITY_ACCOUNT_OFF`, never silently stripped down to the host login.
+  Stored usage and credits of a gated account are not served, and turning
+  the setting off stops that account's live driver and sessions without a
+  restart. They are delivered with your next message, or when you turn the
+  setting on. What you type, queue, schedule or click always runs. Turning it
+  on is your choice: Google does not support delegation, automatic prompts or
+  multiple accounts on consumer plans and may suspend the Antigravity account,
+  and the TUI, desktop and CLI say so when you enable it. A turn the provider
+  starts itself (a reactive wake-up inside `agy`) is not a Moxen prompt and is
+  left alone.
+- **Multiple accounts** (`antigravity/<id>`): an Antigravity account with a
+  `homePath` runs `agy` with `HOME` and `USERPROFILE` pointed at that folder
+  and a synthetic `SSH_CONNECTION`, so `agy` keeps its login in that folder
+  instead of the OS keychain. While `providers.antigravity.allowUnsupportedUse`
+  is off (the default), Moxen runs at most one Antigravity account: the first
+  configured without a `homePath`, which shares the host `agy` login with its
+  environment untouched. Every account with a `homePath` — or whose own `env`
+  or launch args move its login off the host environment — and every account
+  beyond that one, is shown as disabled with the reason
+  (`moxen providers accounts list`, the settings pages; the provider catalog
+  reports the reason before so much as checking whether `agy` is installed in
+  that folder), is never launched,
+  probed for usage or credits, or routed to, and a request that targets it
+  fails with `ANTIGRAVITY_ACCOUNT_OFF`, naming the setting and how to fix it:
+  remove the account's `homePath`, or turn the setting on. Your config is
+  never deleted or rewritten on this path. Signing in an isolated account is
+  refused the same way while the setting is off.
+- **ACP profiles (`providers.acp.agents`)**: managed like Moxen Harness
+  profiles (`providers.harness.profiles`). Add as many ACP agents as you want
+  — either picked from the pinned v1 ACP Registry
+  (`https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`,
+  cached under `<storeRoot>/cache/acp-registry.json` with offline fallback) or
+  added manually (`id`, `name`, `command`, `args`, `launchArgs`, `env`,
+  `enabled`, `defaultModel`, `defaultMode`). Each enabled profile appears as
+  `acp/<id>` in the model picker. Launch arguments are tokenized into argv
+  arrays and never joined into a shell string.
+- **Worktree isolation, permissions & questions**: when Antigravity or an ACP
+  agent delegates `fs/*` or `terminal/*` to the client, Moxen enforces worktree
+  isolation on writes and commands and spawns processes with `shell: false`.
+  Permission requests (`session/request_permission`) normalize both ACP and
+  PascalCase `agy` tool inputs before enforcing worktree isolation, honor
+  `approval-required`, `auto-accept-edits`, `auto`, and `full-access` (including
+  for delegated threads and live `setRuntimeMode` / `session/set_mode`
+  switches and configured `defaultMode`), reply with `allow_once` on automatic
+  approvals and isolated sessions so agents cannot cache approvals past
+  Moxen's gates, and cancel parked prompts when a turn settles or is
+  interrupted. Form elicitations (`elicitation/create`, e.g. `agy`'s
+  `ask_question`) surface in Moxen's interactive answer panel (`respondToUserInput`),
+  while URL/OAuth elicitations and delegated sessions decline cleanly.
+- **Session lifecycle, steering, compaction & skills**: `AcpDriver` registers
+  peer handlers before `session/new` / `session/load` / `session/resume` so
+  startup updates (`available_commands_update`, `usage_update`,
+  `config_option_update`, `current_mode_update`, `session_info_update`) are
+  never dropped, prefers `session/resume` over `session/load` when advertised,
+  sends best-effort `session/close` on session teardown, adopts provider titles
+  from `session_info_update` (`sessionTitle`), and refreshes cached agent
+  profiles live when `providers.acp.agents` changes. For Antigravity, Moxen
+  wires mid-turn steering (`steerTurn` via concurrent `session/prompt`; the
+  main prompt's terminal outcome — success or error, with its usage and
+  carried instructions — is held while a sibling steer is pending and
+  reconciled by the last sibling to exit, whatever the order. A steer refused
+  before its acknowledgement window is handed back to the caller and the turn
+  keeps running on the main prompt, while any failure after acknowledgment
+  fails the turn and sends `session/cancel` exactly like a main prompt failure,
+  abandoning the surviving prompts so the next send drains them — bounded, so
+  a silent agent cannot hold the drain forever — and their trailing output
+  never leaks into the next turn) and
+  `/compact` compaction (`session.notice: "compacted"`), merges local
+  `.claude/skills` / `.agents/skills` with live `available_commands_update` in
+  `skillInventory`, and computes estimated `contextBreakdown` from the live
+  transcript since the last compaction.
+- **Diagnostics & discovery**: `moxen doctor` probes `agy`, and the Settings
+  page checks Antigravity's latest GitHub Release alongside Claude Code,
+  OpenCode and Codex. Catalog discovery runs `initialize`, and when the agent
+  advertises `sessionCapabilities.close`, probes `session/new` followed
+  immediately by `session/close` (cached on disk under
+  `<storeRoot>/cache/antigravity-models.json` per version) to surface the
+  agent's live models, per-model effort levels, and subscription tier
+  (`_meta.antigravity.tier.name`) without reading credentials. Non-Gemini
+  models hosted through Antigravity (such as Claude Sonnet 5.5 and Claude Opus
+  5.5) carry an `(Antigravity)` suffix so they stay distinct from Claude Code's
+  own models across every client.
+- **Context, token & plan usage**: `AcpDriver` consumes ACP `usage_update`
+  notifications for live context-window readings (`contextUsage`; its `cost` is
+  the session's cumulative cost per ACP v1. Each turn keeps the high-water mark
+  of the readings observed while it was open — a snapshot equal to or below the
+  baseline is never evidence of zero spend (the counter can lag a turn's own
+  final charge). The driver maintains an effective baseline in cumulative-
+  counter units, distinct from the booked turn-ledger sum: a reading with no
+  turn open raises it (and establishes an unknown one — a fresh session's
+  origin is zero, a resumed session's stays unknown until such a reading,
+  with post-resume prompt-result costs never establishing it; the first idle
+  reading initialises it to at least the result costs booked in the meantime,
+  never their sum, since the reading may already include those charges), and a
+  settled turn advances it to the counter reading it actually used, or by the
+  cost it booked when the counter was silent or lagging — so spend already
+  booked is never rebooked when the counter catches up, and unattributed
+  out-of-turn growth is never charged to an arbitrary turn. At settle, the turn's cost is
+  the in-turn counter delta above the baseline — the spec-defined cumulative
+  counter wins over the prompt result's vendor-specific cost field — or the
+  result cost when the counter did not move in-turn; a snapshot that never
+  moved leaves the cost undefined so token-based estimation applies, never a
+  reported $0 or an invented negative delta. The booked turn ledger totals
+  the counter's movement) and
+  per-turn `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
+  Moxen also probes `agy --print /usage --output-format json` and
+  `agy --print /credits --output-format json` (zero-turn local slash commands,
+  no shell, no credential access) to report subscription quota windows and
+  remaining credits in the Context tab and `usage.limits`. Compact composer
+  gauges track the `Gemini` pool (`5h`, `wk`, plus `Argon` once it reaches
+  70%), while the extended Plan usage panel divides windows into `Gemini`
+  (`5h`, `Weekly`, `Argon`) and `Claude & GPT` (`5h`, `Weekly`) subcategories.
+  When `agy acp` surfaces quota exhaustion as a warning reply (`⚠ ...`),
+  `AcpDriver` converts it into a `rate-limits.updated` + `rate-limited` state
+  event, fails the turn, and triggers a forced usage refresh so usage-limit
+  cards, `autoContinueAtUsageLimit`, and pool-scoped work-queue/protection
+  rules work consistently with other providers.
+- **Tool canonicalization, background tasks & reactive wakeups**: `AcpDriver`
+  unwraps ACP lazy MCP calls (`call_mcp_tool` / `"MCP Tool <name>"`) and
+  `"Run mcp_<server>_<tool>"` calls into `mcp__<server>__<tool>` rows,
+  normalizes `list_dir`, `read_url_content`, `search_web`, `find_by_name`, and
+  `"Run <tool>"` orchestration calls, promotes backgrounded `run_command` /
+  `invoke_subagent` calls into `backgroundTasks(threadId)` (`background.task`
+  and `background.tasks.changed`), exposes `backgroundTaskOutput` from
+  accumulated tool updates or live client-owned `terminal/*` buffers, supports
+  `stopBackgroundTask` for client-terminal-backed tasks (while agent-internal
+  tasks like `agy`'s `run_command` remain `stoppable: false`), and records
+  out-of-turn tool completions and reactive wakeup turns
+  (`origin: "background"`). Because ACP cannot see internal `schedule` timers or
+  pre-restart background tasks inside an agent, background task lists for `acp`
+  and `antigravity` are marked `partial: true` alongside `opencode`. Native
+  `invoke_subagent` (`Agent`) tool calls also publish `subagent.updated`
+  (`started` / `stopped`) so they appear in the Agents view with their role and
+  summary; full child subagent transcript inspection (`subagentHistory`) is not
+  available because ACP v1 and `agy` do not expose child session IDs or subagent
+  history RPCs.
+- **ACP v1 protocol boundaries**: `AcpDriver` declares
+  `supportsConversationRollback: false` (no conversation rewind RPC), forwards
+  stdio and Streamable HTTP `mcpServers` on `session/new`, `session/resume`, and
+  `session/load` (treating Antigravity as HTTP-capable when `agy acp` omits
+  `mcpCapabilities` from `initialize`, routing Antigravity's external
+  non-`moxen` MCP servers through a compact per-session loopback lazy gateway
+  `moxen-mcp` (loopback-only HTTP that validates `Origin` and `Host` as MCP
+  Streamable HTTP requires, plus a per-session bearer token) with
+  `search_tools` and `call_tool` so `agy`'s 20,000-token eager
+  schema budget never evicts tools while also honoring `disabledTools`,
+  restoring host `HOME`/`USERPROFILE` and clearing the synthetic
+  `SSH_CONNECTION` marker on direct stdio MCP children under isolated
+  Antigravity accounts, and falling back to Moxen's stdio server
+  for built-in tools on ACP agents without `mcpCapabilities.http`), forks
+  sessions via `session/fork` automatically whenever an agent advertises
+  `agentCapabilities.sessionCapabilities.fork` (failing cleanly with
+  `FORK_UNSUPPORTED` when unadvertised, as in `agy acp` v1.5.13), and leaves
+  operations without ACP v1 RPCs unadvertised (`sideQuestion` / `/btw`, prompt
+  improver `completeText`, client-side session rename/title regeneration, and
+  live mid-session MCP/tool updates).
+
+## Mistral Vibe
+
+Moxen drives **Mistral Vibe (`vibe`)** as an opt-in first-class provider (`providers.vibe.enabled: true`) over Mistral's official `vibe-app-server` stdio JSON-RPC 2.0 protocol (verified on `mistral-vibe` v3.1.4).
+
+- **Authentication & single-account scope**: Moxen inherits the `vibe` CLI's own login (OS keyring or `~/.vibe/.env`) and never reads, copies, or stores Mistral credentials. In line with Mistral's consumer terms, Mistral Vibe is configured as a single-account provider (no multi-account pooling or rotation). `initialize.clientInfo` identifies Moxen honestly (`name: "moxen"`, `entrypoint: "unknown"`), and per-session model/effort picks always pass `sessionOnly: true` so Moxen never mutates global `vibe` defaults.
+- **Discovery, diagnostics & updates**: Catalog discovery runs `initialize` → `setup/status` + `config/read` passively (no session started, cached under `<storeRoot>/cache/vibe-models.json`) to surface every unlocked model on your plan along with its `thinkingLevels` and context window size. `moxen doctor` probes `vibe` / `vibe-app-server`, Settings checks the latest `mistralai/mistral-vibe` GitHub Release, and `moxen update vibe` upgrades via `uv tool upgrade mistral-vibe`.
+- **Sessions, streaming & tools**: `VibeDriver` handles RFC 6902 JSON-Patch streaming (`history/entry/updated`, including `append` ops), interim assistant notes, reasoning updates, checklists (`todo`), image attachments, mid-turn steering (`turn/steer` with unconfirmed-steer recovery), native compaction (`session/compact` handoff), conversation rewind (`session/rewind` handoff), session forking (`session/fork`), tool-free `/btw` side questions (`session/fork` with `enabledTools: []`), context breakdown (`session/context/read`), background shell processes (`session/backgroundProcess/{output,stop}`), and session rename (`session/title/update`). Vibe's built-in `task` subagent tool is always disabled via `disabledTools` so delegation runs through Moxen's tracked threads, and per-tool MCP exclusions (`mcp__<server>__<tool>`) are resolved against Vibe's `disabledTools` filter, which matches display names case-insensitively and digest-suffixes colliding names. For a server whose full tool list Moxen knows (Moxen's own in-process server), Moxen recomputes Vibe's published display names exactly — alias and identifier normalization included, digest disambiguation of genuinely colliding names (`write-file` and `write_file` both publish as `demo_write_file_<digest>`) — and emits an anchored exact-match pattern for the excluded tool's published name, so a real name collision cannot leave the tool callable; if the case-insensitive filter would also hide a published name that is not excluded (a case-fold sibling such as `write` beside `WRITE`), the server is not offered instead, with a notice. For any other server Moxen cannot know whether Vibe will digest-suffix the target's published name, so no pattern is trusted: only the server actually holding an excluded tool is withheld (with a notice), and every server without an exclusion keeps its offer untouched. That notice is published with the first send rather than at session start, so a subscriber attaching after startup — the normal send path's turn subscriber — still sees it once. Two MCP-override limits cannot be closed, and only one is guarded. First, when no MCP servers are supplied at all, Moxen sends no `mcpServers` key (and does not refuse startup): Vibe 3.1.4 then supplies no MCP override, so the user's own Vibe configuration's `mcp_servers` stay in scope — a native copy of a server is not denied, and Moxen's exclusions do not reach it there. Second, when servers ARE supplied but enforcing the exclusions would withhold every one of them, the payload would equally carry no override — so Moxen refuses to start that session with `VIBE_MCP_EXCLUSION_UNENFORCEABLE` (naming the excluded tools) instead of sending an override it cannot rely on; withholding some servers while at least one nonempty override remains stays allowed. On Windows the launcher must be a direct executable or a shim `resolveWindowsLaunch` can unwrap (an npm-style `.cmd` to its real entry, or a `.ps1` run through `powershell -File`); an unrecognized `.bat`/`.cmd` wrapper is rejected with `VIBE_UNSUPPORTED_LAUNCHER` rather than run through `cmd.exe`, which would not preserve argument boundaries, and a drive-relative path (`C:tool.cmd`, or a bare drive qualifier `C:`) is rejected with `VIBE_INVALID_BINARY_PATH` in both discovery and session start. A relative `providers.vibe.binaryPath` resolves against the Moxen server's working directory.
+- **Permissions, worktree isolation & questions**: `callback/call` uses Vibe's two-phase flow (immediate `{ callbackId, accepted: true }` acknowledgement followed by `callback/result`). Moxen enforces worktree isolation on file writes and shell commands across every permission mode (never allowing `allow_session` / `allow_always` in isolated worktrees), gates shell commands with `assessCommandLine` in `auto` mode, and bridges `ask_user_question` callbacks to Moxen's interactive answer UI (declining cleanly on delegated threads). Policy writes and turn admission share one per-session queue, and each turn carries its own requested mode (an overlapping send never substitutes a wider mode, and a mode-less send borrows the latest selection at send time). The requested mode, the mode currently being written and the last definitely acknowledged policy are kept separate: a turn is admitted only once its requested policy is definitely acknowledged, and after every awaited write the admission rechecks the latest selection — a newer, narrower one is applied (re-written and acknowledged) before the turn starts, so a queued admission can never start a turn wider than the caller's latest choice. A refused downgrade fails the turn start instead of running. A policy write that times out closes the session (the server may have applied it while the reply was lost, so the cached acknowledgement is unsafe), a `pending` response is not treated as applied and discards the cached acknowledgement (`pending` does not mean the previous approval policy is still in effect: Vibe applies the live approval change before parking the rest of the configuration, so the next turn re-writes and needs a fresh definite acknowledgement), and the session is rechecked open and registered immediately before `turn/start`. Turn completions are routed by server turn id first and otherwise correlated with the active server turn (only the `turn/start` response binds the id; early `turn/started` metadata and completions are buffered and consumed on binding, stale completions dropped, a duplicate replaces its buffer entry, and a genuine overflow fails the turn and closes the session), so a send queued behind a policy write can no longer strand the previous turn's completion; a turn start that times out closes the session (the server may be running a turn Moxen cannot identify); an interrupt requested while the id is still binding is sent once it is known, and if that deferred interrupt is refused the failure is reported as a notice while the accepted turn keeps its identity and completion tracking; and stopping a session settles every outstanding turn (queued sends included) as interrupted. A tightening `setRuntimeMode` made while a turn runs writes at once, skips queued setters the newer selection superseded before their RPC goes out, never widens the local callback gate past the latest selection (tight or pending), and defers a widening write until the session is idle again (only a write the live-turn check actually deferred is replayed at completion — a tightening answered `pending` is never re-sent, because Vibe already applied it live). Three limits remain, in plain words: Vibe applies a policy change to the running turn live, so a mid-turn upgrade can still take effect on the running turn; a withheld MCP server can remain callable through a native copy in the user's Vibe configuration when Moxen offers no MCP servers at all (there is no override left to deny it — when enforcing an exclusion would withhold every offered server, Moxen refuses session startup with `VIBE_MCP_EXCLUSION_UNENFORCEABLE` instead of sending that ineffective empty override); and overlapping sends to one provider thread are not supported: admission is serialized, but a send made while an earlier turn is still active can attempt a policy update and a `turn/start` concurrently with that live turn, and streaming attribution across such sends is best effort.
+- **Plan usage**: `account/read` reports Mistral Vibe's monthly budget (`Monthly`, or `Monthly (PAYG)` when pay-as-you-go overage is enabled so 100% does not block continuation) and reset timestamp into `usage.limits` and the Context/Settings UI.
 
 ## Defaults
 
@@ -47,7 +250,18 @@ the default outright.
 
 - Moxen has no plan mode. Claude Code's own plan tools (`EnterPlanMode`,
   `ExitPlanMode`) are never offered, and an OpenCode session an older build
-  left on its read-only `plan` agent goes back to `build`.
+  left on its read-only `plan` agent goes back to `build`. Claude Code's native
+  subagent tool is never offered either, under both of its names (`Agent` in
+  `tool_use` blocks, `Task` in the `system:init` tools list): both stay out of
+  the model's list in every Moxen-started session, whatever `disabledNativeTools`
+  holds (a stored `Agent` or `Task` entry changes nothing), and the settings
+  tool list leaves both out so neither can be switched back on. Fan out through
+  Moxen's `delegate` tool instead, which Moxen tracks.
+- Antigravity's internal orchestrator models (`gemini-pro-orchestrator-neon` /
+  "Orchestrator (Neon)" and `gemini-pro-orchestrator-g1-pro` / "Orchestrator
+  (Argon)") are omitted from Moxen's offered Antigravity catalog for the same
+  reason: their orchestration stays opaque inside `agy` rather than creating
+  tracked Moxen threads. Use Moxen's `delegate` tool for multi-thread work.
 - After a 5-hour limit Anthropic may keep serving a subscription on spare
   capacity (Claude Code's `/low-priority`). Moxen cannot drive that lane:
   the SDK never forwards the offer, only the slash command reaches us as
@@ -169,6 +383,12 @@ continued thread gets its new id. This immutable session context is appended
 after instruction-update comparison; it does not change the shared instruction
 text or trigger repeat-turn updates. Instruction previews built without a
 thread id omit the line.
+
+The shared runtime instructions allow relevant read-only Moxen CLI inspection.
+They tell agents to use the agent tools for thread and task management, not to
+bypass their restrictions, and to get explicit authorization for the action and
+target before changing another thread through the CLI. This guidance does not
+change CLI permissions or override server or sandbox denials.
 
 Thinking summaries default to Detailed (`providers.codex.reasoningSummary`),
 with Automatic, Concise and Off also available. Moxen preserves the reported

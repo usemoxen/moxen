@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useKeyboard } from "@opentui/react";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import type { ClientApi, QueryResult } from "../../../server/api.js";
 import { t, tx } from "../../i18n/index.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -43,7 +43,7 @@ export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, 
   const phases = { idle: "memory.phase.idle", installing: "memory.phase.installing", downloading: "memory.phase.downloading", validating: "memory.phase.validating", indexing: "memory.phase.indexing" } as const;
   const line = failed ? t("memory.setupFailed") : busy ? t(phases[phase]) : status?.state === "loading" ? t("memory.loading") : status?.validation ? t(status.state === "ready" ? "memory.validated" : "memory.unloaded") : t("memory.notValidated");
   const tone = failed ? COLOR.removed : busy ? COLOR.accent : status?.state === "ready" && status.validation ? COLOR.added : COLOR.dim;
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     if (key.ctrl || key.meta) return;
     if (busy && key.name === "c") { key.preventDefault(); onCancel(); }
     else if (!busy && key.name === "r") { key.preventDefault(); onSetup(); }

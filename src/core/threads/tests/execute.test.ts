@@ -440,6 +440,43 @@ describe("context usage", () => {
     expect(row.summary).toBe("12000 / 200000 tokens in context");
   });
 
+  it("prices non-Claude context-window.updated readings from model prices without writing estimated cost onto StoredTurn.usage (MXN-412)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-context-price-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const modelSelection = { instanceId: "chatgpt/default", model: "gpt-6.2-sol" };
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "ChatGPT priced",
+      modelSelection,
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const reading = { usedTokens: 120_000, maxTokens: 400_000, cachedInputTokens: 100_000, autoCompactThreshold: null, compactsAutomatically: true };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      // gpt-6.2-sol: $2/M input, $0.10/M cacheRead, $10/M output -> 0.5*2 + 1.0*0.1 + 0.1*10 = $2.10
+      awaitTurn: async () => ({
+        status: "completed",
+        text: "done",
+        usage: { input: 500_000, cacheRead: 1_000_000, cacheCreate: 0, output: 100_000, thinking: 0 },
+        error: null,
+      }),
+      streamEvents: Stream.never,
+      contextUsage: async () => reading,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go", modelSelection, config: { providers: {} } });
+
+    const contextRow = (await store.readActivities(thread.id)).findLast((row) => row.kind === "context-window.updated");
+    expect(contextRow?.payload?.["costUsd"]).toBeCloseTo(2.1, 9);
+    // StoredTurn.usage keeps no Moxen-estimated costUsd so future price edits re-price cleanly.
+    const settled = (await store.readTurns(thread.id))[0]!;
+    expect(settled.usage?.costUsd).toBeUndefined();
+  });
+
   it("does not hold the turn hostage to a slow or failing reading", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "moxen-context-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -546,6 +583,100 @@ describe("context usage", () => {
     const checkpoints = await store.readCheckpoints(thread.id);
     expect(checkpoints).toHaveLength(1);
     expect(Date.parse(checkpoints[0]!.createdAt)).toBeLessThan(Date.parse(activities[interrupted]!.createdAt));
+  });
+
+  /** LOCAL-009: interrupted spend must reach the turn ledger, not only the driver outcome. */
+  it("persists the driver's final observed usage when the turn settles interrupted (LOCAL-009)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-interrupted-usage-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Interrupted usage",
+      modelSelection: { instanceId: "antigravity/default", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      // The provider ended the turn interrupted, and its final observed usage
+      // (spend the driver booked) must survive into the stored turn.
+      awaitTurn: async () =>
+        ({ status: "interrupted", text: "", usage: { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 }, error: null }),
+      streamEvents: Stream.never,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    expect((await store.readTurns(thread.id))[0]?.status).toBe("interrupted");
+    expect((await store.readTurns(thread.id))[0]?.usage?.costUsd).toBeCloseTo(0.42, 9);
+  });
+
+  it("persists the last observed usage when a signal-aborted wait bypasses the normal outcome path (LOCAL-009)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-aborted-usage-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Aborted usage",
+      modelSelection: { instanceId: "antigravity/default", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const observed = { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: (_threadId, _turnId, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new CliError("TURN_ABORTED", "Interrupted before result")), { once: true });
+        }),
+      liveTurnUsage: () => observed,
+      streamEvents: Stream.never,
+    };
+    // Run the turn and stop it while it runs: the store's tracked abort fires
+    // onAbort (capturing the final observed usage before the driver interrupt)
+    // and the aborted wait bypasses the normal outcome path.
+    const running = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    await interruptTurn(store, thread.id, turn.id);
+    await running;
+    expect((await store.readTurns(thread.id))[0]?.status).toBe("interrupted");
+    expect((await store.readTurns(thread.id))[0]?.usage?.costUsd).toBeCloseTo(0.42, 9);
+  });
+
+  /** MXN-374: a server shutdown stops provider runs; the ledger must say why, not only "interrupted". */
+  it("records why a run stopped outside Moxen's interrupt ended the turn", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-shutdown-interrupt-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Shutdown",
+      modelSelection: { instanceId: "claude", model: "m" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    // No interruptTurn: the driver's sessions were stopped (Connection.close on a
+    // server restart), so awaitTurn returns interrupted with the row still running.
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => ({ status: "interrupted", text: "", usage: null, error: null }),
+      streamEvents: Stream.never,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+
+    expect((await store.readTurns(thread.id))[0]).toMatchObject({
+      status: "interrupted",
+      error: "Moxen or the provider stopped this run before it finished.",
+    });
+    expect((await store.readActivities(thread.id)).find((row) => row.kind === "turn.interrupted")?.summary)
+      .toBe("Moxen or the provider stopped this run before it finished.");
   });
 
   /** MXN-290 review: the outcome is written on timeout when the checkpoint hangs, and a late checkpoint breaks nothing. */
@@ -1245,5 +1376,311 @@ describe("driver event pump", () => {
     await run;
     await expect.poll(() => failures.join("\n")).toContain("interruptTurn for thread");
     expect(failures.join("\n")).toContain("session already gone");
+  });
+
+  it("does not misattribute Turn B's tool events to Turn A while Turn A is settling checkpoints", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-turnid-filter-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Turn isolation",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+    let settleHookFired = false;
+    const origAppend = store.appendLedger.bind(store);
+    store.appendLedger = (async (tid, kind, entry) => {
+      if (!settleHookFired && kind === "checkpoints") {
+        settleHookFired = true;
+        // Turn B emits a tool event with its own driver turnId while Turn A is still settling.
+        await Effect.runPromise(
+          Queue.offer(queue, {
+            type: "tool.execute.completed",
+            provider: "antigravity",
+            threadId: thread.id,
+            turnId: "driver-turn-B",
+            tool: "Read",
+            raw: { toolCallId: "tc-turn-b", title: "src/b.ts", status: "completed" },
+          }),
+        );
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      return origAppend(tid, kind, entry);
+    }) as typeof store.appendLedger;
+
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "driver-turn-A" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () => ({ status: "completed", text: "Turn A done.", usage: null, error: null }),
+      streamEvents: Stream.fromQueue(queue),
+    };
+    const { turn: turnA } = await sendTurn(store, thread.id, { prompt: "go" });
+    await executeTurn({
+      store,
+      driver,
+      threadId: thread.id,
+      storeTurnId: turnA.id,
+      prompt: "go",
+      workingDirectory: root,
+    });
+
+    const activity = await store.readActivities(thread.id);
+    const misattributed = activity.filter(
+      (row) => row.turnId === turnA.id && JSON.stringify(row).includes("tc-turn-b"),
+    );
+    expect(misattributed).toEqual([]);
+  });
+
+  it("attaches late background.task and tool completion rows to their originating turn even after a later turn ran", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-bg-origin-turn-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Background origin turn",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+    let turnNum = 0;
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => {
+        turnNum += 1;
+        return Effect.succeed({ threadId: input.threadId, turnId: `driver-turn-${turnNum}` });
+      },
+      interruptTurn: () => Effect.void,
+      awaitTurn: async (_tid, driverTurnId) => {
+        if (driverTurnId === "driver-turn-1") {
+          await Effect.runPromise(
+            Queue.offer(queue, {
+              type: "background.task",
+              provider: "antigravity",
+              threadId: thread.id,
+              turnId: "driver-turn-1",
+              taskId: "bg-from-t1",
+              status: "started",
+              description: "long build",
+              taskType: "local_bash",
+              toolUseId: "bg-from-t1",
+              summary: null,
+            }),
+          );
+        }
+        return { status: "completed", text: `Done ${driverTurnId}`, usage: null, error: null };
+      },
+      streamEvents: Stream.fromQueue(queue),
+    };
+    watchDriverSession(store, driver, thread.id, root);
+
+    const { turn: turn1 } = await sendTurn(store, thread.id, { prompt: "start bg" });
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn1.id, prompt: "start bg", workingDirectory: root });
+
+    const { turn: turn2 } = await sendTurn(store, thread.id, { prompt: "unrelated turn 2" });
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn2.id, prompt: "unrelated turn 2", workingDirectory: root });
+
+    // Background task from Turn 1 completes after Turn 2 settled.
+    await Effect.runPromise(
+      Queue.offer(queue, {
+        type: "tool.execute.completed",
+        provider: "antigravity",
+        threadId: thread.id,
+        turnId: "driver-turn-1",
+        tool: "Bash",
+        raw: { toolCallId: "bg-from-t1", title: "long build", status: "completed", output: "ok" },
+      }),
+    );
+    await Effect.runPromise(
+      Queue.offer(queue, {
+        type: "background.task",
+        provider: "antigravity",
+        threadId: thread.id,
+        turnId: "driver-turn-1",
+        taskId: "bg-from-t1",
+        status: "completed",
+        description: "long build",
+        taskType: "local_bash",
+        toolUseId: "bg-from-t1",
+        summary: null,
+      }),
+    );
+
+    await expect
+      .poll(async () => {
+        const rows = await store.readActivities(thread.id);
+        return rows.some((row) => row.kind === "background.completed");
+      })
+      .toBe(true);
+
+    const rows = await store.readActivities(thread.id);
+    const bgDone = rows.find((row) => row.kind === "background.completed");
+    const toolDone = rows.find((row) => row.kind === "tool-call.completed" && row.payload?.["toolCallId"] === "bg-from-t1");
+    expect(bgDone?.turnId).toBe(turn1.id);
+    expect(toolDone?.turnId).toBe(turn1.id);
+  });
+
+  it("records usage.limit, fails the turn, and invokes onUsageLimit when Antigravity emits a quota warning (MXN-454)", async () => {
+    const { AcpDriver } = await import("../../providers/acp/driver.js");
+    const { FakeAcpTransport } = await import("../../providers/acp/tests/fakes.js");
+    const { resetUsageLimitsForTests, usageLimitsSnapshot } = await import("../../usage/limits.js");
+    resetUsageLimitsForTests();
+    cleanup.push(async () => {
+      resetUsageLimitsForTests();
+    });
+
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-agy-quota-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "p",
+      title: "Antigravity quota",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport, backgroundTurnIdleMs: 30 });
+    cleanup.push(() => Effect.runPromise(driver.stopAll()).catch(() => undefined));
+
+    const limitHits: Array<{ turnId: string; resetsAt: string | null }> = [];
+    const onUsageLimit = (turnId: string, resetsAt: string | null) => {
+      limitHits.push({ turnId, resetsAt });
+    };
+    await ensureDriverSession(driver, thread, { store, onUsageLimit });
+    const server = transport.sessions[0]!.server;
+
+    // 1. User turn hitting Antigravity quota exhaustion.
+    const { turn } = await sendTurn(store, thread.id, { prompt: "do work" });
+    const run = executeTurn({
+      store,
+      driver,
+      threadId: thread.id,
+      storeTurnId: turn.id,
+      prompt: "do work",
+      modelSelection: thread.modelSelection,
+      workingDirectory: root,
+      onUsageLimit,
+    });
+    await expect.poll(() => server.requestsTo("session/prompt").length).toBe(1);
+    server.notifyUpdate("acp-sess-1", {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: "\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 17m8s.\n",
+      },
+    });
+    server.finishPrompt("end_turn");
+    await run;
+
+    const storedTurn = (await store.readTurns(thread.id)).find((t) => t.id === turn.id);
+    expect(storedTurn?.status).toBe("failed");
+    expect(storedTurn?.error).toContain("Individual quota reached");
+    const activities = await store.readActivities(thread.id);
+    const limitRow = activities.find((a) => a.kind === "usage.limit" && a.turnId === turn.id);
+    expect(limitRow?.payload).toMatchObject({
+      provider: "antigravity",
+      rateLimitType: "gemini-5h",
+      label: "Session – Gemini",
+    });
+    expect(typeof limitRow?.payload?.["resetsAt"]).toBe("string");
+    expect(limitHits).toHaveLength(1);
+    expect(limitHits[0]?.turnId).toBe(turn.id);
+    expect(usageLimitsSnapshot()["antigravity"]?.windows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "gemini-5h", usedPercent: 100 })]),
+    );
+    // Retracted warning chunk must not be saved as a separate assistant reply.
+    const assistantMessages = (await store.readMessages(thread.id)).filter((m) => m.role === "assistant" && m.turnId === turn.id);
+    expect(assistantMessages).toEqual([]);
+
+    // 2. Background wakeup turn hitting quota also invokes onUsageLimit via watchDriverSession.
+    server.notifyUpdate("acp-sess-1", {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: "\n⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 10m.\n",
+      },
+    });
+    await expect.poll(() => limitHits.length, { timeout: 5_000 }).toBe(2);
+    await flushTurnRunners();
+    const bgTurn = (await store.readTurns(thread.id)).find((t) => t.id === limitHits[1]!.turnId);
+    expect(bgTurn?.status).toBe("failed");
+  });
+
+  it("keeps interrupted-usage persistence inside the locked interruption transaction so an admitted turn never disappears (LOCAL-009)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-interrupted-lock-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Interrupted lock",
+      modelSelection: { instanceId: "antigravity/default", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    // A turns rewrite that runs outside the thread lock rewrites the whole
+    // ledger from a snapshot: any turn admitted between its read and its
+    // rewrite is erased. Count every such rewrite on the store.
+    const locks = (store as unknown as { locks: Map<string, Promise<void>> }).locks;
+    const originalRewrite = store.rewriteLedger.bind(store);
+    let unlockedTurnsRewrites = 0;
+    store.rewriteLedger = async (threadId, name, rows) => {
+      if (name === "turns" && !locks.has(threadId)) unlockedTurnsRewrites += 1;
+      return await originalRewrite(threadId, name, rows);
+    };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: async () =>
+        ({ status: "interrupted", text: "", usage: { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 }, error: null }),
+      streamEvents: Stream.never,
+    };
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    store.rewriteLedger = originalRewrite;
+    expect(unlockedTurnsRewrites).toBe(0);
+    const stored = (await store.readTurns(thread.id)).find((t) => t.id === turn.id);
+    expect(stored?.status).toBe("interrupted");
+    expect(stored?.usage?.costUsd).toBeCloseTo(0.42, 9);
+  });
+
+  it("retrieves aborted-turn usage by its driver turn id, never the session's open turn (LOCAL-009)", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-aborted-turn-id-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Aborted turn id",
+      modelSelection: { instanceId: "antigravity/default", model: "gemini-4-neon" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
+    const usageThis = { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 };
+    const usageOther = { input: 900, cacheRead: 0, cacheCreate: 0, output: 90, thinking: 0, costUsd: 0.99 };
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "d-1" }),
+      interruptTurn: () => Effect.void,
+      awaitTurn: (_threadId, _turnId, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new CliError("TURN_ABORTED", "Interrupted before result")), { once: true });
+        }),
+      // Only a lookup by THIS run's driver turn id may return the turn's own
+      // usage; a thread-scoped sample would hand back another turn's.
+      liveTurnUsage: (_threadId, driverTurnId) => (driverTurnId === "d-1" ? usageThis : usageOther),
+      streamEvents: Stream.never,
+    };
+    const running = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    await interruptTurn(store, thread.id, turn.id);
+    await running;
+    const stored = (await store.readTurns(thread.id)).find((t) => t.id === turn.id);
+    expect(stored?.status).toBe("interrupted");
+    expect(stored?.usage?.costUsd).toBeCloseTo(0.42, 9);
   });
 });

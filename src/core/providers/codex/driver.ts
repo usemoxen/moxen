@@ -93,6 +93,10 @@ import {
 
 export interface CodexDriverOptions {
   readonly settings?: Partial<CodexSettings> & CodexProviderConfig;
+  /** Account-addressed instance id (e.g. `codex/<id>` or paired `chatgpt/<id>`). */
+  readonly instanceId?: string;
+  /** Explicit usage bucket key (defaults to `instanceId` or `"codex"`). */
+  readonly usageKey?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly transport?: CodexTransport;
   readonly rateLimitsTimeoutMs?: number;
@@ -302,6 +306,8 @@ export class CodexDriver implements ProviderAdapter<CliError> {
    * Kept small so shutdown stays prompt.
    */
   private readonly stopTimeoutMs: number;
+  private readonly usageKey: string;
+  private readonly rateLimitInstanceId: string | undefined;
   private secretEnv: readonly string[] = [];
   private readonly sessions = new Map<ThreadId, CodexSession>();
   /** Codex thread id per thread, kept past session teardown (see `resumeCursor`). */
@@ -318,6 +324,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SpawnCodexTransport();
     this.rateLimitsTimeoutMs = options.rateLimitsTimeoutMs ?? 3000;
     this.stopTimeoutMs = options.stopTimeoutMs ?? 2_000;
+    const explicitKey = options.usageKey?.trim().toLowerCase() || options.instanceId?.trim().toLowerCase();
+    this.rateLimitInstanceId = explicitKey && explicitKey !== "codex" ? explicitKey : undefined;
+    this.usageKey = this.rateLimitInstanceId ?? "codex";
   }
 
   /** Custom Harness profile keys must not reach application-owned shell commands. */
@@ -495,18 +504,66 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly contextUsage = async (threadId: ThreadId): Promise<ContextWindowUsage | null> =>
     this.sessions.get(threadId)?.context ?? null;
 
-  /**
-   * Explicit freshness ask: re-read the limits on an already-open session,
-   * never start one. The read publishes through the normal event path too;
-   * the returned windows let the caller record them without waiting for
-   * the pump.
-   */
-  readonly refreshUsage = async (): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
-    const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
-    if (!session) return null;
-    const windows = await this.probeRateLimits(session);
-    return windows.length > 0 ? { key: "codex", windows } : null;
+  readonly liveTurnUsage = (threadId: ThreadId): TokenUsageDelta | null => {
+    const session = this.sessions.get(threadId);
+    const open = session?.transcript.find((turn) => turn.status === "running");
+    if (!session || !open) return null;
+    const usage = this.usageOf(session, open.id);
+    return usage.input + usage.cacheRead + usage.cacheCreate + usage.output + usage.thinking > 0 ? usage : null;
   };
+
+  private standaloneUsageCache: { readonly fetchedAt: number; readonly windows: readonly RateLimitWindow[] } | null = null;
+  private standaloneUsageInFlight: Promise<readonly RateLimitWindow[]> | null = null;
+
+  /**
+   * Explicit freshness ask: re-read the limits on an already-open session when
+   * one exists; otherwise run a lightweight session-less `account/rateLimits/read`
+   * probe on a short-lived peer (cached 30s, single-flight, no thread created)
+   * so Sign in with ChatGPT accounts with a paired Codex companion stay live.
+   */
+  readonly refreshUsage = async (
+    options?: { readonly force?: boolean },
+  ): Promise<{ key: string; windows: readonly RateLimitWindow[] } | null> => {
+    const session = [...this.sessions.values()].find((candidate) => !candidate.closed);
+    if (session) {
+      const windows = await this.probeRateLimits(session);
+      return windows.length > 0 ? { key: this.usageKey, windows } : null;
+    }
+    const windows = await this.probeStandaloneRateLimits(options?.force === true);
+    return windows.length > 0 ? { key: this.usageKey, windows } : null;
+  };
+
+  private async probeStandaloneRateLimits(force: boolean): Promise<readonly RateLimitWindow[]> {
+    const now = Date.now();
+    if (!force && this.standaloneUsageCache && now - this.standaloneUsageCache.fetchedAt < 30_000) {
+      return this.standaloneUsageCache.windows;
+    }
+    if (this.standaloneUsageInFlight) return await this.standaloneUsageInFlight;
+    const work = (async (): Promise<readonly RateLimitWindow[]> => {
+      try {
+        const windows = await this.withPeer(process.cwd(), async (peer) => {
+          const snapshot = await peer.request(
+            CODEX_METHODS.rateLimitsRead,
+            {},
+            this.rateLimitsTimeoutMs,
+          );
+          return this.windowsFromRateSnapshot(snapshot);
+        });
+        if (windows.length > 0) {
+          this.standaloneUsageCache = { fetchedAt: Date.now(), windows };
+        }
+        return windows;
+      } catch {
+        return [];
+      }
+    })();
+    this.standaloneUsageInFlight = work;
+    try {
+      return await work;
+    } finally {
+      if (this.standaloneUsageInFlight === work) this.standaloneUsageInFlight = null;
+    }
+  }
 
   readonly contextBreakdown = async (threadId: string): Promise<ContextBreakdown | null> => {
     const session = this.sessions.get(threadId);
@@ -588,21 +645,30 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     }
   }
 
-  private applyRateSnapshot(session: CodexSession, snapshot: unknown): RateLimitWindow[] {
+  private windowsFromRateSnapshot(snapshot: unknown): RateLimitWindow[] {
     const record = asRecord(snapshot) ?? {};
-    const inner = asRecord(record["rateLimits"]) ?? record;
-    const windows = codexWindowsOf({
+    const buckets = asRecord(record["rateLimitsByLimitId"]);
+    const inner = asRecord(buckets?.["codex"]) ?? asRecord(record["rateLimits"]) ?? record;
+    return codexWindowsOf({
       limitId: asString(inner["limitId"]) ?? undefined,
-      planType: asString(inner["planType"]) ?? undefined,
+      planType: asString(inner["planType"]) ?? asString(record["planType"]) ?? undefined,
       primary: inner["primary"],
       secondary: inner["secondary"],
     });
+  }
+
+  private applyRateSnapshot(session: CodexSession, snapshot: unknown): RateLimitWindow[] {
+    const record = asRecord(snapshot) ?? {};
+    const buckets = asRecord(record["rateLimitsByLimitId"]);
+    const inner = asRecord(buckets?.["codex"]) ?? asRecord(record["rateLimits"]) ?? record;
+    const windows = this.windowsFromRateSnapshot(snapshot);
     session.lastWindows = windows;
     const resets = windows.map((window) => window.resetsAt).filter((value): value is string => value !== null);
     session.lastResetsAt = resets.length > 0 ? resets.sort()[0]! : session.lastResetsAt;
     this.publish({
       type: "rate-limits.updated",
       provider: "codex",
+      ...(this.rateLimitInstanceId ? { instanceId: this.rateLimitInstanceId } : {}),
       threadId: session.threadId,
       windows,
       raw: { planType: inner["planType"] ?? null },

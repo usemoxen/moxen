@@ -1,22 +1,59 @@
+mod ask;
 mod assets;
+mod attachments;
+#[cfg(feature = "render-harness")]
+mod automation;
+mod catalog;
+mod client;
 mod composer;
+mod composer_menu;
+mod connection;
 mod diff;
+mod experience;
+mod experience_view;
+mod git;
+mod git_view;
+mod image_view;
 mod inspector;
+mod language;
+mod live;
 mod mock;
+mod mock_git;
+mod mock_settings;
 mod model;
 mod model_picker;
 mod palette;
+mod pending;
+mod research;
+mod research_view;
+mod search;
+mod settings;
+mod settings_view;
 mod sidebar;
+mod stats;
 mod steps;
 mod theme;
+mod thread_actions;
 mod thread_view;
 mod title_bar;
+mod transcript;
 mod ui;
 mod usage;
+mod wire;
+mod work;
+mod work_view;
 mod workspace;
 
 use gpui::*;
 actions!(app, [Quit]);
+
+fn primary_key(mac: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") {
+        mac
+    } else {
+        other
+    }
+}
 
 fn main() {
     let demo = std::env::args().any(|a| a == "--demo");
@@ -55,11 +92,32 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("up", sidebar::PreviousThread, Some("Sidebar")),
                 KeyBinding::new("down", sidebar::NextThread, Some("Sidebar")),
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-i", title_bar::ToggleInspector, None),
+                KeyBinding::new(primary_key("cmd-q", "ctrl-q"), Quit, None),
+                KeyBinding::new(
+                    primary_key("cmd-i", "ctrl-i"),
+                    title_bar::ToggleInspector,
+                    None,
+                ),
                 KeyBinding::new("ctrl-t", title_bar::ToggleTasks, None),
-                KeyBinding::new("cmd-k", palette::OpenPalette, None),
-                KeyBinding::new("cmd-m", model_picker::TogglePicker, None),
+                KeyBinding::new(primary_key("cmd-k", "ctrl-k"), palette::OpenPalette, None),
+                KeyBinding::new("ctrl-p", palette::OpenPalette, None),
+                KeyBinding::new("shift-f10", thread_actions::OpenMenu, None),
+                KeyBinding::new("f2", thread_actions::RenameThread, None),
+                KeyBinding::new(
+                    "enter",
+                    thread_actions::ConfirmAction,
+                    Some("ThreadActionConfirm"),
+                ),
+                KeyBinding::new(
+                    primary_key("cmd-m", "ctrl-m"),
+                    model_picker::TogglePicker,
+                    None,
+                ),
+                KeyBinding::new(
+                    primary_key("cmd-,", "ctrl-,"),
+                    settings_view::OpenSettings,
+                    None,
+                ),
                 KeyBinding::new("escape", palette::Dismiss, None),
                 KeyBinding::new("tab", palette::NextFocus, None),
                 KeyBinding::new("shift-tab", palette::PreviousFocus, None),
@@ -74,24 +132,37 @@ fn main() {
                 (theme::WIDTH, theme::HEIGHT)
             };
             let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
-            cx.open_window(
-                WindowOptions {
-                    focus: true,
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        appears_transparent: true,
-                        title: Some("Moxen Agent".into()),
+            // Automation never shows, focuses or activates the window.
+            #[cfg(feature = "render-harness")]
+            let automation = automation::requested();
+            #[cfg(not(feature = "render-harness"))]
+            let automation: Option<std::path::PathBuf> = None;
+            let visible = automation.is_none();
+            let _window = cx
+                .open_window(
+                    WindowOptions {
+                        focus: visible,
+                        show: visible,
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        titlebar: Some(TitlebarOptions {
+                            appears_transparent: true,
+                            title: Some("Moxen Agent".into()),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let workspace = cx.new(|cx| workspace::Workspace::new(demo, window, cx));
-                    window.focus(&workspace.read(cx).sidebar_focus.clone(), cx);
-                    workspace
-                },
-            )
-            .expect("open Moxen Agent window");
-            cx.activate(true);
+                    },
+                    |window, cx| {
+                        let workspace = cx.new(|cx| workspace::Workspace::new(demo, window, cx));
+                        window.focus(&workspace.read(cx).sidebar_focus.clone(), cx);
+                        workspace
+                    },
+                )
+                .expect("open Moxen Agent window");
+            if let Some(_script) = automation {
+                #[cfg(feature = "render-harness")]
+                automation::start(cx, _window.into(), _script);
+            } else {
+                cx.activate(true);
+            }
         });
 }

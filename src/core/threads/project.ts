@@ -35,11 +35,36 @@ import type {
   StoredTurn,
 } from "./types.js";
 
+/**
+ * Whether this turn is one of the thread's turns as a reader sees them: it
+ * left the queue and ran. A queued message that never started — still
+ * waiting, or interrupted before it ran — is not a turn, and counting it
+ * would insert it among turns a reader already has (and renumber them).
+ * `startedAt` is set whenever a queued turn is promoted; a turn that ran at
+ * once started at its `createdAt`, and a queued turn that reached a terminal
+ * status (completed or failed) ran even if an old row did not record when.
+ */
+function turnRan(turn: StoredTurn): boolean {
+  if (turn.status === "queued") return false;
+  return !(turn.status === "interrupted" && turn.startedAt === undefined && turn.delivery === "queued");
+}
+
+function runAt(turn: StoredTurn): number {
+  return Date.parse(turn.startedAt ?? turn.createdAt);
+}
+
+/**
+ * The thread's turns in the order they ran: the numbering every reader shows.
+ * Ledger row order is not that order — a message queued before a later turn
+ * starts after it — so numbering by row would move turns a client has
+ * already seen. Ties keep ledger order.
+ */
+export function ranTurns(turns: readonly StoredTurn[]): StoredTurn[] {
+  return turns.filter(turnRan).sort((left, right) => runAt(left) - runAt(right));
+}
+
 function latestMeaningfulTurn(turns: StoredTurn[]): StoredTurn | null {
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
-    if (turns[index]!.status !== "queued") return turns[index]!;
-  }
-  return null;
+  return ranTurns(turns).at(-1) ?? null;
 }
 
 function latestTurnOf(turns: StoredTurn[]): LatestTurnEnvelope | null {
@@ -60,7 +85,7 @@ function latestTurnOf(turns: StoredTurn[]): LatestTurnEnvelope | null {
     requestedAt: latest.createdAt,
     // A turn that waited in the queue started when it was promoted, not
     // when it was asked for — its live clock must not count the wait.
-    startedAt: latest.status === "queued" ? null : (latest.startedAt ?? latest.createdAt),
+    startedAt: latest.startedAt ?? latest.createdAt,
     completedAt: latest.completedAt,
     assistantMessageId: null,
   };
@@ -133,10 +158,13 @@ export interface ProjectThreadInput {
 export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], input: ProjectThreadInput = {}): ThreadEnvelope {
   const running = turns.find((turn) => turn.status === "running") ?? null;
   const latestUser = [...(input.messages ?? [])].reverse().find((message) => message.role === "user") ?? null;
+  const ran = ranTurns(turns);
   // `checkpointTurnCount` is how many turns the thread had once this one
   // finished — 1-based, as every consumer reads it (the TUI's revert target
-  // is `count - 1`; `turnDiff(threadId, count)` reads `turns[count - 1]`).
-  const turnCount = new Map(turns.map((turn, index) => [turn.id, index + 1] as const));
+  // is `count - 1`; `turnDiff(threadId, count)` reads `ranTurns()[count - 1]`).
+  // Only turns that ran count: a queued or never-started message is not one of
+  // them, so adding one cannot renumber checkpoints of turns already seen.
+  const turnCount = new Map(ran.map((turn, index) => [turn.id, index + 1] as const));
   const queued = turns
     .filter((turn) => turn.status === "queued")
     .map((turn) => ({

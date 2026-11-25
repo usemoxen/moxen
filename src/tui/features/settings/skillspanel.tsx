@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useKeyboard } from "@opentui/react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { ClientApi, QueryResult } from "../../../server/api.js";
+import { useKeyLayer } from "../../hooks/useKeyLayer.js";
 import { t } from "../../i18n/index.js";
 import { useToasts } from "../../hooks/useToasts.js";
 import { Chip } from "../../ui/chip.js";
@@ -103,7 +103,7 @@ export function SkillsPanel({ client, width, onClose, showHint = true }: { clien
       push("skills-recovery", "info", t("skills.removedTo", { path: result.movedTo }));
     }, t("skills.removed"));
   };
-  useKeyboard((key) => {
+  useKeyLayer((key) => {
     // The provider choice reads its own keys, esc included.
     if (choosingProviders) return;
     if (key.name === "escape" || key.name === "esc") {
@@ -134,6 +134,9 @@ export function SkillsPanel({ client, width, onClose, showHint = true }: { clien
     else if (key.name === "s") { key.preventDefault(); setScopeAt(Math.max(0, projects.findIndex((project) => project.id === projectId) + 1)); setChooseScope(true); }
     else if (key.name === "r") { key.preventDefault(); void refresh(); }
     else if (key.name === "d" && skill?.editable) { key.preventDefault(); setConfirm(true); }
+  }, {
+    capture: (key) => key.name !== "tab",
+    allowDuringTextInput: (key) => editing === "import" && key.ctrl === true && key.name === "o",
   });
   /** A plain action, as on the other Settings pages: a label and its key. */
   const action = (label: string, keyHint: string, run: () => void, extra: { danger?: boolean } = {}) => <Chip label={label} keyHint={keyHint} onPress={() => { if (!busy) run(); }} disabled={busy} {...extra} />;
@@ -162,8 +165,8 @@ export function SkillsPanel({ client, width, onClose, showHint = true }: { clien
       <box style={{ flexDirection: "row", flexShrink: 0 }}>{action(t("skills.destination", { source }), "ctrl+o", () => setSource(SOURCES[(SOURCES.indexOf(source) + 1) % SOURCES.length]!))}</box>
       {inventory ? <text style={{ flexShrink: 0 }} fg={COLOR.dim} bg={SURFACE.raised} selectable={false}>{truncate(inventory.roots[source], width)}</text> : null}
       <text style={{ flexShrink: 0 }} fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>{t("skills.importHelp")}</text>
-      <TextField initial="" width={width} placeholder={t("skills.folderPath")} onSubmit={(from) => { if (client) void mutate(() => client.dispatch({ type: "skills.import", source, from, ...(projectId ? { projectId } : {}) }), t("skills.imported")); }} />
-    </box> : editing === "text" && text !== null ? <TextField key={skill?.path} initial={text} multiline width={width} onSubmit={(next) => { if (client && address) void mutate(() => client.dispatch({ type: "skills.save", ...address, text: next, previous: text }), t("skills.changed")); }} /> : <>
+      <TextField initial="" width={width} placeholder={t("skills.folderPath")} onCancel={() => setEditing(null)} onSubmit={(from) => { if (client) void mutate(() => client.dispatch({ type: "skills.import", source, from, ...(projectId ? { projectId } : {}) }), t("skills.imported")); }} />
+    </box> : editing === "text" && text !== null ? <TextField key={skill?.path} initial={text} multiline width={width} onCancel={() => setEditing(null)} onSubmit={(next) => { if (client && address) void mutate(() => client.dispatch({ type: "skills.save", ...address, text: next, previous: text }), t("skills.changed")); }} /> : <>
       <scrollbox ref={listRef} style={{ height: Math.max(3, Math.min(9, skills.length + 1)), flexShrink: 0, marginTop: 1 }} backgroundColor={SURFACE.raised}>
         {loading ? <text fg={COLOR.dim} bg={SURFACE.raised}>{t("skills.loading")}</text> : skills.length === 0 ? <text fg={COLOR.dim} bg={SURFACE.raised}>{t("skills.empty")}</text> : skills.map((entry, at) => (
           <Line key={`${entry.source}/${entry.folder}`} id={`managed-skill-${at}`} left={`${at === selected ? "▌ " : "  "}${entry.name}`} right={[entry.source, t(entry.enabled ? "skills.enabled" : "skills.disabled"), ...(entry.providers !== undefined && entry.providers.length > 0 ? [providerNames(entry.providers)] : [])].join(" · ")} active={at === selected} width={width} onPress={() => { if (!busy) setSelected(at); }} />

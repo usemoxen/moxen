@@ -69,27 +69,41 @@ describe("opencode config", () => {
     expect(JSON.parse(buildServerConfigContent(undefined, { auto: null, buffer: null }))).not.toHaveProperty("compaction");
   });
 
-  it("pins share and update off in the injected config without clobbering the user's other keys", () => {
-    expect(JSON.parse(buildServerConfigContent(undefined))).toEqual({ share: "disabled", update: "disable" });
+  it("pins share and update off and denies native subagents in the injected config without clobbering the user's other keys", () => {
+    const denySubagent = [{ action: "subagent", resource: "*", effect: "deny" }];
+    expect(JSON.parse(buildServerConfigContent(undefined))).toEqual({ permissions: denySubagent, share: "disabled", update: "disable" });
     const merged = JSON.parse(
       buildServerConfigContent(JSON.stringify({ theme: "dark", mcp: { servers: { x: {} } }, share: "auto" })),
     );
-    expect(merged).toEqual({ theme: "dark", mcp: { servers: { x: {} } }, share: "disabled", update: "disable" });
-    // No plugins and no permissions are injected.
+    expect(merged).toEqual({ theme: "dark", mcp: { servers: { x: {} } }, permissions: denySubagent, share: "disabled", update: "disable" });
+    // No plugins are injected.
     expect(merged).not.toHaveProperty("plugin");
     expect(merged).not.toHaveProperty("plugins");
-    expect(merged).not.toHaveProperty("permissions");
-    expect(JSON.parse(buildServerConfigContent("corrupt{"))).toEqual({ share: "disabled", update: "disable" });
-    expect(JSON.parse(buildServerConfigContent("[1]"))).toEqual({ share: "disabled", update: "disable" });
+    expect(JSON.parse(buildServerConfigContent("corrupt{"))).toEqual({ permissions: denySubagent, share: "disabled", update: "disable" });
+    expect(JSON.parse(buildServerConfigContent("[1]"))).toEqual({ permissions: denySubagent, share: "disabled", update: "disable" });
   });
 
-  it("switches OpenCode's own tools off: websearch is removed, every other one is denied after the user's own rules", () => {
+  it("switches OpenCode's own tools off: websearch is removed, every other one and subagent are denied after the user's own rules", () => {
     const own = { action: "shell", resource: "git *", effect: "allow" };
     const content = JSON.parse(buildServerConfigContent(JSON.stringify({ permissions: [own] }), {}, "WebSearch, webfetch,Shell"));
     expect(content.websearch).toBe(false);
-    expect(content.permissions).toEqual([own, { action: "webfetch", resource: "*", effect: "deny" }, { action: "shell", resource: "*", effect: "deny" }]);
-    expect(JSON.parse(buildServerConfigContent(undefined, {}, "websearch"))).not.toHaveProperty("permissions");
-    expect(JSON.parse(buildServerConfigContent(undefined, {}, ""))).toEqual({ share: "disabled", update: "disable" });
+    expect(content.permissions).toEqual([
+      own,
+      { action: "webfetch", resource: "*", effect: "deny" },
+      { action: "shell", resource: "*", effect: "deny" },
+      { action: "subagent", resource: "*", effect: "deny" },
+    ]);
+    expect(JSON.parse(buildServerConfigContent(undefined, {}, "websearch"))).toEqual({
+      websearch: false,
+      permissions: [{ action: "subagent", resource: "*", effect: "deny" }],
+      share: "disabled",
+      update: "disable",
+    });
+    expect(JSON.parse(buildServerConfigContent(undefined, {}, ""))).toEqual({
+      permissions: [{ action: "subagent", resource: "*", effect: "deny" }],
+      share: "disabled",
+      update: "disable",
+    });
   });
 
   it("puts Moxen's prompt in as the system of build, keeping one the user wrote and the user's other agents", () => {
