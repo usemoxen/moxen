@@ -49,7 +49,7 @@ async function world() {
   const make = (instanceId: string, model = "test-model", title = `Work on ${instanceId}`) =>
     createThread(w.store, { projectId: "p", title, env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId, model } });
   const allow = (on: boolean) => {
-    w.config.providers = { ...w.config.providers, antigravity: { ...w.config.providers?.antigravity, allowDelegation: on } };
+    w.config.providers = { ...w.config.providers, antigravity: { ...w.config.providers?.antigravity, allowUnsupportedUse: on } };
   };
   return { ...w, ctx, make, allow };
 }
@@ -72,7 +72,7 @@ describe("Antigravity delegation refused while off", () => {
     const parent = await w.make("codex");
     const before = await w.store.listThreadIds();
     await expect(delegate(w.ctx, { parentThreadId: parent.id, task: "Build it", title: "build", provider: "antigravity", model: "gemini-4-neon", isolation: "worktree" }))
-      .rejects.toMatchObject({ code: "ANTIGRAVITY_DELEGATION_OFF", message: expect.stringContaining("providers.antigravity.allowDelegation") });
+      .rejects.toMatchObject({ code: "ANTIGRAVITY_DELEGATION_OFF", message: expect.stringContaining("providers.antigravity.allowUnsupportedUse") });
     expect(await w.store.listThreadIds()).toEqual(before);
     expect(await w.store.readDelegations()).toEqual([]);
     // A dry run is refused too: it must not plan a delegation that cannot start.
@@ -185,7 +185,7 @@ describe("Antigravity automatic prompts held while off", () => {
     const thread = await w.make("antigravity", "gemini-4-neon");
     const queued = await queueAgentMessage(w.ctx, thread.id, { message: "Check the logs" });
     expect(queued.status).toBe("queued");
-    expect(queued.waitingFor.join(" ")).toContain("providers.antigravity.allowDelegation");
+    expect(queued.waitingFor.join(" ")).toContain("providers.antigravity.allowUnsupportedUse");
 
     // The admission pass does not start it on its own.
     await runWorkQueue(w.ctx);

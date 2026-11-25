@@ -11,7 +11,7 @@ import path from "node:path";
 import type { ModelSummary, ProviderSummary } from "../../catalog/summary.js";
 import { CliError } from "../../errors.js";
 import { binaryOnPath } from "../../infra/process.js";
-import { accountInstanceId, type AntigravityAccountConfig, type AntigravityProviderConfig } from "../../types.js";
+import { accountInstanceId, antigravityAccountBlockedReason, type AntigravityAccountConfig, type AntigravityProviderConfig } from "../../types.js";
 import { AcpDriver } from "../acp/driver.js";
 import type { AcpTransport } from "../acp/transport.js";
 import { ANTIGRAVITY_DEFAULT_MODEL_SLUG, antigravityAccountEnv, antigravityLaunchSpec } from "./config.js";
@@ -173,20 +173,29 @@ export async function antigravityProvider(
     : undefined);
   const installed = transport ? true : isInstalled(spec.command, accountEnv);
   const disabled = account?.enabled === false;
+  const blockedReason = antigravityAccountBlockedReason(config, instanceId);
   const base: ProviderSummary = {
     instanceId,
     driver: "antigravity",
     displayName,
     installed,
     enabled: false,
-    status: !installed ? "not installed" : disabled ? "disabled" : null,
+    status: !installed
+      ? "not installed"
+      : blockedReason !== null
+        ? blockedReason
+        : disabled
+          ? "disabled"
+          : null,
     authStatus: null,
     models: [],
     supportedRuntimeModes: null,
     usageLimits: null,
     skills: [],
   };
-  if (!installed || disabled) return base;
+  // A gated account is disabled with the reason and never launched or
+  // probed: the driver (and so `agy`) is not constructed.
+  if (!installed || blockedReason !== null || disabled) return base;
 
   const now = (options.now ?? Date.now)();
   const useCache = transport === undefined || options.storeRoot !== undefined;

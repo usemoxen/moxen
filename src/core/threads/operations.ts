@@ -64,7 +64,7 @@ import type {
   WorkspaceResolution,
 } from "../types.js";
 import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
-import { antigravityDelegationAllowed, driverKindOfInstance } from "../types.js";
+import { antigravityUnsupportedUseAllowed, driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
@@ -1191,7 +1191,7 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string, o
           id: ctx.store.newId(), threadId, turnId: null,
           kind: "notice",
           summary: "Hand-off held: Antigravity delegation and automatic prompts are off",
-          payload: { notice: "other", held: "antigravity-delegation", detail: "Turn on providers.antigravity.allowDelegation to let Moxen hand off automatically, or continue the thread yourself." },
+          payload: { notice: "other", held: "antigravity-delegation", detail: "Turn on providers.antigravity.allowUnsupportedUse to let Moxen hand off automatically, or continue the thread yourself." },
           createdAt: ctx.store.nowIso(),
         });
         ctx.store.emit(threadId, "activity");
@@ -3139,12 +3139,12 @@ const DELEGATE_DEFAULT_TIMEOUT_MS = 600_000;
 
 /**
  * Whether Moxen must hold automatic prompts on this instance: Antigravity
- * with `providers.antigravity.allowDelegation` off (the default). Google's
+ * with `providers.antigravity.allowUnsupportedUse` off (the default). Google's
  * consumer sign-in covers only prompts the user types themselves, so a
  * delegated task or an automatic turn is refused or held, never started.
  */
 function antigravityAutoPromptsHeld(config: CliConfig, instanceId: string): boolean {
-  return driverKindOfInstance(instanceId) === "antigravity" && !antigravityDelegationAllowed(config);
+  return driverKindOfInstance(instanceId) === "antigravity" && !antigravityUnsupportedUseAllowed(config);
 }
 
 /** Refuse starting delegated work on Antigravity while the setting is off, before anything is created. */
@@ -3152,8 +3152,8 @@ function requireAntigravityDelegation(config: CliConfig, instanceId: string): vo
   if (!antigravityAutoPromptsHeld(config, instanceId)) return;
   throw new CliError(
     "ANTIGRAVITY_DELEGATION_OFF",
-    "Delegation and automatic prompts are off for Antigravity: Google does not support them on consumer plans and may suspend the account. Turn on providers.antigravity.allowDelegation to allow them.",
-    { exitCode: 4, details: { instanceId, setting: "providers.antigravity.allowDelegation" } },
+    "Delegation and automatic prompts are off for Antigravity: Google does not support them on consumer plans and may suspend the account. Turn on providers.antigravity.allowUnsupportedUse to allow them.",
+    { exitCode: 4, details: { instanceId, setting: "providers.antigravity.allowUnsupportedUse" } },
   );
 }
 

@@ -77,7 +77,7 @@ is taken back before it runs instead of firing as a pointless turn; a turn
 that failed or was interrupted does not count as resumed.
 
 Antigravity threads hold automatic prompts the same way while
-`providers.antigravity.allowDelegation` is off (the default): Google's consumer
+`providers.antigravity.allowUnsupportedUse` is off (the default): Google's consumer
 sign-in covers only prompts you type yourself, so a task notice, an
 agent-queued message, a continue after a usage limit or an automatic hand-off
 waits in the work queue or the notice batch rather than starting a turn. The
@@ -86,8 +86,12 @@ setting on. Delegating a new task to Antigravity is refused outright while off
 (`ANTIGRAVITY_DELEGATION_OFF`), before a thread or worktree is created; an
 agent's `task_send`/wake and `thread_continue` onto Antigravity are refused the
 same way. What you type, queue, schedule or click always runs, and a turn the
-provider starts itself is left alone. See [Providers](providers.md) for the
-setting and the account-suspension warning.
+provider starts itself is left alone. While the setting is off Moxen also runs
+at most one Antigravity account, the one that shares the host `agy` login: a
+request that targets an isolated or extra account fails with
+`ANTIGRAVITY_ACCOUNT_OFF`, naming the setting and how to fix it. See
+[Providers](providers.md) for the setting, the account-suspension warning and
+the multiple-account rules.
 
 When a turn settles, its checkpoint and its context-window reading are
 written before its outcome, so anyone who sees the turn complete also sees

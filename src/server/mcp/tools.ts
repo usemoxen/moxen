@@ -18,7 +18,7 @@ import { knowledgeInput, KNOWLEDGE_LIMITS } from "../../core/knowledge/input.js"
 import { untrustedContext } from "../../core/untrusted.js";
 import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
-import { antigravityDelegationAllowed, driverKindOfInstance, type HarnessProviderConfig, type WebConfig } from "../../core/types.js";
+import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type HarnessProviderConfig, type WebConfig } from "../../core/types.js";
 import type { DelegatedTaskStatus } from "../../core/threads/views.js";
 import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
@@ -1580,7 +1580,7 @@ async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
     api.query({ type: "providers.list" }),
     api.query({ type: "config.read" }),
   ]);
-  const antigravityAllowed = antigravityDelegationAllowed(config);
+  const antigravityAllowed = antigravityUnsupportedUseAllowed(config);
   const rows = providers
     .filter((provider) => provider.enabled && provider.installed)
     .filter((provider) => only === undefined || provider.instanceId === only)
@@ -1592,7 +1592,7 @@ async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
       return {
         provider: provider.instanceId,
         name: provider.displayName ?? provider.instanceId,
-        ...(delegationOff ? { note: "Not available for delegation: providers.antigravity.allowDelegation is off. Google does not support delegation or automatic prompts on consumer plans and may suspend the account; delegating here is refused until the user turns the setting on." } : {}),
+        ...(delegationOff ? { note: "Not available for delegation: providers.antigravity.allowUnsupportedUse is off. Google does not support delegation, automatic prompts or multiple accounts on consumer plans and may suspend the account; delegating here is refused until the user turns the setting on." } : {}),
         ...(provider.usageLimits ? { usageLimits: provider.usageLimits } : {}),
         models: visible.slice(0, MAX_MODELS_PER_PROVIDER).map((model) => {
           const efforts = model.efforts.find((descriptor) => descriptor.id === "effort")?.choices.map((choice) => choice.id) ?? [];

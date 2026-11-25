@@ -14,7 +14,7 @@ import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
-import { antigravityDelegationAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
+import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
 import type {
@@ -425,7 +425,7 @@ export async function sendTurn(
     // pass here; usage-control maintenance keeps its own exemption.
     const autoHeld = config !== undefined && origin !== undefined && origin !== "task-notification" && input.usageControl !== true
       && driverKindOfInstance((input.modelSelection ?? thread.modelSelection).instanceId) === "antigravity"
-      && !antigravityDelegationAllowed(config);
+      && !antigravityUnsupportedUseAllowed(config);
     if (usageHeld || autoHeld) delivery = "queue";
 
     let turns = await store.readTurns(threadId);

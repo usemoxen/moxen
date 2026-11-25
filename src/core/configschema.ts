@@ -1639,10 +1639,10 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     fallback: { key: "thinkingEffort" },
   },
   {
-    key: "providers.antigravity.allowDelegation",
-    label: "Allow delegation and automatic prompts",
+    key: "providers.antigravity.allowUnsupportedUse",
+    label: "Allow unsupported Antigravity use",
     description:
-      "Let other threads delegate tasks to Antigravity, and let Moxen start prompts you did not write on its threads: task notices, agent messages, continues after a usage limit, and handing off. Google does not support this on consumer plans and may suspend the Antigravity account.",
+      "Let other threads delegate tasks to Antigravity, let Moxen start prompts you did not write on its threads (task notices, agent messages, continues after a usage limit, handing off), and let Moxen run several Antigravity accounts, each in its own home folder. Google does not support delegation, automatic prompts or multiple accounts on consumer plans and may suspend the Antigravity account.",
     section: "provider:antigravity",
     group: "Defaults",
     kind: { type: "boolean" },

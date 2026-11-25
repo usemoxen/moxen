@@ -55,21 +55,37 @@ negotiates any other protocol version is refused loudly
   configured under `providers.antigravity.binaryPath` and
   `providers.antigravity.launchArgs`), updates itself via
   `moxen update antigravity` (`agy update`), and is probed by `moxen doctor`.
-- **Delegation and automatic prompts (`providers.antigravity.allowDelegation`,
-  off by default)**: Google's consumer sign-in for Antigravity covers only
-  prompts you type yourself in an ACP client — not another agent delegating to
-  `agy`, nor app-driven or unattended prompts. So Moxen refuses to delegate a
-  task to any Antigravity account (`antigravity`, `antigravity/<id>`, legacy
-  `agy`) while this is off, before a thread or worktree is created, and holds
-  automatic prompts on Antigravity threads (task notices, agent-queued
-  messages, continues after a usage limit, automatic hand-offs) in the work
-  queue and notice batch instead of starting them. They are delivered with
-  your next message, or when you turn the setting on. What you type, queue,
-  schedule or click always runs. Turning it on is your choice: Google does not
-  support it on consumer plans and may suspend the Antigravity account, and
-  the TUI, desktop and CLI say so when you enable it. A turn the provider
+- **Unsupported use (`providers.antigravity.allowUnsupportedUse`, off by
+  default)**: Google's consumer sign-in for Antigravity covers one person, one
+  account, and prompts you type yourself in an ACP client — not another agent
+  delegating to `agy`, app-driven or unattended prompts, or several accounts
+  on one machine. While this is off Moxen refuses to delegate a task to any
+  Antigravity account (`antigravity`, `antigravity/<id>`, legacy `agy`) before
+  a thread or worktree is created, holds automatic prompts on Antigravity
+  threads (task notices, agent-queued messages, continues after a usage
+  limit, automatic hand-offs) in the work queue and notice batch instead of
+  starting them, and never signs in an account with its own isolated home
+  folder. They are delivered with your next message, or when you turn the
+  setting on. What you type, queue, schedule or click always runs. Turning it
+  on is your choice: Google does not support delegation, automatic prompts or
+  multiple accounts on consumer plans and may suspend the Antigravity account,
+  and the TUI, desktop and CLI say so when you enable it. A turn the provider
   starts itself (a reactive wake-up inside `agy`) is not a Moxen prompt and is
   left alone.
+- **Multiple accounts** (`antigravity/<id>`): an Antigravity account with a
+  `homePath` runs `agy` with `HOME` and `USERPROFILE` pointed at that folder
+  and a synthetic `SSH_CONNECTION`, so `agy` keeps its login in that folder
+  instead of the OS keychain. While `providers.antigravity.allowUnsupportedUse`
+  is off (the default), Moxen runs at most one Antigravity account: the first
+  configured without a `homePath`, which shares the host `agy` login with its
+  environment untouched. Every account with a `homePath`, and every account
+  beyond that one, is shown as disabled with the reason
+  (`moxen providers accounts list`, the settings pages), is never launched,
+  probed for usage or credits, or routed to, and a request that targets it
+  fails with `ANTIGRAVITY_ACCOUNT_OFF`, naming the setting and how to fix it:
+  remove the account's `homePath`, or turn the setting on. Your config is
+  never deleted or rewritten on this path. Signing in an isolated account is
+  refused the same way while the setting is off.
 - **ACP profiles (`providers.acp.agents`)**: managed like Moxen Harness
   profiles (`providers.harness.profiles`). Add as many ACP agents as you want
   — either picked from the pinned v1 ACP Registry

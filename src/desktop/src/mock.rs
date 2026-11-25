@@ -427,6 +427,7 @@ impl MockSource {
                     codex_binary_path: None,
                     codex_launch_args: None,
                     codex_verified: false,
+                    disabled_reason: None,
                 },
                 crate::settings::ProviderAccountSummary {
                     kind: "chatgpt".into(),
@@ -448,6 +449,7 @@ impl MockSource {
                     codex_binary_path: None,
                     codex_launch_args: None,
                     codex_verified: true,
+                    disabled_reason: None,
                 },
             ],
             experience: json!({"onboardingCompleted":true,"seenReleases":["0.1.2"],"version":"0.1.5","releases":[
@@ -1789,6 +1791,7 @@ impl ThreadSource for MockSource {
                     codex_binary_path: str_opt("codexBinaryPath"),
                     codex_launch_args: str_opt("codexLaunchArgs"),
                     codex_verified: false,
+                    disabled_reason: None,
                 });
         }
         self.settings_notice = Some(SettingsNotice {

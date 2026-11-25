@@ -188,6 +188,14 @@ export interface ProviderAccountSummary {
   readonly codexBinaryPath: string | null;
   readonly codexLaunchArgs: string | null;
   readonly codexVerified: boolean;
+  /**
+   * Why a configured account cannot run regardless of its own `enabled`
+   * flag: an Antigravity account gated by the off-by-default
+   * `providers.antigravity.allowUnsupportedUse` (multiple or isolated
+   * accounts). The user's own toggle stays `enabled`; the reason says how
+   * to fix it. Absent for every other account kind.
+   */
+  readonly disabledReason?: string | null;
 }
 
 /** Multi-account provider kinds addressed as `<kind>/<id>`. */
@@ -306,12 +314,13 @@ export interface CodexProviderConfig extends Omit<OpencodeProviderConfig, "bundl
 export interface AntigravityProviderConfig extends Omit<OpencodeProviderConfig, "bundledSkills" | "moxenPrompt" | "compactBuffer"> {
   launchArgs?: string;
   /**
-   * Whether other threads may delegate to Antigravity and Moxen may start
-   * automatic prompts on its threads. Off by default: Google's consumer
-   * sign-in covers only prompts the user types themselves. One key for
-   * every account (`antigravity`, `antigravity/<id>`, legacy `agy`).
+   * Whether Moxen may do what Google does not support on Antigravity consumer
+   * plans: delegate to it, start automatic prompts on its threads, and run
+   * multiple accounts with isolated home folders. Off by default. One key
+   * for every account (`antigravity`, `antigravity/<id>`, legacy `agy`);
+   * Moxen never turns it on for the user.
    */
-  allowDelegation?: boolean;
+  allowUnsupportedUse?: boolean;
   accounts?: AntigravityAccountConfig[];
 }
 
@@ -928,14 +937,49 @@ export function driverKindOfInstance(instanceId: string): "claude" | "codex" | "
 }
 
 /**
- * Whether Antigravity delegation and automatic prompts are allowed
- * (`providers.antigravity.allowDelegation`, off by default). Google does not
- * support them on consumer plans, so the default makes Moxen refuse them.
- * The one provider-level key governs every Antigravity account; resolve the
- * instance's kind with `driverKindOfInstance` before asking this.
+ * Whether Moxen may do what Google does not support on Antigravity consumer
+ * plans (`providers.antigravity.allowUnsupportedUse`, off by default):
+ * delegation, automatic prompts, and multiple accounts. The default makes
+ * Moxen refuse or disable all three. The one provider-level key governs
+ * every Antigravity account; resolve the instance's kind with
+ * `driverKindOfInstance` before asking this. Moxen never turns it on for
+ * the user.
  */
-export function antigravityDelegationAllowed(config: Pick<CliConfig, "providers">): boolean {
-  return config.providers?.antigravity?.allowDelegation === true;
+export function antigravityUnsupportedUseAllowed(config: Pick<CliConfig, "providers">): boolean {
+  return config.providers?.antigravity?.allowUnsupportedUse === true;
+}
+
+/**
+ * Why the Antigravity account behind `instanceId` cannot run while
+ * `providers.antigravity.allowUnsupportedUse` is off (the default): null
+ * when it may. While off Moxen runs at most one Antigravity account — the
+ * first configured account without a `homePath`, which shares the host
+ * `agy` login with its environment untouched — and never launches, probes
+ * for usage or credits, or routes to any configured account that has an
+ * isolated `homePath` or any configured account beyond that one. The host
+ * instance ids (`antigravity`, legacy `agy`) and an account id with no
+ * configured entry are the host login itself (no folder, no isolation) and
+ * stay allowed. No path on this gate may read or write another account's
+ * folder.
+ */
+export function antigravityAccountBlockedReason(
+  config: Pick<AntigravityProviderConfig, "allowUnsupportedUse" | "accounts"> | undefined,
+  instanceId: string,
+): string | null {
+  if (config?.allowUnsupportedUse === true) return null;
+  const parsed = parseAccountInstanceId(instanceId);
+  if (parsed?.kind !== "antigravity") return null;
+  const accounts = config?.accounts ?? [];
+  const account = accounts.find((entry) => entry.id.trim().toLowerCase() === parsed.accountId);
+  // No configured entry: no account folder and no isolation, so it runs on
+  // the host `agy` login, the one account that stays while off.
+  if (account === undefined) return null;
+  if (account.homePath?.trim()) {
+    return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the one that shares the host agy login with no homePath. Google does not support multiple consumer accounts and may suspend them. Remove account "${parsed.accountId}" homePath so it uses the host agy login, or turn providers.antigravity.allowUnsupportedUse on.`;
+  }
+  const survivor = accounts.find((entry) => !entry.homePath?.trim());
+  if (survivor && survivor.id.trim().toLowerCase() === parsed.accountId) return null;
+  return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the first without a homePath. Google does not support multiple consumer accounts and may suspend them. Keep only that account, or turn providers.antigravity.allowUnsupportedUse on.`;
 }
 
 /** Parse an account-addressed instance id (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`), or null for legacy/non-account ids. */

@@ -1,5 +1,5 @@
 import { CliError } from "../errors.js";
-import { antigravityDelegationAllowed, driverKindOfInstance, type CliConfig } from "../types.js";
+import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig } from "../types.js";
 import { usageKeyForInstance, usageSignal, usageWindowsForModel } from "../usage/limits.js";
 import type { StoredThread, StoredTurn } from "./types.js";
 
@@ -172,13 +172,13 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   const automaticTurn = policy?.automatic === true || policy?.wakeUp === true
     || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold"
     || (turn.origin !== undefined && turn.origin !== "task-notification");
-  if (automaticTurn && driverKindOfInstance(selection.instanceId) === "antigravity" && !antigravityDelegationAllowed(config)) {
+  if (automaticTurn && driverKindOfInstance(selection.instanceId) === "antigravity" && !antigravityUnsupportedUseAllowed(config)) {
     const userResumed = row.turns.some((other) => other.id !== turn.id && other.origin === undefined
       && other.queue?.automatic !== true && other.queue?.wakeUp !== true
       && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"
       && (other.status === "running" || other.status === "completed")
       && Date.parse(other.startedAt ?? other.createdAt) >= Date.parse(turn.createdAt));
-    if (!userResumed) blocked.push("Antigravity delegation is off: turn on providers.antigravity.allowDelegation");
+    if (!userResumed) blocked.push("Antigravity automatic prompts are held: turn on providers.antigravity.allowUnsupportedUse");
   }
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {
     if (condition.type === "at") { if (Date.parse(condition.at) > now) blocked.push(`Waiting until ${condition.at}`); }

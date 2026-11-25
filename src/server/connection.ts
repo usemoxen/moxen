@@ -186,8 +186,8 @@ import type { ContextBreakdown, ContextWindowUsage, ProviderRuntimeEvent } from 
 import { isCompactCommand } from "../core/providers/spi.js";
 import { pruneFinishedWorktrees } from "../core/threads/prune.js";
 import type { CheckpointFileStat, ResearchPlan, ResearchSize, StoredActivity, StoredCheckpoint, StoredThread, StoredTurn, TurnStatus } from "../core/threads/types.js";
-import type { CliConfig, ForgeConfig, ModelSelection, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
-import { driverKindOfInstance, parseAccountInstanceId } from "../core/types.js";
+import type { AntigravityAccountConfig, CliConfig, ForgeConfig, ModelSelection, ProviderAccountSummary, ProvidersConfig, ThreadEnvelope, WebConfig } from "../core/types.js";
+import { antigravityAccountBlockedReason, antigravityUnsupportedUseAllowed, driverKindOfInstance, parseAccountInstanceId } from "../core/types.js";
 import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
@@ -900,9 +900,25 @@ export class DirectConnection implements ClientApi {
       auth.set(`claude/${account.id.trim().toLowerCase()}`, probeClaudeAccountAuth(account));
     }
     for (const account of providers?.antigravity?.accounts ?? []) {
-      auth.set(`antigravity/${account.id.trim().toLowerCase()}`, probeAntigravityAccountAuth(account));
+      // A gated account's folder is never read: while multiple Antigravity
+      // accounts are off (`providers.antigravity.allowUnsupportedUse`), the
+      // only account Moxen may observe is the host-login one.
+      const gated = antigravityAccountBlockedReason(providers?.antigravity, `antigravity/${account.id.trim().toLowerCase()}`) !== null;
+      if (!gated) auth.set(`antigravity/${account.id.trim().toLowerCase()}`, probeAntigravityAccountAuth(account));
     }
     return auth;
+  }
+
+  /**
+   * One configured Antigravity account's public summary: a gated account
+   * (multiple accounts off, the default) is reported disabled with the
+   * reason and without probing its home folder.
+   */
+  private antigravityAccountSummary(account: AntigravityAccountConfig, providers: CliConfig["providers"]): ProviderAccountSummary {
+    const instanceId = `antigravity/${account.id.trim().toLowerCase()}`;
+    const reason = antigravityAccountBlockedReason(providers?.antigravity, instanceId);
+    const auth = reason === null ? probeAntigravityAccountAuth(account) : undefined;
+    return { ...summarizeAccount("antigravity", account, auth), disabledReason: reason };
   }
 
   private async settingsSnapshot(): Promise<SettingsSnapshot> {
@@ -1234,6 +1250,9 @@ export class DirectConnection implements ClientApi {
     }
     for (const account of config.providers?.antigravity?.accounts ?? []) {
       if (account.enabled === false) continue;
+      // A gated account (multiple accounts off, the default) is never
+      // launched or probed: not even its home folder is read.
+      if (antigravityAccountBlockedReason(config.providers?.antigravity, `antigravity/${account.id.trim().toLowerCase()}`) !== null) continue;
       if (!probeAntigravityAccountAuth(account).signedIn) continue;
       try {
         targets.add(this.driverFor(`antigravity/${account.id.trim().toLowerCase()}`));
@@ -2042,7 +2061,7 @@ export class DirectConnection implements ClientApi {
               throw cause;
             }
           }
-          if (command.key === "providers.antigravity.allowDelegation" && next.providers?.antigravity?.allowDelegation === true) {
+          if (command.key === "providers.antigravity.allowUnsupportedUse" && next.providers?.antigravity?.allowUnsupportedUse === true) {
             // Turning it on releases what the off default held: task notices
             // go out now, and an admission pass starts the held wake-ups.
             void this.context().then((ctx) => recoverTaskNotifications(ctx)).catch(() => undefined);
@@ -2147,7 +2166,7 @@ export class DirectConnection implements ClientApi {
             if (stored) account = summarizeAccount("claude", stored, probeClaudeAccountAuth(stored));
           } else if (account.kind === "antigravity") {
             const stored = saved.config.providers?.antigravity?.accounts?.find((entry) => entry.id === account.id);
-            if (stored) account = summarizeAccount("antigravity", stored, probeAntigravityAccountAuth(stored));
+            if (stored) account = this.antigravityAccountSummary(stored, saved.config.providers);
           }
           return { account, created: saved.created, settings: await this.settingsSnapshot(), accepted: true };
         });
@@ -2180,7 +2199,7 @@ export class DirectConnection implements ClientApi {
             if (stored) account = summarizeAccount("claude", stored, probeClaudeAccountAuth(stored));
           } else if (account.kind === "antigravity") {
             const stored = updated.config.providers?.antigravity?.accounts?.find((entry) => entry.id === account.id);
-            if (stored) account = summarizeAccount("antigravity", stored, probeAntigravityAccountAuth(stored));
+            if (stored) account = this.antigravityAccountSummary(stored, updated.config.providers);
           }
           return { account, settings: await this.settingsSnapshot(), accepted: true };
         });
@@ -2221,6 +2240,17 @@ export class DirectConnection implements ClientApi {
           command.homePath?.trim() ||
           savedHome?.trim() ||
           (normalizedId !== "default" ? managedAccountHomeDisplayPath(command.kind, normalizedId) : undefined);
+        // Signing in an isolated Antigravity account is a multiple-account
+        // use: while the setting is off (the default) it would write a
+        // homePath Moxen then refuses to ever run. Nothing is written and
+        // nothing is launched.
+        if (command.kind === "antigravity" && effectiveHome !== undefined && !antigravityUnsupportedUseAllowed(config)) {
+          throw new CliError(
+            "ANTIGRAVITY_ACCOUNT_OFF",
+            `Signing in Antigravity account "${normalizedId}" needs an isolated home folder, and multiple Antigravity accounts are off (providers.antigravity.allowUnsupportedUse, the default): Google does not support multiple consumer accounts and may suspend them. Keep this account on the host agy login (no homePath), or turn providers.antigravity.allowUnsupportedUse on.`,
+            { exitCode: 4, details: { instanceId: `antigravity/${normalizedId}`, setting: "providers.antigravity.allowUnsupportedUse" } },
+          );
+        }
 
         if (effectiveHome && effectiveHome !== savedHome) {
           await this.withConfigWrite(async () => {
@@ -2344,7 +2374,7 @@ export class DirectConnection implements ClientApi {
                 })()
               : (() => {
                   const found = config.providers?.antigravity?.accounts?.find((item) => item.id.trim().toLowerCase() === entry.id);
-                  return found ? summarizeAccount("antigravity", found, probeAntigravityAccountAuth(found)) : null;
+                  return found ? this.antigravityAccountSummary(found, config.providers) : null;
                 })();
           return {
             account,

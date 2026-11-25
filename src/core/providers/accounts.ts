@@ -16,6 +16,7 @@ import { CliError } from "../errors.js";
 import { isSecretRef } from "../secrets.js";
 import {
   accountInstanceId,
+  antigravityAccountBlockedReason,
   managedAccountHomeDisplayPath,
   parseAccountInstanceId,
   type AccountProviderKind,
@@ -401,6 +402,21 @@ export interface ResolvedAntigravityAccount {
 }
 
 /**
+ * Refuse to launch or route to an Antigravity account the off-by-default
+ * gate disables: any account with an isolated `homePath`, and every account
+ * beyond the one that shares the host `agy` login. Names the setting and
+ * both fixes; config is never touched.
+ */
+export function requireAntigravityAccountAllowed(config: AntigravityProviderConfig | undefined, instanceId: string): void {
+  const reason = antigravityAccountBlockedReason(config, instanceId);
+  if (reason === null) return;
+  throw new CliError("ANTIGRAVITY_ACCOUNT_OFF", reason, {
+    exitCode: 4,
+    details: { instanceId, setting: "providers.antigravity.allowUnsupportedUse" },
+  });
+}
+
+/**
  * Resolve effective Antigravity (`agy`) launch spec and isolated env for `instanceId`.
  * When `account.homePath` is set, isolates `agy` via `HOME`/`USERPROFILE` plus
  * `--gemini-dir <homePath>/.gemini`. Default accounts without `homePath` inherit
@@ -411,6 +427,9 @@ export function resolveAntigravityAccount(
   instanceId: string,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): ResolvedAntigravityAccount {
+  // While `providers.antigravity.allowUnsupportedUse` is off (the default)
+  // a gated account is never launched or routed to.
+  requireAntigravityAccountAllowed(config, instanceId);
   const parsed = parseAccountInstanceId(instanceId);
   const accountId = parsed?.kind === "antigravity" ? parsed.accountId : null;
   const account = accountId !== null
@@ -683,7 +702,12 @@ export function summarizeProviderAccounts(
   }
   for (const account of providers?.antigravity?.accounts ?? []) {
     const instanceId = accountInstanceId("antigravity", account.id.trim().toLowerCase());
-    out.push(summarizeAccount("antigravity", account, authByInstance?.get(instanceId)));
+    const reason = antigravityAccountBlockedReason(providers?.antigravity, instanceId);
+    const summary = summarizeAccount("antigravity", account, authByInstance?.get(instanceId));
+    // Present on every Antigravity row (null while allowed) so clients can
+    // show a gated account as disabled with the reason; other kinds never
+    // carry the field.
+    out.push({ ...summary, disabledReason: reason });
   }
   return out;
 }
