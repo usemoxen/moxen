@@ -2559,11 +2559,13 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    * `session.compaction.ended` never comes — a compaction that merged into
    * one still running consumed no end event of its own, and without this the
    * turn would hang until the stall watchdog failed it. And it is only
-   * believed once it can be checked: the server is asked, live, whether any
-   * work is still enqueued for the session (our compaction included), and the
-   * very same turn must still be the running one after the answer. A session
-   * at rest reports the compaction's absence on its own; a marker against a
-   * session whose inbox still holds the compaction is an earlier run's echo.
+   * believed once it can be checked: the server is asked, live, whether the
+   * session is still running (`session.active` — a dequeued compaction at
+   * work is no longer in its inbox but shows there) and whether any work is
+   * still enqueued for it (our compaction included), and the very same turn
+   * must still be the running one after the answer. A session at rest reports
+   * the compaction's absence on its own; a marker against a session that is
+   * busy or whose inbox still holds the compaction is an earlier run's echo.
    *
    * No usage is read off the timeline for this end: a compaction-only turn
    * has no reply of its own, and the last assistant message still on the
@@ -2576,10 +2578,13 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     if (turn?.compacting !== true || turn.compactionRequested !== true) return;
     void this.connectionFor(session)
       .then(async (connection) => {
-        const pending = await connection.sessionInbox(session.nativeSessionId);
-        // Work still queued — this turn's compaction among it — means the idle
-        // is not about this turn.
-        if (pending.length > 0) return;
+        const [active, pending] = await Promise.all([
+          connection.sessionActive(session.nativeSessionId),
+          connection.sessionInbox(session.nativeSessionId),
+        ]);
+        // Still running, or work still queued — this turn's compaction among
+        // it — means the idle is not about this turn.
+        if (active || pending.length > 0) return;
         // The read was async: a settle, a new turn, anything may have moved under it.
         if (this.openTurn(session) !== turn || turn.status !== "running") return;
         await this.refreshContext(session);

@@ -509,6 +509,43 @@ describe("opencode driver", () => {
     await expect(outcome).resolves.toMatchObject({ status: "completed" });
   });
 
+  it("does not let a compaction's delayed raw idle complete a second /compact that is running, dequeued from its inbox", async () => {
+    // Dequeued from the inbox, the compaction no longer shows in
+    // `session.inbox.list` — only `session.active` still tells the truth
+    // about it. A raw idle that arrives while the session is busy running
+    // the second compaction is an earlier run's echo.
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    await server.pushRaw({
+      type: "session.compaction.ended",
+      data: { sessionID: "opencode-session-1", reason: "manual", text: "Kept." },
+    });
+    await expect(driver.awaitTurn("thread-1", first.turnId)).resolves.toMatchObject({ status: "completed" });
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "/compact" }));
+    expect(server.callsTo("session.compact")).toHaveLength(2);
+    // Nothing queued, but the server lists the session as running.
+    server.inbox = [];
+    server.active = true;
+    let settled = false;
+    const outcome = driver.awaitTurn("thread-1", second.turnId).then((result) => {
+      settled = true;
+      return result;
+    });
+    // The first compaction's delayed raw idle: refused while the second is still running.
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    await waitFor("the session's activity to be checked", () => server.callsTo("session.active").length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    // At rest since: the same marker ends the turn, with nothing booked on it.
+    server.active = false;
+    await server.pushRaw({ type: "session.idle", data: { sessionID: "opencode-session-1" } });
+    const completed = await outcome;
+    expect(completed).toMatchObject({ status: "completed", error: null });
+    expect(completed.usage).toEqual({ input: 0, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 });
+  });
+
   it("settles an idle-only /compact without booking the previous reply's tokens", async () => {
     // A /compact with no prompt of its own books no usage: the metered reply
     // left on the timeline belongs to the turn that produced it and was

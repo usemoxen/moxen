@@ -195,6 +195,15 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
     return this.inbox;
   }
 
+  /** What `session.active` answers: whether the server still lists the session as running. False — the default — a session at rest. */
+  active = false;
+
+  async sessionActive(sessionID: string): Promise<boolean> {
+    this.calls.push({ method: "session.active", args: { sessionID } });
+    this.failChecked("session.active");
+    return this.active;
+  }
+
   async storedAuthTypes(): Promise<Record<string, string>> {
     this.calls.push({ method: "integration.list", args: {} });
     this.failChecked("integration.list");

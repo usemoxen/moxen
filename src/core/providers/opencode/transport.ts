@@ -150,11 +150,16 @@ export interface OpencodeServerConnection {
   /**
    * `session.inbox.list`: the session's durably enqueued work not yet
    * delivered (user, synthetic, compaction and move items), oldest first.
-   * The server-side truth of what is still queued — a session whose list is
-   * empty has drained, which is what a raw idle marker is only safe to
-   * believe once it has already said.
+   * The server-side truth of what is still queued.
    */
   sessionInbox(sessionID: string): Promise<ReadonlyArray<{ readonly id: string; readonly type: string }>>;
+  /**
+   * `session.active`: whether the server still lists this session among its
+   * running ones — a dequeued compaction at work no longer sits in the
+   * inbox but shows here. An unreadable answer counts as running: a raw
+   * idle marker is only believed about a session that can be seen at rest.
+   */
+  sessionActive(sessionID: string): Promise<boolean>;
   /**
    * Credential type per provider id (`api` | `oauth` | `env`) as this server
    * knows them (`GET /api/integration`). Connection types only, never a secret.
@@ -471,6 +476,15 @@ export class LiveOpencodeServerConnection implements OpencodeServerConnection {
       const type = asString(asRecord(item)?.type);
       return id && type ? [{ id, type }] : [];
     });
+  }
+
+  async sessionActive(sessionID: string): Promise<boolean> {
+    const result = await request("session.active", () => this.client.session.active());
+    // The generated client unwraps the response's `data`; an envelope is tolerated anyway.
+    const record = asRecord(result);
+    const active = asRecord(record?.data) ?? record;
+    // An unreadable answer is a busy session: settling on it could end a running turn.
+    return active === null || active[sessionID] !== undefined;
   }
 
   async storedAuthTypes(): Promise<Record<string, string>> {
