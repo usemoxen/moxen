@@ -144,6 +144,25 @@ describe("toThreadEnvelope", () => {
     // The second turn: two turns exist once it has run.
     expect(projected.checkpoints?.[0]).toMatchObject({ turnId: "t2", checkpointTurnCount: 2, ref: "abc" });
   });
+
+  it("names maintenance turns so readers skip a compaction's output, and reads the prompt on an older ledger", () => {
+    const marked = toThreadEnvelope(thread(), [turn({ id: "work" }), turn({ id: "compact", maintenance: true })]);
+    expect(marked.maintenanceTurns).toEqual(["compact"]);
+    // A ledger written before the marker existed is recognised by its prompt.
+    const older = toThreadEnvelope(
+      thread(),
+      [turn({ id: "work", messageId: "m-work" }), turn({ id: "compact", messageId: "m-compact" })],
+      {
+        messages: [
+          { id: "m-work", threadId: "thread-1", turnId: "work", role: "user", text: "Build it", createdAt: "2026-01-01T00:00:00.000Z" },
+          { id: "m-compact", threadId: "thread-1", turnId: "compact", role: "user", text: "/compact", createdAt: "2026-01-01T00:00:00.000Z" },
+        ],
+      },
+    );
+    expect(older.maintenanceTurns).toEqual(["compact"]);
+    // Omitted when a thread has none, so older envelopes stay byte-for-byte as they were.
+    expect(toThreadEnvelope(thread(), [turn()])).not.toHaveProperty("maintenanceTurns");
+  });
 });
 
 describe("row projections", () => {
