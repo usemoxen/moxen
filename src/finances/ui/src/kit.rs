@@ -129,3 +129,177 @@ pub fn segmented<E: 'static>(
                 }))
         }))
 }
+
+/// The keystroke-to-text reduction of the search fields, pure so it is
+/// testable: a printable character appends, backspace removes the last one,
+/// escape clears; with control, platform (cmd/ctrl) or alt held nothing is
+/// typed.
+pub fn apply_keystroke(
+    current: &str,
+    key: &str,
+    key_char: Option<&str>,
+    control: bool,
+    platform: bool,
+    alt: bool,
+) -> String {
+    if control || platform || alt {
+        return current.to_string();
+    }
+    match key {
+        "backspace" => {
+            let mut out = current.to_string();
+            out.pop();
+            out
+        }
+        "escape" => String::new(),
+        _ => {
+            let c = key_char.unwrap_or(key);
+            if c.chars().count() == 1 {
+                format!("{current}{c}")
+            } else {
+                current.to_string()
+            }
+        }
+    }
+}
+
+/// A single-line text field driven by keystrokes (the shell has no text
+/// input element of its own): click to focus, type to append, backspace to
+/// delete, escape to clear, the `x` clears too. The value lives in the app
+/// entity, so every render rebuilds this with the current text.
+pub fn text_field<E: 'static>(
+    id: &'static str,
+    value: &str,
+    placeholder: &str,
+    window: &Window,
+    cx: &mut Context<E>,
+    on_change: impl Fn(&mut E, String, &mut Context<E>) + Clone + 'static,
+) -> Stateful<Div> {
+    let handle = cx.focus_handle();
+    let focused = handle.is_focused(window);
+    let entity = cx.entity();
+    let current = value.to_string();
+    let mut field = div()
+        .id(id)
+        .h(px(28.))
+        .pl(px(9.))
+        .pr(px(7.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .rounded(px(theme::radius("radius-md")))
+        .bg(color("sunk"))
+        .border_1()
+        .border_color(color(if focused { "live" } else { "rule" }))
+        .cursor_text()
+        .focusable()
+        .tab_index(0)
+        .track_focus(&handle)
+        .child(icon("search", "ink-2", 13.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_family(theme::MONO)
+                .text_size(px(12.5))
+                .line_height(px(16.))
+                .text_color(color(if value.is_empty() { "ink-2" } else { "ink" }))
+                .child(if value.is_empty() {
+                    placeholder.to_string()
+                } else {
+                    value.to_string()
+                }),
+        )
+        .on_click(cx.listener({
+            let handle = handle.clone();
+            move |_, _, window, cx| {
+                window.focus(&handle, cx);
+            }
+        }));
+    if !value.is_empty() {
+        field = field.child(
+            div()
+                .id((id, 0usize))
+                .size(px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .hover(|s| s.bg(color("rule")))
+                .child(icon("action-x", "ink-2", 10.))
+                .on_click(cx.listener({
+                    let on_change = on_change.clone();
+                    move |this, _, _, cx| on_change(this, String::new(), cx)
+                })),
+        );
+    }
+    field.on_key_down(move |event, _window, cx| {
+        let ks = &event.keystroke;
+        let next = apply_keystroke(
+            &current,
+            &ks.key,
+            ks.key_char.as_deref(),
+            ks.modifiers.control,
+            ks.modifiers.platform,
+            ks.modifiers.alt,
+        );
+        if next != current {
+            let on_change = on_change.clone();
+            entity.update(cx, move |this, cx| on_change(this, next, cx));
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_keystroke;
+
+    #[test]
+    fn keystrokes_edit_the_query() {
+        assert_eq!(
+            apply_keystroke("", "a", Some("a"), false, false, false),
+            "a"
+        );
+        assert_eq!(
+            apply_keystroke("ab", "c", Some("c"), false, false, false),
+            "abc"
+        );
+        assert_eq!(
+            apply_keystroke("ab", "backspace", None, false, false, false),
+            "a"
+        );
+        assert_eq!(
+            apply_keystroke("ab", "escape", None, false, false, false),
+            ""
+        );
+        // Modifiers held: nothing is typed (shortcuts stay shortcuts).
+        assert_eq!(
+            apply_keystroke("ab", "q", Some("q"), false, true, false),
+            "ab"
+        );
+        assert_eq!(
+            apply_keystroke("ab", "a", Some("a"), true, false, false),
+            "ab"
+        );
+        assert_eq!(
+            apply_keystroke("ab", "a", Some("a"), false, false, true),
+            "ab"
+        );
+        // Non-printable keys do not append.
+        assert_eq!(
+            apply_keystroke("ab", "shift", None, false, false, false),
+            "ab"
+        );
+        assert_eq!(
+            apply_keystroke("ab", "enter", None, false, false, false),
+            "ab"
+        );
+        // key_char wins over the ascii-equivalent key.
+        assert_eq!(
+            apply_keystroke("", "s", Some("ß"), false, false, false),
+            "ß"
+        );
+    }
+}

@@ -112,6 +112,85 @@ pub struct Subscription {
     pub frequency: Frequency,
     pub status: SubscriptionStatus,
     pub next_charge: Option<NaiveDate>,
+    /// First day the subscription no longer charges (exclusive), if known.
+    pub end_date: Option<NaiveDate>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MovementKind {
+    Income,
+    Expense,
+    /// A real charge recorded for a subscription's billing day.
+    Charge,
+}
+
+impl MovementKind {
+    pub fn key(self) -> &'static str {
+        match self {
+            MovementKind::Income => "mov.kind.income",
+            MovementKind::Expense => "mov.kind.expense",
+            MovementKind::Charge => "mov.kind.charge",
+        }
+    }
+}
+
+/// Income: expected/received. Expense: planned/pending/done. A charge is a
+/// real record; `NotCharged` marks a real charge of 0 (the cycle was not
+/// billed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MovementStatus {
+    Expected,
+    Received,
+    Planned,
+    Pending,
+    Done,
+    NotCharged,
+}
+
+impl MovementStatus {
+    pub fn key(self) -> &'static str {
+        match self {
+            MovementStatus::Expected => "mov.status.expected",
+            MovementStatus::Received => "mov.status.received",
+            MovementStatus::Planned => "mov.status.planned",
+            MovementStatus::Pending => "mov.status.pending",
+            MovementStatus::Done => "mov.status.done",
+            MovementStatus::NotCharged => "mov.status.notcharged",
+        }
+    }
+
+    /// The token color the status dot uses.
+    pub fn token(self) -> &'static str {
+        match self {
+            MovementStatus::Expected | MovementStatus::Planned => "label-8",
+            MovementStatus::Pending => "held",
+            MovementStatus::Received | MovementStatus::Done => "added",
+            MovementStatus::NotCharged => "label-8",
+        }
+    }
+}
+
+/// One recorded movement: an income, an expense or a real charge of a
+/// subscription. Recurring ones (`frequency` != `Once`) repeat until
+/// `end_date` (exclusive).
+#[derive(Clone, Debug)]
+pub struct Movement {
+    pub id: String,
+    pub kind: MovementKind,
+    /// The concept; for charges, the subscription's name.
+    pub name: String,
+    pub subscription_id: Option<String>,
+    pub category: Option<LocalizedText>,
+    pub amount: Money,
+    pub date: NaiveDate,
+    /// Optional local time (HH:mm), only to order movements of the same day.
+    pub time: Option<String>,
+    pub frequency: Frequency,
+    pub end_date: Option<NaiveDate>,
+    pub status: MovementStatus,
+    /// A paused recurring income stops projecting until resumed.
+    pub paused: bool,
+    pub notes: Option<LocalizedText>,
 }
 
 #[derive(Clone, Debug)]
@@ -152,4 +231,17 @@ pub trait FinancesData {
     fn subscriptions(&self) -> &[Subscription];
     /// Past balances for the dashboard chart, oldest first.
     fn balance_history(&self) -> &[BalancePoint];
+    /// The account's currency; every total the views show is in it.
+    fn account_currency(&self) -> Currency {
+        Currency::Eur
+    }
+    /// The rate used to convert `from` into `to`: `1 from = rate to`.
+    /// Must return 1.0 when both currencies are the same.
+    fn exchange_rate(&self, from: Currency, to: Currency) -> f64;
+    /// All recorded movements: incomes, expenses and real charges.
+    fn movements(&self) -> &[Movement];
+    /// False while the data is still loading; the pages show skeletons.
+    fn is_ready(&self) -> bool {
+        true
+    }
 }
