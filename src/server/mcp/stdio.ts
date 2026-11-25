@@ -25,13 +25,14 @@ export const MOXEN_MCP_INSTRUCTIONS =
   "task_ask checks on a task you delegated without disturbing it: its provider answers a side question on a copy of the task's thread, with no tools and nothing added there. " +
   "message_queue queues or schedules a message on your own thread (or a task you delegated) through the user's queue: at takes an ISO time or HH:MM, conditions wait for an allowance reset or another thread; with neither it runs after the current turn. A protected thread keeps it waiting. " +
   "thread_search and thread_read find and read other threads, a step at a time. " +
+  "project_list lists Moxen's registered projects and project_resolve resolves a folder to one; registering a folder stays the user's (`moxen projects ensure`), never an agent's. " +
   "The models tool lists the providers, models and efforts you can delegate to. " +
   "usage_status reports the user's current shared provider usage, fresh rather than the hours-old figures models carries: call it before fanning work out. " +
   "context_usage reports how full your own context window is, from the latest reading Moxen recorded. " +
   "web_fetch reads a web page as text; it is not part of delegating.";
 
 /** What a delegated task is told: it has no delegation tools, so only what is left is described. */
-export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "context_usage reports how full your own context window is, from the latest reading Moxen recorded. usage_status reports the user's current shared provider usage. web_fetch reads a web page as text, retrying through a browser for pages built by scripts.";
+export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "context_usage reports how full your own context window is, from the latest reading Moxen recorded. usage_status reports the user's current shared provider usage. web_fetch reads a web page as text, retrying through a browser for pages built by scripts. project_list lists, and project_resolve resolves a folder to, the projects registered with Moxen.";
 
 /** What a session with Moxen memory is told about its tools; the rules for using it are in the runtime instructions. */
 export const MOXEN_MEMORY_MCP_INSTRUCTIONS = "memory_read, memory_search, memory_save, memory_edit, memory_append and memory_delete are Moxen's persistent memory, kept across sessions and providers.";

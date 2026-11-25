@@ -11,6 +11,7 @@ import {
   removeStoredProject,
   renameStoredProject,
   resolveStoredProject,
+  stripTrailingSeparators,
   workspaceRootsEqual,
 } from "../projects.js";
 
@@ -30,6 +31,17 @@ describe("workspaceRootsEqual", () => {
   it("compares normalized roots", () => {
     expect(workspaceRootsEqual("/repo", "/repo/")).toBe(true);
     expect(workspaceRootsEqual("/repo", "/other")).toBe(false);
+  });
+
+  it("keeps a Windows volume root's trailing separator, so C:\\ never becomes C:", () => {
+    // Pure path shaping, so every platform tests the same strings.
+    expect(stripTrailingSeparators("C:\\")).toBe("C:\\");
+    expect(stripTrailingSeparators("C:")).toBe("C:");
+    expect(stripTrailingSeparators("/repo/")).toBe("/repo");
+    expect(stripTrailingSeparators("/repo//")).toBe("/repo");
+    expect(stripTrailingSeparators("/")).toBe("/");
+    // An equal pair stays equal through the volume root, instead of both turning into C:.
+    expect(workspaceRootsEqual("C:\\", "C:\\")).toBe(true);
   });
 });
 
@@ -108,6 +120,22 @@ describe("projects registry", () => {
     expect(revived.project.deletedAt).toBeNull();
     expect(revived.command).toBeNull();
     expect((await listStoredProjects(root)).map((entry) => entry.id)).toEqual([project.id]);
+  });
+
+  it("keeps every acknowledged registration: parallel ensures all persist, none fails to write", async () => {
+    const root = await tmpRoot();
+    // A registry mutation is a read, a transform and a whole-file write:
+    // sixteen parallel ones could each acknowledge and keep only the last.
+    const ensured = await Promise.all(
+      Array.from({ length: 16 }, (_, index) => ensureStoredProject(root, { workspaceRoot: `/repo-${index}` })),
+    );
+    expect(ensured).toHaveLength(16);
+    const stored = await listStoredProjects(root);
+    expect(stored).toHaveLength(16);
+    expect(new Set(stored.map((entry) => entry.id)).size).toBe(16);
+    for (const entry of ensured) {
+      expect(stored.some((row) => row.id === entry.project.id && workspaceRootsEqual(row.workspaceRoot, entry.project.workspaceRoot))).toBe(true);
+    }
   });
 
   it("refuses a rename onto another live project's title", async () => {

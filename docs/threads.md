@@ -1214,6 +1214,29 @@ A `modelSelection` with `provider`/`model` together is refused.
   the old thread, where the user can hold or remove it. There is no CLI
   surface for this: the palette and `threads continue` stay the user's.
 
+### Listing and resolving projects (`project_list`, `project_resolve`)
+
+The projects registry behind `moxen projects list` and `resolve`, as
+read-only agent tools. `project_list` lists every registered project
+(id, folder and title, one per line; the shared "No project" entry is left
+out, as the CLI's own list leaves it). `project_resolve` resolves one
+folder to the project Moxen keys it by — the Git root in repo workspace
+mode, the canonical folder otherwise, per the server's `workspaceMode`
+setting — with the same workspace read the CLI gives, and reports no
+project plainly when the folder has none. Each takes a fully qualified
+absolute path: the folder lives on the machine Moxen runs on, and a
+relative path is refused rather than resolved against the server's own
+working directory. On Windows the path must name its volume (`C:\folder`)
+or both parts of a UNC share (`\\server\share`); a folder's exact path is
+kept as given, one whose name ends in a space included. A folder that does
+not exist, or is not a directory, is refused the same way the CLI refuses
+it (`WORKSPACE_NOT_FOUND`, `WORKSPACE_NOT_DIRECTORY`).
+
+The reads come with the `moxen` server for every session, delegated
+tasks included. No agent path writes the projects registry: registering a
+folder is the user's — `moxen projects ensure` under the configured
+`projectPolicy` — never an agent's.
+
 ### Continuing in a new thread (palette / `threads continue`)
 
 The user's own **Continue in a new thread** palette action (and

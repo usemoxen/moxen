@@ -458,6 +458,37 @@ export const THREAD_TOOLS: readonly McpTool[] = [
 ];
 
 /**
+ * Moxen's own projects registry (`core/projects/`), as a session sees it
+ * (MXN-415): reads only. No agent path writes the registry — registering a
+ * folder is the user's (`moxen projects ensure`), per the store's
+ * `projectPolicy`.
+ */
+export const PROJECT_TOOLS: readonly McpTool[] = [
+  {
+    name: "project_list",
+    description:
+      "List the projects registered with Moxen, one line each: project id, the folder it is keyed by (workspace root) and its title — what `moxen projects list` shows. " +
+      "Projects are how Moxen groups threads and defaults per folder. Read-only.",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "project_resolve",
+    description:
+      "Resolve one folder on the machine Moxen runs on to the project it belongs to, as `moxen projects resolve` does: the workspace root Moxen keys the folder by " +
+      "(the Git repository root in repo workspace mode, the canonical folder itself otherwise, per the server's workspaceMode setting), whether it is a repository, its branch, and the project — or no project. " +
+      "The folder must exist and be a directory; pass a fully qualified absolute path (on Windows, with its volume): it is not resolved against your working directory.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: { cwd: { type: "string", description: "The folder to resolve, a fully qualified absolute path on the machine Moxen runs on." } },
+      required: ["cwd"],
+      additionalProperties: false,
+    },
+  },
+];
+
+/**
  * The tools that reach other threads: handing work to them, and finding and
  * reading them. A delegated task gets none: it neither delegates again nor
  * continues itself in a new thread (a full context there is compacted in
@@ -627,7 +658,7 @@ function offered(name: string, options: MoxenToolOptions): boolean {
 
 /** The tools one session is offered: all of them, less the delegation ones for a delegated task, plus the checklist where the provider keeps none. */
 export function moxenToolsFor(options: MoxenToolOptions): readonly McpTool[] {
-  const tools = [...MOXEN_TOOLS, ...THREAD_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
+  const tools = [...MOXEN_TOOLS, ...PROJECT_TOOLS, ...THREAD_TOOLS, ...MEMORY_TOOLS].filter((tool) => offered(tool.name, options));
   if (options.researchLead === true) tools.push(...RESEARCH_ROLE_TOOLS);
   if (options.researchMember === true) tools.push(...RESEARCH_MESSAGE_TOOLS);
   if (options.imageGeneration === true && options.delegated !== true) tools.push(IMAGE_GENERATION_TOOL);
@@ -905,6 +936,10 @@ export async function callMoxenTool(
         });
         return { text: read.text, isError: false };
       }
+      case "project_list":
+        return await projectListTool(api);
+      case "project_resolve":
+        return ok(await projectResolveTool(api, args));
       case "memory_search": {
         const found = await api.query({
           type: "memory.search",
@@ -1050,6 +1085,60 @@ export async function callMoxenTool(
 }
 
 const SEARCH_SNIPPET_CHARS = 120;
+
+/**
+ * A folder argument for the project tools: non-empty and fully qualified,
+ * and preserved exactly — a folder's name may end in a space, which a trim
+ * would silently turn into a different folder. The folder lives on the
+ * machine Moxen runs on, where the server resolves it — a relative path
+ * would land against the server's own working directory, not the caller's,
+ * so it is refused instead of meaning the wrong folder.
+ */
+function argFolder(args: Record<string, unknown>, key = "cwd"): string {
+  const value = args[key];
+  if (typeof value !== "string" || value === "") throw new CliError("INVALID_TOOL_INPUT", `${key} must be a non-empty string.`);
+  if (!fullyQualifiedFolder(value)) {
+    throw new CliError("INVALID_TOOL_INPUT", `${key} must be a fully qualified absolute path on the machine Moxen runs on (a Windows one names its volume, like C:\\folder): it is not resolved against your working directory.`);
+  }
+  return value;
+}
+
+/**
+ * Fully qualified for the server's own platform: on Windows a complete
+ * volume or UNC share — a drive with its separator (`C:\folder`, `c:/`), or
+ * `\\server\share` with both parts — passes; `path.isAbsolute("/folder")`
+ * is true there without a volume, `C:folder` is drive-relative and
+ * `\\server` names no share, so none of those may name a folder.
+ */
+export function fullyQualifiedFolder(value: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform === "win32") return /^([A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/.test(value);
+  return value.startsWith("/");
+}
+
+/**
+ * `project_list`: the registry as `moxen projects list` prints it — id,
+ * workspace root and title, one line per project. The one shared scratch
+ * entry is not a folder's project, so it is left out as the CLI does.
+ */
+async function projectListTool(api: ClientApi): Promise<ToolResult> {
+  const { projects } = await api.query({ type: "projects.list" });
+  const rows = projects.filter((project) => project.scratch !== true);
+  if (rows.length === 0) return { text: "No registered projects. Registering a folder is the user's (`moxen projects ensure`).", isError: false };
+  const lines = rows.map((project) => `- ${project.id} · ${project.workspaceRoot} · ${project.title}`);
+  return { text: `${rows.length === 1 ? "One registered project" : `${rows.length} registered projects`}:\n${lines.join("\n")}`, isError: false };
+}
+
+/** `project_resolve`: the same read as `moxen projects resolve` — the workspace resolution, and the project or none. */
+async function projectResolveTool(api: ClientApi, args: Record<string, unknown>) {
+  const resolved = await api.query({ type: "project.resolve", cwd: argFolder(args) });
+  return {
+    workspace: resolved.workspace,
+    project: resolved.project,
+    ...(resolved.project === null
+      ? { note: `No project for ${resolved.workspace.workspaceRoot}. Registering a folder is the user's (\`moxen projects ensure\`).` }
+      : {}),
+  };
+}
 
 /** Exactly one of `taskId` (one task) or `taskIds` (several): one bad id never stops the others. */
 function settleIds(args: Record<string, unknown>): string[] {
