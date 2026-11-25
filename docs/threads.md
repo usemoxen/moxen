@@ -1223,7 +1223,11 @@ its original order, each waiting for the new thread's handoff turn first — so
 a scheduled continuation still runs its handoff before anything that moved.
 An entry keeps its scheduled time, conditions (and latched state), user hold,
 per-turn model, runtime and interaction-mode overrides, origin and
-notification facts, and attachments. An entry condition elsewhere that names
+notification facts, and attachments — and when the source turn carried
+several messages (a settle's promotion batches queued ones into a single
+turn), the entry carries all of them, in order, each identified by its own
+source id, and their count is what holds a half-written entry out of
+admission until the move is whole. An entry condition elsewhere that names
 a moved message follows it to the new thread, and keeps following it across
 further moves: a landed move's marker is a durable alias, so retrying a
 continue (which rejoins the same destination) never releases a dependent
@@ -1232,7 +1236,11 @@ being taken back ends the trail. Each new destination replaces the wait the
 move itself added — the one it marks as its own at creation, beyond a reach
 of a client edit — never a wait the user wrote on a sibling entry, so a
 second move carries one server-owned wait, never two; the 16-condition
-limit counts client conditions only.
+limit counts client conditions only. A hand-off that dies between staging
+and landing is not lost: the staged claims are durable, keyed to their
+reserved destination, and every work-queue pass resumes their move,
+repairs half-written entries and lands them, without anyone continuing the
+source again.
 
 The source thread keeps its rows as history, but nothing moved can run there:
 each moved turn is taken back as removed, and the handoff names the move

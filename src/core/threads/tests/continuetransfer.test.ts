@@ -5,7 +5,7 @@ import { driverKindOfInstance } from "../../types.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { openThreadStore } from "../store.js";
 import { buildHandoff } from "../handoff.js";
-import { createThread, sendTurn, completeTurn, interruptTurn, openTurn, trackContinuation, untrackContinuation } from "../threads.js";
+import { createThread, sendTurn, completeTurn, interruptTurn, holdPromotedTurn, openTurn, trackContinuation, untrackContinuation } from "../threads.js";
 import { queueAdmission, parseQueuePolicy } from "../queue.js";
 import { armedScheduleCount, armScheduledTurn, onScheduledTurnDue } from "../schedule.js";
 import {
@@ -538,20 +538,29 @@ describe("a manual continue moves pending messages to the new thread's work queu
     });
     expect(late.turn.status).toBe("queued");
 
-    // Admission cannot take the claimed turn, and the handoff — given the
-    // claim's exclusion list, as continueThreadInner passes it — hides the
-    // claimed turn while the late send appears in neither history nor
-    // immediate work.
+    // Admission cannot take the claimed turn: it is removed from the
+    // runnable set, so nothing dispatches on the source — the queue pass's
+    // own resume may land the claim's move (it is durable and retryable),
+    // and either way the turn runs only on the destination. The handoff —
+    // given the claim's exclusion list, as continueThreadInner passes it —
+    // hides the claimed turn while the late send appears in neither history
+    // nor immediate work.
     await runWorkQueue(w.ctx);
-    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)?.status).toBe("queued");
+    expect(w.sent.filter((turn) => turn.threadId === source.id)).toEqual([]);
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === staged.turn.id)).toMatchObject({
+      queue: { removed: true },
+      handoff: { destinationThreadId: destination.id },
+    });
     const doc = await buildHandoff(w.store, source.id, { knownTurnIds: claim!.known, excludedTurnIds: [...claim!.claimed, ...claim!.restaged] });
     expect(doc).not.toContain("Late");
     expect(doc).not.toContain("Second");
     // Without this call's exclusion the same staged claim reads the same
     // way: an unlanded claim is never delivered as work, and a staged
-    // (removed) entry is excluded even when a caller carries its id.
+    // (removed) entry is excluded even when a caller passes its id.
     const undisguised = await buildHandoff(w.store, source.id, { knownTurnIds: claim!.known });
     expect(undisguised).not.toContain("Second");
+    const carried = await buildHandoff(w.store, source.id, { knownTurnIds: claim!.known, queuedTurnIds: [staged.turn.id] });
+    expect(carried).not.toContain("Second");
 
     // The migration moves only the claimed turn; the late send stays queued.
     await migrateQueuedMessages(w.ctx, source.id, destination.id);
@@ -568,6 +577,40 @@ describe("a manual continue moves pending messages to the new thread's work queu
     await settleRuns();
     expect(w.sent.map((turn) => turn.threadId)).toEqual([source.id]);
     expect(w.sent[0]!.prompt).toContain("Late");
+  });
+
+  it("moves a settle-batched turn whole: every message, in order, on one entry", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const running = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await sendTurn(w.store, source.id, { prompt: "Second of the batch", delivery: "queue" });
+    const folded = await sendTurn(w.store, source.id, { prompt: "Third of the batch", delivery: "queue" });
+    // The settles promotion batches both queued messages into one turn...
+    await completeTurn(w.store, source.id, running.id, { text: "Done." });
+    const promoted = openTurn(await w.store.readTurns(source.id))!;
+    expect((await w.store.readMessages(source.id)).filter((message) => message.turnId === promoted.id && message.role === "user").map((message) => message.text)).toEqual(["Second of the batch", "Third of the batch"]);
+    expect((await w.store.readTurns(source.id)).some((turn) => turn.id === folded.turn.id)).toBe(false);
+    // ...and a usage hold requeues it before it ever dispatched, for an hour
+    // that shortly comes due.
+    const until = new Date(Date.now() + 1500).toISOString();
+    expect(await holdPromotedTurn(w.store, source.id, promoted.id, until)).toBe(true);
+
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    const moved = (await w.store.readTurns(continued.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${promoted.id}`)!;
+    // MXN-388: the batch moves whole — every message, in order, one entry —
+    // and the entry's own policy records how many messages it must carry.
+    expect(moved.queue?.transferMessages).toBe(2);
+    const own = (await w.store.readMessages(continued.threadId)).filter((message) => message.turnId === moved.id && message.role === "user").map((message) => message.text);
+    expect(own).toEqual(["Second of the batch", "Third of the batch"]);
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === promoted.id)).toMatchObject({ status: "interrupted", handoff: { landed: true } });
+    // One dispatch delivers both, in order, once its held time comes due.
+    await settleRuns();
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThanOrEqual(Date.parse(until)), { timeout: 10_000, interval: 25 });
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const dispatched = w.sent.find((turn) => turn.threadId === continued.threadId && turn.prompt.includes("batch"))!;
+    expect(dispatched.prompt).toContain("Second of the batch\n\nThird of the batch");
+    expect(w.sent.filter((turn) => turn.prompt.includes("Third of the batch"))).toHaveLength(1);
   });
 
   it("keeps a post-claim send off the destination through the real continue path", async () => {
@@ -668,30 +711,29 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect((await w.store.readMessages(destId)).filter((message) => message.turnId === partial.id)).toEqual([]);
     expect((await w.store.readTurns(source.id)).filter((turn) => turn.status === "queued")).toHaveLength(1);
 
-    // The partial entry cannot dispatch, even with its handoff complete: it
-    // waits for the repair instead of failing.
+    // The partial entry cannot dispatch, not even from the schedule path,
+    // while its message is missing: it waits for the repair instead of
+    // failing.
     await settleRuns();
     expect(openTurn(await w.store.readTurns(destId))).toBeNull();
-    // Three admission passes promote nothing and append no activity: the
-    // entry is parked as blocked until a continue repairs its message.
-    for (let pass = 0; pass < 3; pass += 1) {
-      expect(await runDueScheduledTurn(w.ctx, destId)).toBe(false);
-      await runWorkQueue(w.ctx);
-    }
-    await settleRuns();
-    expect((await w.store.readActivities(destId)).filter((activity) => activity.kind === "turn.promoted" && activity.turnId === partial.id)).toEqual([]);
-    expect((await w.store.readTurns(destId)).find((turn) => turn.id === partial.id)?.status).toBe("queued");
+    expect(await runDueScheduledTurn(w.ctx, destId)).toBe(false);
     expect(w.sent.filter((turn) => turn.threadId === destId)).toHaveLength(1);
     expect((await w.store.readActivities(destId)).some((activity) => activity.summary === "Its queued message is missing.")).toBe(false);
     const blockedEntry = (await readWorkQueue(w.ctx)).find((entry) => entry.threadId === destId && entry.turnId === partial.id)!;
     expect(blockedEntry.blocked).toContain("Waiting for its move to finish");
 
-    // A retry repairs the message in place and completes the move, once.
+    // No one continues the source again: the queue pass's own resume
+    // repairs the message in place — exactly one copy — and lands the move.
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readMessages(destId)).filter((message) => message.turnId === partial.id && message.role === "user").map((message) => message.text)).toEqual(["Second"]);
+    expect((await w.store.readTurns(source.id)).filter((turn) => turn.status === "queued")).toEqual([]);
+    // A retry continue joins the same destination and repairs nothing.
     const again = await continueThread(w.ctx, { threadId: source.id });
     expect(again.threadId).toBe(destId);
     expect(await w.store.readTurns(destId)).toHaveLength(2);
     expect((await w.store.readTurns(destId)).filter((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"))).toHaveLength(1);
-    const messages = (await w.store.readMessages(destId)).filter((message) => message.turnId === partial.id);
+    const messages = (await w.store.readMessages(destId)).filter((message) => message.turnId === partial.id && message.role === "user");
     expect(messages.map((message) => message.text)).toEqual(["Second"]);
     expect((await w.store.readTurns(source.id)).filter((turn) => turn.status === "queued")).toEqual([]);
     await runWorkQueue(w.ctx);
@@ -953,35 +995,38 @@ describe("a manual continue moves pending messages to the new thread's work queu
     // Crash between the destination turn and message writes: a turn row
     // with no message, and the source row still staged.
     const append = w.store.appendLedger.bind(w.store);
-    let injected = false;
     const fault = vi.spyOn(w.store, "appendLedger").mockImplementation((threadId, name, row) => {
       const text = (row as { text?: unknown }).text;
-      if (!injected && name === "messages" && threadId === destination.id && typeof text === "string" && !text.startsWith("# Continuing:")) {
-        injected = true;
+      if (name === "messages" && threadId === destination.id && typeof text === "string" && !text.startsWith("# Continuing:")) {
         throw new Error("injected ledger failure");
       }
       return append(threadId, name, row);
     });
     await expect(migrateQueuedMessages(w.ctx, source.id, destination.id)).rejects.toThrow("injected ledger failure");
-    fault.mockRestore();
-    expect(injected).toBe(true);
     const partial = (await w.store.readTurns(destination.id)).find((turn) => turn.queue?.requestId === `handoff:transfer:${staged.id}`)!;
     expect((await w.store.readMessages(destination.id)).filter((message) => message.turnId === partial.id)).toEqual([]);
 
-    // The handoff settles without the message ever landing: the queue pass
-    // must leave the partial entry alone — no summary, no next
+    // The handoff settles without the message ever landing — the ledger
+    // keeps failing the repair, so the queue pass cannot resume the move:
+    // it must leave the partial entry alone — no summary, no next
     // destination, no completion, no failure marking.
     const handoffId = (await w.store.readTurns(destination.id)).find((turn) => !turn.queue?.requestId?.startsWith("handoff:transfer:"))!.id;
     await interruptTurn(w.store, destination.id, handoffId);
     const threadsBefore = await w.store.listThreadIds();
-    await runWorkQueue(w.ctx);
-    await settleRuns();
-    expect(await w.store.listThreadIds()).toEqual(threadsBefore);
-    expect((await w.store.readTurns(destination.id)).some((turn) => turn.queue?.summaryFor === partial.id)).toBe(false);
-    expect((await w.store.readTurns(destination.id)).find((turn) => turn.id === partial.id)).toMatchObject({ status: "queued" });
-    for (const threadId of [source.id, destination.id]) {
-      for (const turn of await w.store.readTurns(threadId)) {
-        if (turn.status === "running") await interruptTurn(w.store, threadId, turn.id);
+    try {
+      await runWorkQueue(w.ctx);
+      await settleRuns();
+      expect(await w.store.listThreadIds()).toEqual(threadsBefore);
+      expect((await w.store.readTurns(destination.id)).some((turn) => turn.queue?.summaryFor === partial.id)).toBe(false);
+      expect((await w.store.readTurns(destination.id)).find((turn) => turn.id === partial.id)).toMatchObject({ status: "queued" });
+      const blocked = (await readWorkQueue(w.ctx)).find((entry) => entry.turnId === partial.id)!;
+      expect(blocked.blocked).toContain("Waiting for its move to finish");
+    } finally {
+      fault.mockRestore();
+      for (const threadId of [source.id, destination.id]) {
+        for (const turn of await w.store.readTurns(threadId)) {
+          if (turn.status === "running") await interruptTurn(w.store, threadId, turn.id);
+        }
       }
     }
   });
