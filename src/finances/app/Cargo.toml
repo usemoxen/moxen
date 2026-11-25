@@ -24,6 +24,8 @@ moxen-finances-ui = { path = "../ui" }
 # The ui crate itself never links SQLite.
 moxen-finances-store = { path = "../store" }
 moxen-finances-core = { path = "../core" }
+# LOCAL-031: the Enable Banking client, linked here and never in the ui crate.
+moxen-finances-banking = { path = "../banking" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14", features = ["font-kit"] }
 serde = { version = "1", features = ["derive"] }

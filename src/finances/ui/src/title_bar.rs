@@ -24,11 +24,38 @@ fn mark() -> Div {
         .child("€")
 }
 
-pub fn render(app: &FinancesApp, _cx: &mut Context<FinancesApp>) -> impl IntoElement {
+/// The bar's height, which the standalone window centres the macOS traffic
+/// lights in.
+pub const HEIGHT: f32 = 44.;
+/// Where the standalone window puts the first traffic light.
+pub const TRAFFIC_LIGHTS: (f32, f32) = (12., 15.);
+/// Where the mark starts when the traffic lights share the bar: just past the
+/// third one.
+const AFTER_TRAFFIC_LIGHTS: f32 = 84.;
+const EDGE: f32 = 16.;
+
+/// The bar's left padding. Only a windowed macOS app draws native controls
+/// over it: full screen hides them, and Windows keeps its own title bar.
+fn leading(macos: bool, fullscreen: bool) -> f32 {
+    if macos && !fullscreen {
+        AFTER_TRAFFIC_LIGHTS
+    } else {
+        EDGE
+    }
+}
+
+pub fn render(
+    app: &FinancesApp,
+    window: &Window,
+    _cx: &mut Context<FinancesApp>,
+) -> impl IntoElement {
     div()
-        .h(px(44.))
+        .h(px(HEIGHT))
         .flex_shrink_0()
-        .pl(px(16.))
+        .pl(px(leading(
+            cfg!(target_os = "macos"),
+            window.is_fullscreen(),
+        )))
         .pr(px(12.))
         .flex()
         .items_center()
@@ -36,10 +63,6 @@ pub fn render(app: &FinancesApp, _cx: &mut Context<FinancesApp>) -> impl IntoEle
         .border_b_1()
         .border_color(color("rule"))
         .bg(color("ground"))
-        // Room for the native traffic lights.
-        .when(cfg!(target_os = "macos"), |s| {
-            s.child(div().w(px(78.)).flex_shrink_0())
-        })
         .child(mark())
         .child(
             div()
@@ -57,4 +80,16 @@ pub fn render(app: &FinancesApp, _cx: &mut Context<FinancesApp>) -> impl IntoEle
                 .text_color(color("ink-2"))
                 .child(format::long_date(app.data.today())),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::leading;
+
+    #[test]
+    fn the_bar_only_clears_controls_that_are_there() {
+        assert_eq!(leading(true, false), 84.);
+        assert_eq!(leading(true, true), 16.);
+        assert_eq!(leading(false, false), 16.);
+    }
 }

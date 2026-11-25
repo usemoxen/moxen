@@ -41,6 +41,7 @@ import { runProblems } from "./scenarios/problems.js";
 import { runImageThumbs } from "./scenarios/imageThumbs.js";
 import { runImageVisibility } from "./scenarios/imageVisibility.js";
 import { runMessageCaching } from "./scenarios/messageCaching.js";
+import { runMarkdownTables } from "./scenarios/markdownTables.js";
 import { runPathChips } from "./scenarios/pathChips.js";
 import { runTerminalVisibility } from "./scenarios/terminalVisibility.js";
 import { runImageTokens } from "./scenarios/imageTokens.js";
@@ -157,6 +158,7 @@ export async function runWalkthrough(): Promise<void> {
   await runImageThumbs();
   await runImageVisibility();
   await runMessageCaching();
+  await runMarkdownTables();
   await runTerminalVisibility();
   await runPathChips();
   await runInteractionModes();

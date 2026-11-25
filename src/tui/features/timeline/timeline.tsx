@@ -1,4 +1,5 @@
 import { useScrollingText } from "../../hooks/useScrollingText.js";
+import { MarkdownView } from "../../ui/markdown.js";
 import { OverflowText } from "../../ui/overflowtext.js";
 import { type MessageKey, t as tr, tx } from "../../i18n/index.js";
 import { currentLanguage } from "../../i18n/index.js";
@@ -521,9 +522,9 @@ function ActivityRow({ entry, now, turnFiles = [], onOpenUrl, width = 80 }: { en
         {view.running && hasText ? (
           // Streaming: the whole block in place, like the live reply — a
           // tail window re-cut on every delta and read as jitter.
-          <markdown content={view.text.trim()} fg={COLOR.dim} syntaxStyle={syntaxStyle()} selectable />
+          <MarkdownView content={view.text.trim()} fg={COLOR.dim} syntaxStyle={syntaxStyle()} selectable />
         ) : expanded && hasText ? (
-          <markdown content={view.text} fg={COLOR.dim} syntaxStyle={syntaxStyle()} selectable />
+          <MarkdownView content={view.text} fg={COLOR.dim} syntaxStyle={syntaxStyle()} selectable />
         ) : null}
       </ToolChip>
     );
@@ -669,7 +670,7 @@ export function MessageBody({
                   )}
                 </text>
               ) : (
-                <markdown
+                <MarkdownView
                   key={index}
                   content={block.text}
                   fg={COLOR.text}
@@ -823,7 +824,7 @@ function TaskNotificationBlock({
               // The agent's own words, so markdown like the replies around it:
               // `code` renders as code rather than as literal backticks.
               <box style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 2 }} backgroundColor={SURFACE.panel}>
-                <markdown content={task.headline} fg={COLOR.text} syntaxStyle={syntaxStyle()} selectable />
+                <MarkdownView content={task.headline} fg={COLOR.text} syntaxStyle={syntaxStyle()} selectable />
               </box>
             )}
             {!task.review ? null : (
@@ -983,7 +984,7 @@ function CompactionLine({
           style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1 }}
           backgroundColor={SURFACE.panel}
         >
-          <markdown content={summary} fg={COLOR.text} syntaxStyle={syntaxStyle()} selectable />
+          <MarkdownView content={summary} fg={COLOR.text} syntaxStyle={syntaxStyle()} selectable />
         </box>
       ) : null}
     </box>
@@ -1254,7 +1255,7 @@ function PlanCard({ entry, now }: { entry: TimelineEntry; now: number }) {
           }}
           backgroundColor={SURFACE.panel}
         >
-          <markdown content={plan.planMarkdown} fg={COLOR.text} syntaxStyle={syntaxStyle()} selectable />
+          <MarkdownView content={plan.planMarkdown} fg={COLOR.text} syntaxStyle={syntaxStyle()} selectable />
         </box>
       ) : null}
     </box>

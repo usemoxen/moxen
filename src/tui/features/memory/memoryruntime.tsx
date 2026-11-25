@@ -28,16 +28,26 @@ export function useMemoryRuntime(client: ClientApi | undefined, visible: boolean
   return status;
 }
 
-export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, onKeyword, onManage }: {
+/** The main action as it reads: its "(r)"/"(c)" bare-key hint goes where the shortcut is off (the Settings page's rows). */
+export function memoryActionLabel(key: "memory.cancel" | "memory.recheck" | "memory.setup", hotkeys: boolean): string {
+  return hotkeys ? t(key) : t(key).replace(/\s+\((.)\)$/, "");
+}
+
+export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, onKeyword, hotkeys = true }: {
   status: Status | null;
   saving?: boolean;
   onSetup: () => void;
   onCancel: () => void;
   onKeyword: () => void;
-  /** The memory manager above the settings page; absent where it cannot open. */
-  onManage?: () => void;
+  /**
+   * The bare r/c shortcuts. On the Settings Memory page typing names a filter
+   * and the manager owns the keys, so its rows act instead.
+   */
+  hotkeys?: boolean;
 }) {
   const busy = saving || status?.busy === true;
+  /** The main button's label; where the bare-key shortcut is off, its "(r)" hint goes with it. */
+  const actionLabel = (key: "memory.cancel" | "memory.recheck" | "memory.setup"): string => memoryActionLabel(key, hotkeys);
   const failed = status?.state === "failed";
   const phase = status?.phase ?? "idle";
   const phases = { idle: "memory.phase.idle", installing: "memory.phase.installing", downloading: "memory.phase.downloading", validating: "memory.phase.validating", indexing: "memory.phase.indexing" } as const;
@@ -47,14 +57,14 @@ export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, 
     if (key.ctrl || key.meta) return;
     if (busy && key.name === "c") { key.preventDefault(); onCancel(); }
     else if (!busy && key.name === "r") { key.preventDefault(); onSetup(); }
-  });
+  }, { capture: true, active: hotkeys });
   return <box style={{ flexDirection: "column", flexShrink: 0, marginBottom: 1, paddingTop: 1, paddingBottom: 1, paddingLeft: 2, paddingRight: 1 }} backgroundColor={SURFACE.panel} selectable={false}>
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }} backgroundColor={SURFACE.panel}>
       <box style={{ flexDirection: "row" }} backgroundColor={SURFACE.panel}>
         <text fg={COLOR.bright} bg={SURFACE.panel} selectable={false}>{t("memory.title")}</text>
         {status?.device ? <text fg={COLOR.dim} bg={SURFACE.panel} selectable={false}>{`  ${status.device}`}</text> : null}
       </box>
-      <HoverButton label={` ${t(busy ? "memory.cancel" : status?.validation ? "memory.recheck" : "memory.setup")} `}
+      <HoverButton label={` ${actionLabel(busy ? "memory.cancel" : status?.validation ? "memory.recheck" : "memory.setup")} `}
         fg={SURFACE.base} hoverBg={COLOR.bright} bg={COLOR.accent} onClick={busy ? onCancel : onSetup} />
     </box>
     <text fg={tone} bg={SURFACE.panel} wrapMode="word" selectable={false}>{line}</text>
@@ -63,7 +73,6 @@ export function MemoryRuntimePanel({ status, saving = false, onSetup, onCancel, 
     {failed && status?.message ? <text fg={COLOR.removed} bg={SURFACE.panel} wrapMode="word" selectable={false}>{tx(status.message)}</text> : null}
     {busy ? null : <box style={{ flexDirection: "row", flexShrink: 0 }} backgroundColor={SURFACE.panel}>
       <HoverButton label={t("memory.keyword")} fg={COLOR.dim} hoverFg={COLOR.bright} bg={SURFACE.panel} onClick={onKeyword} />
-      {onManage === undefined ? null : <HoverButton label={`  ${t("mem.manage")}`} fg={COLOR.dim} hoverFg={COLOR.bright} bg={SURFACE.panel} onClick={onManage} />}
     </box>}
   </box>;
 }

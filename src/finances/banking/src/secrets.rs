@@ -21,30 +21,32 @@ use std::sync::Mutex;
 use thiserror::Error;
 
 use crate::jwt::{JwtError, JwtSigner, PrivateKey};
+use crate::text::{Language, Localized};
 
 /// The keychain service name. The account (the "user" of the entry) is the
 /// Enable Banking application id, so two applications are two entries.
 pub const KEYCHAIN_SERVICE: &str = "Moxen Finances — Enable Banking";
 
-/// Why a key could not be stored, loaded or imported.
+/// Why a key could not be stored, loaded or imported. `Display` is the
+/// English sentence; the Spanish one comes from [`Localized`].
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum SecretError {
     /// The OS keychain refused: locked, unavailable, or a policy of the
     /// platform. The message comes from the platform and never carries the
     /// key.
-    #[error("no se pudo usar el llavero del sistema: {message}")]
+    #[error("the system keychain could not be used: {message}")]
     Keychain {
         /// The platform's description of the failure.
         message: String,
     },
 
     /// No key is stored for that application id.
-    #[error("no hay ninguna clave guardada para esta aplicación de Enable Banking")]
+    #[error("no key is stored for this Enable Banking application")]
     Missing,
 
     /// The file could not be read. The path is the user's own and is only
     /// shown back to them; it is never stored.
-    #[error("no se pudo leer {path}: {kind}")]
+    #[error("could not read {path}: {kind}")]
     Io {
         /// The file the user pointed at.
         path: PathBuf,
@@ -53,13 +55,42 @@ pub enum SecretError {
     },
 
     /// The file is empty or only whitespace.
-    #[error("el archivo de la clave está vacío")]
+    #[error("the key file is empty")]
     EmptyKey,
 
     /// The file is not a usable private key: the error says why, and the
     /// import refuses it here rather than failing on the first sync.
     #[error("{0}")]
     NotAKey(#[from] JwtError),
+}
+
+impl Localized for SecretError {
+    fn localized(&self, language: Language) -> String {
+        match self {
+            SecretError::Keychain { message } => format!(
+                "{} {message}",
+                language.pick(
+                    "the system keychain could not be used:",
+                    "no se pudo usar el llavero del sistema:"
+                )
+            ),
+            SecretError::Missing => language
+                .pick(
+                    "no key is stored for this Enable Banking application",
+                    "no hay ninguna clave guardada para esta aplicación de Enable Banking",
+                )
+                .to_string(),
+            SecretError::Io { path, kind } => format!(
+                "{} {}: {kind}",
+                language.pick("could not read", "no se pudo leer"),
+                path.display()
+            ),
+            SecretError::EmptyKey => language
+                .pick("the key file is empty", "el archivo de la clave está vacío")
+                .to_string(),
+            SecretError::NotAKey(error) => error.localized(language),
+        }
+    }
 }
 
 /// A place a private key can live: the OS keychain, or memory.

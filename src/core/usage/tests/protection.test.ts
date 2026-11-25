@@ -8,7 +8,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeDriver } from "../../providers/claude/driver.js";
 import { FakeTransport, initMessage, successResult } from "../../providers/claude/tests/fakes.js";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, settleThread, updateThreadMeta, trackContinuation, untrackContinuation } from "../../threads/threads.js";
+import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, holdPromotedTurn, startBackgroundTurn, settleThread, updateThreadMeta, trackContinuation, untrackContinuation } from "../../threads/threads.js";
 import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
 import { continueThread, editWorkQueue, flushTaskNotifications, queueTaskNotification, recoverTaskNotifications, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
@@ -1063,6 +1063,219 @@ describe("usage protection", () => {
     expect((await w.store.readTurns(id)).at(-1)?.status).toBe("queued");
     await interruptTurn(w.store, id, (await w.store.readTurns(id)).at(-1)!.id);
   });
+
+  it("moves a plain follow-up to the new thread when the stored recovery hands off", async () => {
+    const w = await world();
+    const id = await w.make("paused handoff");
+    const turn = openTurn(await w.store.readTurns(id))!;
+    await completeTurn(w.store, id, turn.id, { text: "Stopped safely." });
+    const recovery = (await sendTurn(w.store, id, {
+      prompt: "Continue", origin: "usage-continue",
+      queue: { ...parseQueuePolicy({ conditions: [], order: 1, sequential: false, continuation: "stored" }), automatic: true, requestId: "usage:1" },
+    })).turn;
+    const thread = (await w.store.readThreadRecord(id))!;
+    await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", windows: [], phase: "waiting", resetsAt: null, order: 1, handoff: true, turnId: turn.id, recoveryTurnId: recovery.id } });
+    // A plain message a user queued while the hold stood: accepted right
+    // before the hand-off clears the pause, exactly the send that could be
+    // stranded once the source never settles again (MXN-388).
+    const plain = (await sendTurn(w.store, id, { prompt: "Then cover the edge case.", delivery: "queue" })).turn;
+    expect(plain.status).toBe("queued");
+    expect(plain.queue).toBeUndefined();
+    let destination: string | null = null;
+    try {
+      await runWorkQueue(w.ctx);
+      const prepared = (await w.store.readTurns(id)).find((candidate) => candidate.id === recovery.id)!;
+      expect(prepared.handoff?.destinationThreadId).toBeTruthy();
+      destination = prepared.handoff!.destinationThreadId!;
+      // The follow-up moved with the hand-off: taken back as removed on the
+      // source, landed on the destination waiting on its hand-off turn.
+      expect((await w.store.readTurns(id)).find((candidate) => candidate.id === plain.id)).toMatchObject({
+        status: "interrupted",
+        handoff: { destinationThreadId: destination, landed: true },
+      });
+      await settleStartedTurns(w, destination);
+      // The hand-off turn starts as a queue entry itself, so each pass
+      // admits the next waiting turn on the destination: the hand-off
+      // turn first, then the follow-up it carried.
+      let settled: string = "queued";
+      for (let pass = 0; pass < 3 && settled !== "completed"; pass += 1) {
+        await runWorkQueue(w.ctx);
+        await settleStartedTurns(w, destination);
+        settled = (await w.store.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}`)?.status ?? "queued";
+      }
+      const moved = (await w.store.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}`)!;
+      expect(moved.status).toBe("completed");
+      // It ran once, on the new thread only; the old thread never ran it.
+      expect(w.prompts.filter((prompt) => prompt.includes("Then cover the edge case."))).toHaveLength(1);
+      expect(w.sent).not.toContain(id);
+      expect((await w.store.readThreadRecord(id))?.usagePause).toBeNull();
+    } finally {
+      if (destination !== null) for (const running of (await w.store.readTurns(destination)).filter((candidate) => candidate.status === "running")) await interruptTurn(w.store, destination, running.id);
+      for (const running of (await w.store.readTurns(id)).filter((candidate) => candidate.status === "running")) await interruptTurn(w.store, id, running.id);
+    }
+  }, 20_000);
+
+  it("carries every message of a turn the hold held mid-batch when the stored recovery hands off", async () => {
+    const w = await world();
+    const id = await w.make("batched hold");
+    const running = openTurn(await w.store.readTurns(id))!;
+    // Two plain messages queued behind a turn; the settle batches both into
+    // the one turn it promotes...
+    await sendTurn(w.store, id, { prompt: "One: cover the parser", delivery: "queue" });
+    await sendTurn(w.store, id, { prompt: "Two: cover the printer", delivery: "queue" });
+    await completeTurn(w.store, id, running.id, { text: "wrapping up" });
+    const promoted = openTurn(await w.store.readTurns(id))!;
+    expect((await w.store.readMessages(id)).filter((message) => message.turnId === promoted.id && message.role === "user").map((message) => message.text)).toEqual(["One: cover the parser", "Two: cover the printer"]);
+    // ...and a usage hold takes that promoted turn back before it dispatched,
+    // for an hour that shortly comes due.
+    const until = new Date(Date.now() + 1500).toISOString();
+    expect(await holdPromotedTurn(w.store, id, promoted.id, until)).toBe(true);
+    const recovery = (await sendTurn(w.store, id, {
+      prompt: "Continue", origin: "usage-continue",
+      queue: { ...parseQueuePolicy({ conditions: [], order: 1, sequential: false, continuation: "stored" }), automatic: true, requestId: "usage:1" },
+    })).turn;
+    const thread = (await w.store.readThreadRecord(id))!;
+    await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", windows: [], phase: "waiting", resetsAt: null, order: 1, handoff: true, turnId: running.id, recoveryTurnId: recovery.id } });
+    let destination: string | null = null;
+    try {
+      await vi.waitFor(() => expect(Date.now()).toBeGreaterThanOrEqual(Date.parse(until)), { timeout: 10_000, interval: 25 });
+      await runWorkQueue(w.ctx);
+      const prepared = (await w.store.readTurns(id)).find((candidate) => candidate.id === recovery.id)!;
+      expect(prepared.handoff?.destinationThreadId).toBeTruthy();
+      destination = prepared.handoff!.destinationThreadId!;
+      // MXN-388: the batch moves whole — every message, in order, one entry.
+      expect((await w.store.readTurns(id)).find((candidate) => candidate.id === promoted.id)).toMatchObject({
+        status: "interrupted",
+        handoff: { destinationThreadId: destination, landed: true },
+      });
+      const movedId = (await w.store.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${promoted.id}`)!.id;
+      expect((await w.store.readTurns(destination)).find((candidate) => candidate.id === movedId)?.queue?.transferMessages).toBe(2);
+      const own = (await w.store.readMessages(destination)).filter((message) => message.turnId === movedId && message.role === "user").map((message) => message.text);
+      expect(own).toEqual(["One: cover the parser", "Two: cover the printer"]);
+      // Its hand-off turn starts as a queue entry itself, so each pass admits
+      // the next waiting turn on the destination.
+      let settled: string | undefined;
+      for (let pass = 0; pass < 3 && settled !== "completed"; pass += 1) {
+        await runWorkQueue(w.ctx);
+        await settleStartedTurns(w, destination);
+        settled = (await w.store.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${promoted.id}`)?.status;
+      }
+      expect(settled).toBe("completed");
+      const dispatched = w.prompts.find((prompt) => prompt.includes("cover the parser"))!;
+      // One dispatch carries both, in order, on the new thread only.
+      expect(dispatched).toContain("One: cover the parser\n\nTwo: cover the printer");
+      expect(w.sent).not.toContain(id);
+    } finally {
+      if (destination !== null) for (const row of (await w.store.readTurns(destination)).filter((candidate) => candidate.status === "running")) await interruptTurn(w.store, destination, row.id);
+      for (const row of (await w.store.readTurns(id)).filter((candidate) => candidate.status === "running")) await interruptTurn(w.store, id, row.id);
+    }
+  }, 20_000);
+
+  // A staged follow-up whose move never landed, after a restart: the queue
+  // pass alone repairs it, and a loaded runner needs several admissions.
+  it("resumes a follow-up move the crashed hand-off left behind, from ordinary queue processing after a restart", async () => {
+    const w = await world();
+    const id = await w.make("paused handoff");
+    const turn = openTurn(await w.store.readTurns(id))!;
+    await completeTurn(w.store, id, turn.id, { text: "Stopped safely." });
+    const recovery = (await sendTurn(w.store, id, {
+      prompt: "Continue", origin: "usage-continue",
+      queue: { ...parseQueuePolicy({ conditions: [], order: 1, sequential: false, continuation: "stored" }), automatic: true, requestId: "usage:1" },
+    })).turn;
+    const thread = (await w.store.readThreadRecord(id))!;
+    await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", windows: [], phase: "waiting", resetsAt: null, order: 1, handoff: true, turnId: turn.id, recoveryTurnId: recovery.id } });
+    const plain = (await sendTurn(w.store, id, { prompt: "Then cover the edge case.", delivery: "queue" })).turn;
+    const dueAt = new Date(Date.now() + 1500).toISOString();
+    const scheduled = (await sendTurn(w.store, id, { prompt: "Later, repeat the check", scheduledFor: dueAt })).turn;
+    // MXN-388: the server dies after the prepared recovery cleared the hold
+    // but before the follow-ups' move landed — a crash mid-migration.
+    const append = w.store.appendLedger.bind(w.store);
+    const crash = vi.spyOn(w.store, "appendLedger").mockImplementation(async (threadId, name, row) => {
+      const requestId = (row as { queue?: { requestId?: string } }).queue?.requestId;
+      if (name === "turns" && threadId !== id && requestId?.startsWith("handoff:transfer:")) throw new Error("server stopped before the move landed");
+      return append(threadId, name, row);
+    });
+    await runWorkQueue(w.ctx);
+    crash.mockRestore();
+    const prepared = (await w.store.readTurns(id)).find((candidate) => candidate.id === recovery.id)!;
+    expect(prepared.status).toBe("completed");
+    expect((await w.store.readThreadRecord(id))?.usagePause).toBeNull();
+    const destination = prepared.handoff!.destinationThreadId!;
+    for (const stranded of [plain, scheduled]) {
+      const row = (await w.store.readTurns(id)).find((candidate) => candidate.id === stranded.id)!;
+      expect(row).toMatchObject({ status: "queued", queue: { removed: true }, handoff: { destinationThreadId: destination } });
+      expect(row.handoff?.landed).toBeUndefined();
+    }
+    // A restart: nobody continues the source — ordinary queue processing
+    // alone resumes the move, lands both follow-ups and runs them once.
+    // The schedule comes due while the move lands.
+    const reopened = await openThreadStore(w.root);
+    const restarted: OperationContext = { ...w.ctx, store: reopened };
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThanOrEqual(Date.parse(dueAt)), { timeout: 10_000, interval: 25 });
+    for (let pass = 0; pass < 4; pass += 1) {
+      await runWorkQueue(restarted);
+      await settleStartedTurns(w, destination);
+      const statuses = (await reopened.readTurns(destination))
+        .flatMap((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}` || candidate.queue?.requestId === `handoff:transfer:${scheduled.id}` ? [candidate.status] : []);
+      if (statuses.length === 2 && statuses.every((status) => status === "completed")) break;
+    }
+    for (const moved of (await reopened.readTurns(destination)).filter((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}` || candidate.queue?.requestId === `handoff:transfer:${scheduled.id}`)) {
+      expect(moved.status).toBe("completed");
+      expect((await reopened.readTurns(id)).find((candidate) => candidate.id === (moved.queue!.requestId!.slice("handoff:transfer:".length)))).toMatchObject({ status: "interrupted", handoff: { landed: true } });
+    }
+    expect(w.prompts.filter((prompt) => prompt.includes("Then cover the edge case."))).toHaveLength(1);
+    expect(w.prompts.some((prompt) => prompt.includes("Later, repeat the check"))).toBe(true);
+    expect(w.sent).not.toContain(id);
+    for (const row of (await reopened.readTurns(destination)).filter((candidate) => candidate.status === "running")) await interruptTurn(reopened, destination, row.id);
+  }, 20_000);
+
+  it("repairs a half-written destination entry from ordinary queue processing after a restart", async () => {
+    const w = await world();
+    const id = await w.make("paused handoff");
+    const turn = openTurn(await w.store.readTurns(id))!;
+    await completeTurn(w.store, id, turn.id, { text: "Stopped safely." });
+    const recovery = (await sendTurn(w.store, id, {
+      prompt: "Continue", origin: "usage-continue",
+      queue: { ...parseQueuePolicy({ conditions: [], order: 1, sequential: false, continuation: "stored" }), automatic: true, requestId: "usage:1" },
+    })).turn;
+    const thread = (await w.store.readThreadRecord(id))!;
+    await w.store.writeThreadRecord({ ...thread, usagePause: { provider: "codex", windows: [], phase: "waiting", resetsAt: null, order: 1, handoff: true, turnId: turn.id, recoveryTurnId: recovery.id } });
+    const plain = (await sendTurn(w.store, id, { prompt: "Then cover the edge case.", delivery: "queue" })).turn;
+    // MXN-388: the process dies after the destination entry's turn row landed
+    // but before its message did — the source stays staged, the entry can
+    // never run, and only the queue pass's repair closes the gap.
+    const append = w.store.appendLedger.bind(w.store);
+    const crash = vi.spyOn(w.store, "appendLedger").mockImplementation(async (threadId, name, row) => {
+      if (name === "messages" && threadId !== id && (row as { text?: unknown }).text === "Then cover the edge case.") {
+        throw new Error("injected ledger failure");
+      }
+      return append(threadId, name, row);
+    });
+    await runWorkQueue(w.ctx);
+    crash.mockRestore();
+    const prepared = (await w.store.readTurns(id)).find((candidate) => candidate.id === recovery.id)!;
+    const destination = prepared.handoff!.destinationThreadId!;
+    const partial = (await w.store.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}`)!;
+    expect(partial).toBeDefined();
+    expect((await w.store.readMessages(destination)).some((message) => message.turnId === partial.id)).toBe(false);
+    const staged = (await w.store.readTurns(id)).find((candidate) => candidate.id === plain.id)!;
+    expect(staged).toMatchObject({ status: "queued", queue: { removed: true } });
+    expect(staged.handoff?.landed).toBeUndefined();
+    // A restart repairs the entry, lands the move and runs it once.
+    const reopened = await openThreadStore(w.root);
+    const restarted: OperationContext = { ...w.ctx, store: reopened };
+    for (let pass = 0; pass < 4; pass += 1) {
+      await runWorkQueue(restarted);
+      await settleStartedTurns(w, destination);
+      const moved = (await reopened.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}`);
+      if (moved?.status === "completed") break;
+    }
+    expect((await reopened.readTurns(destination)).find((candidate) => candidate.queue?.requestId === `handoff:transfer:${plain.id}`)?.status).toBe("completed");
+    expect((await reopened.readTurns(id)).find((candidate) => candidate.id === plain.id)).toMatchObject({ status: "interrupted", handoff: { landed: true } });
+    expect(w.prompts.filter((prompt) => prompt.includes("Then cover the edge case."))).toHaveLength(1);
+    expect(w.sent).not.toContain(id);
+    for (const row of (await reopened.readTurns(destination)).filter((candidate) => candidate.status === "running")) await interruptTurn(reopened, destination, row.id);
+  }, 20_000);
 
   it.each(["claude", "codex"] as const)("%s holds queued input across restart and wraps only one thread at a time", async (provider) => {
     const w = await world(provider);

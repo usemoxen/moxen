@@ -40,4 +40,23 @@ describe("resolveWorkspace", () => {
     expect(resolution.workspaceRoot).toBe(await realpath(nested));
     expect(resolution.isGitRepository).toBe(true);
   });
+
+  it("resolves a repo root whose name ends in a space, not onto the folder beside it (POSIX: Windows cannot hold the name)", async () => {
+    if (process.platform === "win32") return; // a Windows folder name cannot end in a space, so neither root exists there.
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-space-"));
+    cleanup.push(root);
+    const spaced = path.join(root, "repo ");
+    await mkdir(spaced);
+    await runProcess("git", ["init", "-b", "main"], { cwd: spaced });
+    await mkdir(path.join(root, "repo"));
+
+    const resolution = await resolveWorkspace(spaced, "repo");
+
+    expect(resolution.workspaceRoot).toBe(await realpath(spaced));
+    expect(resolution.workspaceRoot.endsWith("repo ")).toBe(true);
+
+    // The folder beside it resolves to itself alone.
+    const beside = await resolveWorkspace(path.join(root, "repo"), "folder");
+    expect(beside.workspaceRoot).toBe(await realpath(path.join(root, "repo")));
+  });
 });

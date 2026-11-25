@@ -92,7 +92,7 @@ import { chatgptHarnessConfigFor, driverProviders } from "../core/threads/longth
 import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
 import { ensureStoredProject, listStoredProjects, removeStoredProject, renameStoredProject, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
-import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, memoryIndexText, readMemory, saveMemory, searchMemories, type MemoryLocation } from "../core/memory/memory.js";
+import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, MAX_MEMORIES, memoryIndexText, readMemory, saveMemory, searchMemories, type MemoryLocation } from "../core/memory/memory.js";
 import { EmbeddingRuntime } from "../core/memory/embedding-runtime.js";
 import { SemanticMemory } from "../core/memory/semantic.js";
 import { projectMemorySetting } from "../core/threads/instructions.js";
@@ -3140,7 +3140,7 @@ export class DirectConnection implements ClientApi {
       }
       case "memory.list": {
         const location = await this.memoryLocation(query);
-        return { projectId: location.projectId, memories: await listMemories(location), index: await memoryIndexText(location) };
+        return { projectId: location.projectId, memories: await listMemories(location), index: await memoryIndexText(location), cap: MAX_MEMORIES };
       }
       case "memory.read":
         return await readMemory(await this.memoryLocation(query), query.name, query.scope);

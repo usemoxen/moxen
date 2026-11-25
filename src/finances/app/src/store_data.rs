@@ -7,11 +7,21 @@
 //! account): every read serves a cached snapshot, and every command rewrites
 //! the store and reloads the snapshot, so the next frame shows the change.
 //! Failures come back as [`DataError`] — never a panic.
+//!
+//! Bank sync (LOCAL-031) sits here too: the application id is a setting, the
+//! private key lives in the OS keychain through `moxen-finances-banking`, and
+//! a link or a sync runs on a worker thread against its own connection to the
+//! same file, so the window keeps painting. `bank_sync()` reads the store
+//! directly (it is a handful of small queries) instead of the snapshot, so a
+//! run that finishes in the background shows up on the next frame.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate};
+use moxen_finances_banking::secrets::{KeychainStore, import_pem_file};
+use moxen_finances_banking::{Client, PrivateKeyStore, SystemClock, UreqTransport};
 use moxen_finances_core::accounts::total_balance_minor;
 use moxen_finances_core::dates::today_madrid_now;
 use moxen_finances_core::exchange::{RATE_SCALE, find_rate_at};
@@ -30,15 +40,20 @@ use moxen_finances_store::repo::{
 };
 use moxen_finances_store::{Store, StoreError};
 use moxen_finances_ui::commands::{
-    AccountDraft, CsvSheet, DataError, DataErrorKind, FinancesMutations, MovementDraft,
-    SubscriptionAction, SubscriptionDraft, TransferDraft,
+    AccountDraft, BankLinkDraft, CsvSheet, DataError, DataErrorKind, FinancesMutations,
+    MovementDraft, SubscriptionAction, SubscriptionDraft, TransferDraft,
 };
 use moxen_finances_ui::data::{
-    AccountInfo, AccountKind, AccountSelection, BalancePoint, Currency, FinancesData, Frequency,
-    Money, MonthSummary, Movement, MovementKind, MovementStatus, Subscription, SubscriptionStatus,
-    UpcomingCharge, category_localized, passthrough_localized,
+    AccountInfo, AccountKind, AccountSelection, BalancePoint, BankSyncState, Currency,
+    FinancesData, Frequency, Money, MonthSummary, Movement, MovementKind, MovementStatus,
+    Subscription, SubscriptionStatus, UpcomingCharge, category_localized, passthrough_localized,
 };
 use moxen_finances_ui::model;
+
+use crate::bank_sync::{
+    self, APP_ID_SETTING, BankFailure, BankGateway, BankRuntime, GatewayFactory, INTERVAL_SETTING,
+    UrlOpener,
+};
 
 // ---------------------------------------------------------------------------
 // Mapping between the ui DTOs and the core types
@@ -531,17 +546,29 @@ pub struct StoreData {
     selection: RefCell<AccountSelection>,
     snapshot: RefCell<Rc<Snapshot>>,
     load_error: RefCell<Option<DataError>>,
+    /// Where the private key lives, how a gateway is built, and what the
+    /// settings screen polls while a link or a sync runs.
+    bank: Arc<BankRuntime>,
 }
 
 impl StoreData {
-    /// Wraps an open store and loads its first snapshot. The error is the
-    /// load's failure, if any (the store itself opened fine).
+    /// Wraps an open store and loads its first snapshot. The bank runtime is the
+    /// app's own: the OS keychain, the real client over the real transport, and
+    /// the platform's browser opener.
     pub fn try_new(store: Store) -> Result<Self, DataError> {
+        Self::with_bank_runtime(store, Arc::new(default_bank_runtime()))
+    }
+
+    /// The same, with a caller's runtime: what a test needs to link and sync
+    /// against a recorded transport and an in-memory key store, with no
+    /// keychain, no browser and no network.
+    pub fn with_bank_runtime(store: Store, bank: Arc<BankRuntime>) -> Result<Self, DataError> {
         let data = StoreData {
             store: RefCell::new(store),
             selection: RefCell::new(AccountSelection::All),
             snapshot: RefCell::new(Rc::new(empty_snapshot())),
             load_error: RefCell::new(None),
+            bank,
         };
         data.reload()?;
         Ok(data)
@@ -551,6 +578,24 @@ impl StoreData {
     pub fn initialize(path: impl AsRef<std::path::Path>) -> Result<Self, DataError> {
         let store = Store::initialize(path).map_err(map_error)?;
         Self::try_new(store)
+    }
+
+    /// The store, for the bank tests that seed a link directly.
+    #[cfg(test)]
+    pub(crate) fn store_ref(&self) -> std::cell::Ref<'_, Store> {
+        self.store.borrow()
+    }
+
+    /// The store, for the bank tests that seed a link directly.
+    #[cfg(test)]
+    pub(crate) fn store_mut(&self) -> std::cell::RefMut<'_, Store> {
+        self.store.borrow_mut()
+    }
+
+    /// The bank runtime this data source runs on, so the app can start the
+    /// automatic sync over the same key store and gateway factory.
+    pub fn bank_runtime(&self) -> Arc<BankRuntime> {
+        Arc::clone(&self.bank)
     }
 
     /// Re-reads the whole snapshot for the current selection.
@@ -590,6 +635,58 @@ impl StoreData {
     fn snapshot(&self) -> Rc<Snapshot> {
         self.snapshot.borrow().clone()
     }
+}
+
+/// The runtime the app ships with: the OS keychain for keys, the real
+/// Enable Banking client over `ureq` for requests, and the platform's browser
+/// for the authorization URL.
+///
+/// This is the ONLY place a keychain or a network is touched, and it is only
+/// reached when the user asks for a link or a sync.
+pub fn default_bank_runtime() -> BankRuntime {
+    let factory: GatewayFactory = Arc::new(|secrets: &dyn PrivateKeyStore, app_id: &str| {
+        let key = bank_sync::load_key(secrets, app_id)?;
+        let signer = moxen_finances_banking::JwtSigner::new(app_id, &key)?;
+        // Thirty seconds per request: transaction pages are the slow call.
+        let transport = UreqTransport::new(std::time::Duration::from_secs(30));
+        Ok(Box::new(Client::new(signer, transport, SystemClock)) as Box<dyn BankGateway>)
+    });
+    let opener: UrlOpener = Arc::new(open_in_browser);
+    BankRuntime::new(Arc::new(KeychainStore::new()), factory, opener)
+}
+
+/// Hand an `https` URL to the platform's browser without a shell: `open` on
+/// macOS, the URL protocol handler on Windows. The URL was already checked to
+/// be `https` by the link flow, and it is passed as one argument, never joined
+/// into a command line.
+fn open_in_browser(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        // `rundll32 url.dll,FileProtocolHandler` opens the default browser
+        // without going through `cmd`, so the URL is never re-parsed.
+        let mut command = std::process::Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", url]);
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| true)
+        .unwrap_or(false)
 }
 
 fn empty_snapshot() -> Snapshot {
@@ -667,6 +764,11 @@ impl FinancesData for StoreData {
             .borrow()
             .path()
             .map(|path| path.display().to_string())
+    }
+    fn bank_sync(&self) -> BankSyncState {
+        // Read live, not from the snapshot: a link or a sync that finished on
+        // its worker thread has to show up on the next frame.
+        bank_sync::state(&self.store.borrow(), &self.bank)
     }
 }
 
@@ -1123,6 +1225,162 @@ impl FinancesMutations for StoreData {
             .export_csv(kind, "1970-01-01", "2999-12-31")
             .map_err(map_error)
     }
+
+    // -- bank sync (LOCAL-031) ---------------------------------------------------
+
+    fn save_bank_application(&self, app_id: &str) -> Result<(), DataError> {
+        let app_id = app_id.trim();
+        if app_id.is_empty() {
+            return Err(DataError::new(
+                DataErrorKind::Invalid,
+                moxen_finances_ui::language::message("settings.bank.app.empty"),
+            ));
+        }
+        // The application id is public metadata: it names the application in
+        // every JWT. The key never comes this way, and the setting cannot hold
+        // one.
+        self.store
+            .borrow_mut()
+            .update_setting(APP_ID_SETTING, app_id)
+            .map_err(map_error)
+    }
+
+    fn import_bank_key(&self, pem_path: &str) -> Result<(), DataError> {
+        let app_id = bank_sync::app_id(&self.store.borrow());
+        if app_id.is_empty() {
+            return Err(BankFailure::NoApplication.to_data_error());
+        }
+        // Read once, validated, stored in the OS keychain. The path is not
+        // kept, and no part of the key touches this database or a log.
+        import_pem_file(self.bank.secrets.as_ref(), &app_id, pem_path)
+            .map_err(|error| BankFailure::Secret(error).to_data_error())
+    }
+
+    fn remove_bank_key(&self) -> Result<(), DataError> {
+        let app_id = bank_sync::app_id(&self.store.borrow());
+        if app_id.is_empty() {
+            return Err(BankFailure::NoApplication.to_data_error());
+        }
+        self.bank
+            .secrets
+            .forget(&app_id)
+            .map_err(|error| BankFailure::Secret(error).to_data_error())
+    }
+
+    fn link_bank(&self, draft: &BankLinkDraft) -> Result<(), DataError> {
+        let app_id = bank_sync::app_id(&self.store.borrow());
+        if app_id.is_empty() {
+            return Err(BankFailure::NoApplication.to_data_error());
+        }
+        // A link with no key would fail on the first request; say which piece
+        // is missing before opening a browser.
+        moxen_finances_banking::secrets::PrivateKeyStore::load(self.bank.secrets.as_ref(), &app_id)
+            .map_err(|error| BankFailure::Secret(error).to_data_error())?;
+        let country = draft.country.trim().to_ascii_uppercase();
+        if country.is_empty() || draft.bank_name.trim().is_empty() {
+            return Err(DataError::new(
+                DataErrorKind::Invalid,
+                moxen_finances_ui::language::message("settings.bank.link.needs-application"),
+            ));
+        }
+        let bank_name = draft.bank_name.trim().to_string();
+        let language = draft.language.clone();
+        // A file-backed store links on a worker thread, against its own
+        // connection to the same file, so the window keeps painting while the
+        // browser is open. An in-memory store (a test) has no file to share,
+        // so it links here.
+        let path = self.store.borrow().path().map(std::path::Path::to_path_buf);
+        match path {
+            Some(path) => self
+                .bank
+                .link_in_background(path, app_id, country, bank_name, language)
+                .map_err(|failure| failure.to_data_error()),
+            None => {
+                let mut store = self.store.borrow_mut();
+                self.bank
+                    .link_inline(
+                        &mut store,
+                        &app_id,
+                        &country,
+                        &bank_name,
+                        language.as_deref(),
+                    )
+                    .map(|_| ())
+                    .map_err(|failure| failure.to_data_error())
+            }
+        }
+    }
+
+    fn unlink_bank(&self, connection_id: &str) -> Result<(), DataError> {
+        // Ask the bank to close the session first (it needs the row we are
+        // about to delete), then forget the link. The movements the link
+        // imported stay: they are the user's history, not the link's.
+        let (app_id, session_id, path) = {
+            let store = self.store.borrow();
+            match store.bank_connection(connection_id).map_err(map_error)? {
+                Some(connection) => (
+                    connection.app_id,
+                    connection.session_id,
+                    store.path().map(std::path::Path::to_path_buf),
+                ),
+                None => return Ok(()),
+            }
+        };
+        if let Some(path) = path {
+            self.bank
+                .close_session_in_background(path, app_id, session_id);
+        }
+        self.store
+            .borrow_mut()
+            .delete_bank_connection(connection_id)
+            .map_err(map_error)?;
+        Ok(())
+    }
+
+    fn map_bank_account(
+        &self,
+        connection_id: &str,
+        external_uid: &str,
+        account_id: &str,
+    ) -> Result<(), DataError> {
+        self.store
+            .borrow_mut()
+            .set_bank_account_mapping(connection_id, external_uid, account_id)
+            .map_err(map_error)
+    }
+
+    fn sync_bank_now(&self, connection_id: &str) -> Result<(), DataError> {
+        let today =
+            parse_date(&today_madrid_now()).unwrap_or_else(|| chrono::Utc::now().date_naive());
+        let path = self.store.borrow().path().map(std::path::Path::to_path_buf);
+        match path {
+            Some(path) => self
+                .bank
+                .sync_in_background(path, connection_id.to_string(), today)
+                .map_err(|failure| failure.to_data_error()),
+            None => {
+                let mut store = self.store.borrow_mut();
+                self.bank
+                    .sync_inline(&mut store, connection_id, today)
+                    .map_err(|failure| failure.to_data_error())?;
+                drop(store);
+                // The ledger changed on this thread: read it again so the
+                // views show the imported movements on the next frame.
+                self.reload()
+            }
+        }
+    }
+
+    fn set_bank_sync_interval(&self, minutes: Option<u32>) -> Result<(), DataError> {
+        // Off is stored as an empty value, which the reader treats as absent.
+        let value = minutes
+            .map(|minutes| minutes.to_string())
+            .unwrap_or_default();
+        self.store
+            .borrow_mut()
+            .update_setting(INTERVAL_SETTING, &value)
+            .map_err(map_error)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,5 +1670,197 @@ mod tests {
                 .iter()
                 .any(|a| a.id == created && a.archived)
         );
+    }
+}
+
+#[cfg(test)]
+mod bank_tests {
+    //! The bank sync through the trait the Settings page talks to: the
+    //! application id in settings, the key in an in-memory store, the interval,
+    //! the mapping, a sync and an unlink. No keychain, no browser, no network.
+
+    use super::*;
+    use crate::test_support::*;
+    use moxen_finances_ui::data::BankConsent;
+
+    #[test]
+    fn the_application_id_is_a_setting_and_the_key_stays_in_its_store() {
+        let (runtime, secrets) = bank_runtime(vec![]);
+        let data = memory_data(runtime);
+        // Nothing stored yet: linking is not ready.
+        assert_eq!(data.bank_sync().app_id, "");
+        assert!(!data.bank_sync().is_ready_to_link());
+
+        data.save_bank_application("  fictional-application-id  ")
+            .expect("the application");
+        assert_eq!(data.bank_sync().app_id, "fictional-application-id");
+        assert!(!data.bank_sync().key_stored);
+        // An empty application id is refused with a localizable error.
+        let error = data.save_bank_application("   ").expect_err("empty");
+        assert_eq!(error.kind, DataErrorKind::Invalid);
+
+        // The key is imported from a PEM file into the key store, and nowhere
+        // else: the settings table holds no key.
+        data.import_bank_key(
+            &banking_fixture_path("test-key-pkcs8.pem")
+                .display()
+                .to_string(),
+        )
+        .expect("the key");
+        assert!(data.bank_sync().key_stored);
+        assert!(data.bank_sync().is_ready_to_link());
+        assert_eq!(secrets.len(), 1);
+        let settings = data.store_ref().settings().expect("settings");
+        assert!(
+            !settings
+                .iter()
+                .any(|setting| setting.value.contains("PRIVATE KEY")),
+            "no setting may hold the private key"
+        );
+
+        // And it can be removed again.
+        data.remove_bank_key().expect("forget");
+        assert!(!data.bank_sync().key_stored);
+        assert!(secrets.is_empty());
+    }
+
+    #[test]
+    fn the_interval_is_stored_off_when_cleared() {
+        let (runtime, _secrets) = bank_runtime(vec![]);
+        let data = memory_data(runtime);
+        data.set_bank_sync_interval(Some(60)).expect("an hour");
+        assert_eq!(data.bank_sync().interval, Some(60));
+        data.set_bank_sync_interval(None).expect("off");
+        assert_eq!(data.bank_sync().interval, None);
+        // And the scheduler sees nothing due while it is off.
+        assert!(bank_sync::due_connections(&data.store_ref(), chrono::Utc::now()).is_empty());
+    }
+
+    #[test]
+    fn a_sync_through_the_commands_imports_once_and_refreshes_the_views() {
+        let (runtime, _secrets) = bank_runtime(vec![
+            moxen_finances_banking::HttpResponse::new(200, banking_fixture("balances.json")),
+            moxen_finances_banking::HttpResponse::new(
+                200,
+                banking_fixture("transactions-page-1.json"),
+            ),
+            moxen_finances_banking::HttpResponse::new(
+                200,
+                banking_fixture("transactions-page-2.json"),
+            ),
+            moxen_finances_banking::HttpResponse::new(
+                200,
+                banking_fixture("transactions-page-3.json"),
+            ),
+        ]);
+        let data = memory_data(runtime);
+        data.save_bank_application(BANK_APP_ID)
+            .expect("application");
+        data.import_bank_key(
+            &banking_fixture_path("test-key-pkcs8.pem")
+                .display()
+                .to_string(),
+        )
+        .expect("key");
+        let (connection_id, account_id) = linked_in_store(&data, "2099-12-31T00:00:00Z");
+        // The linked bank shows up for the settings screen at once.
+        let state = data.bank_sync();
+        assert_eq!(state.connections.len(), 1);
+        assert_eq!(state.connections[0].accounts.len(), 2);
+        assert_eq!(state.connections[0].consent, BankConsent::Valid);
+
+        let before = data.movements().len();
+        data.sync_bank_now(&connection_id).expect("sync");
+        // The in-memory store syncs on this thread, so the result is already
+        // there: three booked movements, and the pending one skipped.
+        assert_eq!(data.movements().len(), before + 3);
+        assert_eq!(data.bank_sync().connections[0].imported, 3);
+        assert_eq!(
+            data.bank_sync().connections[0].last_sync,
+            Some(data.today())
+        );
+        // The balance landed on the mapped account.
+        let account = data
+            .accounts()
+            .iter()
+            .find(|account| account.id == account_id)
+            .cloned()
+            .expect("the account");
+        assert_eq!(account.balance.minor, 123_456);
+        // No link or sync is running once the command returned.
+        assert_eq!(data.bank_sync().activity.map(|_| ()), None);
+        assert!(data.bank_sync().message.is_some());
+    }
+
+    #[test]
+    fn mapping_and_unlinking_are_the_user_s_own_decisions() {
+        let (runtime, _secrets) = bank_runtime(vec![]);
+        let data = memory_data(runtime);
+        data.save_bank_application(BANK_APP_ID)
+            .expect("application");
+        let (connection_id, account_id) = linked_in_store(&data, "2099-12-31T00:00:00Z");
+
+        // The unmapped account of the link chooses the local account.
+        data.map_bank_account(&connection_id, "fictional-account-uid-0002", &account_id)
+            .expect("map");
+        assert_eq!(
+            data.bank_sync().connections[0].accounts[1]
+                .account_id
+                .as_deref(),
+            Some(account_id.as_str())
+        );
+        // And can be unmapped again.
+        data.map_bank_account(&connection_id, "fictional-account-uid-0002", "")
+            .expect("unmap");
+        assert_eq!(data.bank_sync().connections[0].accounts[1].account_id, None);
+        // An account the link does not have is refused.
+        let error = data
+            .map_bank_account(&connection_id, "not-a-uid", &account_id)
+            .expect_err("unknown");
+        assert_eq!(error.kind, DataErrorKind::NotFound);
+
+        // Unlinking forgets the link, keeps the movements already imported.
+        data.unlink_bank(&connection_id).expect("unlink");
+        assert!(data.bank_sync().connections.is_empty());
+        assert!(data.accounts().iter().any(|a| a.id == account_id));
+    }
+
+    #[test]
+    fn a_bank_command_without_an_application_is_refused_cleanly() {
+        let (runtime, _secrets) = bank_runtime(vec![]);
+        let data = memory_data(runtime);
+        // No application id: linking and key import say which piece is missing
+        // instead of opening a browser.
+        let error = data
+            .link_bank(&BankLinkDraft {
+                country: "ES".into(),
+                bank_name: "Banco Ficticio".into(),
+                language: None,
+            })
+            .expect_err("no application");
+        assert_eq!(error.kind, DataErrorKind::Banking);
+        assert!(error.detail.contains("application id"), "{}", error.detail);
+        let error = data
+            .import_bank_key(
+                &banking_fixture_path("test-key-pkcs8.pem")
+                    .display()
+                    .to_string(),
+            )
+            .expect_err("no application");
+        assert_eq!(error.kind, DataErrorKind::Banking);
+        assert!(data.bank_sync().connections.is_empty());
+    }
+
+    #[test]
+    fn a_missing_link_is_a_not_found_not_a_panic() {
+        let (runtime, _secrets) = bank_runtime(vec![]);
+        let data = memory_data(runtime);
+        data.save_bank_application(BANK_APP_ID)
+            .expect("application");
+        let error = data.sync_bank_now("no-such-link").expect_err("gone");
+        assert_eq!(error.kind, DataErrorKind::Banking);
+        // An unlink of something that is not there is a no-op: the caller
+        // wanted it gone.
+        data.unlink_bank("no-such-link").expect("nothing to unlink");
     }
 }

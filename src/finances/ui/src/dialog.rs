@@ -842,8 +842,9 @@ pub fn render(
                     .on_click(cx.listener(|this, _, _, cx| close(this, cx))),
                 )
                 .child(
-                    kit::button(
+                    kit::primary_button(
                         ("dialog-save", 0usize),
+                        None,
                         message(if is_restore {
                             "dialog.restore.action"
                         } else {
@@ -851,7 +852,7 @@ pub fn render(
                         })
                         .to_string(),
                     )
-                    .control(message("dialog.save"))
+                    .primary_control(message("dialog.save"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if submit(this, cx) && !matches!(this.dialog, Some(Dialog::RestoreBackup)) {
                             close(this, cx);

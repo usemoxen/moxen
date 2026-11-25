@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 
+use crate::text::{Language, Localized};
+
 use crate::{JWT_MAX_TTL, JWT_TTL};
 
 /// `typ` and `alg`, fixed by the API: only RS256 is accepted.
@@ -198,35 +200,80 @@ impl Claims {
 pub const MAX_TTL: Duration = JWT_MAX_TTL;
 
 /// Why a token could not be produced. Every variant says what the caller has
-/// to fix, and none of them carries key material.
+/// to fix, and none of them carries key material. `Display` is the English
+/// sentence; the Spanish one comes from [`Localized`].
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum JwtError {
     /// The text does not contain a `-----BEGIN ...-----` line at all, so it is
     /// not a PEM file (a `.key` that is really a certificate chain, a truncated
     /// download, or the wrong file).
-    #[error("la clave no está en formato PEM: no se encontró ninguna línea «-----BEGIN ...-----»")]
+    #[error("the key is not PEM-encoded: no «-----BEGIN ...-----» line was found")]
     MissingPem,
     /// A PEM file, but not a private key this crate can sign with: a public
     /// key, a certificate, a CA bundle.
-    #[error("el archivo PEM contiene «{0}», que no es una clave privada RSA utilizable")]
+    #[error("the PEM file holds «{0}», which is not a usable RSA private key")]
     UnsupportedLabel(String),
     /// A password-protected key. This crate never asks for or keeps a
     /// password, so the user has to export an unencrypted copy.
     #[error(
-        "la clave privada está cifrada con contraseña; expórtala sin contraseña \
-         (openssl pkcs8 -topk8 -nocrypt) y vuelve a importarla"
+        "the private key is password-protected; export it without a password \
+         (openssl pkcs8 -topk8 -nocrypt) and import it again"
     )]
     EncryptedKey,
     /// The armor says private key but the DER inside is not a readable RSA key.
-    #[error("la clave privada PEM está dañada o no es una clave RSA")]
+    #[error("the PEM private key is damaged or is not an RSA key")]
     MalformedKey,
     /// The application id is empty, so `kid` would name no application.
-    #[error("falta el identificador de la aplicación de Enable Banking")]
+    #[error("the Enable Banking application id is missing")]
     MissingApplicationId,
     /// RSA refused to sign, which for a usable key means its modulus is too
     /// small for a SHA-256 signature.
-    #[error("no se pudo firmar el token con esta clave")]
+    #[error("the token could not be signed with this key")]
     Signing,
+}
+
+impl Localized for JwtError {
+    fn localized(&self, language: Language) -> String {
+        match self {
+            JwtError::MissingPem => language.pick(
+                "the key is not PEM-encoded: no «-----BEGIN ...-----» line was found",
+                "la clave no está en formato PEM: no se encontró ninguna línea «-----BEGIN ...-----»",
+            )
+            .to_string(),
+            JwtError::UnsupportedLabel(label) => language
+                .pick(
+                    "the PEM file holds «{label}», which is not a usable RSA private key",
+                    "el archivo PEM contiene «{label}», que no es una clave privada RSA utilizable",
+                )
+                .replace("{label}", label),
+            JwtError::EncryptedKey => language
+                .pick(
+                    "the private key is password-protected; export it without a password \
+                     (openssl pkcs8 -topk8 -nocrypt) and import it again",
+                    "la clave privada está cifrada con contraseña; expórtala sin contraseña \
+                     (openssl pkcs8 -topk8 -nocrypt) y vuelve a importarla",
+                )
+                .to_string(),
+            JwtError::MalformedKey => language
+                .pick(
+                    "the PEM private key is damaged or is not an RSA key",
+                    "la clave privada PEM está dañada o no es una clave RSA",
+                )
+                .to_string(),
+            JwtError::MissingApplicationId => language
+                .pick(
+                    "the Enable Banking application id is missing",
+                    "falta el identificador de la aplicación de Enable Banking",
+                )
+                .to_string(),
+            JwtError::Signing => language
+                .pick(
+                    "the token could not be signed with this key",
+                    "no se pudo firmar el token con esta clave",
+                )
+                .to_string(),
+        }
+    }
 }
 
 /// A token TTL as the API will accept it: at least a second, at most a day.

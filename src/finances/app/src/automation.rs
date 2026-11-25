@@ -13,13 +13,15 @@
 //! lang es-ES               # en | es-ES
 //! theme light              # dark | light
 //! account all              # all | <index of the account in the selector>
+//! dialog new-subscription  # new-subscription | new-expense | new-account | transfer
 //! scenario 350.00 5 Compra puntual   # add a scenario event: amount, days ahead, label
 //! screenshot out/main.png  # draws a frame and saves it
 //! quit
 //! ```
 
 use gpui::{prelude::*, *};
-use moxen_finances_ui::data::AccountSelection;
+use moxen_finances_ui::data::{AccountSelection, MovementKind};
+use moxen_finances_ui::dialog::{self, Dialog};
 use moxen_finances_ui::language::Language;
 use moxen_finances_ui::shell::{FinancesApp, Page};
 use moxen_finances_ui::theme::ThemeMode;
@@ -43,6 +45,7 @@ pub enum Command {
     Lang(String),
     Theme(String),
     Account(String),
+    Dialog(String),
     Scenario(String, i64, String),
     Screenshot(PathBuf),
     Quit,
@@ -64,6 +67,7 @@ pub fn parse(script: &str) -> Result<Vec<Command>, String> {
             "lang" if !rest.is_empty() => Command::Lang(rest.to_string()),
             "theme" if !rest.is_empty() => Command::Theme(rest.to_string()),
             "account" if !rest.is_empty() => Command::Account(rest.to_string()),
+            "dialog" if !rest.is_empty() => Command::Dialog(rest.to_string()),
             "scenario" => {
                 let (amount, rest) = rest
                     .split_once(' ')
@@ -195,6 +199,20 @@ async fn execute(
                     Ok(())
                 })
                 .map_err(|cause| cause.to_string())??;
+            draw(cx, any_window)?;
+        }
+        Command::Dialog(which) => {
+            let wanted = match which.as_str() {
+                "new-subscription" => Dialog::NewSubscription,
+                "new-expense" => Dialog::NewMovement(MovementKind::Expense),
+                "new-account" => Dialog::NewAccount,
+                "transfer" => Dialog::Transfer,
+                _ => return Err(format!("unknown dialog: {which}")),
+            };
+            draw(cx, any_window)?;
+            window
+                .update(cx, |app, _, cx| dialog::open(app, wanted, cx))
+                .map_err(|cause| cause.to_string())?;
             draw(cx, any_window)?;
         }
         Command::Scenario(amount, days, label) => {

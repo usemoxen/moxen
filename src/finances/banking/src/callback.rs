@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::DEFAULT_CALLBACK_PORTS;
+use crate::text::{Language, Localized};
 
 /// The path a user registers.
 pub const CALLBACK_PATH: &str = "/callback";
@@ -70,11 +71,12 @@ impl fmt::Debug for CallbackOutcome {
     }
 }
 
-/// Why no code arrived.
+/// Why no code arrived. `Display` is the English sentence; the Spanish one
+/// comes from [`Localized`].
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum CallbackError {
     /// Every port of the list was busy, so no redirect URL could answer.
-    #[error("no hay ningún puerto libre para recibir la vuelta del banco: {ports:?}")]
+    #[error("no free port was found to receive the bank's return: {ports:?}")]
     PortsUnavailable {
         /// The ports that were tried, in order.
         ports: Vec<u16>,
@@ -82,7 +84,7 @@ pub enum CallbackError {
 
     /// The bank redirected with `error` instead of `code`: the user cancelled,
     /// or the bank refused. There is nothing to retry.
-    #[error("el banco no ha autorizado el acceso: {error}")]
+    #[error("the bank did not authorize the access: {error}")]
     Denied {
         /// The OAuth error code (`access_denied`, ...).
         error: String,
@@ -92,27 +94,79 @@ pub enum CallbackError {
 
     /// A redirect arrived with a `state` that was not ours, and no valid one
     /// followed before the deadline.
-    #[error("la respuesta del banco no corresponde a esta solicitud (state distinto)")]
+    #[error("the bank's answer does not match this request (different state)")]
     StateMismatch,
 
     /// The deadline passed with no usable redirect.
-    #[error("el banco no respondió a tiempo")]
+    #[error("the bank did not answer in time")]
     Timeout,
 
     /// A socket failure while listening or reading.
-    #[error("no se pudo escuchar en 127.0.0.1: {message}")]
+    #[error("could not listen on 127.0.0.1: {message}")]
     Io {
         /// A bounded description, without request contents.
         message: String,
     },
 
     /// A local client opened more connections than one link can need.
-    #[error("demasiadas conexiones mientras se esperaba al banco")]
+    #[error("too many connections while waiting for the bank")]
     TooManyConnections,
 
     /// The state to compare against was empty, which cannot be checked.
-    #[error("la solicitud no tiene state que comprobar")]
+    #[error("the request has no state to check")]
     MissingState,
+}
+
+impl Localized for CallbackError {
+    fn localized(&self, language: Language) -> String {
+        match self {
+            CallbackError::PortsUnavailable { ports } => format!(
+                "{} {ports:?}",
+                language.pick(
+                    "no free port was found to receive the bank's return:",
+                    "no hay ningún puerto libre para recibir la vuelta del banco:"
+                )
+            ),
+            CallbackError::Denied { error, .. } => format!(
+                "{} {error}",
+                language.pick(
+                    "the bank did not authorize the access:",
+                    "el banco no ha autorizado el acceso:"
+                )
+            ),
+            CallbackError::StateMismatch => language
+                .pick(
+                    "the bank's answer does not match this request (different state)",
+                    "la respuesta del banco no corresponde a esta solicitud (state distinto)",
+                )
+                .to_string(),
+            CallbackError::Timeout => language
+                .pick(
+                    "the bank did not answer in time",
+                    "el banco no respondió a tiempo",
+                )
+                .to_string(),
+            CallbackError::Io { message } => format!(
+                "{} {message}",
+                language.pick(
+                    "could not listen on 127.0.0.1:",
+                    "no se pudo escuchar en 127.0.0.1:"
+                )
+            ),
+            CallbackError::TooManyConnections => language
+                .pick(
+                    "too many connections while waiting for the bank",
+                    "demasiadas conexiones mientras se esperaba al banco",
+                )
+                .to_string(),
+            CallbackError::MissingState => language
+                .pick(
+                    "the request has no state to check",
+                    "la solicitud no tiene state que comprobar",
+                )
+                .to_string(),
+        }
+    }
 }
 
 /// The redirect URLs a user should register for one port: both spellings,
@@ -122,6 +176,20 @@ pub fn redirect_urls(port: u16) -> [String; 2] {
         format!("http://127.0.0.1:{port}{CALLBACK_PATH}"),
         format!("http://localhost:{port}{CALLBACK_PATH}"),
     ]
+}
+
+/// A fresh `state` for one authorization: 32 hex characters from the OS
+/// randomness, so two links can never share one and a stray local request
+/// cannot be matched by guessing.
+pub fn new_state() -> String {
+    use rand::RngCore as _;
+    let mut bytes = [0_u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    let mut state = String::with_capacity(32);
+    for byte in bytes {
+        state.push_str(&format!("{byte:02x}"));
+    }
+    state
 }
 
 /// Whether `url` is one of the loopback redirect URLs this crate serves. A

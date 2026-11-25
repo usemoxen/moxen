@@ -331,3 +331,115 @@ fn a_very_old_database_gains_the_columns_the_reference_adds_on_open() {
     assert_eq!(state.account.opening_balance_date, None);
     assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
 }
+
+/// A database at version 2, holding a row of every kind the schema 2 moved:
+/// an account, a subscription with its history, an income, an expense, a
+/// charge and a transfer. This is what the version 3 migration must leave
+/// exactly as it is.
+fn version_2_file(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("temporary folder");
+    let path = dir.path().join(name);
+    {
+        let connection = Connection::open(&path).expect("open");
+        connection
+            .execute_batch(schema::SCHEMA_V1)
+            .expect("the version 1 schema");
+        connection
+            .execute_batch(
+                "INSERT INTO account (id, name, currency, balance_minor, balance_date, balance_set)
+                   VALUES ('account-primary', 'Cuenta', 'EUR', 264000, '2026-11-18', 1);
+                 INSERT INTO subscriptions
+                   (id, name, currency, price_minor, frequency, status, created_at, updated_at)
+                   VALUES ('sub-1', 'Suscripción', 'EUR', 999, 'monthly', 'active',
+                           '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z');
+                 INSERT INTO subscription_prices
+                   (id, subscription_id, price_minor, currency, effective_from, created_at)
+                   VALUES ('price-1', 'sub-1', 999, 'EUR', '2026-11-01', '2026-11-01T00:00:00.000Z');
+                 INSERT INTO incomes (id, concept, amount_minor, date, status, created_at)
+                   VALUES ('i1', 'Nómina', 250000, '2026-11-30', 'received',
+                           '2026-11-18T09:00:00.000Z');
+                 INSERT INTO expenses (id, concept, category, amount_minor, date, status, created_at)
+                   VALUES ('e1', 'Cena', 'Ocio', 4500, '2026-11-21', 'done',
+                           '2026-11-18T09:00:00.000Z');",
+            )
+            .expect("the version 1 rows");
+        // Version 2 only: the file stays at version 2, which is what a build
+        // from before LOCAL-031 left behind.
+        schema::migrate_with(&connection, &MIGRATIONS[..2], 2, Some(&path))
+            .expect("migrate to version 2");
+        connection
+            .execute_batch(
+                "INSERT INTO transfers
+                   (id, date, amount_minor, currency, from_account_id, to_account_id, note, created_at)
+                   VALUES ('t1', '2026-11-22', 1000, 'EUR', 'account-primary', 'account-primary',
+                           'Traspaso', '2026-11-22T09:00:00.000Z');",
+            )
+            .expect("a transfer");
+    }
+    (dir, path)
+}
+
+#[test]
+fn a_version_2_database_migrates_to_3_with_every_row_intact() {
+    let (dir, path) = version_2_file("finances.db");
+    assert_eq!(user_version(&path), 2);
+    // The state before, read through the store's own API at version 2: the
+    // compare below is against the same data, so a lost row cannot hide.
+    let before = {
+        let connection = Connection::open(&path).expect("open");
+        moxen_finances_store::repo::app_state(&connection).expect("the version 2 state")
+    };
+
+    let store = Store::open(&path).expect("open and migrate");
+    assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
+    assert_eq!(
+        store.app_state().expect("the version 3 state"),
+        before,
+        "every version 2 row survives the version 3 migration"
+    );
+    // The new tables exist and are empty: a migration, not a re-link.
+    assert!(store.bank_connections().expect("connections").is_empty());
+    assert_eq!(store.bank_movement_count("nothing").expect("count"), 0);
+
+    // The copy the migration made first is the version 2 file, readable, with
+    // the rows of that moment.
+    let backup = dir.path().join("finances.db.pre-v3.bak");
+    assert!(backup.exists(), "the copy sits next to the database");
+    let copy = Connection::open(&backup).expect("open the copy");
+    let version: i64 = copy
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version of the copy");
+    assert_eq!(version, 2, "the copy is the pre-migration state");
+    let rows: i64 = copy
+        .query_row("SELECT COUNT(*) FROM incomes", [], |row| row.get(0))
+        .expect("the copy's rows");
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn the_version_3_migration_is_refused_when_its_copy_cannot_be_made() {
+    let (_dir, path) = version_2_file("finances.db");
+    let before = object_names(&path);
+    // A directory where the backup file has to go: the copy cannot be made,
+    // on every platform, without permission tricks.
+    std::fs::create_dir(path.with_file_name("finances.db.pre-v3.bak"))
+        .expect("occupy the backup's name");
+
+    let error = match Store::open(&path) {
+        Ok(_) => panic!("the migration must be refused without its backup"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, StoreError::MigrationBackup { .. }),
+        "{error:?}"
+    );
+    // The database is exactly as it was, still at version 2, and still
+    // migrates once the way is clear.
+    assert_eq!(user_version(&path), 2);
+    assert_eq!(object_names(&path), before);
+    std::fs::remove_dir(path.with_file_name("finances.db.pre-v3.bak")).expect("clear the way");
+    let store = Store::open(&path).expect("open after the refusal");
+    assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+    assert_eq!(store.app_state().expect("state").incomes.len(), 1);
+}

@@ -56,6 +56,14 @@ export interface QueuePolicy {
   readonly automatic?: boolean;
   /** An automatic wake-up persisted while protection held its thread. */
   readonly wakeUp?: boolean;
+  /**
+   * Internal state: how many user messages a moved entry must carry before it
+   * may run. Only the transfer machinery writes it (clients cannot forge it
+   * or keep it through an echo, since `parseQueuePolicy` rebuilds policies
+   * without it), and rows written before it carry none and fall back to one:
+   * a message that has landed and none required missing.
+   */
+  readonly transferMessages?: number;
   readonly requestId?: string;
   readonly summaryFor?: string;
   readonly eventAfter?: string;

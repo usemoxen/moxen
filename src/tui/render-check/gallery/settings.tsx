@@ -1,4 +1,5 @@
 import { act } from "react";
+import type { ComponentProps } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 
 import type { ProviderSummary } from "../../../core/catalog/summary.js";
@@ -221,7 +222,7 @@ export const CONFIGURED: CliConfig = (() => {
 })();
 
 /** The settings page at `height`, taking up the whole stage. */
-export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG) {
+export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG, initialSection?: SettingsModalProps["initialSection"]) {
   const snapshot = {
     path: "/home/dev/.moxen/config.json",
     exists: true,
@@ -265,11 +266,14 @@ export function settingsPage(height: number, config: CliConfig = DEFAULT_CONFIG)
         top={0}
         width={WIDTH}
         height={height}
+        {...(initialSection === undefined ? {} : { initialSection })}
         onClose={noop}
       />
     </Stage>
   );
 }
+
+type SettingsModalProps = ComponentProps<typeof SettingsModal>;
 
 /** The sidebar's width in columns: its labels sit left of it, the open page right of it. */
 const SIDEBAR_COLUMNS = 26;
