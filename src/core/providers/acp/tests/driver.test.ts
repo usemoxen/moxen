@@ -3266,3 +3266,146 @@ describe("LOCAL-009 round 5: counter evidence, and equal snapshots", () => {
     await Effect.runPromise(driver.stopAll());
   });
 });
+
+describe("LOCAL-009 round 6: the effective baseline advances with the counter", () => {
+  it("does not rebook spend already covered by an idle counter reading (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    // An idle cumulative reading of $0.50 arrives with no turn open.
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 100, size: 100_000, cost: 0.5 });
+    await new Promise((r) => setTimeout(r, 10));
+    // Turn A: the counter reaches $0.60 → $0.10.
+    const tA = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.6 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oA = await driver.awaitTurn("thread-1", tA.turnId);
+    expect(oA.usage?.costUsd).toBeCloseTo(0.1, 9);
+    // Turn B: with no new idle reading, the counter reaches $0.70 → $0.10
+    // again. The baseline advanced to the $0.60 reading actually used, so the
+    // already-covered spend is not booked twice.
+    const tB = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_000, size: 100_000, cost: 0.7 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oB = await driver.awaitTurn("thread-1", tB.turnId);
+    expect(oB.usage?.costUsd).toBeCloseTo(0.1, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("does not rebook spend on a resumed session after an idle reading establishes the origin (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport({ sessionId: "acp-old" });
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-old" }));
+    const server = transport.sessions[0]!.server;
+    // An idle reading establishes the resumed counter's origin at $0.50.
+    server.notifyUpdate("acp-old", { sessionUpdate: "usage_update", used: 100, size: 100_000, cost: 0.5 });
+    await new Promise((r) => setTimeout(r, 10));
+    // Turn A: the counter reaches $0.60 → $0.10.
+    const tA = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-old", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.6 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oA = await driver.awaitTurn("thread-1", tA.turnId);
+    expect(oA.usage?.costUsd).toBeCloseTo(0.1, 9);
+    // Turn B: the counter reaches $0.70 → $0.10, never $0.20 on the stale origin.
+    const tB = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-old", { sessionUpdate: "usage_update", used: 2_000, size: 100_000, cost: 0.7 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oB = await driver.awaitTurn("thread-1", tB.turnId);
+    expect(oB.usage?.costUsd).toBeCloseTo(0.1, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("treats an idle reading between turns as the baseline, without re-booking later (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    // Turn A books $0.20 from a fresh counter.
+    const tA = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.2 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oA = await driver.awaitTurn("thread-1", tA.turnId);
+    expect(oA.usage?.costUsd).toBeCloseTo(0.2, 9);
+    // An idle reading between turns raises the baseline to $0.50.
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_500, size: 100_000, cost: 0.5 });
+    await new Promise((r) => setTimeout(r, 10));
+    // Turn B: the counter reaches $0.60 → $0.10 past the $0.50 baseline.
+    const tB = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_000, size: 100_000, cost: 0.6 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oB = await driver.awaitTurn("thread-1", tB.turnId);
+    expect(oB.usage?.costUsd).toBeCloseTo(0.1, 9);
+    // Turn C: the counter reaches $0.70 → $0.10 again — the baseline advanced
+    // to the $0.60 reading turn B actually used.
+    const tC = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "three" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_500, size: 100_000, cost: 0.7 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oC = await driver.awaitTurn("thread-1", tC.turnId);
+    expect(oC.usage?.costUsd).toBeCloseTo(0.1, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("advances the baseline by a result-only turn's booked spend, so the counter catching up is not rebooked (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 100, size: 100_000, cost: 0.5 });
+    await new Promise((r) => setTimeout(r, 10));
+    // Turn A carries no counter reading but an explicit $0.10 result cost.
+    const tA = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.finishPrompt("end_turn", { usage: { inputTokens: 500, outputTokens: 50, cost: 0.1 } });
+    const oA = await driver.awaitTurn("thread-1", tA.turnId);
+    expect(oA.usage?.costUsd).toBeCloseTo(0.1, 9);
+    // Turn B: the counter catches up at $0.65 — only $0.05 remains unbooked,
+    // never the $0.15 the lagging baseline would re-attribute.
+    const tB = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.65 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oB = await driver.awaitTurn("thread-1", tB.turnId);
+    expect(oB.usage?.costUsd).toBeCloseTo(0.05, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("leaves a fallen counter unbooked and books only the strict rebound past the baseline (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport();
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 100, size: 100_000, cost: 0.5 });
+    await new Promise((r) => setTimeout(r, 10));
+    // Turn A: the counter reaches $0.60 → $0.10 booked.
+    const tA = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.6 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oA = await driver.awaitTurn("thread-1", tA.turnId);
+    expect(oA.usage?.costUsd).toBeCloseTo(0.1, 9);
+    // Turn B: the counter falls to $0.55 — a lower reading is not evidence of
+    // spend, so nothing is booked and no negative delta is invented.
+    const tB = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 1_500, size: 100_000, cost: 0.55 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn", { usage: { inputTokens: 400, outputTokens: 40 } });
+    const oB = await driver.awaitTurn("thread-1", tB.turnId);
+    expect(oB.usage?.costUsd).toBeUndefined();
+    // Turn C: the counter rebounds to $0.65 — only the $0.05 strictly above
+    // the $0.60 baseline is booked, never the dip that followed.
+    const tC = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "three" }));
+    server.notifyUpdate("acp-sess-1", { sessionUpdate: "usage_update", used: 2_000, size: 100_000, cost: 0.65 });
+    await new Promise((r) => setTimeout(r, 10));
+    server.finishPrompt("end_turn");
+    const oC = await driver.awaitTurn("thread-1", tC.turnId);
+    expect(oC.usage?.costUsd).toBeCloseTo(0.05, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+});

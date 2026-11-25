@@ -1129,14 +1129,35 @@ describe("ResponsesWsSession stream ownership round 5 (LOCAL-009)", () => {
     wsSession.close();
   });
 
+  /** A socket whose close() dispatches no event at all — a wedged endpoint. */
+  class SilentCloseSocket extends FakeResponsesSocket {
+    close(): void {
+      if (this.closed) return;
+      this.closed = true;
+      this.readyState = 3;
+    }
+  }
+
   it("rejects a pending handshake directly when return() interrupts it, without waiting on its socket (LOCAL-009)", async () => {
     const sockets: FakeResponsesSocket[] = [];
     const wsSession = new ResponsesWsSession({
       webSocketFactory: () => {
-        // Never opens, and its close() never dispatches anything: a wedged
-        // socket on which neither the open nor the close event ever arrives.
-        const socket = new FakeResponsesSocket(() => {});
+        // The first socket never opens and its close() dispatches no event:
+        // neither the open nor the close event ever settles the handshake,
+        // so only the direct reject can free the owner (a close-dispatching
+        // fake would settle it too and hide the gap on older revisions).
+        if (sockets.length === 0) {
+          const socket = new SilentCloseSocket(() => {});
+          sockets.push(socket);
+          return socket;
+        }
+        const socket = new FakeResponsesSocket((_payload, self) => {
+          queueMicrotask(() => {
+            self.sendEvent({ type: "response.completed", response: { id: "resp_1", usage: { input_tokens: 1, output_tokens: 1 } } });
+          });
+        });
         sockets.push(socket);
+        queueMicrotask(() => socket.open());
         return socket;
       },
     });
@@ -1153,6 +1174,13 @@ describe("ResponsesWsSession stream ownership round 5 (LOCAL-009)", () => {
     // No request was sent on the abandoned handshake's socket.
     expect(sockets[0]!.sent).toHaveLength(0);
     expect(wsSession.isDisabled).toBe(false);
+    // The abandoned owner released the session: a stream queued behind it can
+    // open a fresh socket, send its request, and complete.
+    const second = wsSession.stream(req(wsSession), () => ({ model: "gpt-6.2-sol", input: [] }), false);
+    const events: ModelEvent[] = [];
+    for await (const event of second) events.push(event);
+    expect(sockets[1]!.sent).toHaveLength(1);
+    expect(events.at(-1)).toEqual({ type: "finish", reason: "stop" });
     wsSession.close();
   });
 });

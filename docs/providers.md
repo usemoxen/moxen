@@ -113,20 +113,23 @@ negotiates any other protocol version is refused loudly
 - **Context, token & plan usage**: `AcpDriver` consumes ACP `usage_update`
   notifications for live context-window readings (`contextUsage`; its `cost` is
   the session's cumulative cost per ACP v1. Each turn keeps the high-water mark
-  of the readings observed while it was open — a snapshot equal to or below
-  everything booked before it is never evidence of zero spend (the counter can
-  lag a turn's own final charge) — and a reading with no turn open is
-  reconciled out-of-turn: it establishes the counter's origin (an unknown one
-  on a resumed session, where post-resume prompt-result costs never do; a new
-  session's origin is zero), and any growth above what the ledger booked stays
-  unattributed — it anchors the next in-turn delta but is never charged to an
-  arbitrary turn and never pushed into the accounted baseline. At settle, the
-  turn's cost is the in-turn counter delta above that anchor — the spec-defined
-  cumulative counter wins over the prompt result's vendor-specific cost field
-  — or the result cost when the counter did not move in-turn; a snapshot that
-  never moved leaves the cost undefined so token-based estimation applies. The
-  accounted baseline advances only by spend actually booked, so the
-  booked turns total the counter's movement) and
+  of the readings observed while it was open — a snapshot equal to or below the
+  baseline is never evidence of zero spend (the counter can lag a turn's own
+  final charge). The driver maintains an effective baseline in cumulative-
+  counter units, distinct from the booked turn-ledger sum: a reading with no
+  turn open raises it (and establishes an unknown one — a fresh session's
+  origin is zero, a resumed session's stays unknown until such a reading,
+  with post-resume prompt-result costs never establishing it), and a settled
+  turn advances it to the counter reading it actually used, or by the cost it
+  booked when the counter was silent or lagging — so spend already booked is
+  never rebooked when the counter catches up, and unattributed out-of-turn
+  growth is never charged to an arbitrary turn. At settle, the turn's cost is
+  the in-turn counter delta above the baseline — the spec-defined cumulative
+  counter wins over the prompt result's vendor-specific cost field — or the
+  result cost when the counter did not move in-turn; a snapshot that never
+  moved leaves the cost undefined so token-based estimation applies, never a
+  reported $0 or an invented negative delta. The booked turn ledger totals
+  the counter's movement) and
   per-turn `session/prompt` `usage` metrics for token/cost stats. For Antigravity,
   Moxen also probes `agy --print /usage --output-format json` and
   `agy --print /credits --output-format json` (zero-turn local slash commands,
