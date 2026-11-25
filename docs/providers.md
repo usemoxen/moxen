@@ -286,6 +286,15 @@ the default outright.
   `/simplify`, `/verify`, …) and a user's, project's, plugin's or MCP
   server's own commands are all offered. The list is a deny-list in
   `core/providers/claude/commands.ts`.
+- A Claude reply can end with only a thinking block and no text: after one
+  "no visible output" nudge from the CLI, the run still reports `success` with
+  an empty result, which is what hides the answer of a `/btw` on the models
+  that think adaptively (Fable 5.2, Opus 5.5, Sonnet 5.5). Moxen reads the
+  answer from the run's own result, the assistant blocks and token deltas, and
+  when there is genuinely no text it says the model replied with thinking only
+  instead of "empty". A turn that died on an API error also reports `success`,
+  with the API's error text in its result; that text is reported as a failure,
+  never as the model's answer.
 
 ## Codex
 

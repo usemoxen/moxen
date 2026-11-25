@@ -262,6 +262,85 @@ export function assistantText(
   });
 }
 
+/**
+ * A reply that only thought. The real CLI emits this block on its own, then
+ * nudges the model once ("no visible output"), and a second thinking-only
+ * reply ends the run as `success` with an empty `result` — so the whole
+ * answer of such a turn is a thinking block and nothing else.
+ */
+export function assistantThinking(
+  thinking: string,
+  overrides: Record<string, unknown> = {},
+): SDKMessage {
+  return asMessage({
+    type: "assistant",
+    message: {
+      content: [{ type: "thinking", thinking, signature: "c2ln" }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    },
+    parent_tool_use_id: null,
+    uuid: "assistant-thinking-1",
+    session_id: "session-1",
+    ...overrides,
+  });
+}
+
+/** The CLI's own frame for a failed API call: synthetic text, `error` set, not an answer. */
+export function assistantApiError(
+  text: string,
+  overrides: Record<string, unknown> = {},
+): SDKMessage {
+  return asMessage({
+    type: "assistant",
+    message: {
+      model: "<synthetic>",
+      content: [{ type: "text", text }],
+      stop_reason: "stop_sequence",
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+    parent_tool_use_id: null,
+    error: "unknown",
+    uuid: "assistant-api-error",
+    session_id: "session-1",
+    ...overrides,
+  });
+}
+
+/** An assistant message whose `content` is the plain string the API also allows. */
+export function assistantStringText(text: string, overrides: Record<string, unknown> = {}): SDKMessage {
+  return asMessage({
+    type: "assistant",
+    message: { content: text, usage: { input_tokens: 10, output_tokens: 5 } },
+    parent_tool_use_id: null,
+    uuid: "assistant-string-1",
+    session_id: "session-1",
+    ...overrides,
+  });
+}
+
+/** One token-level `text_delta`, the shape `includePartialMessages` turns on. */
+export function streamTextDelta(text: string, index = 0): SDKMessage {
+  return asMessage({
+    type: "stream_event",
+    event: { type: "content_block_delta", index, delta: { type: "text_delta", text } },
+    parent_tool_use_id: null,
+    uuid: `se-${index}-${text.length}`,
+    session_id: "session-1",
+  });
+}
+
+/** The CLI's running thinking estimate, sent before a thinking reply's block. */
+export function thinkingTokens(estimated = 10): SDKMessage {
+  return asMessage({
+    type: "system",
+    subtype: "thinking_tokens",
+    estimated_tokens: estimated,
+    estimated_tokens_delta: estimated,
+    uuid: "thinking-tokens-1",
+    session_id: "session-1",
+  });
+}
+
 export function assistantToolUse(
   toolUseId: string,
   toolName: string,

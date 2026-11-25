@@ -935,18 +935,51 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       abortController: controller,
     });
     input.signal?.addEventListener("abort", abort, { once: true });
+    // The CLI sends one assistant message per content block, so a reply's text
+    // can sit in any of them; token frames and the result carry it too.
     const parts: string[] = [];
+    const streamed: string[] = [];
     let result: string | null = null;
+    let apiError: string | null = null;
+    let thought = false;
+    let turns = 0;
     try {
       for await (const message of query) {
         if (message.type === "assistant") {
-          for (const block of message.message.content) {
-            if (block.type === "text" && block.text.trim()) parts.push(block.text);
+          // A synthetic frame carrying the CLI's own API error is not an answer.
+          const failed = message.error !== undefined;
+          for (const block of contentBlocks(message.message as unknown)) {
+            if (block["type"] === "thinking") thought = true;
+            if (block["type"] !== "text") continue;
+            const text = typeof block["text"] === "string" ? block["text"] : "";
+            if (!text.trim()) continue;
+            if (failed) apiError ??= text.trim();
+            else parts.push(text);
+          }
+        } else if (message.type === "system") {
+          if (message.subtype === "thinking_tokens") thought = true;
+        } else if (message.type === "stream_event") {
+          const event = message.event as unknown as Record<string, unknown>;
+          const delta = event["delta"] as { type?: unknown; text?: unknown } | undefined;
+          if (event["type"] === "content_block_delta") {
+            if (delta?.type === "thinking_delta") thought = true;
+            else if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
+              streamed.push(delta.text);
+            }
           }
         } else if (message.type === "result") {
-          if (message.subtype === "success" && typeof message.result === "string") result = message.result;
-          else if (message.subtype !== "success" && !(message.subtype === "error_max_turns" && parts.length > 0)) {
-            throw new CliError(failureCode, `${label} did not get an answer (${message.subtype}).`);
+          if (typeof message.num_turns === "number") turns = message.num_turns;
+          if (message.subtype !== "success") {
+            if (!(message.subtype === "error_max_turns" && parts.length > 0)) {
+              throw new CliError(failureCode, `${label} did not get an answer (${message.subtype}).`);
+            }
+          } else if (message.is_error === true) {
+            // A turn that died on an API error also reports `success`, with the
+            // API's error text in `result` — never the model's answer.
+            const detail = typeof message.result === "string" && message.result.trim() ? message.result.trim() : apiError;
+            throw new CliError(failureCode, `${label} failed: ${detail ?? "Claude reported an API error"}.`);
+          } else if (typeof message.result === "string") {
+            result = message.result;
           }
           break;
         }
@@ -955,8 +988,16 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       input.signal?.removeEventListener("abort", abort);
       query.close?.();
     }
-    const text = parts.join("\n\n") || result || "";
-    if (!text.trim()) throw new CliError(failureCode, `${label} came back empty.`);
+    // The run's own result is its final answer; the blocks also hold interim
+    // notes, so they stand in only when it reported no text.
+    const text = result?.trim() ? result : (parts.join("\n\n") || streamed.join(""));
+    if (!text.trim()) {
+      // A reply that only thought ends as a `success` result with no text at
+      // all: say which it was, instead of an empty answer nobody can act on.
+      const who = input.model ?? "the model";
+      const why = thought ? `${who} replied with thinking only and no text${turns > 1 ? ` in ${turns} turns` : ""}` : null;
+      throw new CliError(failureCode, why === null ? `${label} came back empty.` : `${label} came back empty: ${why}.`);
+    }
     // Padded file chips are part of the draft: editing replies must keep their outer spaces.
     return { text: instructions === undefined ? text.trim() : text, withContext: input.cursor !== null };
   }
