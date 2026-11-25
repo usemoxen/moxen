@@ -286,6 +286,21 @@ the default outright.
   `/simplify`, `/verify`, …) and a user's, project's, plugin's or MCP
   server's own commands are all offered. The list is a deny-list in
   `core/providers/claude/commands.ts`.
+- A Claude reply can end with only a thinking block and no text: after one
+  "no visible output" nudge from the CLI, the run still reports `success` with
+  an empty result, which is what hides the answer of a `/btw` on the models
+  that think adaptively (Fable 5.2, Opus 5.5, Sonnet 5.5). A reply's content
+  blocks arrive as one assistant message each, all under one message id, while
+  the result repeats only that message's last text block — so Moxen reassembles
+  the whole final message when the result matches that block, and otherwise
+  takes the result, which is then the answer after an interim note. A child
+  tool's frames and another session's, as named by the run's `init`, are left
+  out. When there is genuinely no text it says the model replied with thinking
+  only instead of "empty". A turn that died on an API error also reports
+  `success`, with the raw upstream body in its result; that body can echo the
+  request, a credential included, so it is reported as a failure named by the
+  SDK's own error kind and the HTTP status alone ("Claude is rate limited
+  (HTTP 429)"), never as the model's answer.
 
 ## Codex
 
