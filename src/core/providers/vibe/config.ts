@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { appEnv, expandHome } from "../../config.js";
+import { CliError } from "../../errors.js";
 import { binaryOnPath } from "../../infra/process.js";
 import { tokenizeLaunchArgs } from "../codex/config.js";
 
@@ -107,7 +108,10 @@ function fallbackUserBinCandidates(
 
 /**
  * Resolve the configured `vibe-app-server` command: explicit path, PATH lookup,
- * or `~/.local/bin` fallback where `uv tool install` places Vibe.
+ * or `~/.local/bin` fallback where `uv tool install` places Vibe. A relative
+ * configured path is resolved once against the Moxen process's working
+ * directory (`path.resolve`), so the installed check and the spawn agree even
+ * though the child runs in the session's working directory.
  */
 export function resolveVibeBinary(
   binaryPath: string | undefined,
@@ -117,8 +121,10 @@ export function resolveVibeBinary(
   const platform = options.platform ?? process.platform;
   const checkFile = options.isFile ?? isExecutableFile;
   const configured = expandHome(binaryPath?.trim() || DEFAULT_VIBE_SETTINGS.binaryPath);
-  if (path.isAbsolute(configured) || configured.includes("/") || configured.includes("\\")) {
-    return { command: configured, installed: checkFile(configured) };
+  if (configured.includes("/") || configured.includes("\\")) {
+    const paths = platform === "win32" ? path.win32 : path;
+    const command = paths.isAbsolute(configured) ? configured : paths.resolve(configured);
+    return { command, installed: checkFile(command) };
   }
   if (binaryOnPath(configured, env)) {
     return { command: configured, installed: true };
@@ -129,6 +135,43 @@ export function resolveVibeBinary(
     }
   }
   return { command: configured, installed: false };
+}
+
+/**
+ * A Windows drive-relative path (`C:tool.cmd`, or a bare drive qualifier `C:`)
+ * is neither absolute nor a bare command name: it resolves against a per-drive
+ * current directory the child would not share. Shared by discovery and the
+ * transport so both reject it the same way. Null when the path is fine or the
+ * platform is not Windows.
+ */
+export function vibeDriveRelativePathError(
+  binaryPath: string,
+  platform: NodeJS.Platform = process.platform,
+): CliError | null {
+  if (platform !== "win32") return null;
+  const configured = expandHome(binaryPath.trim());
+  if (!/^[A-Za-z]:(?:[^\\/]|$)/.test(configured)) return null;
+  return new CliError(
+    "VIBE_INVALID_BINARY_PATH",
+    `Mistral Vibe executable path "${configured}" is drive-relative. Use an absolute path (such as C:\\Tools\\vibe-app-server.exe) or a bare command name on PATH.`,
+    { details: { binaryPath: configured } },
+  );
+}
+
+/**
+ * A sanitized, actionable discovery status for the launcher errors the
+ * transport raises, or null for anything else (whose raw text may carry
+ * credentials and must not be surfaced).
+ */
+export function vibeLauncherStatus(cause: unknown): string | null {
+  if (!(cause instanceof CliError)) return null;
+  if (cause.code === "VIBE_INVALID_BINARY_PATH") {
+    return "Mistral Vibe executable path is drive-relative; set providers.vibe.binaryPath to an absolute path or a command on PATH.";
+  }
+  if (cause.code === "VIBE_UNSUPPORTED_LAUNCHER") {
+    return "Mistral Vibe launcher is an unsupported batch wrapper; set providers.vibe.binaryPath to the real executable it calls.";
+  }
+  return null;
 }
 
 const AUTH_ERROR_PATTERNS: readonly RegExp[] = [

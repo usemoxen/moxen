@@ -7,6 +7,7 @@
  * `vibe-app-server` probes). Every payload is read defensively to tolerate
  * additive fields across Vibe updates.
  */
+import { createHash } from "node:crypto";
 import { createTwoFilesPatch } from "diff";
 
 import type { ModelSummary } from "../../catalog/summary.js";
@@ -245,6 +246,310 @@ export function vibeMcpServersOf(servers: readonly McpServerSpec[] | undefined):
     }
   }
   return out;
+}
+
+/**
+ * Vibe's MCP server alias normalization (`normalize_mcp_server_name`,
+ * `mistral-vibe` v3.1.4): characters outside `[a-zA-Z0-9_-]` become `_`,
+ * leading/trailing `_`/`-` are stripped, and the result is cut to 256 chars.
+ * Iterates code points so an astral character is one replacement, as Python
+ * does (a UTF-16 `.replace` would emit two underscores).
+ */
+function vibeMcpServerAlias(name: string): string {
+  const replaced = [...name].map((ch) => (/[a-zA-Z0-9_-]/.test(ch) ? ch : "_")).join("");
+  return replaced.replace(/^[_-]+/, "").replace(/[_-]+$/, "").slice(0, 256);
+}
+
+/**
+ * Vibe's identifier normalization (`_normalize_identifier` in
+ * `mistralai_vibe_local_harness/vibe/_mcp_naming.py`): code-point wise, every
+ * character outside `[A-Za-z0-9_$]` becomes a single `_`, and a leading digit
+ * gains a `_` prefix.
+ */
+function vibeMcpIdentifier(value: string): string {
+  const normalized = [...value].map((ch) => (/[A-Za-z0-9_$]/.test(ch) ? ch : "_")).join("") || "_";
+  return /^[0-9]/.test(normalized) ? `_${normalized}` : normalized;
+}
+
+export interface VibeMcpExclusionPlan {
+  /** Servers not to offer this session because an exclusion cannot be scoped. */
+  readonly dropServers: ReadonlySet<string>;
+  /** Exact anchored `disabledTools` patterns for the unambiguous exclusions. */
+  readonly patterns: string[];
+  /** Sanitized notes explaining each dropped server. */
+  readonly notes: string[];
+  /**
+   * True when the plan would withhold every offered server while exclusions
+   * exist: Vibe 3.1.4 sends no MCP override for an empty list, so a native
+   * copy of the withheld servers from the user's own Vibe configuration (which
+   * may still expose the excluded tools) stays in scope. The session must
+   * refuse to start rather than send an ineffective empty override.
+   */
+  readonly unsatisfiable: boolean;
+  /** The `mcp__server__tool` exclusions that cannot be enforced. */
+  readonly unsatisfiableExclusions: string[];
+}
+
+const UNSATISFIABLE_PLAN = (exclusions: readonly string[]): Pick<VibeMcpExclusionPlan, "unsatisfiable" | "unsatisfiableExclusions"> =>
+  exclusions.length > 0
+    ? { unsatisfiable: true, unsatisfiableExclusions: [...exclusions] }
+    : { unsatisfiable: false, unsatisfiableExclusions: [] };
+
+/**
+ * Vibe's display names for every (server, tool) identity, computed exactly as
+ * `mistral-vibe` 3.1.4's `_display_names` (`_mcp_naming.py`) does: the
+ * candidate is `_normalize_identifier(f"{server}_{tool}")`; a raw candidate
+ * that is already an identifier and has a single owner keeps the raw form, a
+ * unique candidate takes the normalized form, and every owner of a shared
+ * candidate gets `_<sha256(server + "\0" + tool)[:8]>` appended (lengthened
+ * on a further collision). Identity iteration is sorted, as Python's
+ * `sorted(identities)` is.
+ */
+function vibeMcpDisplayNames(identities: ReadonlyArray<{ readonly server: string; readonly tool: string }>): Map<string, string> {
+  const owners = new Map<string, number>();
+  for (const { server, tool } of identities) {
+    const candidate = vibeMcpIdentifier(`${server}_${tool}`);
+    owners.set(candidate, (owners.get(candidate) ?? 0) + 1);
+  }
+  const sorted = [...identities].sort((a, b) => {
+    if (a.server !== b.server) return a.server < b.server ? -1 : 1;
+    if (a.tool !== b.tool) return a.tool < b.tool ? -1 : 1;
+    return 0;
+  });
+  const used = new Set<string>();
+  const result = new Map<string, string>();
+  for (const { server, tool } of sorted) {
+    const key = `${server}\u0000${tool}`;
+    const base = `${server}_${tool}`;
+    const candidate = vibeMcpIdentifier(base);
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(base) && owners.get(candidate) === 1) {
+      result.set(key, base);
+      used.add(base);
+    } else if (owners.get(candidate) === 1 && !used.has(candidate)) {
+      result.set(key, candidate);
+      used.add(candidate);
+    } else {
+      const digest = createHash("sha256").update(`${server}\u0000${tool}`, "utf8").digest("hex");
+      for (let length = 8; ; length += 1) {
+        if (length > digest.length) {
+          result.set(key, `${candidate}_${digest}`);
+          used.add(`${candidate}_${digest}`);
+          break;
+        }
+        const name = `${candidate}_${digest.slice(0, length)}`;
+        if (!used.has(name)) {
+          result.set(key, name);
+          used.add(name);
+          break;
+        }
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Plan Moxen's per-tool MCP exclusions (`mcp__<server>__<tool>`) against Vibe's
+ * `disabledTools` filter. Verified against `mistral-vibe` v3.1.4
+ * (`_mcp_naming.py`, `_mcp_models.py`, `_runtime.py`): a tool is published
+ * under the display name built from the normalized server alias and the
+ * normalized remote tool name (`_display_names`), and `disabledTools` entries
+ * are case-insensitive fnmatch globs or `re:` regex full matches against that
+ * display name (`MCPToolFilter.allows`). When two identities normalize to the
+ * same candidate, Vibe digest-suffixes ALL of them (`_display_names`).
+ *
+ * Moxen knows the offered server list and the excluded tool names. It knows a
+ * server's full tool list only for servers Moxen hosts in-process. Exclusions
+ * are therefore resolved in exactly two ways:
+ *
+ *  - With every offered tool list known, each excluded tool's published display
+ *    name is computed exactly (including Vibe's digest suffixes) and only the
+ *    anchored pattern for that name is emitted — unless the case-insensitive
+ *    filter would make that pattern also match a published name that is not
+ *    excluded (a case-fold sibling), in which case the server that holds the
+ *    excluded tool is not offered, with a notice (fail closed).
+ *  - Otherwise (any offered server's tool list unknown) no pattern is emitted
+ *    at all: Vibe may digest-suffix colliding display names in a way Moxen
+ *    cannot predict, and a guessed suffix or the unsuffixed base name would
+ *    miss the target and leave the excluded tool callable. Fail closed: only
+ *    the server that holds an excluded tool is withheld (a server with no
+ *    exclusion is always offered, and Vibe's own digest disambiguation is left
+ *    alone), with a notice.
+ *  - Exact-mode drops are re-resolved iteratively: withholding one server can
+ *    unsuffix another server's published names, so the plan recomputes
+ *    against the retained catalog after every removal (a server's own
+ *    case-fold conflict first) and emits patterns only for exclusions that
+ *    remain enforceable.
+ *
+ * An exclusion whose `mcp__<name>__` prefix parses under more than one offered
+ * server (names may contain `__`) is structurally ambiguous and implicates all
+ * matched servers. When ALL supplied servers are withheld, Vibe 3.1.4 sends no
+ * MCP override at all (`_runtime.py` guards `if options.mcp_servers:`), so a
+ * native copy of a withheld server from the user's own Vibe configuration
+ * stays in scope; omitting a server is not a deny there.
+ */
+export function vibeMcpExclusionPlan(
+  servers: readonly McpServerSpec[],
+  disabled: readonly string[],
+): VibeMcpExclusionPlan {
+  const dropServers = new Set<string>();
+  const notes: string[] = [];
+  const patterns = new Set<string>();
+  if (servers.length === 0 || disabled.length === 0) {
+    return { dropServers, patterns: [...patterns], notes, ...UNSATISFIABLE_PLAN([]) };
+  }
+
+  const prefixExclusions = new Map<string, string[]>();
+  const matchedExclusionNames: string[] = [];
+  for (const name of disabled) {
+    const matched = servers.filter((server) => {
+      const prefix = `mcp__${server.name}__`;
+      return name.startsWith(prefix) && name.slice(prefix.length).length > 0;
+    });
+    if (matched.length === 0) continue;
+    matchedExclusionNames.push(name);
+    if (matched.length > 1) {
+      for (const server of matched) dropServers.add(server.name);
+      notes.push(`MCP exclusion "${name}" matches more than one server (${matched.map((s) => s.name).join(", ")}); those servers are not offered to this session.`);
+    } else if (matched.length === 1) {
+      const server = matched[0]!;
+      const tool = name.slice(`mcp__${server.name}__`.length);
+      const list = prefixExclusions.get(server.name) ?? [];
+      list.push(tool);
+      prefixExclusions.set(server.name, list);
+    }
+    // An exclusion naming a server that is not offered needs no enforcement.
+  }
+
+  if (servers.some((server) => server.type !== "in-process")) {
+    // At least one offered server's tool list is unknown: the excluded tool's
+    // published name cannot be proven, so no pattern is trusted. Only the
+    // server that holds an excluded tool is withheld ("only": no other server
+    // loses its offer, and Vibe's own digest disambiguation is left alone).
+    for (const [serverName, tools] of prefixExclusions) {
+      if (dropServers.has(serverName)) continue;
+      dropServers.add(serverName);
+      notes.push(`MCP tool exclusions (${tools.join(", ")}) cannot be scoped within server "${serverName}" without its tool list; the server is not offered to this session.`);
+    }
+    // Withholding the last offered server would leave the override empty and
+    // the exclusions unenforced against a native copy.
+    if (servers.every((server) => dropServers.has(server.name))) {
+      return { dropServers, patterns: [], notes, ...UNSATISFIABLE_PLAN(matchedExclusionNames) };
+    }
+    return { dropServers, patterns: [], notes, ...UNSATISFIABLE_PLAN([]) };
+  }
+
+  // Every offered server is in-process: the tool identities are known, so
+  // Vibe's published display names (including digest suffixes) are computable
+  // exactly and the anchored pattern provably matches the excluded tool.
+  // `_display_names` sees each server's config-normalized name, so identities
+  // are keyed by the alias Vibe will have after its name validator runs.
+  // Drops are resolved iteratively: withholding one server can change the
+  // other servers' published names (a digest disambiguation can disappear),
+  // so the plan recomputes against the retained catalog after every removal
+  // and stops as soon as every surviving exclusion is enforceable — a server
+  // that only needs a pattern is never dropped, and each pass either
+  // withholds one server or ends, so the loop terminates. A server's own
+  // conflict (a case-fold bystander on the same server) is resolved before
+  // cross-server ones.
+  const aliasByServer = new Map(servers.map((server) => [server.name, vibeMcpServerAlias(server.name)]));
+  let retained = [...servers];
+  const ignoredNoted = new Set<string>();
+  for (;;) {
+    const identities = retained.flatMap((server) =>
+      server.type === "in-process"
+        ? server.tools.map((tool) => ({ server: aliasByServer.get(server.name) ?? server.name, tool: tool.name }))
+        : [],
+    );
+    const displays = vibeMcpDisplayNames(identities);
+    const retainedNames = new Set(retained.map((server) => server.name));
+    const excludedIdentities = new Set<string>();
+    for (const [serverName, tools] of prefixExclusions) {
+      if (!retainedNames.has(serverName)) continue;
+      const alias = aliasByServer.get(serverName) ?? serverName;
+      for (const tool of tools) excludedIdentities.add(`${alias}\u0000${tool}`);
+    }
+
+    // Scan EVERY exclusion of EVERY retained server before dropping anything:
+    // a `.find()` that stops at the first bystander could otherwise pick a
+    // cross-server conflict and miss a mandatory internal one elsewhere, which
+    // made the plan order-dependent. Servers are visited in sorted order and
+    // the quoted bystander is the first of the sorted witness list, so the
+    // notes do not depend on the caller's input order either.
+    const violations: Array<{ readonly serverName: string; readonly note: string; readonly internal: boolean }> = [];
+    for (const [serverName, tools] of [...prefixExclusions].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      if (!retainedNames.has(serverName)) continue;
+      const alias = aliasByServer.get(serverName) ?? serverName;
+      for (const tool of tools) {
+        const display = displays.get(`${alias}\u0000${tool}`);
+        if (display === undefined) {
+          const key = `${serverName}\u0000${tool}`;
+          if (!ignoredNoted.has(key)) {
+            ignoredNoted.add(key);
+            notes.push(`MCP exclusion "${tool}" names no tool server "${serverName}" lists; it is ignored.`);
+          }
+          continue;
+        }
+        // Vibe compiles `re:` patterns with IGNORECASE and full-matches them
+        // against every published display name: the pattern is only safe when
+        // everything it matches is itself excluded.
+        const matcher = new RegExp(`^(?:${display.replace(/[^A-Za-z0-9_]/g, "\\$&")})$`, "i");
+        const bystanders = identities
+          .map((identity) => ({ identity, name: displays.get(`${identity.server}\u0000${identity.tool}`) }))
+          .filter((entry): entry is { identity: typeof identities[number]; name: string } =>
+            entry.name !== undefined && matcher.test(entry.name) && !excludedIdentities.has(`${entry.identity.server}\u0000${entry.identity.tool}`))
+          .sort((p, q) => (p.identity.server !== q.identity.server
+            ? (p.identity.server < q.identity.server ? -1 : 1)
+            : (p.identity.tool < q.identity.tool ? -1 : p.identity.tool > q.identity.tool ? 1 : 0)));
+        if (bystanders.length === 0) continue;
+        // Any bystander suffices to disprove the pattern; quoting the
+        // deterministic first witness keeps the note input-order independent.
+        const bystander = bystanders[0]!.identity;
+        const holderName = retained.find((server) => (aliasByServer.get(server.name) ?? server.name) === bystander.server)?.name ?? bystander.server;
+        violations.push({
+          serverName,
+          internal: bystander.server === alias,
+          note: bystander.server === alias
+            ? `MCP server "${serverName}" is not offered to this session: its excluded tool "${tool}" cannot be separated from "${bystander.tool}" on the same server, and the filter matches case-insensitively.`
+            : `MCP server "${serverName}" is not offered to this session: its excluded tool "${tool}" cannot be separated from "${bystander.tool}" of server "${holderName}", and the filter matches case-insensitively.`,
+        });
+      }
+    }
+    // A server's own conflict (a case-fold bystander on the same server) is a
+    // mandatory drop and is resolved before any cross-server choice: withholding
+    // those servers first can unsuffix other tools and re-enable patterns.
+    const internalServers = [...new Set(violations.filter((entry) => entry.internal).map((entry) => entry.serverName))].sort();
+    if (internalServers.length > 0) {
+      for (const serverName of internalServers) {
+        dropServers.add(serverName);
+        notes.push(violations.find((entry) => entry.internal && entry.serverName === serverName)!.note);
+      }
+      retained = retained.filter((server) => !internalServers.includes(server.name));
+    } else if (violations.length > 0) {
+      // Cross-server drop, one per pass, deterministic: the smallest server
+      // name wins instead of whichever conflict the input order produced.
+      const chosen = [...violations].sort((p, q) => (p.serverName !== q.serverName ? (p.serverName < q.serverName ? -1 : 1) : (p.note < q.note ? -1 : 1)))[0]!;
+      dropServers.add(chosen.serverName);
+      notes.push(chosen.note);
+      retained = retained.filter((server) => server.name !== chosen.serverName);
+    } else {
+      // Nothing must be withheld any further: enforce every surviving
+      // exclusion against the retained catalog's published names.
+      for (const [serverName, tools] of prefixExclusions) {
+        if (!retainedNames.has(serverName)) continue;
+        const alias = aliasByServer.get(serverName) ?? serverName;
+        for (const tool of tools) {
+          const display = displays.get(`${alias}\u0000${tool}`);
+          if (display !== undefined) patterns.add(`re:${display.replace(/[^A-Za-z0-9_]/g, "\\$&")}`);
+        }
+      }
+      break;
+    }
+    if (retained.length === 0) {
+      return { dropServers, patterns: [...patterns], notes, ...UNSATISFIABLE_PLAN(matchedExclusionNames) };
+    }
+  }
+  return { dropServers, patterns: [...patterns], notes, ...UNSATISFIABLE_PLAN([]) };
 }
 
 /** Build `TurnStartParams.message` / `TurnSteerParams.message` content blocks. */

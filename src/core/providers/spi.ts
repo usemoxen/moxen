@@ -445,13 +445,15 @@ export type ProviderRuntimeEvent =
        * or its auto mode refused a tool call (`detail` is why). A harness
        * session whose automatic compaction gave up says so too, in `title`, and one
        * whose MCP servers did not all come up, or were reconfigured while it ran, says
-       * that as `mcp`.
+       * that as `mcp`. A turn the provider accepted whose deferred interrupt failed
+       * says so as `interrupt-failed` (`detail` is the provider's error): the turn
+       * keeps running under its own completion tracking.
        */
       readonly type: "session.notice";
       readonly provider: ProviderDriverKind;
       readonly threadId: ThreadId;
       readonly turnId: TurnId | null;
-      readonly notice: "compacted" | "permission-denied" | "compaction-stopped" | "mcp";
+      readonly notice: "compacted" | "permission-denied" | "compaction-stopped" | "mcp" | "interrupt-failed";
       readonly title: string;
       readonly detail: string | null;
     }
