@@ -7,6 +7,7 @@ import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DEFAULT_CONFIG } from "../../core/config.js";
+import { managedAccountHomeDisplayPath } from "../../core/types.js";
 import { queueAdmission, type QueueRow } from "../../core/threads/queue.js";
 import type { StoredThread, StoredTurn } from "../../core/threads/types.js";
 import type { TurnDriver } from "../../core/threads/execute.js";
@@ -298,6 +299,59 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
       const altOn = enabled.accounts.find((account) => account.instanceId === "antigravity/alt")!;
       expect(altOn.disabledReason ?? null).toBeNull();
       expect(altOn.signedIn).toBe(true);
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it("signs an Antigravity account in on the host login while off, and keeps assigning its managed home once on", async () => {
+    const dir = makeTempDir("moxen-agy-login-home-");
+    const configPath = path.join(dir, "config.json");
+    // A second account with no homePath of its own: the add flow's outcome
+    // must not silently hand it one while the setting is off.
+    const writeConfig = (allow: boolean): void => {
+      fs.writeFileSync(configPath, JSON.stringify({ providers: { antigravity: {
+        ...(allow ? { allowUnsupportedUse: true } : {}),
+        accounts: [{ id: "default", label: "Default" }, { id: "team", label: "Team" }],
+      } } }));
+    };
+    const spawnChildCalls: string[] = [];
+    const conn = new DirectConnection({
+      storeRoot: path.join(dir, "store"),
+      configPath,
+      builtinMcpServers: null,
+      providerAccountLoginDeps: {
+        urlWaitMs: 0,
+        ensureDir: () => {},
+        spawnChild: (command) => {
+          spawnChildCalls.push(command);
+          const child = new EventEmitter() as unknown as import("node:child_process").ChildProcess;
+          (child as unknown as { stdout: EventEmitter }).stdout = new EventEmitter();
+          (child as unknown as { stderr: EventEmitter }).stderr = new EventEmitter();
+          (child as unknown as { stdin: unknown }).stdin = {
+            write: (_data: string, _enc: string, cb: (err?: Error | null) => void) => cb(null),
+          };
+          return child;
+        },
+      },
+    });
+    try {
+      // While off (the default) no managed isolated home is assigned or
+      // written: the account signs in on the host `agy` login, like "default".
+      writeConfig(false);
+      const shared = await conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "team" });
+      expect(shared.homePath).toBeNull();
+      expect(spawnChildCalls).toEqual(["agy"]);
+      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).providers.antigravity.accounts[1]).toEqual({ id: "team", label: "Team" });
+
+      // Once the setting is on, the saved account still gets today's managed
+      // home, written to the config before the login session starts.
+      writeConfig(true);
+      const isolated = await conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "team" });
+      expect(isolated.homePath).toBe(managedAccountHomeDisplayPath("antigravity", "team"));
+      const stored = JSON.parse(fs.readFileSync(configPath, "utf8")).providers.antigravity.accounts[1];
+      expect(stored.homePath).toBe(managedAccountHomeDisplayPath("antigravity", "team"));
+      await conn.dispatch({ type: "provider.account.login.cancel", sessionId: isolated.sessionId });
     } finally {
       await conn.close();
     }

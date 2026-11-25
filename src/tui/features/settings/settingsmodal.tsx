@@ -392,6 +392,9 @@ export function SettingsModal({
 
   const opencodeEnabled = snapshot?.settings.find((view) => view.descriptor.key === "providers.opencode.enabled")?.value === true;
   const vibeEnabled = snapshot?.settings.find((view) => view.descriptor.key === "providers.vibe.enabled")?.value === true;
+  // Server-provided state of the off-by-default Antigravity gate, so the add
+  // wizard can skip a managed isolated home while it is off.
+  const antigravityUnsupportedUseOn = snapshot?.settings.find((view) => view.descriptor.key === "providers.antigravity.allowUnsupportedUse")?.value === true;
   const activeAccount = useMemo(
     () => (tab === "providers:profile" && selectedAccount !== null ? (loadedAccounts.find((entry) => entry.instanceId === selectedAccount) ?? null) : null),
     [tab, selectedAccount, loadedAccounts],
@@ -930,6 +933,7 @@ export function SettingsModal({
               ) : tab === "providers:overview" ? (
                 <ProvidersOverviewPanel
                   accounts={loadedAccounts}
+                  antigravityUnsupportedUseOn={antigravityUnsupportedUseOn}
                   opencodeEnabled={opencodeEnabled}
                   onToggleOpencode={(enabled) => {
                     void onSet("providers.opencode.enabled", enabled ? "true" : "false");

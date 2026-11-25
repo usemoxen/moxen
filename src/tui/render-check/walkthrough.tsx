@@ -49,6 +49,7 @@ import { runPromptImprover } from "./scenarios/promptImprover.js";
 import { runInteractionModes } from "./scenarios/interactionModes.js";
 import { runSettingsCoverage } from "./scenarios/settingsCoverage.js";
 import { runSettingsAndGit } from "./scenarios/settingsAndGit.js";
+import { runAddProviderWizard } from "./scenarios/addProviderWizard.js";
 import { runSettingsModelList, runSettingsSlider } from "./scenarios/settingsSlider.js";
 import { runHarnessProfiles } from "./scenarios/harnessProfiles.js";
 import { runMcpAccess } from "./scenarios/mcpAccess.js";
@@ -139,6 +140,7 @@ export async function runWalkthrough(): Promise<void> {
   await runSidePanelTabs();
   await runScheduleModal();
   await runSettingsAndGit();
+  await runAddProviderWizard();
   await runSettingsSlider();
   await runSettingsModelList();
   await runHarnessProfiles();
