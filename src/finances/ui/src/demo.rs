@@ -2,10 +2,12 @@
 //! real person's data ever goes in here (the repository is public).
 
 use crate::data::{
-    BalancePoint, Currency, FinancesData, Frequency, LocalizedText, Money, MonthSummary, Movement,
-    MovementKind, MovementStatus, Subscription, SubscriptionStatus, UpcomingCharge,
+    AccountInfo, AccountKind, BalancePoint, Currency, FinancesData, Frequency, LocalizedText,
+    Money, MonthSummary, Movement, MovementKind, MovementStatus, Subscription, SubscriptionStatus,
+    UpcomingCharge,
 };
 use chrono::NaiveDate;
+use std::rc::Rc;
 
 /// A fictional demo exchange rate, only used to total mixed currencies.
 const USD_TO_EUR: f64 = 0.92;
@@ -104,10 +106,11 @@ pub struct DemoData {
     balance_date: NaiveDate,
     forecast: Money,
     month: MonthSummary,
-    upcoming: Vec<UpcomingCharge>,
-    subscriptions: Vec<Subscription>,
-    history: Vec<BalancePoint>,
-    movements: Vec<Movement>,
+    upcoming: Rc<[UpcomingCharge]>,
+    subscriptions: Rc<[Subscription]>,
+    history: Rc<[BalancePoint]>,
+    movements: Rc<[Movement]>,
+    accounts: Rc<[AccountInfo]>,
 }
 
 impl DemoData {
@@ -262,7 +265,7 @@ impl DemoData {
                 date: date(2026, 12, 8),
             },
         ];
-        let history = [
+        let history: Vec<BalancePoint> = [
             (2026, 9, 3, 510210),
             (2026, 9, 10, 498840),
             (2026, 9, 17, 504175),
@@ -486,16 +489,25 @@ impl DemoData {
             recurring,
             upcoming: upcoming.len(),
         };
+        let accounts: Rc<[AccountInfo]> = Rc::from([AccountInfo {
+            id: "demo-account".to_string(),
+            name: "Demo".to_string(),
+            kind: AccountKind::Checking,
+            currency: Currency::Eur,
+            archived: false,
+            balance,
+        }]);
         DemoData {
             today,
             balance,
             balance_date: today,
             forecast,
             month,
-            upcoming,
-            subscriptions,
-            history,
-            movements,
+            upcoming: Rc::from(upcoming),
+            subscriptions: Rc::from(subscriptions),
+            history: Rc::from(history),
+            movements: Rc::from(movements),
+            accounts,
         }
     }
 }
@@ -555,16 +567,16 @@ impl FinancesData for DemoData {
         self.month.clone()
     }
 
-    fn upcoming_charges(&self) -> &[UpcomingCharge] {
-        &self.upcoming
+    fn upcoming_charges(&self) -> Rc<[UpcomingCharge]> {
+        self.upcoming.clone()
     }
 
-    fn subscriptions(&self) -> &[Subscription] {
-        &self.subscriptions
+    fn subscriptions(&self) -> Rc<[Subscription]> {
+        self.subscriptions.clone()
     }
 
-    fn balance_history(&self) -> &[BalancePoint] {
-        &self.history
+    fn balance_history(&self) -> Rc<[BalancePoint]> {
+        self.history.clone()
     }
 
     fn exchange_rate(&self, from: Currency, to: Currency) -> f64 {
@@ -575,8 +587,12 @@ impl FinancesData for DemoData {
         }
     }
 
-    fn movements(&self) -> &[Movement] {
-        &self.movements
+    fn movements(&self) -> Rc<[Movement]> {
+        self.movements.clone()
+    }
+
+    fn accounts(&self) -> Rc<[AccountInfo]> {
+        self.accounts.clone()
     }
 }
 
@@ -593,7 +609,7 @@ mod tests {
         // Upcoming charges are soonest first and reference known subscriptions.
         let upcoming = data.upcoming_charges();
         assert!(upcoming.windows(2).all(|w| w[0].date <= w[1].date));
-        for charge in upcoming {
+        for charge in upcoming.iter() {
             assert!(subs.iter().any(|s| s.id == charge.subscription_id));
             assert!(charge.date >= data.today());
         }
@@ -629,7 +645,7 @@ mod tests {
         // happened in the past; recurring movements have a monthly frequency.
         let movements = data.movements();
         assert!(movements.len() >= 10);
-        for movement in movements {
+        for movement in movements.iter() {
             if movement.kind == crate::data::MovementKind::Charge {
                 let id = movement
                     .subscription_id
@@ -651,11 +667,8 @@ mod tests {
     fn demo_names_are_the_invented_ones() {
         // A guard against accidentally copying real services into the demo.
         let data = DemoData::new();
-        let names: Vec<&str> = data
-            .subscriptions()
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect();
+        let subs = data.subscriptions();
+        let names: Vec<&str> = subs.iter().map(|s| s.name.as_str()).collect();
         for expected in [
             "AlmacenNube",
             "CineEnPantallas",

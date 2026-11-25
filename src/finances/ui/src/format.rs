@@ -10,6 +10,17 @@ pub fn money(amount: Money) -> String {
     format_amount(amount.minor, amount.currency, false)
 }
 
+/// "2026-11-25": the text a date field shows and parses back.
+pub fn iso_date(date: NaiveDate) -> String {
+    date.format("%Y-%m-%d").to_string()
+}
+
+/// "12.99": the text an amount field shows and parses back (always a dot,
+/// whatever the interface language, so the form is unambiguous).
+pub fn amount_text(minor: i64) -> String {
+    format!("{:.2}", minor as f64 / 100.)
+}
+
 pub fn signed_money(amount: Money) -> String {
     format_amount(amount.minor, amount.currency, true)
 }

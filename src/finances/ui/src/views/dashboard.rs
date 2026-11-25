@@ -234,7 +234,7 @@ pub fn render(
                                         )),
                                 ),
                         )
-                        .child(chart::balance_chart(history))
+                        .child(chart::balance_chart(&history))
                         .child(
                             div().flex().justify_between().children([
                                 div()

@@ -1,13 +1,17 @@
 //! Subscriptions: the list on the left, the selected one's detail on the
-//! right. Pause/resume/cancel are shown as disabled actions until the store
-//! crate can apply them.
+//! right. When the data source accepts commands (the store does), the header
+//! opens the create form and the detail pane can pause, resume, cancel,
+//! reactivate, edit and delete; the demo keeps them disabled.
 
+use crate::commands::SubscriptionAction;
 use crate::data::{Subscription, SubscriptionStatus};
+use crate::dialog::{self, Dialog};
 use crate::format;
 use crate::kit::{self, Control};
 use crate::language::{fill, message};
 use crate::shell::FinancesApp;
 use crate::theme::{self, TypeScale, color};
+use crate::views::disabled_action;
 use gpui::{prelude::*, *};
 
 const LABELS: [&str; 8] = [
@@ -116,19 +120,54 @@ fn field(label: &str, value: String) -> Div {
         )
 }
 
-/// A disabled action button: dimmed, with a tooltip saying why.
-fn disabled_action(id: (&'static str, usize), icon: &'static str, label: &str) -> Stateful<Div> {
-    kit::button(id, label.to_string())
-        .child(kit::icon(icon, "ink-2", 13.))
-        .disabled(message("sub.action.disabled"))
+/// A live action button, or its disabled twin when the data source is
+/// read-only (the demo).
+fn action_button(
+    id: (&'static str, usize),
+    icon: &'static str,
+    label_key: &'static str,
+    can_mutate: bool,
+    cx: &mut Context<FinancesApp>,
+    on_click: impl Fn(&mut FinancesApp, &mut Context<FinancesApp>) + Clone + 'static,
+) -> Stateful<Div> {
+    if can_mutate {
+        kit::button(id, message(label_key).to_string())
+            .child(kit::icon(icon, "ink-2", 13.))
+            .control(message(label_key))
+            .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+    } else {
+        disabled_action(id, icon, label_key)
+    }
 }
 
-fn detail(sub: &Subscription, index: usize) -> Div {
-    let action = match sub.status {
-        SubscriptionStatus::Paused => ("action-play", "sub.action.resume"),
-        SubscriptionStatus::Active => ("action-pause", "sub.action.pause"),
-        _ => ("action-pause", "sub.action.pause"),
+fn detail(
+    app: &FinancesApp,
+    sub: &Subscription,
+    index: usize,
+    cx: &mut Context<FinancesApp>,
+) -> Div {
+    let can_mutate = app.can_mutate();
+    let (primary_icon, primary_action, primary_key) = match sub.status {
+        SubscriptionStatus::Paused => (
+            "action-play",
+            SubscriptionAction::Resume,
+            "sub.action.resume",
+        ),
+        SubscriptionStatus::Active => (
+            "action-pause",
+            SubscriptionAction::Pause,
+            "sub.action.pause",
+        ),
+        SubscriptionStatus::Cancelled | SubscriptionStatus::Finished => (
+            "action-play",
+            SubscriptionAction::Reactivate,
+            "sub.action.reactivate",
+        ),
     };
+    let id = sub.id.clone();
+    let cancel_id = sub.id.clone();
+    let edit_id = sub.id.clone();
+    let delete_id = sub.id.clone();
     div()
         .flex_1()
         .min_w_0()
@@ -193,23 +232,52 @@ fn detail(sub: &Subscription, index: usize) -> Div {
             div()
                 .flex()
                 .flex_row()
+                .flex_wrap()
                 .gap(px(8.))
-                .child(disabled_action(
-                    ("resume", index),
-                    action.0,
-                    message(action.1),
+                .child(action_button(
+                    ("sub-primary", index),
+                    primary_icon,
+                    primary_key,
+                    can_mutate,
+                    cx,
+                    move |this, cx| this.subscription_action(&id, primary_action, cx),
                 ))
                 .when(
                     sub.status == SubscriptionStatus::Active
                         || sub.status == SubscriptionStatus::Paused,
                     |s| {
-                        s.child(disabled_action(
+                        s.child(action_button(
                             ("cancel", index),
                             "action-x",
-                            message("sub.action.cancel"),
+                            "sub.action.cancel",
+                            can_mutate,
+                            cx,
+                            move |this, cx| {
+                                this.subscription_action(&cancel_id, SubscriptionAction::Cancel, cx)
+                            },
                         ))
                     },
-                ),
+                )
+                .child(action_button(
+                    ("edit", index),
+                    "action-edit",
+                    "sub.action.edit",
+                    can_mutate,
+                    cx,
+                    move |this, cx| {
+                        dialog::open(this, Dialog::EditSubscription(edit_id.clone()), cx)
+                    },
+                ))
+                .child(action_button(
+                    ("delete", index),
+                    "action-x",
+                    "sub.action.delete",
+                    can_mutate,
+                    cx,
+                    move |this, cx| {
+                        this.subscription_action(&delete_id, SubscriptionAction::Delete, cx)
+                    },
+                )),
         )
 }
 
@@ -227,6 +295,7 @@ pub fn render(
         .iter()
         .filter(|s| s.status == SubscriptionStatus::Paused)
         .count();
+    let can_mutate = app.can_mutate();
     let selected_id = app
         .selected_subscription()
         .map(str::to_string)
@@ -235,6 +304,17 @@ pub fn render(
         .iter()
         .position(|s| Some(s.id.as_str()) == selected_id.as_deref());
 
+    let new_button = if can_mutate {
+        kit::button(("new-sub", 0usize), message("sub.new").to_string())
+            .child(kit::icon("plus", "ink-2", 13.))
+            .control(message("sub.new"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                dialog::open(this, Dialog::NewSubscription, cx);
+            }))
+            .into_any_element()
+    } else {
+        disabled_action(("new-sub", 0usize), "plus", "sub.new").into_any_element()
+    };
     div()
         .id("subscriptions")
         .debug_selector(|| "subscriptions".into())
@@ -247,28 +327,37 @@ pub fn render(
                 .p(px(24.))
                 .pb(px(16.))
                 .flex()
-                .flex_col()
-                .gap(px(4.))
+                .flex_row()
+                .items_end()
+                .justify_between()
+                .gap(px(12.))
                 .child(
                     div()
-                        .type_scale("display")
-                        .text_color(color("ink"))
-                        .child(message(app.page.nav_key())),
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .type_scale("display")
+                                .text_color(color("ink"))
+                                .child(message(app.page.nav_key())),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::MONO)
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .text_color(color("ink-2"))
+                                .child(fill(
+                                    "subscriptions.subtitle",
+                                    &[
+                                        ("{active}", &active.to_string()),
+                                        ("{paused}", &paused.to_string()),
+                                    ],
+                                )),
+                        ),
                 )
-                .child(
-                    div()
-                        .font_family(theme::MONO)
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .text_color(color("ink-2"))
-                        .child(fill(
-                            "subscriptions.subtitle",
-                            &[
-                                ("{active}", &active.to_string()),
-                                ("{paused}", &paused.to_string()),
-                            ],
-                        )),
-                ),
+                .child(new_button),
         )
         .child(
             div()
@@ -311,9 +400,12 @@ pub fn render(
                         .h_full()
                         .overflow_y_scroll()
                         .child(match selected.and_then(|i| subs.get(i)) {
-                            Some(sub) => {
-                                detail(sub, subs.iter().position(|s| s.id == sub.id).unwrap_or(0))
-                            }
+                            Some(sub) => detail(
+                                app,
+                                sub,
+                                subs.iter().position(|s| s.id == sub.id).unwrap_or(0),
+                                cx,
+                            ),
                             None => div()
                                 .p(px(24.))
                                 .text_size(px(13.))

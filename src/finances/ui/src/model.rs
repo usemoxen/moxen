@@ -835,6 +835,22 @@ pub fn parse_amount_minor(text: &str) -> Option<i64> {
     Some((value * 100.).round() as i64)
 }
 
+/// Parses a typed date ("2026-11-25") into a `NaiveDate`. Empty means "no
+/// date" and is the caller's `None`; anything else must be `YYYY-MM-DD`.
+pub fn parse_iso_date(text: &str) -> Option<NaiveDate> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").ok()
+}
+
+/// Parses a typed date that must be present (a movement's date, a
+/// subscription's start). `None` for empty or malformed text.
+pub fn parse_required_date(text: &str) -> Option<NaiveDate> {
+    parse_iso_date(text).filter(|_| !text.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

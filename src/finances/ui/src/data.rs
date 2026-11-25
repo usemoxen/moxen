@@ -1,15 +1,31 @@
 //! The view-model boundary: plain structs the views read through the
 //! [`FinancesData`] trait. Money stays in integer minor units (cents). The
-//! `core` and `store` crates will implement this trait later without the
-//! views changing.
+//! `core` and `store` crates plug in behind this trait (through the app's
+//! `StoreData` adapter, LOCAL-030) without the views changing: this module
+//! knows nothing about SQLite, rusqlite or the store's own types. Writes go
+//! through the plain-DTO commands of [`crate::commands`].
 
 use crate::language;
 use chrono::NaiveDate;
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Currency {
     Eur,
     Usd,
+}
+
+impl Currency {
+    /// The ISO code, as shown next to an account's name.
+    pub fn code(self) -> &'static str {
+        match self {
+            Currency::Eur => "EUR",
+            Currency::Usd => "USD",
+        }
+    }
+
+    /// Every currency the UI can offer, in picker order.
+    pub const ALL: [Currency; 2] = [Currency::Eur, Currency::Usd];
 }
 
 /// An amount in minor units of its currency (cents).
@@ -54,6 +70,15 @@ impl Frequency {
             Frequency::Annual => "freq.annual",
         }
     }
+
+    /// Every frequency the forms offer, in picker order.
+    pub const ALL: [Frequency; 5] = [
+        Frequency::Once,
+        Frequency::Weekly,
+        Frequency::Monthly,
+        Frequency::Quarterly,
+        Frequency::Annual,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +218,114 @@ pub struct Movement {
     pub notes: Option<LocalizedText>,
 }
 
+/// The kind of account, as the account row stores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountKind {
+    Checking,
+    Savings,
+    CreditCard,
+    Cash,
+}
+
+impl AccountKind {
+    pub fn key(self) -> &'static str {
+        match self {
+            AccountKind::Checking => "account.kind.checking",
+            AccountKind::Savings => "account.kind.savings",
+            AccountKind::CreditCard => "account.kind.credit-card",
+            AccountKind::Cash => "account.kind.cash",
+        }
+    }
+
+    /// Every kind the account form offers, in picker order.
+    pub const ALL: [AccountKind; 4] = [
+        AccountKind::Checking,
+        AccountKind::Savings,
+        AccountKind::CreditCard,
+        AccountKind::Cash,
+    ];
+}
+
+/// What the account selector shows for one account. The balance is in the
+/// account's own currency, so it never needs a conversion.
+#[derive(Clone, Debug)]
+pub struct AccountInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: AccountKind,
+    pub currency: Currency,
+    pub archived: bool,
+    pub balance: Money,
+}
+
+/// Which account the pages are looking at: one of them, or the aggregate
+/// "all accounts" view (whose totals are converted, and flagged approximate
+/// when an exchange rate is missing).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountSelection {
+    All,
+    One(String),
+}
+
+impl AccountSelection {
+    pub fn is_all(&self) -> bool {
+        matches!(self, AccountSelection::All)
+    }
+}
+
+/// Interns a string once, so user-entered text can live in a
+/// `&'static str` field without leaking on every render.
+fn intern(text: &str) -> &'static str {
+    use std::sync::{LazyLock, Mutex};
+    static CACHE: LazyLock<Mutex<std::collections::HashMap<String, &'static str>>> =
+        LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    let mut cache = CACHE.lock().expect("category intern cache");
+    cache
+        .entry(text.to_string())
+        .or_insert_with(|| Box::leak(text.to_string().into_boxed_str()))
+}
+
+/// User-entered text (a note, a description) shown as-is in both interface
+/// languages.
+pub fn passthrough_localized(text: &str) -> LocalizedText {
+    let passthrough = intern(text);
+    LocalizedText {
+        en: passthrough,
+        es: passthrough,
+    }
+}
+
+/// A category the store keeps as plain text (the reference's categories are
+/// Spanish) turned into the pair the interface shows in either language.
+/// Unknown categories pass through unchanged, in both languages.
+pub fn category_localized(stored: &str) -> LocalizedText {
+    let known: &[(&str, &str, &str)] = &[
+        ("Nómina", "Salary", "Nómina"),
+        ("Ayudas", "Grants", "Ayudas"),
+        ("Autónomo", "Freelance", "Autónomo"),
+        ("Devoluciones", "Refunds", "Devoluciones"),
+        ("Hogar", "Home", "Hogar"),
+        ("Transporte", "Transport", "Transporte"),
+        ("Compras", "Groceries", "Compras"),
+        ("Ocio", "Leisure", "Ocio"),
+        ("Salud", "Health", "Salud"),
+        ("Educación", "Education", "Educación"),
+        ("Regalos", "Gifts", "Regalos"),
+        ("Suscripciones", "Subscriptions", "Suscripciones"),
+        ("Otros", "Other", "Otros"),
+    ];
+    for (stored_name, en, es) in known {
+        if stored == *stored_name {
+            return LocalizedText { en, es };
+        }
+    }
+    let passthrough = intern(stored);
+    LocalizedText {
+        en: passthrough,
+        es: passthrough,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UpcomingCharge {
     pub subscription_id: String,
@@ -217,31 +350,51 @@ pub struct MonthSummary {
     pub upcoming: usize,
 }
 
-/// Everything the views need, behind one trait.
+/// Everything the views need, behind one trait. The collections come back as
+/// shared slices, so a store-backed implementation can swap its snapshot
+/// after a write and the next render reads the fresh one.
 pub trait FinancesData {
     fn today(&self) -> NaiveDate;
-    /// The real balance of the account, with the date it refers to.
+    /// The real balance of the selected account, with the date it refers to.
     fn balance(&self) -> Money;
     fn balance_date(&self) -> NaiveDate;
     /// The expected balance at the end of the month.
     fn month_end_forecast(&self) -> Money;
     fn month_summary(&self) -> MonthSummary;
     /// Charges expected soon, soonest first.
-    fn upcoming_charges(&self) -> &[UpcomingCharge];
-    fn subscriptions(&self) -> &[Subscription];
+    fn upcoming_charges(&self) -> Rc<[UpcomingCharge]>;
+    fn subscriptions(&self) -> Rc<[Subscription]>;
     /// Past balances for the dashboard chart, oldest first.
-    fn balance_history(&self) -> &[BalancePoint];
-    /// The account's currency; every total the views show is in it.
+    fn balance_history(&self) -> Rc<[BalancePoint]>;
+    /// The selected account's currency; every total the views show is in it.
     fn account_currency(&self) -> Currency {
         Currency::Eur
     }
     /// The rate used to convert `from` into `to`: `1 from = rate to`.
-    /// Must return 1.0 when both currencies are the same.
+    /// Must return 1.0 when both currencies are the same, and when no rate is
+    /// known (the unconverted amount is then shown and flagged approximate).
     fn exchange_rate(&self, from: Currency, to: Currency) -> f64;
-    /// All recorded movements: incomes, expenses and real charges.
-    fn movements(&self) -> &[Movement];
+    /// All recorded movements of the selected scope: incomes, expenses and
+    /// real charges (plus the transfers of one account, as movements).
+    fn movements(&self) -> Rc<[Movement]>;
     /// False while the data is still loading; the pages show skeletons.
     fn is_ready(&self) -> bool {
         true
+    }
+    // -- LOCAL-030: multi-account and store wiring ---------------------------
+    /// Every account, in the user's order (archived ones included, so the
+    /// settings page can offer them).
+    fn accounts(&self) -> Rc<[AccountInfo]> {
+        Rc::from([])
+    }
+    /// True when the "all accounts" total had to fall back without an
+    /// exchange rate: the badge the selector shows next to the total.
+    fn total_approximate(&self) -> bool {
+        false
+    }
+    /// The database file behind the data, when there is one (the Settings
+    /// page shows it). `None` for the demo data.
+    fn database_path(&self) -> Option<String> {
+        None
     }
 }

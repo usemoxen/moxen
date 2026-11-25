@@ -109,8 +109,8 @@ pub fn render(
     let from = model::start_of_month(first_month);
     let to = model::end_of_month(today);
     let events = model::collect_events(
-        data.subscriptions(),
-        data.movements(),
+        &data.subscriptions(),
+        &data.movements(),
         account,
         &rate,
         from,
@@ -131,9 +131,9 @@ pub fn render(
         0
     };
 
-    let normalized = model::normalized_monthly_cost(data.subscriptions(), account, &rate);
-    let savings = model::savings_from_inactive(data.subscriptions(), account, &rate);
-    let ranking = model::subscription_ranking(data.subscriptions(), account, &rate);
+    let normalized = model::normalized_monthly_cost(&data.subscriptions(), account, &rate);
+    let savings = model::savings_from_inactive(&data.subscriptions(), account, &rate);
+    let ranking = model::subscription_ranking(&data.subscriptions(), account, &rate);
     let categories = model::category_distribution(&events, from, to);
     let evolution = model::cost_evolution(&events, &month_list, normalized);
 

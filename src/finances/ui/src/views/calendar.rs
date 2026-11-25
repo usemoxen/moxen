@@ -252,8 +252,8 @@ pub fn render(
     };
 
     let events = model::collect_events(
-        data.subscriptions(),
-        data.movements(),
+        &data.subscriptions(),
+        &data.movements(),
         account,
         &rate,
         grid_from,
@@ -281,8 +281,8 @@ pub fn render(
 
     // The month's totals and month-end balance.
     let month_events = model::collect_events(
-        data.subscriptions(),
-        data.movements(),
+        &data.subscriptions(),
+        &data.movements(),
         account,
         &rate,
         model::start_of_month(NaiveDate::from_ymd_opt(year, month, 1).expect("month")),
