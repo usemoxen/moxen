@@ -13,6 +13,11 @@ no other Moxen product.
 | `app` | The standalone app (`moxen-finances`). |
 | `mcp` | An optional read-only MCP server over the same data, for any harness. |
 
+The store keeps the database at `<platform data dir>/Moxen/Finances/finances.db` (the platform data
+folder, so never a hardcoded home), which `MOXEN_FINANCES_DB` overrides and an explicit path bypasses.
+Its schema is the TypeScript reference's, table for table, so a database from either app opens in the
+other; a new file gets the fictional demo seed, an existing one never does.
+
 Rules: the repository is public, so no real personal data goes in it (demo data only, `data/` and `*.db`
 are ignored). Nothing under `src/` in TypeScript imports this. `src/desktop` is not touched until the
 bundling refactor is approved. Checks: `cargo fmt --check && cargo clippy && cargo test` in this folder.

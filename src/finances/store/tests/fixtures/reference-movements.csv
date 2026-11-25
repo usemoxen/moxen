@@ -1,0 +1,13 @@
+﻿fecha;tipo;origen;nombre;detalle;importe_eur;importe_original;moneda_original;estimado;estado;categoria
+2026-11-08;gasto;subscription;Asistentes Cloud Go;Plan de pago para un catálogo de asistentes.;10,91;12,00;USD;estimado;active;Suscripciones
+2026-11-17;gasto;subscription;Canciones en streaming;Reproducción de audio en línea.;10,49;10,49;EUR;estimado;active;Suscripciones
+2026-11-23;gasto;subscription;CorreoSeguro Pro;Buzón privado con gestor de claves.;18,99;18,99;EUR;estimado;active;Suscripciones
+2026-11-24;gasto;subscription;Nube 400 GB;Espacio compartido de 400 GB.;5,49;5,49;EUR;estimado;active;Suscripciones
+2026-11-26;gasto;subscription;Almacén Nube;Copia de seguridad en la nube.;3,64;4,00;USD;estimado;active;Suscripciones
+2026-11-28;gasto;subscription;Soporte de sobremesa;Soporte articulado de sobremesa.;17,50;17,50;EUR;estimado;active;Suscripciones
+2026-11-30;gasto;subscription;Conversador IA;Chat de inteligencia artificial de pago.;24,00;24,00;EUR;estimado;active;Suscripciones
+2026-12-23;gasto;subscription;CorreoSeguro Pro;Buzón privado con gestor de claves.;18,99;18,99;EUR;estimado;active;Suscripciones
+2026-12-24;gasto;subscription;Nube 400 GB;Espacio compartido de 400 GB.;5,49;5,49;EUR;estimado;active;Suscripciones
+2026-12-26;gasto;subscription;Almacén Nube;Copia de seguridad en la nube.;3,64;4,00;USD;estimado;active;Suscripciones
+2026-12-28;gasto;subscription;Soporte de sobremesa;Soporte articulado de sobremesa.;17,50;17,50;EUR;estimado;active;Suscripciones
+2026-12-30;gasto;subscription;Conversador IA;Chat de inteligencia artificial de pago.;24,00;24,00;EUR;estimado;active;Suscripciones

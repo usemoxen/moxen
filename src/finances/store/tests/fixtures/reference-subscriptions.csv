@@ -1,0 +1,11 @@
+﻿id;nombre;descripcion;moneda;precio;frecuencia;inicio;dia_cobro;fin;estado;plan;notas
+seed-sub-1;Mobilidad urbana;Desplazamientos por la ciudad.;EUR;;monthly;;;;active;;
+seed-sub-2;CorreoSeguro Pro;Buzón privado con gestor de claves.;EUR;18,99;monthly;2026-04-23;23;;active;;
+seed-sub-3;Conversador IA;Chat de inteligencia artificial de pago.;EUR;24,00;monthly;2026-09-30;30;;active;;
+seed-sub-4;Asistentes Cloud Go;Plan de pago para un catálogo de asistentes.;USD;12,00;monthly;2026-10-08;8;2026-11-25;active;;
+seed-sub-5;Web ejemplo.dev;Un sitio de ejemplo.;USD;12,99;annual;2026-03-21;21;;active;;
+seed-sub-6;Soporte de sobremesa;Soporte articulado de sobremesa.;EUR;17,50;monthly;2026-09-28;28;2027-01-10;active;;
+seed-sub-7;Canciones en streaming;Reproducción de audio en línea.;EUR;10,49;monthly;2025-04-17;17;2026-12-10;active;;
+seed-sub-8;Almacén Nube;Copia de seguridad en la nube.;USD;4,00;monthly;2026-07-26;26;;active;;
+seed-sub-9;Nube 400 GB;Espacio compartido de 400 GB.;EUR;5,49;monthly;2025-02-14;24;;active;;
+seed-sub-10;Seguridad Hogar;Protección para todos los dispositivos de casa.;EUR;44,99;annual;2022-10-10;10;;active;;
