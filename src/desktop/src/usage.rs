@@ -1522,16 +1522,13 @@ pub fn render(
     let compacts = breakdown
         .and_then(|breakdown| breakdown.compacts)
         .or_else(|| snapshot.and_then(|usage| usage.compacts));
-    // The live reading's own figure first (a provider that reports its session
-    // cost), then the thread's computed cost, which covers every provider.
     // One accounting scope for the figure: the thread's own turns, when they
-    // can be priced. The live session's native figure is its own block below.
-    let cost = data
-        .cost
-        .as_ref()
-        .and_then(|cost| cost.total)
-        .or_else(|| breakdown.and_then(|breakdown| breakdown.cost))
-        .or_else(|| snapshot.and_then(|usage| usage.cost));
+    // can be priced. A turn-cost object that exists with no total is the
+    // thread's answer too — nothing could be priced — so the live session's
+    // native figure is never passed off as the thread's; it keeps its own
+    // block below.
+    let cost = thread_cost_total(data, breakdown, snapshot);
+    let cost_unknown = data.cost.as_ref().is_some_and(|cost| cost.total.is_none());
     let processed = snapshot.and_then(|usage| usage.processed);
     let estimated = breakdown.is_some_and(|breakdown| breakdown.estimated);
     let mut body = div().p(px(16.)).flex().flex_col().gap(px(24.)).child(
@@ -1561,6 +1558,12 @@ pub fn render(
                 // "312k / 1m · 31% · $4.64" does.
                 .when_some(cost, |row, cost| {
                     row.child(mono(format!("· {}", format_usd(cost))))
+                })
+                // No total to show, but the thread does have turns: say it is
+                // unpriced rather than leaving the session's figure to read as
+                // the thread's.
+                .when(cost.is_none() && cost_unknown, |row| {
+                    row.child(mono(crate::language::message("side.unpriced").to_string()))
                 })
                 .child(mono(if data.live {
                     "live".to_string()
@@ -1718,6 +1721,24 @@ pub fn render(
     body
 }
 
+/// The thread's own total, from its priced turns. When the server sends a
+/// turn-cost object with no total, that is authoritative: nothing could be
+/// priced, so there is no thread figure and the live session's native amount
+/// stays in `cost_by_model`'s own block. With no turn-cost object at all the
+/// live breakdown, then the snapshot, stand in.
+fn thread_cost_total(
+    data: &ContextData,
+    breakdown: Option<&Breakdown>,
+    snapshot: Option<&SnapshotUsage>,
+) -> Option<f64> {
+    match data.cost.as_ref() {
+        Some(cost) => cost.total,
+        None => breakdown
+            .and_then(|breakdown| breakdown.cost)
+            .or_else(|| snapshot.and_then(|usage| usage.cost)),
+    }
+}
+
 /// The thread's cost by model, then — separately — the live session's own split.
 /// They are different accounting scopes: the rows above add up to the thread
 /// total, while the session block prices only what its own query ran and
@@ -1753,7 +1774,13 @@ fn cost_by_model(
                     None => crate::language::message("side.unpriced").to_string(),
                 }))
         }));
-        if cost.partial() {
+        if cost.total.is_none() {
+            // Every turn unpriced: an unknown total, not a total that covers
+            // "the rest" of nothing.
+            section = section.child(mono(
+                crate::language::message("side.costUnknown").to_string(),
+            ));
+        } else if cost.partial() {
             let count = cost.unpriced_turns.to_string();
             section = section.child(mono(crate::language::fill(
                 "side.costPartial",
@@ -2234,6 +2261,63 @@ mod tests {
     }
 
     #[test]
+    fn an_unpriced_thread_reports_no_total_beside_a_live_session_amount() {
+        // The wire shape when no turn could be priced: `totalUsd: null` with a
+        // `byModel` row of its own, beside a live Claude session that reports
+        // its own $2.00. The header must not pass the session's figure off as
+        // the thread's: it read `17 / 100 · 17% · $2.00` before this rule.
+        let data = super::ContextData {
+            live: true,
+            breakdown: Some(super::Breakdown {
+                used: 17,
+                max: Some(100),
+                cost: Some(2.0),
+                provider_cost: vec![super::ProviderCost {
+                    model: "claude-opus-5".to_string(),
+                    cost: 2.0,
+                }],
+                ..Default::default()
+            }),
+            cost: super::ThreadCost::from_json(&json!({
+                "totalUsd": null, "pricedTurns": 0, "unpricedTurns": 1,
+                "reported": false, "estimated": false,
+                "byModel": [
+                    {"model": "some-local-model", "costUsd": null, "turns": 1, "unpricedTurns": 1},
+                ],
+            })),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::thread_cost_total(&data, data.breakdown.as_ref(), None),
+            None
+        );
+        // A priced thread still shows its own sum, with an unpriced turn or not.
+        let mixed = super::ContextData {
+            cost: super::ThreadCost::from_json(&json!({
+                "totalUsd": 14.0, "pricedTurns": 2, "unpricedTurns": 1,
+                "reported": false, "estimated": true,
+                "byModel": [
+                    {"model": "gpt-6.2-sol", "costUsd": 14.0, "turns": 2, "unpricedTurns": 0},
+                ],
+            })),
+            ..Default::default()
+        };
+        assert_eq!(super::thread_cost_total(&mixed, None, None), Some(14.0));
+        // With no turn-cost object at all the live reading's figure stands in.
+        let live_only = super::ContextData {
+            breakdown: Some(super::Breakdown {
+                cost: Some(2.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::thread_cost_total(&live_only, live_only.breakdown.as_ref(), None),
+            Some(2.0)
+        );
+    }
+
+    #[test]
     fn the_cost_block_reads_spanish_from_the_shared_catalog() {
         // The Context tab's cost copy is drawn from the catalogs the TUI and
         // this window share (`language::message`/`fill` at every cost site), so
@@ -2255,6 +2339,12 @@ mod tests {
         assert_eq!(
             crate::language::fill("side.costPartial", &[("{count}", "1")]),
             "1 turno(s) sin precio, así que el total cubre el resto."
+        );
+        // The all-unpriced case has its own wording, shipped through the same
+        // catalog rather than an English literal.
+        assert_eq!(
+            crate::language::message("side.costUnknown"),
+            "Ningún turno se pudo valorar: el coste de este hilo es desconocido, no cero."
         );
         assert_eq!(
             crate::language::fill("side.providerCostSplit", &[("{name}", "Claude")]),

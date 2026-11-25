@@ -1291,7 +1291,12 @@ over the one before it, and a turn nobody priced stays unpriced. A model with
 no price shows as `unpriced` and the total is marked partial rather than the
 turn counting as zero; a thread with nothing priceable has no cost at all, not
 `$0.00`. The figure is an **API-equivalent price**, not what a subscription is
-charged, and every surface labels it that way.
+charged, and every surface labels it that way. When no turn could be priced the
+panel says so — the thread's cost is unknown, not zero — and never puts a number
+there. A provider that reports its live session's own spend (Claude Code does)
+has that amount shown in its own block, said to be the current session with its
+own subtotal: it covers only what that query ran, so it is never presented as
+the thread's total.
 
 The split by model is shown where a thread ran on more than one: Moxen's rows
 add up to the thread's total by construction, and where the provider keeps its
@@ -1305,8 +1310,10 @@ that delegated the task can read it, and a settled task stays readable because
 its parent already reads its report — plus one check telemetry needs and a
 status read does not: the thread it resolves to must exist, must not be
 deleted, and must be in the caller's own project, or the answer is the same
-`TASK_NOT_FOUND` a stranger gets. Its cost is not rolled into the delegating
-thread's.
+`TASK_NOT_FOUND` a stranger gets. That check is made again after the telemetry
+has been gathered, so a task deleted while the read is in flight is refused the
+same way rather than answering with data for a thread that is gone. Its cost is
+not rolled into the delegating thread's.
 
 **Shared usage.** An agent sees every set-up provider's allowance with the
 `usage_status` tool (on the `moxen` server, a delegated task included): each

@@ -4601,6 +4601,32 @@ export async function requireAgentTaskThread(
   return { parent, taskId, child, delegation };
 }
 
+/** The one refusal a task telemetry read gives, whatever the reason. */
+function taskReadRefused(taskId: string, parentThreadId: string): CliError {
+  return new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parentThreadId}.`, {
+    exitCode: 3,
+    details: { taskId, parentThreadId },
+  });
+}
+
+/**
+ * The record behind a task telemetry read, or the refusal: it must exist, must
+ * not be deleted, and must sit in the caller's project.
+ */
+async function taskThreadOrThrow(
+  ctx: OperationContext,
+  taskId: string,
+  parentThreadId: string,
+  threadId: string,
+  projectId: string,
+): Promise<StoredThread> {
+  const target = await ctx.store.readThreadRecord(threadId).catch(() => null);
+  if (!target || target.deletedAt != null || target.projectId !== projectId) {
+    throw taskReadRefused(taskId, parentThreadId);
+  }
+  return target;
+}
+
 /**
  * The thread an agent reads a delegated task's context and cost from
  * (`context_usage` with a task id): the task, followed to the thread it
@@ -4613,23 +4639,35 @@ export async function requireAgentTaskThread(
  * id that does not exist are indistinguishable. `task_status` keeps its own
  * behaviour — a settled task stays readable, and it does not police a deleted
  * one — since the parent already reads that task's report.
+ *
+ * The check is only true of the moment it ran: a caller that gathers telemetry
+ * afterwards confirms it again with `confirmAgentTaskThread` before answering.
  */
 export async function agentTaskThread(
   ctx: OperationContext,
   rawCallerThreadId: string,
   rawTaskId: string,
-): Promise<{ readonly threadId: string }> {
+): Promise<{ readonly threadId: string; readonly projectId: string }> {
   const { parent, taskId, child } = await requireAgentTaskThread(ctx, rawCallerThreadId, rawTaskId);
   const live = await ownedDelegation(ctx, rawCallerThreadId, rawTaskId).catch(() => null);
   const threadId = live?.childThreadId ?? child.id;
-  const target = await ctx.store.readThreadRecord(threadId).catch(() => null);
-  if (!target || target.deletedAt != null || target.projectId !== parent.projectId) {
-    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parent.id}.`, {
-      exitCode: 3,
-      details: { taskId, parentThreadId: parent.id },
-    });
-  }
-  return { threadId };
+  await taskThreadOrThrow(ctx, taskId, parent.id, threadId, parent.projectId);
+  return { threadId, projectId: parent.projectId };
+}
+
+/**
+ * The same check, run again after a read gathered the telemetry: a deletion
+ * that lands in between is not served the data it produced. Same refusal, same
+ * details, so the caller cannot tell a race from a stranger.
+ */
+export async function confirmAgentTaskThread(
+  ctx: OperationContext,
+  rawCallerThreadId: string,
+  rawTaskId: string,
+  threadId: string,
+  projectId: string,
+): Promise<void> {
+  await taskThreadOrThrow(ctx, requireThreadId(rawTaskId), requireThreadId(rawCallerThreadId), threadId, projectId);
 }
 
 /** A delegated task by parent + task id; the task id is the child thread id. */

@@ -1142,6 +1142,7 @@ export const es: Catalog = {
   "side.providerCostSplit": "Tal como lo informa {name}, con las llamadas de subagentes.",
   "side.unpriced": "sin precio",
   "side.costPartial": "{count} turno(s) sin precio, así que el total cubre el resto.",
+  "side.costUnknown": "Ningún turno se pudo valorar: el coste de este hilo es desconocido, no cero.",
   "side.plan_usage_48f7": "Uso del plan",
   "side.remaining_credits_9c4e": "Créditos restantes",
   "side.no_subscription_usage_reported_fa47": "Este proveedor no da el uso de la suscripción.",

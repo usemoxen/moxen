@@ -1148,6 +1148,7 @@ export const en = {
   "side.providerCostSplit": "As {name} reports it, subagent calls included.",
   "side.unpriced": "unpriced",
   "side.costPartial": "{count} turn(s) unpriced, so the total covers the rest.",
+  "side.costUnknown": "No turn could be priced: this thread's cost is unknown, not zero.",
   "side.plan_usage_48f7": "Plan usage",
   "side.remaining_credits_9c4e": "Remaining credits",
   "side.no_subscription_usage_reported_fa47": "No subscription usage reported for this provider.",

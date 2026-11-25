@@ -521,7 +521,11 @@ export function ContextTab({
   // One accounting scope for the figure, the rows and the partial state: the
   // thread's own turns. The live session's native split is a different scope
   // (it prices only what its own query ran) and is drawn as its own block.
-  const costUsd = cost?.totalUsd ?? breakdown?.costUsd ?? fallback?.costUsd ?? null;
+  // A turn-cost object that exists with no total is the thread's answer too:
+  // nothing could be priced, so the thread's figure is unknown, not the live
+  // session's — that stays in its own block below.
+  const costUsd = cost === null ? (breakdown?.costUsd ?? fallback?.costUsd ?? null) : cost.totalUsd;
+  const unknown = cost !== null && cost.totalUsd === null;
   const processed = fallback?.totalProcessedTokens ?? null;
   const threadRows = cost?.byModel ?? [];
   const partial = (cost?.unpricedTurns ?? 0) > 0;
@@ -535,10 +539,10 @@ export function ContextTab({
         <>
           <Empty glyph="○" text={t("side.no_reading_yet_one_a155")} />
           {/* The cost is known from the turns even when the window is not measured. */}
-          {costUsd === null ? null : (
+          {costUsd === null && !unknown ? null : (
             <box style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1 }}>
               <text fg={COLOR.dim}>{t("side.cost")}</text>
-              <text fg={COLOR.text}>{formatUsd(costUsd)}</text>
+              {costUsd === null ? <text fg={COLOR.faint}>{t("side.unpriced")}</text> : <text fg={COLOR.text}>{formatUsd(costUsd)}</text>}
             </box>
           )}
         </>
@@ -551,7 +555,14 @@ export function ContextTab({
             ) : (
               <text fg={COLOR.dim}>{t("side.ofMax", { max: formatTokenCount(max), percent: Math.round((used / max) * 100) })}</text>
             )}
-            {costUsd === null ? null : (
+            {costUsd === null ? (
+              unknown ? (
+                <>
+                  <text fg={COLOR.dim}>{" · "}</text>
+                  <text fg={COLOR.faint}>{t("side.unpriced")}</text>
+                </>
+              ) : null
+            ) : (
               <>
                 <text fg={COLOR.dim}>{" · "}</text>
                 <text fg={COLOR.text}>{formatUsd(costUsd)}</text>
@@ -631,7 +642,7 @@ export function ContextTab({
           )}
         </>
       )}
-      {threadRows.length === 0 ? null : (
+      {threadRows.length === 0 && costUsd !== null ? null : (
         <box style={{ flexDirection: "column", flexShrink: 0 }}>
           <Heading text={t("side.costByModel")} meta={t("side.apiEquivalent")} />
           {threadRows.map((row) => (
@@ -640,7 +651,11 @@ export function ContextTab({
               <text fg={row.costUsd === null ? COLOR.faint : COLOR.text}>{row.costUsd === null ? t("side.unpriced") : formatUsd(row.costUsd)}</text>
             </box>
           ))}
-          {partial ? <text fg={COLOR.dim} wrapMode="word">{t("side.costPartial", { count: cost?.unpricedTurns ?? 0 })}</text> : null}
+          {unknown ? (
+            <text fg={COLOR.dim} wrapMode="word">{t("side.costUnknown")}</text>
+          ) : partial ? (
+            <text fg={COLOR.dim} wrapMode="word">{t("side.costPartial", { count: cost?.unpricedTurns ?? 0 })}</text>
+          ) : null}
         </box>
       )}
       {sessionRows.length === 0 ? null : (

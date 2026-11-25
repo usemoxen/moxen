@@ -210,6 +210,56 @@ export async function runSidePanelTabs(): Promise<void> {
   if (!sessionRow.includes("$2.00")) fail("the session block does not carry its own subtotal");
   scoped.renderer.destroy();
 
+  // Every turn unpriced: the wire's `totalUsd: null` is the thread's answer, so
+  // no numeric thread total is drawn — the session's own $2 stays in its block
+  // and is never passed off as the thread's.
+  const unpricedThread = {
+    totalUsd: null,
+    pricedTurns: 0,
+    unpricedTurns: 1,
+    reported: false,
+    estimated: false,
+    byModel: [{ model: "some-local-model", costUsd: null, turns: 1, unpricedTurns: 1 }],
+  };
+  const allUnpriced = await testRender(
+    <ContextTab
+      breakdown={{
+        usedTokens: 17,
+        maxTokens: 100,
+        cachedInputTokens: null,
+        autoCompactThreshold: null,
+        compactsAutomatically: null,
+        costUsd: 2,
+        costByModel: [{ model: "claude-opus-5", costUsd: 2 }],
+        categories: [{ name: "Messages", tokens: 17, kind: "used" }],
+        estimated: false,
+      }}
+      fallback={null}
+      cost={unpricedThread}
+      live
+      usageLimits={null}
+      providerName="Claude"
+      width={58}
+      now={now}
+    />,
+    { width: 60, height: 20, exitOnCtrlC: false },
+  );
+  await allUnpriced.flush();
+  const unpricedFrame = allUnpriced.captureCharFrame();
+  console.log("--- context tab: every turn unpriced, beside a live session amount ---");
+  console.log(unpricedFrame);
+  const sizeRow = unpricedFrame.split("\n").find((row) => row.includes("17 / 100"))!;
+  if (sizeRow.includes("$")) fail(`the size row shows a thread total it does not have: ${sizeRow.trim()}`);
+  // The note wraps at panel width, so compare with runs of whitespace flattened.
+  const unpricedFlow = unpricedFrame.replace(/\s+/g, " ");
+  if (!unpricedFlow.includes("No turn could be priced: this thread's cost is unknown, not zero.")) {
+    fail("the all-unpriced frame does not say the thread's cost is unknown");
+  }
+  for (const expected of ["unpriced", "Current session", "$2.00"]) {
+    if (!unpricedFrame.includes(expected)) fail(`the all-unpriced frame is missing "${expected}"`);
+  }
+  allUnpriced.renderer.destroy();
+
   // Priced turns with no context measurement at all: the cost and its rows are
   // known even when the window is not, so they are still drawn.
   const pricedOnly = await testRender(

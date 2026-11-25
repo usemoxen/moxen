@@ -158,6 +158,7 @@ import {
   recordChecklist,
   describeTask,
   agentTaskThread,
+  confirmAgentTaskThread,
   ensureProject,
   handover,
   inspectThreadView,
@@ -3232,10 +3233,9 @@ export class DirectConnection implements ClientApi {
       }
       case "thread.agent-context": {
         const ctx2 = await this.context();
-        const threadId =
-          query.taskId === undefined
-            ? query.callerThreadId
-            : (await agentTaskThread(ctx2, query.callerThreadId, query.taskId)).threadId;
+        const taskId = query.taskId;
+        const authorized = taskId === undefined ? null : await agentTaskThread(ctx2, query.callerThreadId, taskId);
+        const threadId = authorized?.threadId ?? query.callerThreadId;
         const store = await this.store();
         // Live data is a bonus: with no session here (or no thread record, as a
         // torn-down caller leaves) the recorded reading still answers.
@@ -3246,13 +3246,19 @@ export class DirectConnection implements ClientApi {
           this.sessionDriver(threadId).catch(() => null),
         ]);
         const selection = [...turns].reverse().find((turn) => turn.modelSelection !== undefined)?.modelSelection ?? thread?.modelSelection ?? null;
-        return {
+        const answer = {
           threadId,
           provider: selection === null ? null : driverKindOfInstance(selection.instanceId),
           reading: reading.reading,
           breakdown: await this.liveBreakdown(threadId, driver),
           cost: await this.threadCostOf(threadId),
         };
+        // The authorization was true of an instant; a deletion during these
+        // reads must not be answered with the telemetry they produced.
+        if (taskId !== undefined && authorized !== null) {
+          await confirmAgentTaskThread(ctx2, query.callerThreadId, taskId, authorized.threadId, authorized.projectId);
+        }
+        return answer;
       }
       case "thread.context": {
         const driver = await this.sessionDriver(query.threadId);

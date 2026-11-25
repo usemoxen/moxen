@@ -422,9 +422,35 @@ describe("context_usage is additive for the reply it already gave", () => {
 
 describe("context_usage for a delegated task follows the task's lifecycle", () => {
   /** A project, an owner, a task and (optionally) the thread the task carried on in. */
-  async function taskChain(options: { readonly continuationProject?: string; readonly noContinuation?: boolean } = {}) {
+  async function taskChain(
+    options: {
+      readonly continuationProject?: string;
+      readonly noContinuation?: boolean;
+      /** Runs inside the task read, between the authorization and the answer. */
+      readonly duringRead?: (store: Awaited<ReturnType<typeof testHarness>>["store"]) => Promise<void>;
+    } = {},
+  ) {
     const harness = await testHarness();
-    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
+    // The live breakdown is where a deletion can land mid-read: it is asked for
+    // after the task was authorized and before the payload is returned.
+    const hookDriver = (): TurnDriver =>
+      ({
+        hasSession: () => Effect.succeed(true),
+        startSession: () => Effect.succeed({}),
+        sendTurn: () => Effect.succeed({ threadId: "", turnId: "t" }),
+        interruptTurn: () => Effect.void,
+        awaitTurn: async () => ({ status: "completed", text: "", usage: null, error: null }),
+        streamEvents: Stream.never,
+        contextBreakdown: async () => {
+          await options.duringRead?.(harness.store);
+          return { usedTokens: 321, maxTokens: 1_000, cachedInputTokens: null, autoCompactThreshold: null, compactsAutomatically: null, categories: [{ name: "Messages", tokens: 321, kind: "used" }], estimated: true } as never;
+        },
+      }) as unknown as TurnDriver;
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: options.duringRead === undefined ? harness.drivers : { ...harness.drivers, claude: hookDriver },
+      config: async () => harness.config,
+    });
     const { project } = await ensureStoredProject(process.env.MOXEN_STORE_ROOT!, { workspaceRoot: await realpath(harness.work) });
     const make = (id: string, projectId = project.id) =>
       createThread(harness.store, { id, projectId, title: id, modelSelection: CLAUDE });
@@ -496,6 +522,19 @@ describe("context_usage for a delegated task follows the task's lifecycle", () =
     const world = await taskChain();
     try {
       expect((await world.ask({ taskId: "task" })).value).toMatchObject({ threadId: "next" });
+    } finally {
+      await world.connection.close();
+    }
+  });
+
+  it("refuses a task deleted between authorizing the read and gathering its telemetry", async () => {
+    const world = await taskChain({ duringRead: (store) => deleteThread(store, "next").then(() => undefined) });
+    try {
+      const refused = await world.ask({ taskId: "task" });
+      // A deletion that lands mid-read is not served the data it produced.
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toMatch(/TASK_NOT_FOUND/u);
+      expect(refused.text).not.toMatch(/321|cost|byModel/u);
     } finally {
       await world.connection.close();
     }
