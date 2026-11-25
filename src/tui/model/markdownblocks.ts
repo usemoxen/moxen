@@ -36,11 +36,28 @@ const QUOTE_MARK = /^ {0,3}>[ \t]?/;
 
 /** Whether a token tree holds a GFM table anywhere — list items, nested lists, quotes included. */
 function containsTable(token: unknown): boolean {
+  return contains(token, (node) => node.type === "table");
+}
+
+/**
+ * Whether a token tree holds a GFM task item (`- [x]`) anywhere — nested
+ * lists and quotes included. A container holding one is never split
+ * structurally: OpenTUI's list renderer drops the checkbox tokens, so the
+ * item's `[x]`/`[ ]` would vanish, and no rewriting of the markers is done —
+ * the whole container renders exactly as ordinary markdown does.
+ */
+function containsTask(token: unknown): boolean {
+  return contains(token, (node) => node.task === true);
+}
+
+/** Walks a token tree (tokens/items arrays, nested to any depth) for a predicate on each node. */
+function contains(token: unknown, predicate: (node: { type?: string; task?: boolean }) => boolean): boolean {
+  if (Array.isArray(token)) return token.some((child) => contains(child, predicate));
   if (token === null || typeof token !== "object") return false;
-  const node = token as { type?: string; tokens?: unknown; items?: unknown };
-  if (node.type === "table") return true;
-  if (Array.isArray(node.tokens) && node.tokens.some(containsTable)) return true;
-  if (Array.isArray(node.items) && node.items.some(containsTable)) return true;
+  const node = token as { type?: string; task?: boolean; tokens?: unknown; items?: unknown };
+  if (predicate(node)) return true;
+  if (Array.isArray(node.tokens) && node.tokens.some((child) => contains(child, predicate))) return true;
+  if (Array.isArray(node.items) && node.items.some((child) => contains(child, predicate))) return true;
   return false;
 }
 
@@ -55,75 +72,15 @@ function quoteInner(raw: string): string {
 /** `Tokens.Generic` keeps `type` a plain string, so narrowing needs this guard. */
 const isList = (token: Token): token is Tokens.List => token.type === "list";
 
-/** A task-list marker line: `- [x] done`, `  2. [ ] todo` — indentation kept in the capture. */
-const TASK_MARKER = /^([ \t]*(?:[*+-]|\d{1,9}[.)])[ \t]+)\[[ xX]\][ \t]*/;
-/** A fence line at any indent, as inside a list item. */
-const FENCE_LINE = /^[ \t]*(`{3,}|~{3,})/;
-
-/** Every task item's checked state in document order, loose and nested items included. */
-function taskChecks(token: unknown): boolean[] {
-  const out: boolean[] = [];
-  const walk = (node: unknown): void => {
-    if (Array.isArray(node)) {
-      for (const child of node) walk(child);
-      return;
-    }
-    if (node === null || typeof node !== "object") return;
-    const t = node as { items?: unknown; tokens?: unknown; task?: boolean; checked?: boolean };
-    if (Array.isArray(t.items)) {
-      for (const item of t.items as Array<{ task?: boolean; checked?: boolean; tokens?: unknown }>) {
-        if (item.task === true) out.push(item.checked === true);
-        walk(item.tokens);
-      }
-    }
-    if (Array.isArray(t.tokens)) walk(t.tokens);
-  };
-  walk(token);
-  return out;
-}
-
-/**
- * A list that renders structurally loses marked's checkbox tokens (OpenTUI's
- * list renderer skips them — loose items keep the checkbox inside paragraph
- * inline tokens, nested lists dedent their raw), so each task marker is
- * rewritten at its original source line, in order, from the token's checked
- * state: `- [x] done` becomes `- ☒ done`, nesting and indentation intact.
- * Fenced lines are never touched.
- */
-function listText(list: Tokens.List): string {
-  const checks = taskChecks(list);
-  let next = 0;
-  let fenceChar = "";
-  let fenceLen = 0;
-  return list.raw
-    .split("\n")
-    .map((line) => {
-      if (fenceChar !== "") {
-        if (new RegExp(`^[ \\t]*${fenceChar === "`" ? "`" : "~"}{${fenceLen},}[ \\t]*$`).test(line)) fenceChar = "";
-        return line;
-      }
-      const open = FENCE_LINE.exec(line);
-      if (open) {
-        fenceChar = open[1]![0]!;
-        fenceLen = open[1]!.length;
-        return line;
-      }
-      if (next < checks.length && TASK_MARKER.test(line)) {
-        const glyph = checks[next++] ? "☒" : "☐";
-        return line.replace(TASK_MARKER, `$1${glyph} `);
-      }
-      return line;
-    })
-    .join("\n");
-}
-
 /**
  * The markdown cut into blocks. `gapBefore` records whether a blank line
  * separated the block from the one before it, so the renderer can keep that
  * blank row now that blocks are separate elements. Text blocks carry no
  * trailing blank lines — the separator comes from the source whitespace or
  * the following block's margin, never both. Lists without a table stay in
- * the text run, rendered as ordinary markdown exactly as before.
+ * the text run, rendered as ordinary markdown exactly as before — and so does
+ * any list or blockquote that holds a task item, whose `[x]` markers the
+ * structural renderer would drop.
  *
  * Line endings are normalized to `\n` once, up front: marked normalizes them
  * before lexing, so its token raws (and the offsets measured against them)
@@ -152,14 +109,17 @@ export function splitMarkdownBlocks(text: string): MarkdownBlock[] {
     }
     // The run not yet flushed counts as a block too, for the gap test.
     const gapBefore = (blocks.length > 0 || run.length > 0) && BLANK_BEFORE.test(source.slice(Math.max(0, start - GAP_LOOKBACK), start));
-    if (token.type === "blockquote") {
+    // A container holding a task item anywhere is never split: the structural
+    // list renderer drops checkbox tokens, and no marker rewriting is done, so
+    // it stays in the text run and renders exactly as ordinary markdown does.
+    if (token.type === "blockquote" && !containsTask(token)) {
       flushRun();
       blocks.push({ kind: "quote", inner: quoteInner(token.raw), gapBefore });
       continue;
     }
-    if (isList(token) && containsTable(token)) {
+    if (isList(token) && containsTable(token) && !containsTask(token)) {
       flushRun();
-      blocks.push({ kind: "list", text: listText(token), gapBefore });
+      blocks.push({ kind: "list", text: token.raw, gapBefore });
       continue;
     }
     if (run.length === 0) runGap = gapBefore;

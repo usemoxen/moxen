@@ -23,8 +23,9 @@ const LIST_TABLE_OPTIONS = { style: "grid" } as const;
  * a list holding a table renders in `internalBlockMode="top-level"`, where
  * OpenTUI draws list children (tables included) structurally, and a
  * blockquote renders as a bordered box around a recursive render of its inner
- * markdown. Everything else — including lists with no table, which keep their
- * `[x]` task markers — takes the exact single-`<markdown>` path it always did.
+ * markdown. Everything else — lists without a table, and any list or quote
+ * holding a task item, whose `[x]` markers the structural renderer would
+ * drop — takes the exact single-`<markdown>` path it always did.
  */
 export function MarkdownView({ content, fg, syntaxStyle, streaming, selectable }: MarkdownViewProps) {
   const blocks = useMemo(() => splitMarkdownBlocks(content), [content]);

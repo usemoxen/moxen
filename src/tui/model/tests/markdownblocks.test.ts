@@ -25,50 +25,30 @@ describe("splitting markdown into TUI blocks", () => {
     ]);
   });
 
-  it("rewrites task-list checkboxes into ballot boxes for the structural renderer, checked and unchecked", () => {
-    const text = "- [x] done item\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- [ ] todo item\n- [X] also done";
-    expect(splitMarkdownBlocks(text)).toEqual([
-      {
-        kind: "list",
-        text: "- ☒ done item\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- ☐ todo item\n- ☒ also done",
-        gapBefore: false,
-      },
-    ]);
+  it("does not split a list holding both a table and a task item — it renders as ordinary markdown, markers untouched", () => {
+    const text = "- [x] done item\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- [ ] todo item";
+    expect(splitMarkdownBlocks(text)).toEqual([{ kind: "text", text, gapBefore: false }]);
   });
 
-  it("rewrites loose task checkboxes (blank line before the table) from the paragraph's inline tokens", () => {
-    const text = "- [x] done\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- [ ] todo";
-    expect(splitMarkdownBlocks(text)).toEqual([
-      {
-        kind: "list",
-        text: "- ☒ done\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- ☐ todo",
-        gapBefore: false,
-      },
-    ]);
+  it("keeps loose and nested task lists with a table unsplit (blank line before the table, nested items)", () => {
+    const loose = "- [x] loose done\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- [ ] loose todo";
+    expect(splitMarkdownBlocks(loose)).toEqual([{ kind: "text", text: loose, gapBefore: false }]);
+    const nested = "- outer\n  - [x] nested done\n  | a | b |\n  |---|---|\n  | 1 | 2 |";
+    expect(splitMarkdownBlocks(nested)).toEqual([{ kind: "text", text: nested, gapBefore: false }]);
   });
 
-  it("rewrites nested task checkboxes at their original indented source lines", () => {
-    const unordered = "- outer\n  - [x] nested done\n  - [ ] nested todo\n  | a | b |\n  |---|---|\n  | 1 | 2 |";
-    expect(splitMarkdownBlocks(unordered)).toEqual([
-      {
-        kind: "list",
-        text: "- outer\n  - ☒ nested done\n  - ☐ nested todo\n  | a | b |\n  |---|---|\n  | 1 | 2 |",
-        gapBefore: false,
-      },
-    ]);
-    const ordered = "1. outer\n   1. [x] deep done\n   2. [ ] deep todo\n   | a |\n   |---|\n   | 1 |";
-    expect(splitMarkdownBlocks(ordered)).toEqual([
-      {
-        kind: "list",
-        text: "1. outer\n   1. ☒ deep done\n   2. ☐ deep todo\n   | a |\n   |---|\n   | 1 |",
-        gapBefore: false,
-      },
-    ]);
+  it("keeps the review's adversarial task sequences unsplit: quoted task, fenced `- [x]`, literal/tab markers", () => {
+    const quotedTask = "- [x] outer done\n  > - [ ] quoted task\n- [ ] sibling task\n  | a | b |\n  |---|---|\n  | 1 | 2 |";
+    expect(splitMarkdownBlocks(quotedTask)).toEqual([{ kind: "text", text: quotedTask, gapBefore: false }]);
+    const fenceTask = "- [ ] real task\n  ```\n  - [x] fenced not a task\n  ```\n  | a | b |\n  |---|---|\n  | 1 | 2 |";
+    expect(splitMarkdownBlocks(fenceTask)).toEqual([{ kind: "text", text: fenceTask, gapBefore: false }]);
+    const literalTask = "- [x]literal\n-\t[x]\tyes\n- [ ] task\n  | a | b |\n  |---|---|\n  | 1 | 2 |";
+    expect(splitMarkdownBlocks(literalTask)).toEqual([{ kind: "text", text: literalTask, gapBefore: false }]);
   });
 
-  it("never rewrites a task marker inside a fenced block in a table-holding list", () => {
-    const text = "- item\n  ```\n  - [x] code\n  ```\n  | a | b |\n  |---|---|\n  | 1 | 2 |";
-    expect(splitMarkdownBlocks(text)).toEqual([{ kind: "list", text, gapBefore: false }]);
+  it("does not split a blockquote that holds a task item, even with a table inside", () => {
+    const text = "> - [x] quoted task\n> - [ ] quoted todo\n> | a | b |\n> |---|---|\n> | 1 | 2 |";
+    expect(splitMarkdownBlocks(text)).toEqual([{ kind: "text", text, gapBefore: false }]);
   });
 
   it("keeps a task list without a table in the text run, markers untouched", () => {
