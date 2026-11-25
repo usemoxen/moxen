@@ -7,7 +7,9 @@
  * server demuxed by `sessionID`. The transport translates v2's events into
  * the vocabulary read here (`translate.ts`). Turns run through
  * `session.prompt` and settle on `session.idle` / `session.error` (v2's
- * `session.execution.*`, once no steered input is still queued); permission
+ * `session.execution.*`, once no steered input is still queued; v2's own raw
+ * `session.idle` marker never ends a prompt turn, only a verified manual
+ * `/compact` one — see `onSessionIdleMarker`); permission
  * and question requests park until `respondToRequest` / `respondToUserInput`
  * resolve them (`permission.reply` once/always/reject, a question form is
  * replied to or cancelled). v2 prompts carry only text and files, so the
@@ -167,6 +169,8 @@ interface OpenCodeTurn {
   interruptAck: (() => void) | null;
   /** A `/compact` turn: it asks the server to compact instead of prompting, and ends when the compaction does. */
   compacting?: boolean;
+  /** The compaction request a compacting turn sent was accepted by the server (`session.compact` resolved). */
+  compactionRequested?: boolean;
   /** The server rejected a request as too long and Moxen compacted to make room: once per turn. */
   overflowRescued?: boolean;
   /** That compaction is under way: the turn stays open, and the server's idle in between is not its end. */
@@ -1385,6 +1389,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         if (turn.compacting) {
           // Accepted, not done: `session.compaction.ended` (see `onCompacted`) ends the turn.
           await connection.summarizeSession(session.nativeSessionId);
+          // The server has admitted this turn's compaction request: from here on,
+          // a raw idle marker may be its end (see `onSessionIdleMarker`).
+          turn.compactionRequested = true;
         } else await connection.prompt({
           sessionID: session.nativeSessionId,
           messageID: userMessageId,
@@ -1974,6 +1981,9 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       case "session.idle":
         this.onSessionIdle(session);
         break;
+      case "session.idle.marker":
+        this.onSessionIdleMarker(session);
+        break;
       case "session.interrupted":
         this.onSessionInterrupted(session, event);
         break;
@@ -2551,6 +2561,53 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       .finally(() => {
         if (settle) this.settleOpenTurn(session, "completed", "");
       });
+  }
+
+  /**
+   * The session went idle on its own, with no execution to succeed — v2's
+   * raw `session.idle` marker. It is station news, not a turn result: it can
+   * straggle in from an earlier run (the tail of a compaction that already
+   * ended), long after the work it belonged to, so no turn that answers to
+   * `session.execution.*` may ever end on it.
+   *
+   * The one turn it can end is a manual `/compact` turn whose own
+   * `session.compaction.ended` never comes — a compaction that merged into
+   * one still running consumed no end event of its own, and without this the
+   * turn would hang until the stall watchdog failed it. And it is only
+   * believed once it can be checked: the server is asked, live, whether the
+   * session is still running (`session.active` — a dequeued compaction at
+   * work is no longer in its inbox but shows there) and whether any work is
+   * still enqueued for it (our compaction included), and the very same turn
+   * must still be the running one after the answer. A session at rest reports
+   * the compaction's absence on its own; a marker against a session that is
+   * busy or whose inbox still holds the compaction is an earlier run's echo.
+   *
+   * No usage is read off the timeline for this end: a compaction-only turn
+   * has no reply of its own, and the last assistant message still on the
+   * timeline is an earlier prompt's — already booked to its own turn. The
+   * context window is still refreshed (compaction frees room); the turn's
+   * usage stays what it was: zero.
+   */
+  private onSessionIdleMarker(session: OpenCodeSession): void {
+    const turn = this.openTurn(session);
+    if (turn?.compacting !== true || turn.compactionRequested !== true) return;
+    void this.connectionFor(session)
+      .then(async (connection) => {
+        const [active, pending] = await Promise.all([
+          connection.sessionActive(session.nativeSessionId),
+          connection.sessionInbox(session.nativeSessionId),
+        ]);
+        // Still running, or work still queued — this turn's compaction among
+        // it — means the idle is not about this turn.
+        if (active || pending.length > 0) return;
+        // The read was async: a settle, a new turn, anything may have moved under it.
+        if (this.openTurn(session) !== turn || turn.status !== "running") return;
+        await this.refreshContext(session);
+        // The refresh was async too: only this exact same compaction turn still running settles.
+        if (this.openTurn(session) !== turn || turn.status !== "running") return;
+        this.settleOpenTurn(session, "completed", "");
+      })
+      .catch(() => undefined);
   }
 
   /**
