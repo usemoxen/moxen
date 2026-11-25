@@ -5,8 +5,11 @@
 
 #[cfg(feature = "render-harness")]
 mod automation;
+mod bank_sync;
 mod settings_file;
 mod store_data;
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod ui_tests;
 
@@ -64,6 +67,10 @@ fn build_data() -> DataSource {
     };
     match store_data::StoreData::initialize(&path) {
         Ok(data) => {
+            // The automatic bank sync runs for as long as the window is open,
+            // on its own thread and its own connection to the file. With no
+            // interval set (the default) a turn finds nothing due.
+            bank_sync::start_scheduler(path.clone(), data.bank_runtime());
             let shared = Rc::new(data);
             let reads: Rc<dyn FinancesData> = shared.clone();
             let writes: Rc<dyn FinancesMutations> = shared;

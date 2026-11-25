@@ -9,14 +9,21 @@
 //!   `account_id` columns on the movement tables, and a `transfers` table.
 //!   The single `account` row becomes the first account, keeping its
 //!   balance, its opening balance and its date.
+//! - **Version 3** (LOCAL-031) adds the bank sync's tables: one row per linked
+//!   bank (`bank_connections`: the public application id, the bank and its
+//!   country, the session id, the consent deadline and the last sync, and
+//!   NEVER the private key), one per external account mapped onto a local
+//!   account (`bank_external_accounts`), and one per imported bank movement
+//!   (`bank_imported_transactions`) whose key is the dedupe key the banking
+//!   crate derives, so a repeated sync cannot create a second movement.
 //!
 //! ### Schema 2 is one-way
 //!
 //! The TypeScript reference does not know the `accounts` table and cannot
 //! read schema 2; that is accepted (see the crate's README). Before migrating
-//! a database file, migration 2 copies the whole file to `<name>.pre-v2.bak`
-//! next to it, and refuses to migrate when the copy fails, so the
-//! pre-migration state always survives somewhere.
+//! a database file, each migration that reshapes data copies the whole file
+//! to `<name>.pre-v<N>.bak` next to it, and refuses to migrate when the copy
+//! fails, so the pre-migration state always survives somewhere.
 //!
 //! `PRAGMA user_version` rather than a version table keeps version 1's table
 //! list exactly the reference's, and version 2 has nowhere to go but
@@ -30,7 +37,7 @@ use rusqlite::Connection;
 use crate::error::{Result, StoreError};
 
 /// The schema this build writes and the newest it can open.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Version 1: the reference's schema, copied statement for statement
 /// (statement text included, so `sqlite_master` matches a database the
@@ -237,6 +244,55 @@ CREATE TABLE IF NOT EXISTS transfers (
 CREATE INDEX IF NOT EXISTS idx_transfers_date ON transfers(date);
 "#;
 
+/// Version 3 (LOCAL-031): the bank sync's tables.
+///
+/// `bank_connections` keeps what a sync needs and nothing a keychain should
+/// hold: the Enable Banking application id is public (it is the JWT's `kid`),
+/// and the private key is never in this database — it lives in the OS keychain
+/// through `moxen-finances-banking`. `bank_external_accounts`
+/// maps the session-scoped account uid onto a local account.
+/// `bank_imported_transactions` holds one row per imported movement, keyed by
+/// the banking crate's dedupe key, so the same operation can never be
+/// imported twice however many times a sync runs.
+pub const SCHEMA_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS bank_connections (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL DEFAULT 'enable-banking',
+  app_id TEXT NOT NULL DEFAULT '',
+  bank_name TEXT NOT NULL DEFAULT '',
+  bank_country TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
+  consent_valid_until TEXT,
+  last_sync_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bank_external_accounts (
+  connection_id TEXT NOT NULL REFERENCES bank_connections(id) ON DELETE CASCADE,
+  external_uid TEXT NOT NULL,
+  account_id TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  currency TEXT NOT NULL DEFAULT 'EUR',
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (connection_id, external_uid)
+);
+
+CREATE TABLE IF NOT EXISTS bank_imported_transactions (
+  dedupe_key TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL DEFAULT '',
+  external_uid TEXT NOT NULL DEFAULT '',
+  movement_kind TEXT NOT NULL,
+  movement_id TEXT NOT NULL,
+  booking_date TEXT NOT NULL DEFAULT '',
+  imported_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bank_accounts_account ON bank_external_accounts(account_id);
+CREATE INDEX IF NOT EXISTS idx_bank_imported_connection
+  ON bank_imported_transactions(connection_id, external_uid);
+"#;
+
 /// The columns `openDatabase` adds to databases created before they existed
 /// (`ensureColumn` in the reference), with the same definitions.
 const ADDED_COLUMNS: [(&str, &str, &str); 7] = [
@@ -272,16 +328,20 @@ fn migration_1(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The `.pre-v2.bak` copy of the database file, made **before** the
-/// transaction starts changing anything: if it fails, the migration is
+/// The `<name>.pre-v<version>.bak` copy of the database file, made **before**
+/// the transaction starts changing anything: if it fails, the migration is
 /// refused (see [`Migration::prepare`]). SQLite's own backup API makes the
 /// copy, so the WAL content and a consistent page snapshot come with it.
-pub fn backup_before_migration(conn: &Connection, path: &Path) -> Result<std::path::PathBuf> {
+pub fn backup_before_migration(
+    conn: &Connection,
+    path: &Path,
+    version: i64,
+) -> Result<std::path::PathBuf> {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "finances.db".to_string());
-    let backup_path = path.with_file_name(format!("{name}.pre-v2.bak"));
+    let backup_path = path.with_file_name(format!("{name}.pre-v{version}.bak"));
     let copy = |source: std::io::Error| StoreError::MigrationBackup {
         from: path.to_path_buf(),
         to: backup_path.clone(),
@@ -298,7 +358,15 @@ pub fn backup_before_migration(conn: &Connection, path: &Path) -> Result<std::pa
 }
 
 fn prepare_v2_file_backup(conn: &Connection, path: &Path) -> Result<()> {
-    backup_before_migration(conn, path)?;
+    backup_before_migration(conn, path, 2)?;
+    Ok(())
+}
+
+/// The schema-3 backup step: the same copy, under `.pre-v3.bak`. It runs
+/// before the version 3 transaction, so a database that never reaches 3 keeps
+/// both its rows and the copy of its previous state.
+fn prepare_v3_file_backup(conn: &Connection, path: &Path) -> Result<()> {
+    backup_before_migration(conn, path, 3)?;
     Ok(())
 }
 
@@ -348,6 +416,15 @@ fn migration_2(conn: &Connection) -> Result<()> {
     // The reference's single-account table ends here: its row lives on as the
     // first account, and nothing else reads it.
     conn.execute_batch("DROP TABLE account;")?;
+    Ok(())
+}
+
+/// Version 3, in the one transaction the runner provides: its tables and
+/// indexes only. Nothing existing is read, moved or dropped — every version 2
+/// row survives exactly as it was — so a failure anywhere rolls the database
+/// back to version 2 untouched.
+fn migration_3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA_V3)?;
     Ok(())
 }
 
@@ -403,6 +480,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         apply: migration_2,
         prepare: Some(prepare_v2_file_backup),
+    },
+    Migration {
+        version: 3,
+        apply: migration_3,
+        prepare: Some(prepare_v3_file_backup),
     },
 ];
 
@@ -501,6 +583,9 @@ mod tests {
             vec![
                 "accounts",
                 "audit_log",
+                "bank_connections",
+                "bank_external_accounts",
+                "bank_imported_transactions",
                 "exchange_rates",
                 "expenses",
                 "incomes",
@@ -556,13 +641,15 @@ mod tests {
         let before = schema_rows(&conn);
         let migrations = [
             MIGRATIONS[0],
+            MIGRATIONS[1],
+            MIGRATIONS[2],
             Migration {
-                version: 3,
+                version: 4,
                 apply: broken,
                 prepare: None,
             },
         ];
-        let error = migrate_with(&conn, &migrations, 3, None).unwrap_err();
+        let error = migrate_with(&conn, &migrations, 4, None).unwrap_err();
         assert!(matches!(error, StoreError::Database(_)), "{error:?}");
         // Neither the table nor the version survived the failure.
         assert_eq!(schema_rows(&conn), before);

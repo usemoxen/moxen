@@ -82,7 +82,10 @@ fn a_database_the_reference_created_migrates_unchanged() {
     }
 
     let store = Store::open(&path).expect("the Rust store opens and migrates it");
-    assert_eq!(store.schema_version().expect("version"), 2);
+    assert_eq!(
+        store.schema_version().expect("version"),
+        moxen_finances_store::SCHEMA_VERSION
+    );
 
     // Every row survives, on the first account, with every computed value.
     let state = store.app_state().expect("read the state");
@@ -117,18 +120,18 @@ fn the_schema_the_reference_created_becomes_the_schema_this_crate_writes() {
         schema_rows(reference_store.path().expect("file")),
         schema_rows(ours.path().expect("file"))
     );
-    // 14 tables: schema 1's thirteen minus the closed single `account`,
-    // plus `accounts` and `transfers`; the named indices gained
-    // `idx_transfers_date`.
+    // 17 tables: schema 1's thirteen minus the closed single `account`,
+    // plus `accounts` and `transfers`, plus schema 3's three bank tables;
+    // the named indices gained `idx_transfers_date` and schema 3's two.
     let rows = schema_rows(&ours_path);
-    assert_eq!(rows.iter().filter(|row| row.0 == "table").count(), 14);
+    assert_eq!(rows.iter().filter(|row| row.0 == "table").count(), 17);
     assert_eq!(
         rows.iter()
             .filter(|row| row.0 == "index" && !row.1.starts_with("sqlite_autoindex_"))
             .count(),
-        9
+        11
     );
-    assert_eq!(rows.iter().filter(|row| row.0 == "index").count(), 23);
+    assert_eq!(rows.iter().filter(|row| row.0 == "index").count(), 28);
 }
 
 #[test]

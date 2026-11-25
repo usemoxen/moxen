@@ -2975,6 +2975,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
+ "moxen-finances-banking",
  "moxen-finances-core",
  "moxen-finances-store",
  "moxen-finances-ui",
