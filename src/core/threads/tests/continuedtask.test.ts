@@ -7,7 +7,7 @@ import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, continueOwnThread, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, continueOwnThread, editWorkQueue, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { StoredThread } from "../types.js";
@@ -435,6 +435,47 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     // The handoff landed: its claim is gone, so the old thread takes work again.
     expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
     await flushTurnRunners();
+  });
+
+  it.each(["manual", "automatic"] as const)("keeps a pending message it moves no queue entry for out of a %s continue's handoff", async (kind) => {
+    const w = await world();
+    const source = await w.make("solo");
+    const turn = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, turn.id, { text: "Done for now." });
+    // A wake-up entry waits on the source for the user's next message: it is
+    // not transferable, so it must not become the new thread's work either.
+    const pending = await sendTurn(w.store, source.id, {
+      prompt: "watcher: build failed",
+      origin: "background-notification",
+      queue: { ...parseQueuePolicy({ conditions: [], order: 1, sequential: false }), automatic: true, wakeUp: true },
+    });
+    expect(pending.turn.status).toBe("queued");
+    const continued = await continueThread(w.ctx, { threadId: source.id, ...(kind === "automatic" ? { automatic: true } : {}) });
+    const handoff = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
+    // MXN-388: a continue that carries no queue entry assigns none of the
+    // source's pending messages to the new thread as task text; they keep
+    // waiting on the source, where they run.
+    expect(handoff).not.toContain("never sent");
+    expect(handoff).not.toContain("watcher: build failed");
+    expect((await w.store.readTurns(source.id)).find((candidate) => candidate.id === pending.turn.id)?.status).toBe("queued");
+  });
+
+  it("leaves a request removed before it ran out of the handoff, and later runs it on the source", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const turn = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, turn.id, { text: "Done for now." });
+    const queued = (await sendTurn(w.store, source.id, { prompt: "Then update the docs.", queue: parseQueuePolicy({ conditions: [], order: 1, sequential: false }) })).turn;
+    await editWorkQueue(w.ctx, source.id, queued.id, "remove");
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    const handoff = (await w.store.readMessages(continued.threadId)).find((message) => message.role === "user")!.text;
+    // MXN-388: a request taken back before it ran is neither history nor
+    // outstanding work in the new thread; restoring it runs it on the source.
+    expect(handoff).not.toContain("Then update the docs.");
+    await editWorkQueue(w.ctx, source.id, queued.id, "restore");
+    await editWorkQueue(w.ctx, source.id, queued.id, "release");
+    await runWorkQueue(w.ctx);
+    await expect.poll(async () => (await w.store.readTurns(source.id)).find((candidate) => candidate.id === queued.id)?.status, { timeout: 10_000, interval: 10 }).toBe("completed");
   });
 
   it("two overlapping continues on a running source both refuse, creating nothing", async () => {

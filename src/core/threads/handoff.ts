@@ -115,6 +115,11 @@ export interface HandoffOptions {
   readonly projectTitle?: string | null;
   readonly preferModelSummary?: boolean;
   readonly modelSummary?: string;
+  /**
+   * The pending turns this handoff carries as never-sent requests. Only a
+   * caller that moves the matching queue entries passes them; anything
+   * else leaves them on the source thread, so an absent list carries none.
+   */
   readonly queuedTurnIds?: readonly string[];
   /**
    * The source turns visible when a manual continue claimed its moves: the
@@ -171,16 +176,32 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   const excluded = new Set(options.excludedTurnIds ?? []);
   const moved = turns.filter((turn) => isTransferLanded(turn) || excluded.has(turn.id));
   const movedIds = new Set(moved.map((turn) => turn.id));
-  const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor && !movedIds.has(turn.id));
+  // A turn taken back before it reached the provider is not history: a
+  // removed queue entry, or a queued turn stopped before its run began
+  // (a landed move marks it this way). A turn that ran and was
+  // interrupted keeps its history: it has a start time.
+  const stoppedBeforeStart = new Set(
+    activities.filter((activity) => activity.kind === "turn.interrupted" && activity.payload?.beforeStart === true && activity.turnId !== null).map((activity) => activity.turnId!),
+  );
+  const neverDispatched = (turn: StoredTurn): boolean =>
+    turn.startedAt === undefined && !produced.has(turn.id)
+    && (turn.queue?.removed === true || (turn.status === "interrupted" && stoppedBeforeStart.has(turn.id)));
+  const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor && !movedIds.has(turn.id) && !neverDispatched(turn));
   const blocks: TurnBlock[] = sent.map((turn) => ({
     turn,
     prompts: messages.filter((message) => message.turnId === turn.id && message.role === "user"),
     replies: messages.filter((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0),
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
   }));
+  const carried = options.queuedTurnIds ?? [];
+  // A carried turn may hold a batch (a settle's promotion folds several
+  // queued messages into one): every eligible user message is part of the
+  // task, in dispatch order, each keeping the control-message exclusions.
   const unsent = turns
-    .filter((turn) => !reached(turn) && !movedIds.has(turn.id) && !(options.preferModelSummary && turn.scheduledFor) && (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)))
-    .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary"));
+    .filter((turn) => !reached(turn) && !movedIds.has(turn.id) && !neverDispatched(turn) && !(options.preferModelSummary && turn.scheduledFor) && carried.includes(turn.id))
+    .flatMap((turn) => messages
+      .filter((message) => message.turnId === turn.id && message.role === "user" && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary")
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)));
 
   // Files the thread changed, summed across every turn's checkpoint.
   const files = new Map<string, { additions: number; deletions: number }>();

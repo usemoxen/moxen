@@ -74,9 +74,9 @@ describe("buildHandoff", () => {
       createdAt: store.nowIso(),
     });
     await failTurn(store, threadId, second.turn.id, { error: "You've hit your session limit" });
-    await sendTurn(store, threadId, { prompt: "And add a test for it.", delivery: "queue" });
+    const queued = await sendTurn(store, threadId, { prompt: "And add a test for it.", delivery: "queue" });
 
-    const doc = await buildHandoff(store, threadId, { projectTitle: "moxen" });
+    const doc = await buildHandoff(store, threadId, { projectTitle: "moxen", queuedTurnIds: [queued.turn.id] });
 
     expect(doc.startsWith("# Continuing: Auth audit")).toBe(true);
     expect(doc).toContain("(branch moxen/auth)");
@@ -115,8 +115,8 @@ describe("buildHandoff", () => {
     const { store, threadId } = await thread();
     const sent = await sendTurn(store, threadId, { prompt: "Rename the helper everywhere." });
     await completeTurn(store, threadId, sent.turn.id, { text: "Renamed it in half the files." });
-    await sendTurn(store, threadId, { prompt: "Then update the docs.", delivery: "queue" });
-    const doc = await buildHandoff(store, threadId);
+    const queued = await sendTurn(store, threadId, { prompt: "Then update the docs.", delivery: "queue" });
+    const doc = await buildHandoff(store, threadId, { queuedTurnIds: [queued.turn.id] });
     expect(doc).toContain("another session worked on and did not finish");
     expect(doc.trimEnd().endsWith("then finish what is left.")).toBe(true);
   });
