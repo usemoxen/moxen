@@ -77,9 +77,9 @@ negotiates any other protocol version is refused loudly
   at that moment, at the boundary itself: the decision's facts resolve first
   and the setting is read at the send or the steer, so a change landing
   during the gate's own reads is seen, not raced. A task
-  notice rides only a live turn you wrote, verified at the steer: a target
-  that dies before the steer goes out keeps the notice durable. Redelivered
-  standalone, or with
+  notice rides only a live turn you wrote, decided before anything is
+  written: a gate-refused notice records no ledger row and arms no retry
+  timer. Redelivered standalone, or with
   only a Moxen-started turn live, it is held in its durable batch like any
   other automatic prompt. On Antigravity threads a promotion never folds a
   message of Moxen's into one of yours either way, even opted in; other

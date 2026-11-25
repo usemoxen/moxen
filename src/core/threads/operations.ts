@@ -4388,7 +4388,15 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
       // setting is read in force at the flush (LOCAL-034) — a timer's
       // captured context is as stale as a predecessor turn's snapshot.
       const antigravityHeld = !rides && antigravityAutoPromptsHeld(liveProvidersOf(ctx), activeSelection.instanceId);
-      if (receivable && (parentNotificationsHeld(held) || antigravityHeld || (!running && spent))) {
+      // The steer's own gate, asked before anything is written: refusing
+      // here means no ledger row and no driver call, and this hold arms no
+      // child watcher and no retry timer — the batch waits for the next
+      // live user turn, an admission, or the setting turning on. The facts
+      // (the target the notice would ride) are re-read just now, so a turn
+      // that changed since the `rides` check above cannot be steered into.
+      const steerGate = running ? await antigravitySteerGate(ctx.store, parentThreadId) : null;
+      const steerRefused = steerGate !== null && steerGate.refuses(() => liveProvidersOf(ctx), true);
+      if (receivable && (parentNotificationsHeld(held) || antigravityHeld || steerRefused || (!running && spent))) {
         // Still held, or spent with no live turn to steer into: stay durable
         // in the batch file instead of starting a turn into the same wall —
         // startTurn resolves even when the session fails, and the batch would
@@ -4915,28 +4923,20 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   }
   const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
   const steerable = running && (await canSteer(ctx, parent));
-  let started: Awaited<ReturnType<typeof startTurn>> | null = null;
-  try {
-    started = await startTurn(ctx, {
-      threadId: parentThreadId,
-      prompt: taskNotificationText(all),
-      origin: "task-notification",
-      notification: { tasks: all },
-      delivery: steerable ? "steer" : "queue",
-      wakeSettled: true,
-    });
-  } catch (cause) {
-    // A steered start that failed delivered nothing — a target that died
-    // between the flush's decision and the send is exactly this: the
-    // entries stay durable for the recovery, the user's next message, or
-    // the next restart to flush again, never forgotten as if a turn had
-    // taken them (LOCAL-034). A queued delivery's failure is a real
-    // failure of the flush itself, and it still throws: its batch was
-    // never reached, and it is on disk.
-    if (!steerable) throw cause;
-    started = null;
-  }
-  if (started === null || (steerable && started.steerDelivered !== true)) return [...deferred, ...mine];
+  await startTurn(ctx, {
+    threadId: parentThreadId,
+    prompt: taskNotificationText(all),
+    origin: "task-notification",
+    notification: { tasks: all },
+    delivery: steerable ? "steer" : "queue",
+    wakeSettled: true,
+  });
+  // A start that delivered, steered or not, forgets the batch (LOCAL-034):
+  // a steer the gate or the driver refused still wrote its ledger row, and
+  // that unconfirmed row is the notice's own durable redelivery — a crash's
+  // orphan recovery sends it exactly once, and no watcher, timer or later
+  // flush may send it twice. A start that threw keeps the batch the old
+  // way, by never reaching this delete.
   return deferred;
 }
 

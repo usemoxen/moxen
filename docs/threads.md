@@ -116,11 +116,10 @@ the follow-up it had queued is never dispatched past the gate: it goes back to
 queued for the admission path, which holds it like any other automatic prompt.
 A task notice holds its exception only while a live turn of yours can carry
 it: steered into your running turn it rides, but a live turn Moxen started
-does not carry it — and the ride is verified at the steer itself, with the
-setting in force there, so a target turn that dies before the steer goes
-out keeps the notice durable instead — and redelivered standalone — a crash
-took the turn it steered into before the driver confirmed it — it is an
-automatic prompt like
+does not carry it — a refusal decided before anything is written, so a
+gate-refused notice records no ledger row and arms no retry timer — and
+redelivered standalone — a crash took the turn it steered into before the
+driver confirmed it — it is an automatic prompt like
 any other, held in its durable batch until you send again or turn the
 setting on. Nothing is lost either way: a held entry keeps its text and its
 metadata, and every path that holds it runs it the moment it may.
