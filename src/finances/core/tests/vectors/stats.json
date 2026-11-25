@@ -1,0 +1,4714 @@
+{
+ "totalsForEvents": [
+  {
+   "events": [
+    {
+     "id": "seed-sub-4:2026-11-08",
+     "date": "2026-11-08",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "detail": "Plan de pago para un catálogo de asistentes.",
+     "amountMinor": 1091,
+     "originalAmountMinor": 1200,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-7:2026-11-17",
+     "date": "2026-11-17",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "detail": "Reproducción de audio en línea.",
+     "amountMinor": 1049,
+     "originalAmountMinor": 1049,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-2:2026-11-23",
+     "date": "2026-11-23",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "detail": "Buzón privado con gestor de claves.",
+     "amountMinor": 1899,
+     "originalAmountMinor": 1899,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-9:2026-11-24",
+     "date": "2026-11-24",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "detail": "Espacio compartido de 400 GB.",
+     "amountMinor": 549,
+     "originalAmountMinor": 549,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-8:2026-11-26",
+     "date": "2026-11-26",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-8",
+     "name": "Almacén Nube",
+     "detail": "Copia de seguridad en la nube.",
+     "amountMinor": 364,
+     "originalAmountMinor": 400,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-6:2026-11-28",
+     "date": "2026-11-28",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "detail": "Soporte articulado de sobremesa.",
+     "amountMinor": 1750,
+     "originalAmountMinor": 1750,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-3:2026-11-30",
+     "date": "2026-11-30",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-3",
+     "name": "Conversador IA",
+     "detail": "Chat de inteligencia artificial de pago.",
+     "amountMinor": 2400,
+     "originalAmountMinor": 2400,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    }
+   ],
+   "from": "2026-11-01",
+   "to": "2026-11-30",
+   "expected": {
+    "incomeMinor": 0,
+    "expenseMinor": 9102,
+    "netMinor": -9102,
+    "subscriptionExpenseMinor": 9102,
+    "otherExpenseMinor": 0,
+    "count": 7
+   }
+  },
+  {
+   "events": [
+    {
+     "id": "seed-sub-4:2026-11-08",
+     "date": "2026-11-08",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "detail": "Plan de pago para un catálogo de asistentes.",
+     "amountMinor": 1091,
+     "originalAmountMinor": 1200,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-7:2026-11-17",
+     "date": "2026-11-17",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "detail": "Reproducción de audio en línea.",
+     "amountMinor": 1049,
+     "originalAmountMinor": 1049,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-2:2026-11-23",
+     "date": "2026-11-23",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "detail": "Buzón privado con gestor de claves.",
+     "amountMinor": 1899,
+     "originalAmountMinor": 1899,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-9:2026-11-24",
+     "date": "2026-11-24",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "detail": "Espacio compartido de 400 GB.",
+     "amountMinor": 549,
+     "originalAmountMinor": 549,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-8:2026-11-26",
+     "date": "2026-11-26",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-8",
+     "name": "Almacén Nube",
+     "detail": "Copia de seguridad en la nube.",
+     "amountMinor": 364,
+     "originalAmountMinor": 400,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-6:2026-11-28",
+     "date": "2026-11-28",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "detail": "Soporte articulado de sobremesa.",
+     "amountMinor": 1750,
+     "originalAmountMinor": 1750,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-3:2026-11-30",
+     "date": "2026-11-30",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-3",
+     "name": "Conversador IA",
+     "detail": "Chat de inteligencia artificial de pago.",
+     "amountMinor": 2400,
+     "originalAmountMinor": 2400,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    }
+   ],
+   "from": "2026-11-01",
+   "to": "2026-11-17",
+   "expected": {
+    "incomeMinor": 0,
+    "expenseMinor": 2140,
+    "netMinor": -2140,
+    "subscriptionExpenseMinor": 2140,
+    "otherExpenseMinor": 0,
+    "count": 2
+   }
+  },
+  {
+   "events": [
+    {
+     "id": "seed-sub-4:2026-11-08",
+     "date": "2026-11-08",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "detail": "Plan de pago para un catálogo de asistentes.",
+     "amountMinor": 1091,
+     "originalAmountMinor": 1200,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-7:2026-11-17",
+     "date": "2026-11-17",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "detail": "Reproducción de audio en línea.",
+     "amountMinor": 1049,
+     "originalAmountMinor": 1049,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-2:2026-11-23",
+     "date": "2026-11-23",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "detail": "Buzón privado con gestor de claves.",
+     "amountMinor": 1899,
+     "originalAmountMinor": 1899,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-9:2026-11-24",
+     "date": "2026-11-24",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "detail": "Espacio compartido de 400 GB.",
+     "amountMinor": 549,
+     "originalAmountMinor": 549,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-8:2026-11-26",
+     "date": "2026-11-26",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-8",
+     "name": "Almacén Nube",
+     "detail": "Copia de seguridad en la nube.",
+     "amountMinor": 364,
+     "originalAmountMinor": 400,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-6:2026-11-28",
+     "date": "2026-11-28",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "detail": "Soporte articulado de sobremesa.",
+     "amountMinor": 1750,
+     "originalAmountMinor": 1750,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-3:2026-11-30",
+     "date": "2026-11-30",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-3",
+     "name": "Conversador IA",
+     "detail": "Chat de inteligencia artificial de pago.",
+     "amountMinor": 2400,
+     "originalAmountMinor": 2400,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    }
+   ],
+   "from": "2026-01-01",
+   "to": "2026-12-31",
+   "expected": {
+    "incomeMinor": 0,
+    "expenseMinor": 9102,
+    "netMinor": -9102,
+    "subscriptionExpenseMinor": 9102,
+    "otherExpenseMinor": 0,
+    "count": 7
+   }
+  }
+ ],
+ "totalsForMonth": [
+  {
+   "year": 2026,
+   "month": 11,
+   "events": [
+    {
+     "id": "seed-sub-4:2026-11-08",
+     "date": "2026-11-08",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "detail": "Plan de pago para un catálogo de asistentes.",
+     "amountMinor": 1091,
+     "originalAmountMinor": 1200,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-7:2026-11-17",
+     "date": "2026-11-17",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "detail": "Reproducción de audio en línea.",
+     "amountMinor": 1049,
+     "originalAmountMinor": 1049,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-2:2026-11-23",
+     "date": "2026-11-23",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "detail": "Buzón privado con gestor de claves.",
+     "amountMinor": 1899,
+     "originalAmountMinor": 1899,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-9:2026-11-24",
+     "date": "2026-11-24",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "detail": "Espacio compartido de 400 GB.",
+     "amountMinor": 549,
+     "originalAmountMinor": 549,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-8:2026-11-26",
+     "date": "2026-11-26",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-8",
+     "name": "Almacén Nube",
+     "detail": "Copia de seguridad en la nube.",
+     "amountMinor": 364,
+     "originalAmountMinor": 400,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-6:2026-11-28",
+     "date": "2026-11-28",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "detail": "Soporte articulado de sobremesa.",
+     "amountMinor": 1750,
+     "originalAmountMinor": 1750,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-3:2026-11-30",
+     "date": "2026-11-30",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-3",
+     "name": "Conversador IA",
+     "detail": "Chat de inteligencia artificial de pago.",
+     "amountMinor": 2400,
+     "originalAmountMinor": 2400,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    }
+   ],
+   "expected": {
+    "incomeMinor": 0,
+    "expenseMinor": 9102,
+    "netMinor": -9102,
+    "subscriptionExpenseMinor": 9102,
+    "otherExpenseMinor": 0,
+    "count": 7
+   }
+  },
+  {
+   "year": 2026,
+   "month": 12,
+   "events": [
+    {
+     "id": "seed-sub-4:2026-11-08",
+     "date": "2026-11-08",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "detail": "Plan de pago para un catálogo de asistentes.",
+     "amountMinor": 1091,
+     "originalAmountMinor": 1200,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-7:2026-11-17",
+     "date": "2026-11-17",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "detail": "Reproducción de audio en línea.",
+     "amountMinor": 1049,
+     "originalAmountMinor": 1049,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-2:2026-11-23",
+     "date": "2026-11-23",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "detail": "Buzón privado con gestor de claves.",
+     "amountMinor": 1899,
+     "originalAmountMinor": 1899,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-9:2026-11-24",
+     "date": "2026-11-24",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "detail": "Espacio compartido de 400 GB.",
+     "amountMinor": 549,
+     "originalAmountMinor": 549,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-8:2026-11-26",
+     "date": "2026-11-26",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-8",
+     "name": "Almacén Nube",
+     "detail": "Copia de seguridad en la nube.",
+     "amountMinor": 364,
+     "originalAmountMinor": 400,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-6:2026-11-28",
+     "date": "2026-11-28",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "detail": "Soporte articulado de sobremesa.",
+     "amountMinor": 1750,
+     "originalAmountMinor": 1750,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-3:2026-11-30",
+     "date": "2026-11-30",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-3",
+     "name": "Conversador IA",
+     "detail": "Chat de inteligencia artificial de pago.",
+     "amountMinor": 2400,
+     "originalAmountMinor": 2400,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    }
+   ],
+   "expected": {
+    "incomeMinor": 0,
+    "expenseMinor": 0,
+    "netMinor": 0,
+    "subscriptionExpenseMinor": 0,
+    "otherExpenseMinor": 0,
+    "count": 0
+   }
+  }
+ ],
+ "distributionByCategory": [
+  {
+   "from": "2026-11-01",
+   "to": "2026-11-30",
+   "events": [
+    {
+     "id": "seed-sub-4:2026-11-08",
+     "date": "2026-11-08",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "detail": "Plan de pago para un catálogo de asistentes.",
+     "amountMinor": 1091,
+     "originalAmountMinor": 1200,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-7:2026-11-17",
+     "date": "2026-11-17",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "detail": "Reproducción de audio en línea.",
+     "amountMinor": 1049,
+     "originalAmountMinor": 1049,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-2:2026-11-23",
+     "date": "2026-11-23",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "detail": "Buzón privado con gestor de claves.",
+     "amountMinor": 1899,
+     "originalAmountMinor": 1899,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-9:2026-11-24",
+     "date": "2026-11-24",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "detail": "Espacio compartido de 400 GB.",
+     "amountMinor": 549,
+     "originalAmountMinor": 549,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-8:2026-11-26",
+     "date": "2026-11-26",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-8",
+     "name": "Almacén Nube",
+     "detail": "Copia de seguridad en la nube.",
+     "amountMinor": 364,
+     "originalAmountMinor": 400,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-6:2026-11-28",
+     "date": "2026-11-28",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "detail": "Soporte articulado de sobremesa.",
+     "amountMinor": 1750,
+     "originalAmountMinor": 1750,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-3:2026-11-30",
+     "date": "2026-11-30",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-3",
+     "name": "Conversador IA",
+     "detail": "Chat de inteligencia artificial de pago.",
+     "amountMinor": 2400,
+     "originalAmountMinor": 2400,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    }
+   ],
+   "expected": [
+    {
+     "category": "Suscripciones",
+     "amountMinor": 9102,
+     "count": 7
+    }
+   ]
+  },
+  {
+   "from": "2026-11-01",
+   "to": "2026-11-17",
+   "events": [
+    {
+     "id": "seed-sub-4:2026-11-08",
+     "date": "2026-11-08",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "detail": "Plan de pago para un catálogo de asistentes.",
+     "amountMinor": 1091,
+     "originalAmountMinor": 1200,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-7:2026-11-17",
+     "date": "2026-11-17",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "detail": "Reproducción de audio en línea.",
+     "amountMinor": 1049,
+     "originalAmountMinor": 1049,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-2:2026-11-23",
+     "date": "2026-11-23",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "detail": "Buzón privado con gestor de claves.",
+     "amountMinor": 1899,
+     "originalAmountMinor": 1899,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-9:2026-11-24",
+     "date": "2026-11-24",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "detail": "Espacio compartido de 400 GB.",
+     "amountMinor": 549,
+     "originalAmountMinor": 549,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-8:2026-11-26",
+     "date": "2026-11-26",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-8",
+     "name": "Almacén Nube",
+     "detail": "Copia de seguridad en la nube.",
+     "amountMinor": 364,
+     "originalAmountMinor": 400,
+     "originalCurrency": "USD",
+     "rateScaled": 909091,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-6:2026-11-28",
+     "date": "2026-11-28",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "detail": "Soporte articulado de sobremesa.",
+     "amountMinor": 1750,
+     "originalAmountMinor": 1750,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    },
+    {
+     "id": "seed-sub-3:2026-11-30",
+     "date": "2026-11-30",
+     "type": "expense",
+     "source": "subscription",
+     "sourceId": "seed-sub-3",
+     "name": "Conversador IA",
+     "detail": "Chat de inteligencia artificial de pago.",
+     "amountMinor": 2400,
+     "originalAmountMinor": 2400,
+     "originalCurrency": "EUR",
+     "rateScaled": 1000000,
+     "estimated": true,
+     "status": "active",
+     "category": "Suscripciones",
+     "affectsBalance": true
+    }
+   ],
+   "expected": [
+    {
+     "category": "Suscripciones",
+     "amountMinor": 2140,
+     "count": 2
+    }
+   ]
+  }
+ ],
+ "monthlyEquivalentMinor": [
+  {
+   "amountMinor": 1250,
+   "frequency": "weekly",
+   "expected": 5417
+  },
+  {
+   "amountMinor": 2400,
+   "frequency": "monthly",
+   "expected": 2400
+  },
+  {
+   "amountMinor": 1899,
+   "frequency": "quarterly",
+   "expected": 633
+  },
+  {
+   "amountMinor": 4499,
+   "frequency": "annual",
+   "expected": 375
+  },
+  {
+   "amountMinor": 6,
+   "frequency": "annual",
+   "expected": 1
+  },
+  {
+   "amountMinor": 4567,
+   "frequency": "annual",
+   "expected": 381
+  },
+  {
+   "amountMinor": 999,
+   "frequency": "once",
+   "expected": 999
+  },
+  {
+   "amountMinor": -1250,
+   "frequency": "weekly",
+   "expected": -5417
+  },
+  {
+   "amountMinor": 1000000,
+   "frequency": "weekly",
+   "expected": 4333333
+  },
+  {
+   "amountMinor": 17385,
+   "frequency": "quarterly",
+   "expected": 5795
+  }
+ ],
+ "annualizedMinor": [
+  {
+   "amountMinor": 1250,
+   "frequency": "weekly",
+   "expected": 65000
+  },
+  {
+   "amountMinor": 2400,
+   "frequency": "monthly",
+   "expected": 28800
+  },
+  {
+   "amountMinor": 4500,
+   "frequency": "quarterly",
+   "expected": 18000
+  },
+  {
+   "amountMinor": 4499,
+   "frequency": "annual",
+   "expected": 4499
+  },
+  {
+   "amountMinor": 999,
+   "frequency": "once",
+   "expected": 999
+  }
+ ],
+ "normalizedMonthlyCost": [
+  {
+   "subscriptions": [
+    {
+     "id": "seed-sub-1",
+     "name": "Mobilidad urbana",
+     "description": "Desplazamientos por la ciudad.",
+     "currency": "EUR",
+     "priceMinor": null,
+     "frequency": "monthly",
+     "startDate": null,
+     "billingDay": null,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [],
+     "statusHistory": []
+    },
+    {
+     "id": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "description": "Buzón privado con gestor de claves.",
+     "currency": "EUR",
+     "priceMinor": 1899,
+     "frequency": "monthly",
+     "startDate": "2026-04-23",
+     "billingDay": 23,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-2",
+       "subscriptionId": "seed-sub-2",
+       "priceMinor": 1899,
+       "currency": "EUR",
+       "effectiveFrom": "2026-04-23",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-2",
+       "subscriptionId": "seed-sub-2",
+       "billingDay": 23,
+       "effectiveFrom": "2026-04-23",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-2",
+       "subscriptionId": "seed-sub-2",
+       "status": "active",
+       "date": "2026-04-23",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-3",
+     "name": "Conversador IA",
+     "description": "Chat de inteligencia artificial de pago.",
+     "currency": "EUR",
+     "priceMinor": 2400,
+     "frequency": "monthly",
+     "startDate": "2026-09-30",
+     "billingDay": 30,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-3",
+       "subscriptionId": "seed-sub-3",
+       "priceMinor": 2400,
+       "currency": "EUR",
+       "effectiveFrom": "2026-09-30",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-3",
+       "subscriptionId": "seed-sub-3",
+       "billingDay": 30,
+       "effectiveFrom": "2026-09-30",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-3",
+       "subscriptionId": "seed-sub-3",
+       "status": "active",
+       "date": "2026-09-30",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "description": "Plan de pago para un catálogo de asistentes.",
+     "currency": "USD",
+     "priceMinor": 1200,
+     "frequency": "monthly",
+     "startDate": "2026-10-08",
+     "billingDay": 8,
+     "nextBillingOverride": null,
+     "endDate": "2026-11-25",
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-4",
+       "subscriptionId": "seed-sub-4",
+       "priceMinor": 1200,
+       "currency": "USD",
+       "effectiveFrom": "2026-10-08",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-4",
+       "subscriptionId": "seed-sub-4",
+       "billingDay": 8,
+       "effectiveFrom": "2026-10-08",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-4",
+       "subscriptionId": "seed-sub-4",
+       "status": "active",
+       "date": "2026-10-08",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-5",
+     "name": "Web ejemplo.dev",
+     "description": "Un sitio de ejemplo.",
+     "currency": "USD",
+     "priceMinor": 1299,
+     "frequency": "annual",
+     "startDate": "2026-03-21",
+     "billingDay": 21,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-5",
+       "subscriptionId": "seed-sub-5",
+       "priceMinor": 1299,
+       "currency": "USD",
+       "effectiveFrom": "2026-03-21",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-5",
+       "subscriptionId": "seed-sub-5",
+       "billingDay": 21,
+       "effectiveFrom": "2026-03-21",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-5",
+       "subscriptionId": "seed-sub-5",
+       "status": "active",
+       "date": "2026-03-21",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "description": "Soporte articulado de sobremesa.",
+     "currency": "EUR",
+     "priceMinor": 1750,
+     "frequency": "monthly",
+     "startDate": "2026-09-28",
+     "billingDay": 28,
+     "nextBillingOverride": null,
+     "endDate": "2027-01-10",
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-6",
+       "subscriptionId": "seed-sub-6",
+       "priceMinor": 1750,
+       "currency": "EUR",
+       "effectiveFrom": "2026-09-28",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-6",
+       "subscriptionId": "seed-sub-6",
+       "billingDay": 28,
+       "effectiveFrom": "2026-09-28",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-6",
+       "subscriptionId": "seed-sub-6",
+       "status": "active",
+       "date": "2026-09-28",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "description": "Reproducción de audio en línea.",
+     "currency": "EUR",
+     "priceMinor": 1049,
+     "frequency": "monthly",
+     "startDate": "2025-04-17",
+     "billingDay": 17,
+     "nextBillingOverride": null,
+     "endDate": "2026-12-10",
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-7-1",
+       "subscriptionId": "seed-sub-7",
+       "priceMinor": 949,
+       "currency": "EUR",
+       "effectiveFrom": "2025-04-17",
+       "effectiveTo": "2026-07-16",
+       "note": "Importe inicial del plan.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      },
+      {
+       "id": "seed-price-7-2",
+       "subscriptionId": "seed-sub-7",
+       "priceMinor": 1049,
+       "currency": "EUR",
+       "effectiveFrom": "2026-07-17",
+       "effectiveTo": null,
+       "note": "Importe tras la revisión de julio de 2026.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-7",
+       "subscriptionId": "seed-sub-7",
+       "billingDay": 17,
+       "effectiveFrom": "2025-04-17",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-7",
+       "subscriptionId": "seed-sub-7",
+       "status": "active",
+       "date": "2025-04-17",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-8",
+     "name": "Almacén Nube",
+     "description": "Copia de seguridad en la nube.",
+     "currency": "USD",
+     "priceMinor": 400,
+     "frequency": "monthly",
+     "startDate": "2026-07-26",
+     "billingDay": 26,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-8",
+       "subscriptionId": "seed-sub-8",
+       "priceMinor": 400,
+       "currency": "USD",
+       "effectiveFrom": "2026-07-26",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-8",
+       "subscriptionId": "seed-sub-8",
+       "billingDay": 26,
+       "effectiveFrom": "2026-07-26",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-8",
+       "subscriptionId": "seed-sub-8",
+       "status": "active",
+       "date": "2026-07-26",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "description": "Espacio compartido de 400 GB.",
+     "currency": "EUR",
+     "priceMinor": 549,
+     "frequency": "monthly",
+     "startDate": "2025-02-14",
+     "billingDay": 24,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-9-1",
+       "subscriptionId": "seed-sub-9",
+       "priceMinor": 849,
+       "currency": "EUR",
+       "effectiveFrom": "2025-02-14",
+       "effectiveTo": "2026-05-23",
+       "note": "Importe inicial del plan.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      },
+      {
+       "id": "seed-price-9-2",
+       "subscriptionId": "seed-sub-9",
+       "priceMinor": 549,
+       "currency": "EUR",
+       "effectiveFrom": "2026-05-24",
+       "effectiveTo": null,
+       "note": "Importe tras la revisión de mayo de 2026.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-9",
+       "subscriptionId": "seed-sub-9",
+       "billingDay": 24,
+       "effectiveFrom": "2025-02-14",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-9",
+       "subscriptionId": "seed-sub-9",
+       "status": "active",
+       "date": "2025-02-14",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-10",
+     "name": "Seguridad Hogar",
+     "description": "Protección para todos los dispositivos de casa.",
+     "currency": "EUR",
+     "priceMinor": 4499,
+     "frequency": "annual",
+     "startDate": "2022-10-10",
+     "billingDay": 10,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-10",
+       "subscriptionId": "seed-sub-10",
+       "priceMinor": 4499,
+       "currency": "EUR",
+       "effectiveFrom": "2022-10-10",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-10",
+       "subscriptionId": "seed-sub-10",
+       "billingDay": 10,
+       "effectiveFrom": "2022-10-10",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-10",
+       "subscriptionId": "seed-sub-10",
+       "status": "active",
+       "date": "2022-10-10",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    }
+   ],
+   "date": "2026-11-18",
+   "rates": [
+    {
+     "id": "seed-rate-eur-usd",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "seed-rate-usd-eur",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "accountCurrency": "EUR",
+   "expected": 9575
+  },
+  {
+   "subscriptions": [
+    {
+     "id": "seed-sub-1",
+     "name": "Mobilidad urbana",
+     "description": "Desplazamientos por la ciudad.",
+     "currency": "EUR",
+     "priceMinor": null,
+     "frequency": "monthly",
+     "startDate": null,
+     "billingDay": null,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [],
+     "statusHistory": []
+    },
+    {
+     "id": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "description": "Buzón privado con gestor de claves.",
+     "currency": "EUR",
+     "priceMinor": 1899,
+     "frequency": "monthly",
+     "startDate": "2026-04-23",
+     "billingDay": 23,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "paused",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-2",
+       "subscriptionId": "seed-sub-2",
+       "priceMinor": 1899,
+       "currency": "EUR",
+       "effectiveFrom": "2026-04-23",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-2",
+       "subscriptionId": "seed-sub-2",
+       "billingDay": 23,
+       "effectiveFrom": "2026-04-23",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-2",
+       "subscriptionId": "seed-sub-2",
+       "status": "active",
+       "date": "2026-04-23",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-3",
+     "name": "Conversador IA",
+     "description": "Chat de inteligencia artificial de pago.",
+     "currency": "EUR",
+     "priceMinor": 2400,
+     "frequency": "monthly",
+     "startDate": "2026-09-30",
+     "billingDay": 30,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-3",
+       "subscriptionId": "seed-sub-3",
+       "priceMinor": 2400,
+       "currency": "EUR",
+       "effectiveFrom": "2026-09-30",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-3",
+       "subscriptionId": "seed-sub-3",
+       "billingDay": 30,
+       "effectiveFrom": "2026-09-30",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-3",
+       "subscriptionId": "seed-sub-3",
+       "status": "active",
+       "date": "2026-09-30",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "description": "Plan de pago para un catálogo de asistentes.",
+     "currency": "USD",
+     "priceMinor": 1200,
+     "frequency": "monthly",
+     "startDate": "2026-10-08",
+     "billingDay": 8,
+     "nextBillingOverride": null,
+     "endDate": "2026-11-25",
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-4",
+       "subscriptionId": "seed-sub-4",
+       "priceMinor": 1200,
+       "currency": "USD",
+       "effectiveFrom": "2026-10-08",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-4",
+       "subscriptionId": "seed-sub-4",
+       "billingDay": 8,
+       "effectiveFrom": "2026-10-08",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-4",
+       "subscriptionId": "seed-sub-4",
+       "status": "active",
+       "date": "2026-10-08",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-5",
+     "name": "Web ejemplo.dev",
+     "description": "Un sitio de ejemplo.",
+     "currency": "USD",
+     "priceMinor": 1299,
+     "frequency": "annual",
+     "startDate": "2026-03-21",
+     "billingDay": 21,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-5",
+       "subscriptionId": "seed-sub-5",
+       "priceMinor": 1299,
+       "currency": "USD",
+       "effectiveFrom": "2026-03-21",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-5",
+       "subscriptionId": "seed-sub-5",
+       "billingDay": 21,
+       "effectiveFrom": "2026-03-21",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-5",
+       "subscriptionId": "seed-sub-5",
+       "status": "active",
+       "date": "2026-03-21",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "description": "Soporte articulado de sobremesa.",
+     "currency": "EUR",
+     "priceMinor": 1750,
+     "frequency": "monthly",
+     "startDate": "2026-09-28",
+     "billingDay": 28,
+     "nextBillingOverride": null,
+     "endDate": "2027-01-10",
+     "status": "finished",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-6",
+       "subscriptionId": "seed-sub-6",
+       "priceMinor": 1750,
+       "currency": "EUR",
+       "effectiveFrom": "2026-09-28",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-6",
+       "subscriptionId": "seed-sub-6",
+       "billingDay": 28,
+       "effectiveFrom": "2026-09-28",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-6",
+       "subscriptionId": "seed-sub-6",
+       "status": "active",
+       "date": "2026-09-28",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "description": "Reproducción de audio en línea.",
+     "currency": "EUR",
+     "priceMinor": 1049,
+     "frequency": "monthly",
+     "startDate": "2025-04-17",
+     "billingDay": 17,
+     "nextBillingOverride": null,
+     "endDate": "2026-12-10",
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-7-1",
+       "subscriptionId": "seed-sub-7",
+       "priceMinor": 949,
+       "currency": "EUR",
+       "effectiveFrom": "2025-04-17",
+       "effectiveTo": "2026-07-16",
+       "note": "Importe inicial del plan.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      },
+      {
+       "id": "seed-price-7-2",
+       "subscriptionId": "seed-sub-7",
+       "priceMinor": 1049,
+       "currency": "EUR",
+       "effectiveFrom": "2026-07-17",
+       "effectiveTo": null,
+       "note": "Importe tras la revisión de julio de 2026.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-7",
+       "subscriptionId": "seed-sub-7",
+       "billingDay": 17,
+       "effectiveFrom": "2025-04-17",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-7",
+       "subscriptionId": "seed-sub-7",
+       "status": "active",
+       "date": "2025-04-17",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-8",
+     "name": "Almacén Nube",
+     "description": "Copia de seguridad en la nube.",
+     "currency": "USD",
+     "priceMinor": 400,
+     "frequency": "monthly",
+     "startDate": "2026-07-26",
+     "billingDay": 26,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-8",
+       "subscriptionId": "seed-sub-8",
+       "priceMinor": 400,
+       "currency": "USD",
+       "effectiveFrom": "2026-07-26",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-8",
+       "subscriptionId": "seed-sub-8",
+       "billingDay": 26,
+       "effectiveFrom": "2026-07-26",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-8",
+       "subscriptionId": "seed-sub-8",
+       "status": "active",
+       "date": "2026-07-26",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "description": "Espacio compartido de 400 GB.",
+     "currency": "EUR",
+     "priceMinor": 549,
+     "frequency": "monthly",
+     "startDate": "2025-02-14",
+     "billingDay": 24,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-9-1",
+       "subscriptionId": "seed-sub-9",
+       "priceMinor": 849,
+       "currency": "EUR",
+       "effectiveFrom": "2025-02-14",
+       "effectiveTo": "2026-05-23",
+       "note": "Importe inicial del plan.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      },
+      {
+       "id": "seed-price-9-2",
+       "subscriptionId": "seed-sub-9",
+       "priceMinor": 549,
+       "currency": "EUR",
+       "effectiveFrom": "2026-05-24",
+       "effectiveTo": null,
+       "note": "Importe tras la revisión de mayo de 2026.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-9",
+       "subscriptionId": "seed-sub-9",
+       "billingDay": 24,
+       "effectiveFrom": "2025-02-14",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-9",
+       "subscriptionId": "seed-sub-9",
+       "status": "active",
+       "date": "2025-02-14",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-10",
+     "name": "Seguridad Hogar",
+     "description": "Protección para todos los dispositivos de casa.",
+     "currency": "EUR",
+     "priceMinor": 4499,
+     "frequency": "annual",
+     "startDate": "2022-10-10",
+     "billingDay": 10,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-10",
+       "subscriptionId": "seed-sub-10",
+       "priceMinor": 4499,
+       "currency": "EUR",
+       "effectiveFrom": "2022-10-10",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-10",
+       "subscriptionId": "seed-sub-10",
+       "billingDay": 10,
+       "effectiveFrom": "2022-10-10",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-10",
+       "subscriptionId": "seed-sub-10",
+       "status": "active",
+       "date": "2022-10-10",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    }
+   ],
+   "date": "2026-11-18",
+   "rates": [
+    {
+     "id": "seed-rate-eur-usd",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "seed-rate-usd-eur",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "accountCurrency": "EUR",
+   "expected": 5926
+  },
+  {
+   "subscriptions": [
+    {
+     "id": "seed-sub-1",
+     "name": "Mobilidad urbana",
+     "description": "Desplazamientos por la ciudad.",
+     "currency": "EUR",
+     "priceMinor": null,
+     "frequency": "monthly",
+     "startDate": null,
+     "billingDay": null,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [],
+     "statusHistory": []
+    },
+    {
+     "id": "seed-sub-2",
+     "name": "CorreoSeguro Pro",
+     "description": "Buzón privado con gestor de claves.",
+     "currency": "EUR",
+     "priceMinor": 1899,
+     "frequency": "monthly",
+     "startDate": "2026-04-23",
+     "billingDay": 23,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-2",
+       "subscriptionId": "seed-sub-2",
+       "priceMinor": 1899,
+       "currency": "EUR",
+       "effectiveFrom": "2026-04-23",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-2",
+       "subscriptionId": "seed-sub-2",
+       "billingDay": 23,
+       "effectiveFrom": "2026-04-23",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-2",
+       "subscriptionId": "seed-sub-2",
+       "status": "active",
+       "date": "2026-04-23",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-3",
+     "name": "Conversador IA",
+     "description": "Chat de inteligencia artificial de pago.",
+     "currency": "EUR",
+     "priceMinor": 2400,
+     "frequency": "monthly",
+     "startDate": "2026-09-30",
+     "billingDay": 30,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-3",
+       "subscriptionId": "seed-sub-3",
+       "priceMinor": 2400,
+       "currency": "EUR",
+       "effectiveFrom": "2026-09-30",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-3",
+       "subscriptionId": "seed-sub-3",
+       "billingDay": 30,
+       "effectiveFrom": "2026-09-30",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-3",
+       "subscriptionId": "seed-sub-3",
+       "status": "active",
+       "date": "2026-09-30",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-4",
+     "name": "Asistentes Cloud Go",
+     "description": "Plan de pago para un catálogo de asistentes.",
+     "currency": "USD",
+     "priceMinor": 1200,
+     "frequency": "monthly",
+     "startDate": "2026-10-08",
+     "billingDay": 8,
+     "nextBillingOverride": null,
+     "endDate": "2026-11-25",
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-4",
+       "subscriptionId": "seed-sub-4",
+       "priceMinor": 1200,
+       "currency": "USD",
+       "effectiveFrom": "2026-10-08",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-4",
+       "subscriptionId": "seed-sub-4",
+       "billingDay": 8,
+       "effectiveFrom": "2026-10-08",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-4",
+       "subscriptionId": "seed-sub-4",
+       "status": "active",
+       "date": "2026-10-08",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-5",
+     "name": "Web ejemplo.dev",
+     "description": "Un sitio de ejemplo.",
+     "currency": "USD",
+     "priceMinor": 1299,
+     "frequency": "annual",
+     "startDate": "2026-03-21",
+     "billingDay": 21,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-5",
+       "subscriptionId": "seed-sub-5",
+       "priceMinor": 1299,
+       "currency": "USD",
+       "effectiveFrom": "2026-03-21",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-5",
+       "subscriptionId": "seed-sub-5",
+       "billingDay": 21,
+       "effectiveFrom": "2026-03-21",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-5",
+       "subscriptionId": "seed-sub-5",
+       "status": "active",
+       "date": "2026-03-21",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-6",
+     "name": "Soporte de sobremesa",
+     "description": "Soporte articulado de sobremesa.",
+     "currency": "EUR",
+     "priceMinor": 1750,
+     "frequency": "monthly",
+     "startDate": "2026-09-28",
+     "billingDay": 28,
+     "nextBillingOverride": null,
+     "endDate": "2027-01-10",
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-6",
+       "subscriptionId": "seed-sub-6",
+       "priceMinor": 1750,
+       "currency": "EUR",
+       "effectiveFrom": "2026-09-28",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-6",
+       "subscriptionId": "seed-sub-6",
+       "billingDay": 28,
+       "effectiveFrom": "2026-09-28",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-6",
+       "subscriptionId": "seed-sub-6",
+       "status": "active",
+       "date": "2026-09-28",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-7",
+     "name": "Canciones en streaming",
+     "description": "Reproducción de audio en línea.",
+     "currency": "EUR",
+     "priceMinor": 1049,
+     "frequency": "monthly",
+     "startDate": "2025-04-17",
+     "billingDay": 17,
+     "nextBillingOverride": null,
+     "endDate": "2026-12-10",
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-7-1",
+       "subscriptionId": "seed-sub-7",
+       "priceMinor": 949,
+       "currency": "EUR",
+       "effectiveFrom": "2025-04-17",
+       "effectiveTo": "2026-07-16",
+       "note": "Importe inicial del plan.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      },
+      {
+       "id": "seed-price-7-2",
+       "subscriptionId": "seed-sub-7",
+       "priceMinor": 1049,
+       "currency": "EUR",
+       "effectiveFrom": "2026-07-17",
+       "effectiveTo": null,
+       "note": "Importe tras la revisión de julio de 2026.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-7",
+       "subscriptionId": "seed-sub-7",
+       "billingDay": 17,
+       "effectiveFrom": "2025-04-17",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-7",
+       "subscriptionId": "seed-sub-7",
+       "status": "active",
+       "date": "2025-04-17",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-8",
+     "name": "Almacén Nube",
+     "description": "Copia de seguridad en la nube.",
+     "currency": "USD",
+     "priceMinor": 400,
+     "frequency": "monthly",
+     "startDate": "2026-07-26",
+     "billingDay": 26,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "cancelled",
+     "cancelledAt": "2026-11-17",
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-8",
+       "subscriptionId": "seed-sub-8",
+       "priceMinor": 400,
+       "currency": "USD",
+       "effectiveFrom": "2026-07-26",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-8",
+       "subscriptionId": "seed-sub-8",
+       "billingDay": 26,
+       "effectiveFrom": "2026-07-26",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-8",
+       "subscriptionId": "seed-sub-8",
+       "status": "active",
+       "date": "2026-07-26",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-9",
+     "name": "Nube 400 GB",
+     "description": "Espacio compartido de 400 GB.",
+     "currency": "EUR",
+     "priceMinor": 549,
+     "frequency": "monthly",
+     "startDate": "2025-02-14",
+     "billingDay": 24,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-9-1",
+       "subscriptionId": "seed-sub-9",
+       "priceMinor": 849,
+       "currency": "EUR",
+       "effectiveFrom": "2025-02-14",
+       "effectiveTo": "2026-05-23",
+       "note": "Importe inicial del plan.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      },
+      {
+       "id": "seed-price-9-2",
+       "subscriptionId": "seed-sub-9",
+       "priceMinor": 549,
+       "currency": "EUR",
+       "effectiveFrom": "2026-05-24",
+       "effectiveTo": null,
+       "note": "Importe tras la revisión de mayo de 2026.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-9",
+       "subscriptionId": "seed-sub-9",
+       "billingDay": 24,
+       "effectiveFrom": "2025-02-14",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-9",
+       "subscriptionId": "seed-sub-9",
+       "status": "active",
+       "date": "2025-02-14",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    },
+    {
+     "id": "seed-sub-10",
+     "name": "Seguridad Hogar",
+     "description": "Protección para todos los dispositivos de casa.",
+     "currency": "EUR",
+     "priceMinor": 4499,
+     "frequency": "annual",
+     "startDate": "2022-10-10",
+     "billingDay": 10,
+     "nextBillingOverride": null,
+     "endDate": null,
+     "status": "active",
+     "cancelledAt": null,
+     "plan": null,
+     "notes": "",
+     "externalPayment": false,
+     "archived": false,
+     "archivedAt": null,
+     "createdAt": "2026-11-18T12:00:00.000Z",
+     "updatedAt": "2026-11-18T12:00:00.000Z",
+     "prices": [
+      {
+       "id": "seed-price-10",
+       "subscriptionId": "seed-sub-10",
+       "priceMinor": 4499,
+       "currency": "EUR",
+       "effectiveFrom": "2022-10-10",
+       "effectiveTo": null,
+       "note": "Importe inicial de ejemplo.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "plans": [],
+     "pauses": [],
+     "billingDays": [
+      {
+       "id": "seed-billing-10",
+       "subscriptionId": "seed-sub-10",
+       "billingDay": 10,
+       "effectiveFrom": "2022-10-10",
+       "note": "Día fijado en el alta.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ],
+     "statusHistory": [
+      {
+       "id": "seed-status-10",
+       "subscriptionId": "seed-sub-10",
+       "status": "active",
+       "date": "2022-10-10",
+       "note": "Alta inicial.",
+       "createdAt": "2026-11-18T12:00:00.000Z"
+      }
+     ]
+    }
+   ],
+   "date": "2026-11-18",
+   "rates": [
+    {
+     "id": "seed-rate-eur-usd",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "seed-rate-usd-eur",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "accountCurrency": "EUR",
+   "expected": 9211
+  }
+ ],
+ "savingsFromInactive": {
+  "subscriptions": [
+   {
+    "id": "seed-sub-1",
+    "name": "Mobilidad urbana",
+    "description": "Desplazamientos por la ciudad.",
+    "currency": "EUR",
+    "priceMinor": null,
+    "frequency": "monthly",
+    "startDate": null,
+    "billingDay": null,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [],
+    "statusHistory": []
+   },
+   {
+    "id": "seed-sub-2",
+    "name": "CorreoSeguro Pro",
+    "description": "Buzón privado con gestor de claves.",
+    "currency": "EUR",
+    "priceMinor": 1899,
+    "frequency": "monthly",
+    "startDate": "2026-04-23",
+    "billingDay": 23,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-2",
+      "subscriptionId": "seed-sub-2",
+      "priceMinor": 1899,
+      "currency": "EUR",
+      "effectiveFrom": "2026-04-23",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-2",
+      "subscriptionId": "seed-sub-2",
+      "billingDay": 23,
+      "effectiveFrom": "2026-04-23",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-2",
+      "subscriptionId": "seed-sub-2",
+      "status": "active",
+      "date": "2026-04-23",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-3",
+    "name": "Conversador IA",
+    "description": "Chat de inteligencia artificial de pago.",
+    "currency": "EUR",
+    "priceMinor": 2400,
+    "frequency": "monthly",
+    "startDate": "2026-09-30",
+    "billingDay": 30,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-3",
+      "subscriptionId": "seed-sub-3",
+      "priceMinor": 2400,
+      "currency": "EUR",
+      "effectiveFrom": "2026-09-30",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-3",
+      "subscriptionId": "seed-sub-3",
+      "billingDay": 30,
+      "effectiveFrom": "2026-09-30",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-3",
+      "subscriptionId": "seed-sub-3",
+      "status": "active",
+      "date": "2026-09-30",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-4",
+    "name": "Asistentes Cloud Go",
+    "description": "Plan de pago para un catálogo de asistentes.",
+    "currency": "USD",
+    "priceMinor": 1200,
+    "frequency": "monthly",
+    "startDate": "2026-10-08",
+    "billingDay": 8,
+    "nextBillingOverride": null,
+    "endDate": "2026-11-25",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-4",
+      "subscriptionId": "seed-sub-4",
+      "priceMinor": 1200,
+      "currency": "USD",
+      "effectiveFrom": "2026-10-08",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-4",
+      "subscriptionId": "seed-sub-4",
+      "billingDay": 8,
+      "effectiveFrom": "2026-10-08",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-4",
+      "subscriptionId": "seed-sub-4",
+      "status": "active",
+      "date": "2026-10-08",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-5",
+    "name": "Web ejemplo.dev",
+    "description": "Un sitio de ejemplo.",
+    "currency": "USD",
+    "priceMinor": 1299,
+    "frequency": "annual",
+    "startDate": "2026-03-21",
+    "billingDay": 21,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-5",
+      "subscriptionId": "seed-sub-5",
+      "priceMinor": 1299,
+      "currency": "USD",
+      "effectiveFrom": "2026-03-21",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-5",
+      "subscriptionId": "seed-sub-5",
+      "billingDay": 21,
+      "effectiveFrom": "2026-03-21",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-5",
+      "subscriptionId": "seed-sub-5",
+      "status": "active",
+      "date": "2026-03-21",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-6",
+    "name": "Soporte de sobremesa",
+    "description": "Soporte articulado de sobremesa.",
+    "currency": "EUR",
+    "priceMinor": 1750,
+    "frequency": "monthly",
+    "startDate": "2026-09-28",
+    "billingDay": 28,
+    "nextBillingOverride": null,
+    "endDate": "2027-01-10",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-6",
+      "subscriptionId": "seed-sub-6",
+      "priceMinor": 1750,
+      "currency": "EUR",
+      "effectiveFrom": "2026-09-28",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-6",
+      "subscriptionId": "seed-sub-6",
+      "billingDay": 28,
+      "effectiveFrom": "2026-09-28",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-6",
+      "subscriptionId": "seed-sub-6",
+      "status": "active",
+      "date": "2026-09-28",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-7",
+    "name": "Canciones en streaming",
+    "description": "Reproducción de audio en línea.",
+    "currency": "EUR",
+    "priceMinor": 1049,
+    "frequency": "monthly",
+    "startDate": "2025-04-17",
+    "billingDay": 17,
+    "nextBillingOverride": null,
+    "endDate": "2026-12-10",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-7-1",
+      "subscriptionId": "seed-sub-7",
+      "priceMinor": 949,
+      "currency": "EUR",
+      "effectiveFrom": "2025-04-17",
+      "effectiveTo": "2026-07-16",
+      "note": "Importe inicial del plan.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     },
+     {
+      "id": "seed-price-7-2",
+      "subscriptionId": "seed-sub-7",
+      "priceMinor": 1049,
+      "currency": "EUR",
+      "effectiveFrom": "2026-07-17",
+      "effectiveTo": null,
+      "note": "Importe tras la revisión de julio de 2026.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-7",
+      "subscriptionId": "seed-sub-7",
+      "billingDay": 17,
+      "effectiveFrom": "2025-04-17",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-7",
+      "subscriptionId": "seed-sub-7",
+      "status": "active",
+      "date": "2025-04-17",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-8",
+    "name": "Almacén Nube",
+    "description": "Copia de seguridad en la nube.",
+    "currency": "USD",
+    "priceMinor": 400,
+    "frequency": "monthly",
+    "startDate": "2026-07-26",
+    "billingDay": 26,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "cancelled",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-8",
+      "subscriptionId": "seed-sub-8",
+      "priceMinor": 400,
+      "currency": "USD",
+      "effectiveFrom": "2026-07-26",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-8",
+      "subscriptionId": "seed-sub-8",
+      "billingDay": 26,
+      "effectiveFrom": "2026-07-26",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-8",
+      "subscriptionId": "seed-sub-8",
+      "status": "active",
+      "date": "2026-07-26",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-9",
+    "name": "Nube 400 GB",
+    "description": "Espacio compartido de 400 GB.",
+    "currency": "EUR",
+    "priceMinor": 549,
+    "frequency": "monthly",
+    "startDate": "2025-02-14",
+    "billingDay": 24,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "finished",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-9-1",
+      "subscriptionId": "seed-sub-9",
+      "priceMinor": 849,
+      "currency": "EUR",
+      "effectiveFrom": "2025-02-14",
+      "effectiveTo": "2026-05-23",
+      "note": "Importe inicial del plan.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     },
+     {
+      "id": "seed-price-9-2",
+      "subscriptionId": "seed-sub-9",
+      "priceMinor": 549,
+      "currency": "EUR",
+      "effectiveFrom": "2026-05-24",
+      "effectiveTo": null,
+      "note": "Importe tras la revisión de mayo de 2026.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-9",
+      "subscriptionId": "seed-sub-9",
+      "billingDay": 24,
+      "effectiveFrom": "2025-02-14",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-9",
+      "subscriptionId": "seed-sub-9",
+      "status": "active",
+      "date": "2025-02-14",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-10",
+    "name": "Seguridad Hogar",
+    "description": "Protección para todos los dispositivos de casa.",
+    "currency": "EUR",
+    "priceMinor": 4499,
+    "frequency": "annual",
+    "startDate": "2022-10-10",
+    "billingDay": 10,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-10",
+      "subscriptionId": "seed-sub-10",
+      "priceMinor": 4499,
+      "currency": "EUR",
+      "effectiveFrom": "2022-10-10",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-10",
+      "subscriptionId": "seed-sub-10",
+      "billingDay": 10,
+      "effectiveFrom": "2022-10-10",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-10",
+      "subscriptionId": "seed-sub-10",
+      "status": "active",
+      "date": "2022-10-10",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   }
+  ],
+  "date": "2026-11-18",
+  "rates": [
+   {
+    "id": "seed-rate-eur-usd",
+    "fromCurrency": "EUR",
+    "toCurrency": "USD",
+    "rateScaled": 1100000,
+    "effectiveFrom": "2026-11-01",
+    "source": "Ejemplo",
+    "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+    "createdAt": "2026-11-18T12:00:00.000Z"
+   },
+   {
+    "id": "seed-rate-usd-eur",
+    "fromCurrency": "USD",
+    "toCurrency": "EUR",
+    "rateScaled": 909091,
+    "effectiveFrom": "2026-11-01",
+    "source": "Ejemplo",
+    "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+    "createdAt": "2026-11-18T12:00:00.000Z"
+   }
+  ],
+  "accountCurrency": "EUR",
+  "expected": 913
+ },
+ "subscriptionCostRanking": {
+  "subscriptions": [
+   {
+    "id": "seed-sub-1",
+    "name": "Mobilidad urbana",
+    "description": "Desplazamientos por la ciudad.",
+    "currency": "EUR",
+    "priceMinor": null,
+    "frequency": "monthly",
+    "startDate": null,
+    "billingDay": null,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [],
+    "statusHistory": []
+   },
+   {
+    "id": "seed-sub-2",
+    "name": "CorreoSeguro Pro",
+    "description": "Buzón privado con gestor de claves.",
+    "currency": "EUR",
+    "priceMinor": 1899,
+    "frequency": "monthly",
+    "startDate": "2026-04-23",
+    "billingDay": 23,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-2",
+      "subscriptionId": "seed-sub-2",
+      "priceMinor": 1899,
+      "currency": "EUR",
+      "effectiveFrom": "2026-04-23",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-2",
+      "subscriptionId": "seed-sub-2",
+      "billingDay": 23,
+      "effectiveFrom": "2026-04-23",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-2",
+      "subscriptionId": "seed-sub-2",
+      "status": "active",
+      "date": "2026-04-23",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-3",
+    "name": "Conversador IA",
+    "description": "Chat de inteligencia artificial de pago.",
+    "currency": "EUR",
+    "priceMinor": 2400,
+    "frequency": "monthly",
+    "startDate": "2026-09-30",
+    "billingDay": 30,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-3",
+      "subscriptionId": "seed-sub-3",
+      "priceMinor": 2400,
+      "currency": "EUR",
+      "effectiveFrom": "2026-09-30",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-3",
+      "subscriptionId": "seed-sub-3",
+      "billingDay": 30,
+      "effectiveFrom": "2026-09-30",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-3",
+      "subscriptionId": "seed-sub-3",
+      "status": "active",
+      "date": "2026-09-30",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-4",
+    "name": "Asistentes Cloud Go",
+    "description": "Plan de pago para un catálogo de asistentes.",
+    "currency": "USD",
+    "priceMinor": 1200,
+    "frequency": "monthly",
+    "startDate": "2026-10-08",
+    "billingDay": 8,
+    "nextBillingOverride": null,
+    "endDate": "2026-11-25",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-4",
+      "subscriptionId": "seed-sub-4",
+      "priceMinor": 1200,
+      "currency": "USD",
+      "effectiveFrom": "2026-10-08",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-4",
+      "subscriptionId": "seed-sub-4",
+      "billingDay": 8,
+      "effectiveFrom": "2026-10-08",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-4",
+      "subscriptionId": "seed-sub-4",
+      "status": "active",
+      "date": "2026-10-08",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-5",
+    "name": "Web ejemplo.dev",
+    "description": "Un sitio de ejemplo.",
+    "currency": "USD",
+    "priceMinor": 1299,
+    "frequency": "annual",
+    "startDate": "2026-03-21",
+    "billingDay": 21,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-5",
+      "subscriptionId": "seed-sub-5",
+      "priceMinor": 1299,
+      "currency": "USD",
+      "effectiveFrom": "2026-03-21",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-5",
+      "subscriptionId": "seed-sub-5",
+      "billingDay": 21,
+      "effectiveFrom": "2026-03-21",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-5",
+      "subscriptionId": "seed-sub-5",
+      "status": "active",
+      "date": "2026-03-21",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-6",
+    "name": "Soporte de sobremesa",
+    "description": "Soporte articulado de sobremesa.",
+    "currency": "EUR",
+    "priceMinor": 1750,
+    "frequency": "monthly",
+    "startDate": "2026-09-28",
+    "billingDay": 28,
+    "nextBillingOverride": null,
+    "endDate": "2027-01-10",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-6",
+      "subscriptionId": "seed-sub-6",
+      "priceMinor": 1750,
+      "currency": "EUR",
+      "effectiveFrom": "2026-09-28",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-6",
+      "subscriptionId": "seed-sub-6",
+      "billingDay": 28,
+      "effectiveFrom": "2026-09-28",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-6",
+      "subscriptionId": "seed-sub-6",
+      "status": "active",
+      "date": "2026-09-28",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-7",
+    "name": "Canciones en streaming",
+    "description": "Reproducción de audio en línea.",
+    "currency": "EUR",
+    "priceMinor": 1049,
+    "frequency": "monthly",
+    "startDate": "2025-04-17",
+    "billingDay": 17,
+    "nextBillingOverride": null,
+    "endDate": "2026-12-10",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-7-1",
+      "subscriptionId": "seed-sub-7",
+      "priceMinor": 949,
+      "currency": "EUR",
+      "effectiveFrom": "2025-04-17",
+      "effectiveTo": "2026-07-16",
+      "note": "Importe inicial del plan.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     },
+     {
+      "id": "seed-price-7-2",
+      "subscriptionId": "seed-sub-7",
+      "priceMinor": 1049,
+      "currency": "EUR",
+      "effectiveFrom": "2026-07-17",
+      "effectiveTo": null,
+      "note": "Importe tras la revisión de julio de 2026.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-7",
+      "subscriptionId": "seed-sub-7",
+      "billingDay": 17,
+      "effectiveFrom": "2025-04-17",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-7",
+      "subscriptionId": "seed-sub-7",
+      "status": "active",
+      "date": "2025-04-17",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-8",
+    "name": "Almacén Nube",
+    "description": "Copia de seguridad en la nube.",
+    "currency": "USD",
+    "priceMinor": 400,
+    "frequency": "monthly",
+    "startDate": "2026-07-26",
+    "billingDay": 26,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-8",
+      "subscriptionId": "seed-sub-8",
+      "priceMinor": 400,
+      "currency": "USD",
+      "effectiveFrom": "2026-07-26",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-8",
+      "subscriptionId": "seed-sub-8",
+      "billingDay": 26,
+      "effectiveFrom": "2026-07-26",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-8",
+      "subscriptionId": "seed-sub-8",
+      "status": "active",
+      "date": "2026-07-26",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-9",
+    "name": "Nube 400 GB",
+    "description": "Espacio compartido de 400 GB.",
+    "currency": "EUR",
+    "priceMinor": 549,
+    "frequency": "monthly",
+    "startDate": "2025-02-14",
+    "billingDay": 24,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-9-1",
+      "subscriptionId": "seed-sub-9",
+      "priceMinor": 849,
+      "currency": "EUR",
+      "effectiveFrom": "2025-02-14",
+      "effectiveTo": "2026-05-23",
+      "note": "Importe inicial del plan.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     },
+     {
+      "id": "seed-price-9-2",
+      "subscriptionId": "seed-sub-9",
+      "priceMinor": 549,
+      "currency": "EUR",
+      "effectiveFrom": "2026-05-24",
+      "effectiveTo": null,
+      "note": "Importe tras la revisión de mayo de 2026.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-9",
+      "subscriptionId": "seed-sub-9",
+      "billingDay": 24,
+      "effectiveFrom": "2025-02-14",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-9",
+      "subscriptionId": "seed-sub-9",
+      "status": "active",
+      "date": "2025-02-14",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-10",
+    "name": "Seguridad Hogar",
+    "description": "Protección para todos los dispositivos de casa.",
+    "currency": "EUR",
+    "priceMinor": 4499,
+    "frequency": "annual",
+    "startDate": "2022-10-10",
+    "billingDay": 10,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-10",
+      "subscriptionId": "seed-sub-10",
+      "priceMinor": 4499,
+      "currency": "EUR",
+      "effectiveFrom": "2022-10-10",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-10",
+      "subscriptionId": "seed-sub-10",
+      "billingDay": 10,
+      "effectiveFrom": "2022-10-10",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-10",
+      "subscriptionId": "seed-sub-10",
+      "status": "active",
+      "date": "2022-10-10",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   }
+  ],
+  "date": "2026-11-18",
+  "rates": [
+   {
+    "id": "seed-rate-eur-usd",
+    "fromCurrency": "EUR",
+    "toCurrency": "USD",
+    "rateScaled": 1100000,
+    "effectiveFrom": "2026-11-01",
+    "source": "Ejemplo",
+    "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+    "createdAt": "2026-11-18T12:00:00.000Z"
+   },
+   {
+    "id": "seed-rate-usd-eur",
+    "fromCurrency": "USD",
+    "toCurrency": "EUR",
+    "rateScaled": 909091,
+    "effectiveFrom": "2026-11-01",
+    "source": "Ejemplo",
+    "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+    "createdAt": "2026-11-18T12:00:00.000Z"
+   }
+  ],
+  "accountCurrency": "EUR",
+  "expected": [
+   {
+    "subscriptionId": "seed-sub-3",
+    "monthlyEquivalentMinor": 2400,
+    "annualizedMinor": 28800,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-2",
+    "monthlyEquivalentMinor": 1899,
+    "annualizedMinor": 22788,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-6",
+    "monthlyEquivalentMinor": 1750,
+    "annualizedMinor": 21000,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-4",
+    "monthlyEquivalentMinor": 1091,
+    "annualizedMinor": 13092,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-7",
+    "monthlyEquivalentMinor": 1049,
+    "annualizedMinor": 12588,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-9",
+    "monthlyEquivalentMinor": 549,
+    "annualizedMinor": 6588,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-10",
+    "monthlyEquivalentMinor": 375,
+    "annualizedMinor": 4500,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-8",
+    "monthlyEquivalentMinor": 364,
+    "annualizedMinor": 4368,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-5",
+    "monthlyEquivalentMinor": 98,
+    "annualizedMinor": 1176,
+    "nextBilling": null
+   },
+   {
+    "subscriptionId": "seed-sub-1",
+    "monthlyEquivalentMinor": null,
+    "annualizedMinor": null,
+    "nextBilling": null
+   }
+  ]
+ },
+ "subscriptionCostEvolution": {
+  "subscriptions": [
+   {
+    "id": "seed-sub-1",
+    "name": "Mobilidad urbana",
+    "description": "Desplazamientos por la ciudad.",
+    "currency": "EUR",
+    "priceMinor": null,
+    "frequency": "monthly",
+    "startDate": null,
+    "billingDay": null,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [],
+    "statusHistory": []
+   },
+   {
+    "id": "seed-sub-2",
+    "name": "CorreoSeguro Pro",
+    "description": "Buzón privado con gestor de claves.",
+    "currency": "EUR",
+    "priceMinor": 1899,
+    "frequency": "monthly",
+    "startDate": "2026-04-23",
+    "billingDay": 23,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-2",
+      "subscriptionId": "seed-sub-2",
+      "priceMinor": 1899,
+      "currency": "EUR",
+      "effectiveFrom": "2026-04-23",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-2",
+      "subscriptionId": "seed-sub-2",
+      "billingDay": 23,
+      "effectiveFrom": "2026-04-23",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-2",
+      "subscriptionId": "seed-sub-2",
+      "status": "active",
+      "date": "2026-04-23",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-3",
+    "name": "Conversador IA",
+    "description": "Chat de inteligencia artificial de pago.",
+    "currency": "EUR",
+    "priceMinor": 2400,
+    "frequency": "monthly",
+    "startDate": "2026-09-30",
+    "billingDay": 30,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-3",
+      "subscriptionId": "seed-sub-3",
+      "priceMinor": 2400,
+      "currency": "EUR",
+      "effectiveFrom": "2026-09-30",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-3",
+      "subscriptionId": "seed-sub-3",
+      "billingDay": 30,
+      "effectiveFrom": "2026-09-30",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-3",
+      "subscriptionId": "seed-sub-3",
+      "status": "active",
+      "date": "2026-09-30",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-4",
+    "name": "Asistentes Cloud Go",
+    "description": "Plan de pago para un catálogo de asistentes.",
+    "currency": "USD",
+    "priceMinor": 1200,
+    "frequency": "monthly",
+    "startDate": "2026-10-08",
+    "billingDay": 8,
+    "nextBillingOverride": null,
+    "endDate": "2026-11-25",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-4",
+      "subscriptionId": "seed-sub-4",
+      "priceMinor": 1200,
+      "currency": "USD",
+      "effectiveFrom": "2026-10-08",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-4",
+      "subscriptionId": "seed-sub-4",
+      "billingDay": 8,
+      "effectiveFrom": "2026-10-08",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-4",
+      "subscriptionId": "seed-sub-4",
+      "status": "active",
+      "date": "2026-10-08",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-5",
+    "name": "Web ejemplo.dev",
+    "description": "Un sitio de ejemplo.",
+    "currency": "USD",
+    "priceMinor": 1299,
+    "frequency": "annual",
+    "startDate": "2026-03-21",
+    "billingDay": 21,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-5",
+      "subscriptionId": "seed-sub-5",
+      "priceMinor": 1299,
+      "currency": "USD",
+      "effectiveFrom": "2026-03-21",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-5",
+      "subscriptionId": "seed-sub-5",
+      "billingDay": 21,
+      "effectiveFrom": "2026-03-21",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-5",
+      "subscriptionId": "seed-sub-5",
+      "status": "active",
+      "date": "2026-03-21",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-6",
+    "name": "Soporte de sobremesa",
+    "description": "Soporte articulado de sobremesa.",
+    "currency": "EUR",
+    "priceMinor": 1750,
+    "frequency": "monthly",
+    "startDate": "2026-09-28",
+    "billingDay": 28,
+    "nextBillingOverride": null,
+    "endDate": "2027-01-10",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-6",
+      "subscriptionId": "seed-sub-6",
+      "priceMinor": 1750,
+      "currency": "EUR",
+      "effectiveFrom": "2026-09-28",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-6",
+      "subscriptionId": "seed-sub-6",
+      "billingDay": 28,
+      "effectiveFrom": "2026-09-28",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-6",
+      "subscriptionId": "seed-sub-6",
+      "status": "active",
+      "date": "2026-09-28",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-7",
+    "name": "Canciones en streaming",
+    "description": "Reproducción de audio en línea.",
+    "currency": "EUR",
+    "priceMinor": 1049,
+    "frequency": "monthly",
+    "startDate": "2025-04-17",
+    "billingDay": 17,
+    "nextBillingOverride": null,
+    "endDate": "2026-12-10",
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-7-1",
+      "subscriptionId": "seed-sub-7",
+      "priceMinor": 949,
+      "currency": "EUR",
+      "effectiveFrom": "2025-04-17",
+      "effectiveTo": "2026-07-16",
+      "note": "Importe inicial del plan.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     },
+     {
+      "id": "seed-price-7-2",
+      "subscriptionId": "seed-sub-7",
+      "priceMinor": 1049,
+      "currency": "EUR",
+      "effectiveFrom": "2026-07-17",
+      "effectiveTo": null,
+      "note": "Importe tras la revisión de julio de 2026.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-7",
+      "subscriptionId": "seed-sub-7",
+      "billingDay": 17,
+      "effectiveFrom": "2025-04-17",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-7",
+      "subscriptionId": "seed-sub-7",
+      "status": "active",
+      "date": "2025-04-17",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-8",
+    "name": "Almacén Nube",
+    "description": "Copia de seguridad en la nube.",
+    "currency": "USD",
+    "priceMinor": 400,
+    "frequency": "monthly",
+    "startDate": "2026-07-26",
+    "billingDay": 26,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-8",
+      "subscriptionId": "seed-sub-8",
+      "priceMinor": 400,
+      "currency": "USD",
+      "effectiveFrom": "2026-07-26",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-8",
+      "subscriptionId": "seed-sub-8",
+      "billingDay": 26,
+      "effectiveFrom": "2026-07-26",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-8",
+      "subscriptionId": "seed-sub-8",
+      "status": "active",
+      "date": "2026-07-26",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-9",
+    "name": "Nube 400 GB",
+    "description": "Espacio compartido de 400 GB.",
+    "currency": "EUR",
+    "priceMinor": 549,
+    "frequency": "monthly",
+    "startDate": "2025-02-14",
+    "billingDay": 24,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-9-1",
+      "subscriptionId": "seed-sub-9",
+      "priceMinor": 849,
+      "currency": "EUR",
+      "effectiveFrom": "2025-02-14",
+      "effectiveTo": "2026-05-23",
+      "note": "Importe inicial del plan.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     },
+     {
+      "id": "seed-price-9-2",
+      "subscriptionId": "seed-sub-9",
+      "priceMinor": 549,
+      "currency": "EUR",
+      "effectiveFrom": "2026-05-24",
+      "effectiveTo": null,
+      "note": "Importe tras la revisión de mayo de 2026.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-9",
+      "subscriptionId": "seed-sub-9",
+      "billingDay": 24,
+      "effectiveFrom": "2025-02-14",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-9",
+      "subscriptionId": "seed-sub-9",
+      "status": "active",
+      "date": "2025-02-14",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   },
+   {
+    "id": "seed-sub-10",
+    "name": "Seguridad Hogar",
+    "description": "Protección para todos los dispositivos de casa.",
+    "currency": "EUR",
+    "priceMinor": 4499,
+    "frequency": "annual",
+    "startDate": "2022-10-10",
+    "billingDay": 10,
+    "nextBillingOverride": null,
+    "endDate": null,
+    "status": "active",
+    "cancelledAt": null,
+    "plan": null,
+    "notes": "",
+    "externalPayment": false,
+    "archived": false,
+    "archivedAt": null,
+    "createdAt": "2026-11-18T12:00:00.000Z",
+    "updatedAt": "2026-11-18T12:00:00.000Z",
+    "prices": [
+     {
+      "id": "seed-price-10",
+      "subscriptionId": "seed-sub-10",
+      "priceMinor": 4499,
+      "currency": "EUR",
+      "effectiveFrom": "2022-10-10",
+      "effectiveTo": null,
+      "note": "Importe inicial de ejemplo.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "plans": [],
+    "pauses": [],
+    "billingDays": [
+     {
+      "id": "seed-billing-10",
+      "subscriptionId": "seed-sub-10",
+      "billingDay": 10,
+      "effectiveFrom": "2022-10-10",
+      "note": "Día fijado en el alta.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ],
+    "statusHistory": [
+     {
+      "id": "seed-status-10",
+      "subscriptionId": "seed-sub-10",
+      "status": "active",
+      "date": "2022-10-10",
+      "note": "Alta inicial.",
+      "createdAt": "2026-11-18T12:00:00.000Z"
+     }
+    ]
+   }
+  ],
+  "events": [
+   {
+    "id": "seed-sub-4:2026-11-08",
+    "date": "2026-11-08",
+    "type": "expense",
+    "source": "subscription",
+    "sourceId": "seed-sub-4",
+    "name": "Asistentes Cloud Go",
+    "detail": "Plan de pago para un catálogo de asistentes.",
+    "amountMinor": 1091,
+    "originalAmountMinor": 1200,
+    "originalCurrency": "USD",
+    "rateScaled": 909091,
+    "estimated": true,
+    "status": "active",
+    "category": "Suscripciones",
+    "affectsBalance": true
+   },
+   {
+    "id": "seed-sub-7:2026-11-17",
+    "date": "2026-11-17",
+    "type": "expense",
+    "source": "subscription",
+    "sourceId": "seed-sub-7",
+    "name": "Canciones en streaming",
+    "detail": "Reproducción de audio en línea.",
+    "amountMinor": 1049,
+    "originalAmountMinor": 1049,
+    "originalCurrency": "EUR",
+    "rateScaled": 1000000,
+    "estimated": true,
+    "status": "active",
+    "category": "Suscripciones",
+    "affectsBalance": true
+   },
+   {
+    "id": "seed-sub-2:2026-11-23",
+    "date": "2026-11-23",
+    "type": "expense",
+    "source": "subscription",
+    "sourceId": "seed-sub-2",
+    "name": "CorreoSeguro Pro",
+    "detail": "Buzón privado con gestor de claves.",
+    "amountMinor": 1899,
+    "originalAmountMinor": 1899,
+    "originalCurrency": "EUR",
+    "rateScaled": 1000000,
+    "estimated": true,
+    "status": "active",
+    "category": "Suscripciones",
+    "affectsBalance": true
+   },
+   {
+    "id": "seed-sub-9:2026-11-24",
+    "date": "2026-11-24",
+    "type": "expense",
+    "source": "subscription",
+    "sourceId": "seed-sub-9",
+    "name": "Nube 400 GB",
+    "detail": "Espacio compartido de 400 GB.",
+    "amountMinor": 549,
+    "originalAmountMinor": 549,
+    "originalCurrency": "EUR",
+    "rateScaled": 1000000,
+    "estimated": true,
+    "status": "active",
+    "category": "Suscripciones",
+    "affectsBalance": true
+   },
+   {
+    "id": "seed-sub-8:2026-11-26",
+    "date": "2026-11-26",
+    "type": "expense",
+    "source": "subscription",
+    "sourceId": "seed-sub-8",
+    "name": "Almacén Nube",
+    "detail": "Copia de seguridad en la nube.",
+    "amountMinor": 364,
+    "originalAmountMinor": 400,
+    "originalCurrency": "USD",
+    "rateScaled": 909091,
+    "estimated": true,
+    "status": "active",
+    "category": "Suscripciones",
+    "affectsBalance": true
+   },
+   {
+    "id": "seed-sub-6:2026-11-28",
+    "date": "2026-11-28",
+    "type": "expense",
+    "source": "subscription",
+    "sourceId": "seed-sub-6",
+    "name": "Soporte de sobremesa",
+    "detail": "Soporte articulado de sobremesa.",
+    "amountMinor": 1750,
+    "originalAmountMinor": 1750,
+    "originalCurrency": "EUR",
+    "rateScaled": 1000000,
+    "estimated": true,
+    "status": "active",
+    "category": "Suscripciones",
+    "affectsBalance": true
+   },
+   {
+    "id": "seed-sub-3:2026-11-30",
+    "date": "2026-11-30",
+    "type": "expense",
+    "source": "subscription",
+    "sourceId": "seed-sub-3",
+    "name": "Conversador IA",
+    "detail": "Chat de inteligencia artificial de pago.",
+    "amountMinor": 2400,
+    "originalAmountMinor": 2400,
+    "originalCurrency": "EUR",
+    "rateScaled": 1000000,
+    "estimated": true,
+    "status": "active",
+    "category": "Suscripciones",
+    "affectsBalance": true
+   }
+  ],
+  "rates": [
+   {
+    "id": "seed-rate-eur-usd",
+    "fromCurrency": "EUR",
+    "toCurrency": "USD",
+    "rateScaled": 1100000,
+    "effectiveFrom": "2026-11-01",
+    "source": "Ejemplo",
+    "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+    "createdAt": "2026-11-18T12:00:00.000Z"
+   },
+   {
+    "id": "seed-rate-usd-eur",
+    "fromCurrency": "USD",
+    "toCurrency": "EUR",
+    "rateScaled": 909091,
+    "effectiveFrom": "2026-11-01",
+    "source": "Ejemplo",
+    "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+    "createdAt": "2026-11-18T12:00:00.000Z"
+   }
+  ],
+  "accountCurrency": "EUR",
+  "months": [
+   {
+    "year": 2026,
+    "month": 11
+   },
+   {
+    "year": 2026,
+    "month": 12
+   },
+   {
+    "year": 2027,
+    "month": 1
+   }
+  ],
+  "expected": [
+   {
+    "year": 2026,
+    "month": 11,
+    "actualMinor": 9102,
+    "normalizedMinor": 9575
+   },
+   {
+    "year": 2026,
+    "month": 12,
+    "actualMinor": 0,
+    "normalizedMinor": 8484
+   },
+   {
+    "year": 2027,
+    "month": 1,
+    "actualMinor": 0,
+    "normalizedMinor": 7435
+   }
+  ]
+ },
+ "monthRange": [
+  {
+   "from": "2026-11-15",
+   "to": "2027-02-01",
+   "expected": [
+    {
+     "year": 2026,
+     "month": 11
+    },
+    {
+     "year": 2026,
+     "month": 12
+    },
+    {
+     "year": 2027,
+     "month": 1
+    },
+    {
+     "year": 2027,
+     "month": 2
+    }
+   ]
+  },
+  {
+   "from": "2024-01-31",
+   "to": "2024-03-31",
+   "expected": [
+    {
+     "year": 2024,
+     "month": 1
+    },
+    {
+     "year": 2024,
+     "month": 2
+    },
+    {
+     "year": 2024,
+     "month": 3
+    }
+   ]
+  },
+  {
+   "from": "2026-11-01",
+   "to": "2026-11-30",
+   "expected": [
+    {
+     "year": 2026,
+     "month": 11
+    }
+   ]
+  },
+  {
+   "from": "x",
+   "to": "2027-02-01",
+   "expected": []
+  },
+  {
+   "from": "2026-11-01",
+   "to": "2026-10-31",
+   "expected": []
+  }
+ ]
+}

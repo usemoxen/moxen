@@ -1,0 +1,564 @@
+{
+ "findRateAt": [
+  {
+   "rates": [
+    {
+     "id": "r-a",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-b",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-c",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 800000,
+     "effectiveFrom": "2026-10-01",
+     "source": "Ejemplo",
+     "note": "Nota 2",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-d",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1050000,
+     "effectiveFrom": "2025-06-01",
+     "source": "Ejemplo",
+     "note": "Nota 3",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "from": "USD",
+   "to": "EUR",
+   "date": "2026-11-18",
+   "expected": {
+    "rate": {
+     "id": "r-b",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    "approximate": false
+   }
+  },
+  {
+   "rates": [
+    {
+     "id": "r-a",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-b",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-c",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 800000,
+     "effectiveFrom": "2026-10-01",
+     "source": "Ejemplo",
+     "note": "Nota 2",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-d",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1050000,
+     "effectiveFrom": "2025-06-01",
+     "source": "Ejemplo",
+     "note": "Nota 3",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "from": "USD",
+   "to": "EUR",
+   "date": "2026-10-15",
+   "expected": {
+    "rate": {
+     "id": "r-c",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 800000,
+     "effectiveFrom": "2026-10-01",
+     "source": "Ejemplo",
+     "note": "Nota 2",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    "approximate": false
+   }
+  },
+  {
+   "rates": [
+    {
+     "id": "r-a",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-b",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-c",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 800000,
+     "effectiveFrom": "2026-10-01",
+     "source": "Ejemplo",
+     "note": "Nota 2",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-d",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1050000,
+     "effectiveFrom": "2025-06-01",
+     "source": "Ejemplo",
+     "note": "Nota 3",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "from": "EUR",
+   "to": "USD",
+   "date": "2026-11-18",
+   "expected": {
+    "rate": {
+     "id": "r-a",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    "approximate": false
+   }
+  },
+  {
+   "rates": [
+    {
+     "id": "r-a",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-b",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-c",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 800000,
+     "effectiveFrom": "2026-10-01",
+     "source": "Ejemplo",
+     "note": "Nota 2",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-d",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1050000,
+     "effectiveFrom": "2025-06-01",
+     "source": "Ejemplo",
+     "note": "Nota 3",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "from": "EUR",
+   "to": "USD",
+   "date": "2024-01-01",
+   "expected": {
+    "rate": {
+     "id": "r-a",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    "approximate": true
+   }
+  },
+  {
+   "rates": [
+    {
+     "id": "r-a",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-b",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-c",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 800000,
+     "effectiveFrom": "2026-10-01",
+     "source": "Ejemplo",
+     "note": "Nota 2",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-d",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1050000,
+     "effectiveFrom": "2025-06-01",
+     "source": "Ejemplo",
+     "note": "Nota 3",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "from": "USD",
+   "to": "EUR",
+   "date": "2024-06-15",
+   "expected": {
+    "rate": {
+     "id": "r-b",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    "approximate": true
+   }
+  },
+  {
+   "rates": [
+    {
+     "id": "r-inv",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "from": "USD",
+   "to": "EUR",
+   "date": "2026-06-01",
+   "expected": {
+    "rate": {
+     "id": "inverse:r-inv",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Inverso de Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    "approximate": false
+   }
+  },
+  {
+   "rates": [
+    {
+     "id": "r-t1",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 700000,
+     "effectiveFrom": "2026-05-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-t2",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 750000,
+     "effectiveFrom": "2026-05-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "from": "USD",
+   "to": "EUR",
+   "date": "2026-06-01",
+   "expected": {
+    "rate": {
+     "id": "r-t1",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 700000,
+     "effectiveFrom": "2026-05-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    "approximate": false
+   }
+  },
+  {
+   "rates": [],
+   "from": "USD",
+   "to": "EUR",
+   "date": "2026-06-01",
+   "expected": null
+  },
+  {
+   "rates": [
+    {
+     "id": "r-a",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-01-01",
+     "source": "Ejemplo",
+     "note": "Nota 0",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-b",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Nota 1",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-c",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 800000,
+     "effectiveFrom": "2026-10-01",
+     "source": "Ejemplo",
+     "note": "Nota 2",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "r-d",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1050000,
+     "effectiveFrom": "2025-06-01",
+     "source": "Ejemplo",
+     "note": "Nota 3",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "from": "EUR",
+   "to": "EUR",
+   "date": "2026-06-01",
+   "expected": null
+  }
+ ],
+ "convertToAccountCurrency": [
+  {
+   "amountMinor": 1500,
+   "from": "EUR",
+   "accountCurrency": "EUR",
+   "date": "2026-11-18",
+   "rates": [],
+   "expected": {
+    "amountMinor": 1500,
+    "rateScaled": 1000000,
+    "rateSource": null,
+    "estimated": false,
+    "approximate": false
+   }
+  },
+  {
+   "amountMinor": 1200,
+   "from": "USD",
+   "accountCurrency": "EUR",
+   "date": "2026-11-08",
+   "rates": [
+    {
+     "id": "seed-rate-eur-usd",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "seed-rate-usd-eur",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "expected": {
+    "amountMinor": 1091,
+    "rateScaled": 909091,
+    "rateSource": "Ejemplo",
+    "estimated": true,
+    "approximate": false
+   }
+  },
+  {
+   "amountMinor": 1200,
+   "from": "USD",
+   "accountCurrency": "EUR",
+   "date": "2026-08-26",
+   "rates": [
+    {
+     "id": "seed-rate-eur-usd",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "seed-rate-usd-eur",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "expected": {
+    "amountMinor": 1091,
+    "rateScaled": 909091,
+    "rateSource": "Ejemplo",
+    "estimated": true,
+    "approximate": true
+   }
+  },
+  {
+   "amountMinor": 400,
+   "from": "USD",
+   "accountCurrency": "EUR",
+   "date": "2026-11-26",
+   "rates": [
+    {
+     "id": "seed-rate-eur-usd",
+     "fromCurrency": "EUR",
+     "toCurrency": "USD",
+     "rateScaled": 1100000,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    },
+    {
+     "id": "seed-rate-usd-eur",
+     "fromCurrency": "USD",
+     "toCurrency": "EUR",
+     "rateScaled": 909091,
+     "effectiveFrom": "2026-11-01",
+     "source": "Ejemplo",
+     "note": "Tipo de cambio de ejemplo (1 EUR = 1,10 USD). No es el valor real.",
+     "createdAt": "2026-11-18T12:00:00.000Z"
+    }
+   ],
+   "expected": {
+    "amountMinor": 364,
+    "rateScaled": 909091,
+    "rateSource": "Ejemplo",
+    "estimated": true,
+    "approximate": false
+   }
+  },
+  {
+   "amountMinor": 2000,
+   "from": "USD",
+   "accountCurrency": "EUR",
+   "date": "2026-11-26",
+   "rates": [],
+   "expected": {
+    "amountMinor": 2000,
+    "rateScaled": null,
+    "rateSource": null,
+    "estimated": true,
+    "approximate": true
+   }
+  }
+ ]
+}

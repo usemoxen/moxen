@@ -1,0 +1,333 @@
+{
+ "convert": [
+  {
+   "amountMinor": 1200,
+   "rateScaled": 909091,
+   "expected": 1091
+  },
+  {
+   "amountMinor": 400,
+   "rateScaled": 909091,
+   "expected": 364
+  },
+  {
+   "amountMinor": 1299,
+   "rateScaled": 909091,
+   "expected": 1181
+  },
+  {
+   "amountMinor": 100,
+   "rateScaled": 909091,
+   "expected": 91
+  },
+  {
+   "amountMinor": 1,
+   "rateScaled": 909091,
+   "expected": 1
+  },
+  {
+   "amountMinor": 0,
+   "rateScaled": 909091,
+   "expected": 0
+  },
+  {
+   "amountMinor": 1,
+   "rateScaled": 500000,
+   "expected": 1
+  },
+  {
+   "amountMinor": 3,
+   "rateScaled": 500000,
+   "expected": 2
+  },
+  {
+   "amountMinor": 2,
+   "rateScaled": 500000,
+   "expected": 1
+  },
+  {
+   "amountMinor": -1200,
+   "rateScaled": 909091,
+   "expected": -1091
+  },
+  {
+   "amountMinor": -1,
+   "rateScaled": 500000,
+   "expected": -1
+  },
+  {
+   "amountMinor": 1234567,
+   "rateScaled": 1000000,
+   "expected": 1234567
+  },
+  {
+   "amountMinor": -5,
+   "rateScaled": 700000,
+   "expected": -4
+  },
+  {
+   "amountMinor": 99999999,
+   "rateScaled": 909091,
+   "expected": 90909099
+  },
+  {
+   "amountMinor": 7,
+   "rateScaled": 0,
+   "error": "Tipo de cambio no válido: 0"
+  },
+  {
+   "amountMinor": 7,
+   "rateScaled": -100,
+   "error": "Tipo de cambio no válido: -100"
+  }
+ ],
+ "formatCurrency": [
+  {
+   "amountMinor": 2499,
+   "currency": "EUR",
+   "expected": "24,99 €"
+  },
+  {
+   "amountMinor": -2499,
+   "currency": "EUR",
+   "expected": "-24,99 €"
+  },
+  {
+   "amountMinor": 1250,
+   "currency": "USD",
+   "expected": "12,50 US$"
+  },
+  {
+   "amountMinor": 0,
+   "currency": "EUR",
+   "expected": "0,00 €"
+  },
+  {
+   "amountMinor": 123456789,
+   "currency": "GBP",
+   "expected": "1.234.567,89 GBP"
+  },
+  {
+   "amountMinor": -12345678,
+   "currency": "GBP",
+   "expected": "-123.456,78 GBP"
+  },
+  {
+   "amountMinor": 999999999999,
+   "currency": "EUR",
+   "expected": "9.999.999.999,99 €"
+  },
+  {
+   "amountMinor": 9999,
+   "currency": "EUR",
+   "expected": "99,99 €"
+  },
+  {
+   "amountMinor": 10000,
+   "currency": "EUR",
+   "expected": "100,00 €"
+  },
+  {
+   "amountMinor": -1,
+   "currency": "USD",
+   "expected": "-0,01 US$"
+  }
+ ],
+ "formatMinor": [
+  {
+   "amountMinor": -1250,
+   "symbol": "",
+   "expected": "-12,50"
+  },
+  {
+   "amountMinor": 1024,
+   "symbol": "",
+   "expected": "10,24"
+  },
+  {
+   "amountMinor": 9999,
+   "symbol": "",
+   "expected": "99,99"
+  },
+  {
+   "amountMinor": 10000,
+   "symbol": "",
+   "expected": "100,00"
+  },
+  {
+   "amountMinor": 123456789,
+   "symbol": "",
+   "expected": "1.234.567,89"
+  }
+ ],
+ "parseAmountToMinor": [
+  {
+   "text": "24,99",
+   "expected": 2499
+  },
+  {
+   "text": "24.99",
+   "expected": 2499
+  },
+  {
+   "text": "1.234,56",
+   "expected": 123456
+  },
+  {
+   "text": "1,234.56",
+   "expected": 123456
+  },
+  {
+   "text": " 12,5 € ",
+   "expected": 1250
+  },
+  {
+   "text": "abc",
+   "expected": null
+  },
+  {
+   "text": "",
+   "expected": null
+  },
+  {
+   "text": "12.5,5",
+   "expected": 12550
+  },
+  {
+   "text": "-19",
+   "expected": -1900
+  },
+  {
+   "text": "19.99",
+   "expected": 1999
+  },
+  {
+   "text": "0",
+   "expected": 0
+  },
+  {
+   "text": "0.005",
+   "expected": 1
+  },
+  {
+   "text": "12,345.67",
+   "expected": 1234567
+  },
+  {
+   "text": " 19\t99 ",
+   "expected": 199900
+  },
+  {
+   "text": "-1.234,56",
+   "expected": -123456
+  },
+  {
+   "text": "12,",
+   "expected": null
+  },
+  {
+   "text": "19,999",
+   "expected": 2000
+  },
+  {
+   "text": "€25",
+   "expected": 2500
+  },
+  {
+   "text": "1 000,00",
+   "expected": 100000
+  }
+ ],
+ "parseRateToScaled": [
+  {
+   "text": "1,1",
+   "expected": 1100000
+  },
+  {
+   "text": "0.909091",
+   "expected": 909091
+  },
+  {
+   "text": "0",
+   "expected": null
+  },
+  {
+   "text": "-1",
+   "expected": null
+  },
+  {
+   "text": "2.5",
+   "expected": 2500000
+  },
+  {
+   "text": " 1 , 25 ",
+   "expected": 1250000
+  },
+  {
+   "text": "abc",
+   "expected": null
+  },
+  {
+   "text": "1.000000",
+   "expected": 1000000
+  },
+  {
+   "text": "0,000001",
+   "expected": 1
+  }
+ ],
+ "formatRate": [
+  {
+   "rateScaled": 909091,
+   "expected": "0,909091"
+  },
+  {
+   "rateScaled": 1100000,
+   "expected": "1,10"
+  },
+  {
+   "rateScaled": 1,
+   "expected": "0,000001"
+  },
+  {
+   "rateScaled": 1234567,
+   "expected": "1,234567"
+  },
+  {
+   "rateScaled": 1500000000,
+   "expected": "1500,00"
+  },
+  {
+   "rateScaled": 9999000000,
+   "expected": "9999,00"
+  },
+  {
+   "rateScaled": 10000000000,
+   "expected": "10.000,00"
+  },
+  {
+   "rateScaled": 123456000000,
+   "expected": "123.456,00"
+  },
+  {
+   "rateScaled": 6000000,
+   "expected": "6,00"
+  },
+  {
+   "rateScaled": 620000,
+   "expected": "0,62"
+  },
+  {
+   "rateScaled": 123,
+   "expected": "0,000123"
+  },
+  {
+   "rateScaled": 0,
+   "expected": "0,00"
+  },
+  {
+   "rateScaled": 100000,
+   "expected": "0,10"
+  }
+ ]
+}
