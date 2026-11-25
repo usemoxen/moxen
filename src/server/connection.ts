@@ -768,6 +768,10 @@ export class DirectConnection implements ClientApi {
       store,
       storeRoot: this.storeRoot,
       config,
+      // The dispatch gate reads the setting in force at settle time, not the
+      // snapshot of the operation that started the turn: `lastProviders` is
+      // refreshed as each new operation reads the config.
+      providersInForce: () => this.lastProviders ?? config.providers,
       driverFor: (instanceId: string) => this.driverFor(instanceId),
       ...(this.builtinMcpServers ? { builtinMcpServers: this.builtinMcpServers } : {}),
     };

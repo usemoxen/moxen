@@ -88,7 +88,15 @@ sign-in covers only prompts you type yourself, so a task notice, an
 agent-queued message, a continue after a usage limit, a usage-protection
 wrap-up or recovery, one of Moxen's compaction prompts or its
 post-compaction resume, or an automatic hand-off waits in the work queue or
-the notice batch rather than starting a turn. A running turn is never
+the notice batch rather than starting a turn. The decision is made in one
+place from the same provenance — at the dispatch boundary itself, reading
+the setting in force at that moment, never the config the preceding turn
+started with — so no path can hand an automatic prompt to the driver: not
+the turn a settling run promotes, not recovery and steer redelivery, not
+admission, not a compaction or a hand-off. Eligibility is settled before a
+promotion rewrites the queue, so a held entry is never folded into your
+message and your message is never stranded in a held one: what runs past the
+gate carries only what could run. A running turn is never
 stopped for a compaction whose follow-up could not start, and a hand-off you
 queued yourself that wants a model summary completes on its stored summary
 rather than waiting on a summary the gate would hold. The
@@ -96,6 +104,12 @@ entry shows why it waits, and runs with your next message or when you turn the
 setting on. Recovering a turn whose process died interrupts it either way, but
 the follow-up it had queued is never dispatched past the gate: it goes back to
 queued for the admission path, which holds it like any other automatic prompt.
+A task notice holds its exception only while a live turn of yours can carry
+it: steered into your running turn it rides, but redelivered standalone — a
+crash took the turn it steered into before the driver confirmed it — it is an
+automatic prompt like any other, held until you send again or turn the
+setting on. Nothing is lost either way: a held entry keeps its text and its
+metadata, and every path that holds it runs it the moment it may.
 Delegating a new task to Antigravity is refused outright while off
 (`ANTIGRAVITY_DELEGATION_OFF`), before a thread or worktree is created; an
 agent's `task_send`/wake and `thread_continue` onto Antigravity are refused the

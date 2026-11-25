@@ -110,7 +110,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, automaticDispatchPrompt, freshUserConsentReleases, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
@@ -153,6 +153,14 @@ export interface OperationContext {
   readonly store: ThreadStore;
   readonly storeRoot: string;
   readonly config: CliConfig;
+  /**
+   * The providers config in force now, for the Antigravity dispatch gate:
+   * a long-lived server keeps refreshing this from the last operation it
+   * ran, so a settle that happens long after its turn started reads the
+   * setting the user switched mid-flight, not the turn's own snapshot.
+   * Absent (tests, CLI): `config` is the setting in force.
+   */
+  readonly providersInForce?: () => CliConfig["providers"];
   /** The driver for a model-selection instance id, shared per context. */
   readonly driverFor: (instanceId: string) => TurnDriver;
   /**
@@ -451,7 +459,7 @@ function sameEndpoint(left: OutOfProcessMcpServerSpec, right: McpServerSpec): bo
  * point that touches a thread can call it. Never throws.
  */
 export async function recoverOrphanedTurn(ctx: OperationContext, threadId: string): Promise<boolean> {
-  const result = await reconcileOrphanedTurn(ctx.store, threadId).catch(() => null);
+  const result = await reconcileOrphanedTurn(ctx.store, threadId, ctx.config.providers).catch(() => null);
   if (!result) return false;
   // Its process died with steers mid-flight whose arrival died with it: the
   // ledger still holds them, so they go out again as queued turns of their
@@ -470,7 +478,7 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
   }
   if (copies.length > 0) {
     for (const id of copies) await requeueUnownedTurn(ctx.store, threadId, id).catch(() => false);
-    const next = await promoteQueuedTurn(ctx.store, threadId).catch(() => null);
+    const next = await promoteQueuedTurn(ctx.store, threadId, ctx.config.providers).catch(() => null);
     if (next && !(await holdGatedPromotion(ctx, threadId, next)) && ctx.store.claimRun(next.id)) {
       await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
     }
@@ -479,21 +487,22 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
 }
 
 /**
- * Whether a recovered turn would send an automatic prompt — a task message, a
- * notice, a continue — rather than a message the user wrote. Admission reads
- * the same provenance, and a turn row written before it kept an origin is read
- * from its message ledger.
+ * The one dispatch gate decision for a turn a runner holds: the setting in
+ * force, provenance read with the message ledger made whole, and the fresh
+ * consent that releases a held entry (a user turn authored after it was
+ * queued). This is the same verdict admission reaches, so recovery and the
+ * dispatch boundary never drift apart.
  */
-async function isAutomaticPromptTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
-  if (turn.queue?.automatic === true || turn.queue?.wakeUp === true) return true;
-  if (turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return true;
-  if (turn.origin !== undefined) return turn.origin !== "task-notification";
+async function antigravityGateHoldsTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
   const thread = await ctx.store.readThreadRecord(threadId).catch(() => null);
   if (!thread) return true;
+  const selection = turn.modelSelection ?? thread.modelSelection;
+  if (!antigravityAutoPromptsHeld(ctx.config, selection.instanceId)) return false;
   const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
   const origins = await loadTurnOrigins(ctx.store, [{ thread, turns }], ctx.config).catch(() => null);
-  const origin = origins?.get(turnOriginKey(threadId, turn.id));
-  return origin !== undefined && origin !== "task-notification";
+  const origin = turn.origin ?? origins?.get(turnOriginKey(threadId, turn.id));
+  if (!automaticDispatchPrompt(turn, origin, turns)) return false;
+  return origins === null || !freshUserConsentReleases(turns, turn, threadId, origins);
 }
 
 /**
@@ -508,11 +517,7 @@ async function isAutomaticPromptTurn(ctx: OperationContext, threadId: string, tu
  * and runs itself.
  */
 async function holdGatedPromotion(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
-  const thread = await ctx.store.readThreadRecord(threadId).catch(() => null);
-  if (!thread) return false;
-  const selection = turn.modelSelection ?? thread.modelSelection;
-  if (!antigravityAutoPromptsHeld(ctx.config, selection.instanceId)) return false;
-  if (!(await isAutomaticPromptTurn(ctx, threadId, turn))) return false;
+  if (!(await antigravityGateHoldsTurn(ctx, threadId, turn))) return false;
   ctx.store.untrackRunning(turn.id);
   await ctx.store.withThreadLock(threadId, async () => {
     const fresh = (await ctx.store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
@@ -547,6 +552,31 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // Turns queued behind this one if it settles below with no runner to take
     // a promotion: settled without promoting, held for admission instead.
     const queuedBefore = new Set((await store.readTurns(threadId)).filter((candidate) => candidate.status === "queued").map((candidate) => candidate.id));
+    // The dispatch boundary itself, not a caller's say-so: admission and
+    // promotion both decide with this same check, and the defense holds a
+    // turn that reached a runner anyway — unless fresh consent or the
+    // setting releases it, exactly as admission would. The config is the
+    // operation's, the setting in force at dispatch.
+    if (await antigravityGateHoldsTurn(ctx, threadId, turn)) {
+      store.untrackRunning(turn.id);
+      await ctx.store.withThreadLock(threadId, async () => {
+        const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
+        if (fresh && fresh.status === "running") {
+          await store.updateTurn(threadId, turn.id, { status: "queued", heldAtSettle: true, owner: null, updatedAt: store.nowIso() });
+          await store.appendLedger(threadId, "activity", {
+            id: store.newId(),
+            threadId,
+            turnId: turn.id,
+            kind: "turn.held",
+            summary: ANTIGRAVITY_HELD_MESSAGE,
+            createdAt: store.nowIso(),
+          });
+          store.emit(threadId, "turn-held");
+        }
+      }).catch(() => undefined);
+      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      return;
+    }
     // One message, or several queued ones batched into this turn at promotion.
     const message = turnPrompt(await store.readMessages(threadId), turn);
     if (message === null) {
@@ -566,7 +596,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
         }
         return;
       }
-      await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }).catch(() => undefined);
+      await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }, ctx.config.providers).catch(() => undefined);
       store.untrackRunning(turn.id);
       await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
       return;
@@ -588,7 +618,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       await driver.updateNativeTools?.(threadId, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
     } catch (cause) {
       const error = cause instanceof Error ? cause.message : String(cause);
-      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
+      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
       store.untrackRunning(turn.id);
       // The failed start settled nothing that runs: a promotion it made has no
       // runner to take it, so hand those turns back to the admission path.
@@ -614,6 +644,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
       config: ctx.config,
+      gateProviders: () => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers),
       workingDirectory: thread.env.path,
       ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
       ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
@@ -741,7 +772,7 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     if (candidate.queue && (JSON.stringify(admission.latched) !== JSON.stringify(candidate.queue.latched ?? []) || JSON.stringify(admission.conditions) !== JSON.stringify(candidate.queue.conditions))) await ctx.store.withThreadLock(threadId, () => ctx.store.updateTurn(threadId, candidate.id, { queue: { ...candidate.queue!, latched: admission.latched, conditions: admission.conditions } }));
     if (admission.blocked.length) continue;
     if (await switchColdRecovery(ctx, row, candidate, now)) continue;
-    const turn = await promoteDueScheduledTurn(ctx.store, threadId, candidate.id, !!summary);
+    const turn = await promoteDueScheduledTurn(ctx.store, threadId, candidate.id, !!summary, ctx.config.providers);
     if (!turn || !ctx.store.claimRun(turn.id)) return false;
     await runRecoveredTurn(ctx, threadId, turn);
     rows[index] = { thread: (await ctx.store.readThreadRecord(threadId))!, turns: await ctx.store.readTurns(threadId) };
@@ -996,7 +1027,7 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     if (summaryToStop) {
       const thread = await ctx.store.readThreadRecord(threadId);
       if (thread && summaryToStop.status === "running") await Effect.runPromise(ctx.driverFor((summaryToStop.modelSelection ?? thread.modelSelection).instanceId).interruptTurn(threadId));
-      await interruptTurn(ctx.store, threadId, summaryToStop.id);
+      await interruptTurn(ctx.store, threadId, summaryToStop.id, undefined, undefined, ctx.config.providers);
     }
     if (cancelProtection) await ctx.store.withThreadLock(threadId, async () => {
       const thread = await ctx.store.readThreadRecord(threadId);
@@ -1151,7 +1182,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
         : undefined;
       if (staleSummary?.status === "running") {
         await Effect.runPromise(ctx.driverFor((staleSummary.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
-        await interruptTurn(store, threadId, staleSummary.id);
+        await interruptTurn(store, threadId, staleSummary.id, undefined, undefined, ctx.config.providers);
       } else if (staleSummary?.status === "queued") {
         await interruptTurn(store, threadId, staleSummary.id);
       }
@@ -1179,7 +1210,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
         await Effect.runPromise(ctx.driverFor((summaryTurn.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
         await interruptTurn(store, threadId, summaryTurn.id);
       }
-      if (summaryTurn?.status === "queued") await interruptTurn(store, threadId, summaryTurn.id);
+      if (summaryTurn?.status === "queued") await interruptTurn(store, threadId, summaryTurn.id, undefined, undefined, ctx.config.providers);
       await store.withThreadLock(threadId, async () => {
         const current = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
         handoff = { ...current!.handoff!, fallback: !current!.handoff!.summary };
@@ -3201,7 +3232,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
     const queuedBefore = new Set((await store.readTurns(thread.id)).filter((turn) => turn.status === "queued").map((turn) => turn.id));
     if (claimed) store.untrackRunning(sent.turn.id);
-    await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }).catch(() => undefined);
+    await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
     // The failed start settled nothing that runs: a promotion it made has no
     // runner to take it, so hand those turns back to the admission path.
     await holdStrandedPromotions(store, thread.id, queuedBefore).catch(() => undefined);
@@ -3267,6 +3298,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       // thread's model changed since it started.
       modelSelection: turnModel,
       config: ctx.config,
+      gateProviders: () => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers),
       runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,

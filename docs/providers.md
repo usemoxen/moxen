@@ -70,15 +70,22 @@ negotiates any other protocol version is refused loudly
   limit, usage-protection wrap-ups and recoveries, Moxen's own compaction
   prompts and their post-compaction resume, automatic hand-offs) in the work
   queue and notice batch instead of starting them, and never signs in an
-  account with its own isolated home folder. A launch or login input that
+  account with its own isolated home folder. The gate is one decision at the
+  dispatch boundary, so every path - the turn a settling run promotes,
+  recovery and steer redelivery, admission - holds alike, reading the setting
+  in force at that moment. A task notice rides only a live turn of yours:
+  redelivered standalone (the turn it steered into died unconfirmed) it is
+  held like any other automatic prompt. A held entry is never batched into
+  one of your messages, and nothing of it is lost: it keeps its text and runs
+  with your next message or when you turn the setting on.
+  A launch or login input that
   moves the login off the host environment — an account `env` override of
   `HOME`, `USERPROFILE`, `SSH_CONNECTION` or the home/profile/config-dir
   variables, or a `--gemini-dir` launch argument — is refused with
   `ANTIGRAVITY_ACCOUNT_OFF`, never silently stripped down to the host login.
   Stored usage and credits of a gated account are not served, and turning
   the setting off stops that account's live driver and sessions without a
-  restart. They are delivered with your next message, or when you turn the
-  setting on. What you type, queue, schedule or click always runs. Turning it
+  restart. What you type, queue, schedule or click always runs. Turning it
   on is your choice: Google does not support delegation, automatic prompts or
   multiple accounts on consumer plans and may suspend the Antigravity account,
   and the TUI, desktop and CLI say so when you enable it. A turn the provider

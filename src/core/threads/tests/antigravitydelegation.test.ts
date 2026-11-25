@@ -30,6 +30,7 @@ import {
   queueAgentMessage,
   queueTaskNotification,
   readWorkQueue,
+  recoverOrphanedTurn,
   recoverTaskNotifications,
   runWorkQueue,
   sendTaskMessage,
@@ -592,4 +593,184 @@ describe("Antigravity orphan recovery held while off", () => {
     await settleRuns();
     expect(await statusOf(follow.turnId)).toBe("completed");
   }, 30_000);
+});
+
+describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
+  /** The pid of a process that has already exited, as a crash leaves behind. */
+  async function deadPid(): Promise<number> {
+    const child = spawn(process.execPath, ["-e", "0"]);
+    await new Promise((resolve) => child.once("exit", resolve));
+    return child.pid!;
+  }
+
+  /**
+   * A driver that records every prompt it is handed, stalls on one named
+   * prompt until released, and takes steers mid-turn where `withSteer` says
+   * the provider could — as Antigravity does for a turn it never confirmed.
+   */
+  function recordingDriver(hooks: { prompts: string[]; steers: string[]; stall?: string; release: (() => void)[]; withSteer?: boolean }) {
+    const promptOf = new Map<string, string>();
+    let turns = 0;
+    const driver: TurnDriver = {
+      hasSession: () => Effect.succeed(true),
+      startSession: () => Effect.succeed({}),
+      sendTurn: (input: { threadId: string; prompt: string }) =>
+        Effect.sync(() => {
+          hooks.prompts.push(input.prompt);
+          turns += 1;
+          const turnId = `driver-turn-${turns}`;
+          promptOf.set(turnId, input.prompt);
+          return { threadId: input.threadId, turnId };
+        }),
+      ...(hooks.withSteer === true
+        ? { steerTurn: (threadId: string, text: string) => Effect.sync(() => { hooks.steers.push(text); }) }
+        : {}),
+      interruptTurn: () => Effect.void,
+      awaitTurn: (async (_threadId: string, turnId: string, signal?: AbortSignal) => {
+        const prompt = promptOf.get(turnId) ?? "";
+        if (prompt === hooks.stall) {
+          await new Promise<void>((resolve) => {
+            if (signal?.aborted === true) resolve();
+            else {
+              hooks.release.push(resolve);
+              signal?.addEventListener("abort", () => resolve(), { once: true });
+            }
+          });
+        }
+        return { status: "completed", text: `Completed: ${prompt}`, usage: { input: 1, cacheRead: 0, cacheCreate: 0, output: 2, thinking: 0 }, error: null } as never;
+      }) as never,
+      resumeCursor: () => "cursor",
+      streamEvents: Stream.never,
+    } as unknown as TurnDriver;
+    return driver;
+  }
+
+  it("holds a task notice redelivered standalone when the live turn it steered into died", async () => {
+    const prompts: string[] = [];
+    const steers: string[] = [];
+    const driver = recordingDriver({ prompts, steers, release: [], withSteer: true });
+    const w = await testHarness({ drivers: { antigravity: () => driver } });
+    const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: () => driver };
+    const make = (instanceId: string, model = "test-model", title = `Work on ${instanceId}`) =>
+      createThread(w.store, { projectId: "p", title, env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId, model } });
+    const parent = await make("antigravity", "gemini-4-neon");
+    const child = await make("codex");
+    // A notifying delegation row plus a finished turn on the child, as a settled task reports.
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parent.id, childThreadId: child.id, prompt: "Do it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const childTurn = (await sendTurn(w.store, child.id, { prompt: "Do it" })).turn;
+    await completeTurn(w.store, child.id, childTurn.id, { text: "Done." });
+
+    // The user's own turn runs with the setting off; the notice steers into it.
+    const live = (await sendTurn(w.store, parent.id, { prompt: "Do a long job." })).turn;
+    await queueTaskNotification(ctx, parent.id, child.id);
+    await flushTaskNotifications(ctx, parent.id);
+    expect(steers.length).toBe(1);
+    const notice = steers[0]!;
+
+    // The turn's owner dies before confirming the steer: the notice would be
+    // redelivered standalone, with no live user turn left to ride.
+    await w.store.updateTurn(parent.id, live.id, { owner: { pid: await deadPid(), host: os.hostname() } });
+    await recoverOrphanedTurn(ctx, parent.id);
+    await settleRuns();
+
+    // The driver never receives it: the exception only ever held while a live
+    // user turn could carry it. The copy keeps its text, held for admission.
+    expect(prompts.some((prompt) => prompt.includes(notice.slice(0, 40)))).toBe(false);
+    const copy = (await w.store.readTurns(parent.id)).find((turn) => turn.origin === "task-notification" && turn.id !== live.id);
+    expect(copy?.status).toBe("queued");
+
+    // A user send releases it, exactly once, as with any held automatic entry.
+    await startTurn(ctx, { threadId: parent.id, prompt: "Please continue" });
+    await settleRuns();
+    await runWorkQueue(ctx);
+    await settleRuns();
+    const released = (await w.store.readTurns(parent.id)).find((turn) => turn.origin === "task-notification" && turn.id !== live.id);
+    expect(released?.status).toBe("completed");
+  });
+
+  it("holds a task message queued while the setting was on when it is dispatched after it turned off", async () => {
+    const prompts: string[] = [];
+    const release: (() => void)[] = [];
+    const driver = recordingDriver({ prompts, steers: [], stall: "Do a long job.", release });
+    const w = await testHarness({ drivers: { antigravity: () => driver, codex: () => driver } });
+    const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: () => driver };
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } };
+    const thread = await createThread(w.store, {
+      projectId: "p",
+      title: "Long job",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+    });
+
+    // The user's turn runs; with the setting on, a task message queues behind it.
+    await startTurn(ctx, { threadId: thread.id, prompt: "Do a long job.", onEvent: () => undefined });
+    await vi.waitFor(() => expect(prompts).toContain("Do a long job."), { timeout: 10_000 });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "Task follow-up", delivery: "queue", origin: "task-message" });
+    expect(queued.turn.status).toBe("queued");
+
+    // The setting goes off before the turn settles; the promotion and dispatch
+    // that follow must not hand the queued message to the driver.
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: false } };
+    for (const resolve of release.splice(0)) resolve();
+    await settleRuns();
+    await runWorkQueue(ctx);
+    await settleRuns();
+    expect(prompts.some((prompt) => prompt.includes("Task follow-up"))).toBe(false);
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)?.status).toBe("queued");
+
+    // The message is intact and runs once the setting is back on.
+    expect((await w.store.readMessages(thread.id)).some((message) => message.turnId === queued.turn.id && message.text.includes("Task follow-up"))).toBe(true);
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } };
+    await runWorkQueue(ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)?.status).toBe("completed");
+  });
+
+  it.each(["manual first", "task message first"])(
+    "keeps a user's queued message runnable beside a task message the gate holds (%s)",
+    async (order) => {
+      // Both queue while the setting is on, behind a turn whose owner then dies;
+      // the recovery comes back with the setting off, so the task message is
+      // held but the manual message must still run, on its own and with its
+      // own text — never merged into the held entry.
+      const w = await world();
+      w.allow(true);
+      const parent = await w.make("codex");
+      const child = await w.make("antigravity", "gemini-4-neon");
+      const now = w.store.nowIso();
+      await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parent.id, childThreadId: child.id, prompt: "Do it", status: "running", notify: true, createdAt: now, updatedAt: now });
+      const live = (await sendTurn(w.store, child.id, { prompt: "Do a long job." })).turn;
+      const manual = order === "manual first"
+        ? await sendTurn(w.store, child.id, { prompt: "My own words", delivery: "queue" })
+        : null;
+      const follow = await sendTaskMessage(w.ctx, parent.id, child.id, "Now the follow-up", false);
+      expect(follow.outcome).toBe("queued");
+      const manualTurn = manual ?? (await sendTurn(w.store, child.id, { prompt: "My own words", delivery: "queue" }));
+      await w.store.updateTurn(child.id, live.id, { owner: { pid: await deadPid(), host: os.hostname() } });
+
+      w.allow(false);
+      await recoverOrphanedTurn(w.ctx, child.id);
+      await settleRuns();
+      await runWorkQueue(w.ctx);
+      await settleRuns();
+
+      const statusOf = async (id: string) => (await w.store.readTurns(child.id)).find((turn) => turn.id === id)?.status;
+      // The user's message ran, alone; the task message was never folded into
+      // the turn that ran. It was queued after the manual message when the
+      // manual came first, so it stays held; queued before it, the manual
+      // message is the fresh consent that releases it, as with any held entry.
+      expect(await statusOf(manualTurn.turn.id)).toBe("completed");
+      expect(await statusOf(follow.turnId)).toBe(order === "manual first" ? "queued" : "completed");
+      expect((await w.store.readTurns(child.id)).filter((turn) => turn.id === manualTurn.turn.id)).toHaveLength(1);
+      expect((await w.store.readMessages(child.id)).some((message) => message.turnId === manualTurn.turn.id && message.text === "My own words")).toBe(true);
+      expect((await w.store.readMessages(child.id)).some((message) => message.turnId === manualTurn.turn.id && message.text.includes("Now the follow-up"))).toBe(false);
+      // Released by the setting, the held task message runs too.
+      w.allow(true);
+      await runWorkQueue(w.ctx);
+      await settleRuns();
+      expect(await statusOf(follow.turnId)).toBe("completed");
+    },
+    30_000,
+  );
 });
