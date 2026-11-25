@@ -9,6 +9,7 @@
 //! is counted as skipped instead of failing the whole file, and a file that is
 //! not CSV at all is refused through [`StoreError::Csv`], not a panic.
 
+use moxen_finances_core::accounts::AccountScope;
 use moxen_finances_core::dates::{is_valid_iso_date, today_madrid_now};
 use moxen_finances_core::money::{parse_amount_to_minor, parse_rate_to_scaled};
 use moxen_finances_core::projection::{EventCollectionInput, EventKind, EventSource};
@@ -58,7 +59,10 @@ impl CsvKind {
         }
     }
 
-    /// The header row, in the reference's order and language.
+    /// The header row, in the reference's order and language. LOCAL-025 adds
+    /// the trailing `cuenta` column (the account id) to the row sheets, and
+    /// to the movements report, so every row says which account it belongs
+    /// to; the reference's files, which have no such column, still import.
     fn headers(&self) -> &'static [&'static str] {
         match self {
             CsvKind::Subscriptions => &[
@@ -74,6 +78,7 @@ impl CsvKind {
                 "estado",
                 "plan",
                 "notas",
+                "cuenta",
             ],
             CsvKind::Incomes => &[
                 "id",
@@ -88,6 +93,7 @@ impl CsvKind {
                 "pausado",
                 "notas",
                 "importe_real",
+                "cuenta",
             ],
             CsvKind::Expenses => &[
                 "id",
@@ -102,6 +108,7 @@ impl CsvKind {
                 "estado",
                 "notas",
                 "importe_real",
+                "cuenta",
             ],
             CsvKind::Rates => &[
                 "id",
@@ -124,6 +131,7 @@ impl CsvKind {
                 "estimado",
                 "estado",
                 "categoria",
+                "cuenta",
             ],
         }
     }
@@ -161,6 +169,7 @@ fn event_source_name(source: EventSource) -> &'static str {
         EventSource::Subscription => "subscription",
         EventSource::Income => "income",
         EventSource::Expense => "expense",
+        EventSource::Transfer => "transfer",
     }
 }
 
@@ -297,8 +306,21 @@ fn frequency_or(value: &str, fallback: Frequency) -> Frequency {
 /// `exportCsv`: one sheet of the state as text.
 ///
 /// `movements` needs the range (`from`…`to`) and comes from core's event
-/// collection, exactly like the reference; the other sheets ignore it.
-pub fn export_csv(state: &AppState, kind: CsvKind, from: &str, to: &str) -> Result<String> {
+/// collection, exactly like the reference; the other sheets ignore it. Every
+/// collectable sheet carries the account of each row in the trailing
+/// `cuenta` column.
+///
+/// LOCAL-025: the scope chooses whose movements the sheet holds —
+/// [`AccountScope::All`] for the total (where transfers, which never change
+/// it, do not appear), [`AccountScope::One`] for one account's sheet, with
+/// its transfers among its movements.
+pub fn export_csv_scoped(
+    state: &AppState,
+    kind: CsvKind,
+    from: &str,
+    to: &str,
+    scope: &AccountScope,
+) -> Result<String> {
     let mut rows: Vec<Vec<String>> = vec![
         kind.headers()
             .iter()
@@ -325,6 +347,7 @@ pub fn export_csv(state: &AppState, kind: CsvKind, from: &str, to: &str) -> Resu
                     sub.status.as_str().to_string(),
                     sub.plan.clone().unwrap_or_default(),
                     sub.notes.clone(),
+                    sub.account_id.clone(),
                 ]);
             }
         }
@@ -346,6 +369,7 @@ pub fn export_csv(state: &AppState, kind: CsvKind, from: &str, to: &str) -> Resu
                         .actual_amount_minor
                         .map(format_cents)
                         .unwrap_or_default(),
+                    income.account_id.clone(),
                 ]);
             }
         }
@@ -367,6 +391,7 @@ pub fn export_csv(state: &AppState, kind: CsvKind, from: &str, to: &str) -> Resu
                         .actual_amount_minor
                         .map(format_cents)
                         .unwrap_or_default(),
+                    expense.account_id.clone(),
                 ]);
             }
         }
@@ -386,6 +411,8 @@ pub fn export_csv(state: &AppState, kind: CsvKind, from: &str, to: &str) -> Resu
         CsvKind::Movements => {
             let collected =
                 moxen_finances_core::projection::collect_events(&EventCollectionInput {
+                    scope: scope.clone(),
+                    transfers: &state.transfers,
                     account_currency: state.account.currency,
                     subscriptions: &state.subscriptions,
                     incomes: &state.incomes,
@@ -419,12 +446,39 @@ pub fn export_csv(state: &AppState, kind: CsvKind, from: &str, to: &str) -> Resu
                     if event.estimated { "estimado" } else { "real" }.to_string(),
                     event.status.clone().unwrap_or_default(),
                     event.category.clone().unwrap_or_default(),
+                    event.account_id.clone(),
                 ]);
             }
         }
     }
 
     records_to_csv(&rows)
+}
+
+/// [`export_csv_scoped`] over every account together, the total's sheet.
+pub fn export_csv(state: &AppState, kind: CsvKind, from: &str, to: &str) -> Result<String> {
+    export_csv_scoped(state, kind, from, to, &AccountScope::All)
+}
+
+/// The account of an imported row, from the trailing `cuenta` cell: the
+/// named account, the first account when the cell is empty, `""` when this
+/// database has no accounts at all (a fresh import keeps the reference's
+/// behavior of rows without an account), and `None` when the cell names an
+/// account this database does not have — the row is skipped rather than
+/// landing somewhere it does not belong.
+fn imported_account(conn: &rusqlite::Connection, cell: &str) -> Result<Option<String>> {
+    match crate::repo::resolve_account_id(conn, cell) {
+        Ok(id) => Ok(Some(id)),
+        Err(_) => {
+            let has_accounts: i64 =
+                conn.query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?;
+            if has_accounts == 0 {
+                Ok(Some(String::new()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 }
 
 /// `importCsv`: create the rows a sheet describes; never delete or rewrite
@@ -492,8 +546,19 @@ pub(crate) fn import_csv(
                 };
                 let end_date = normalize_date(&cell(row, header_index(&headers, "fin")));
 
+                // LOCAL-025: the trailing `cuenta` column names the account
+                // the row belongs to. An empty cell (a file the reference
+                // exported) means the first account; an unknown one skips
+                // the row like any other unreadable field.
+                let account_cell = cell(row, header_index(&headers, "cuenta"));
+                let Some(account_id) = imported_account(conn, account_cell.trim())? else {
+                    summary.skipped += 1;
+                    continue;
+                };
+
                 if kind == CsvKind::Incomes {
                     let input = IncomeInput {
+                        account_id: Some(account_id),
                         concept,
                         amount_minor: amount,
                         currency,
@@ -523,6 +588,7 @@ pub(crate) fn import_csv(
                     let category = cell(row, header_index(&headers, "categoria"));
                     let category = category.trim();
                     let input = ExpenseInput {
+                        account_id: Some(account_id),
                         concept,
                         category: if category.is_empty() {
                             "Otros".to_string()
@@ -567,7 +633,16 @@ pub(crate) fn import_csv(
                 let plan = plan.trim();
                 let description = cell(row, header_index(&headers, "descripcion"));
 
+                // LOCAL-025: the `cuenta` column again; empty means the
+                // first account, unknown skips the row.
+                let account_cell = cell(row, header_index(&headers, "cuenta"));
+                let Some(account_id) = imported_account(conn, account_cell.trim())? else {
+                    summary.skipped += 1;
+                    continue;
+                };
+
                 let input = SubscriptionInput {
+                    account_id: Some(account_id),
                     name,
                     description: Some(description.trim().to_string()),
                     currency: Some(currency),

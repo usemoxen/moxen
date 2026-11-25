@@ -13,8 +13,10 @@ publish.workspace = true
 # the store must not duplicate any of them. Path dependency, same workspace.
 moxen-finances-core = { path = "../core" }
 # SQLite, with SQLite itself compiled in (the `bundled` feature), so Windows
-# needs no system SQLite and every platform runs the same version.
-rusqlite = { version = "0.37", features = ["bundled"] }
+# needs no system SQLite and every platform runs the same version. `backup`
+# is SQLite's own backup API, which makes the pre-migration copy of the
+# database file (a WAL's content included) without going through the OS.
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 # Derive Serialize/Deserialize for the backup payload and its row shapes.
 serde = { version = "1", features = ["derive"] }
 # Read and write the JSON backup the reference app produces.
@@ -34,4 +36,4 @@ tempfile = "3"
 # The compatibility tests load the reference's SQL dump into a bare file
 # before the store opens it, and inspect `sqlite_master`/`PRAGMA user_version`
 # of a database side by side, which the safe API does not expose.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }

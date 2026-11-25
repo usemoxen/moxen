@@ -71,4 +71,26 @@ pub enum StoreError {
     /// place for the database.
     #[error("no se encontró la carpeta de datos de la aplicación para este sistema")]
     NoDataDirectory,
+
+    /// The schema-2 migration could not copy the database file to its
+    /// `.pre-v2.bak` backup, so it refused to run: the database is exactly as
+    /// it was.
+    #[error(
+        "no se pudo copiar la base de datos a {to} antes de migrar (se necesita para no \
+         perder el esquema anterior): la base de datos no se ha tocado. Motivo: {source}"
+    )]
+    MigrationBackup {
+        from: PathBuf,
+        to: PathBuf,
+        source: std::io::Error,
+    },
+
+    /// The account asked for still has movements, so it cannot be deleted:
+    /// archiving is the way to retire an account without losing its history.
+    #[error("la cuenta {id} aún tiene movimientos y no se puede borrar; archívala")]
+    AccountInUse { id: String },
+
+    /// A transfer needs two different accounts.
+    #[error("un traspaso necesita dos cuentas distintas: {reason}")]
+    InvalidTransfer { reason: String },
 }

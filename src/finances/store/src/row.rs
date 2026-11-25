@@ -13,9 +13,9 @@ use serde::Serialize;
 
 use moxen_finances_core::dates::now_utc_iso;
 use moxen_finances_core::types::{
-    Account, ActualCharge, BillingDayEntry, Currency, ExchangeRate, Expense, ExpenseStatus,
-    Frequency, Income, IncomeStatus, PauseEntry, PlanHistoryEntry, PriceHistoryEntry,
-    StatusHistoryEntry, Subscription, SubscriptionStatus,
+    Account, AccountKind, ActualCharge, BillingDayEntry, Currency, ExchangeRate, Expense,
+    ExpenseStatus, Frequency, Income, IncomeStatus, PauseEntry, PlanHistoryEntry,
+    PriceHistoryEntry, StatusHistoryEntry, Subscription, SubscriptionStatus, Transfer,
 };
 
 use crate::error::Result;
@@ -114,10 +114,21 @@ fn expense_status(row: &Row<'_>, column: &str) -> ExpenseStatus {
     }
 }
 
+/// The kind of an account row; an unknown value reads as checking.
+fn account_kind(row: &Row<'_>, column: &str) -> AccountKind {
+    match optional_text(row, column).as_deref() {
+        Some("savings") => AccountKind::Savings,
+        Some("credit-card") => AccountKind::CreditCard,
+        Some("cash") => AccountKind::Cash,
+        _ => AccountKind::Checking,
+    }
+}
+
 pub(crate) fn map_account(row: &Row<'_>) -> Account {
     Account {
         id: text(row, "id", ""),
         name: text(row, "name", "Cuenta principal"),
+        kind: account_kind(row, "kind"),
         currency: currency(row, "currency", Currency::Eur),
         balance_minor: integer(row, "balance_minor", 0),
         balance_date: text(row, "balance_date", ""),
@@ -125,7 +136,23 @@ pub(crate) fn map_account(row: &Row<'_>) -> Account {
         opening_balance_minor: integer(row, "opening_balance_minor", 0),
         opening_balance_date: optional_text(row, "opening_balance_date"),
         opening_balance_set: boolean(row, "opening_balance_set"),
+        archived: boolean(row, "archived"),
+        sort_order: integer(row, "sort_order", 0),
         notes: text(row, "notes", ""),
+    }
+}
+
+pub(crate) fn map_transfer(row: &Row<'_>) -> Transfer {
+    Transfer {
+        id: text(row, "id", ""),
+        date: text(row, "date", ""),
+        time: optional_text(row, "time"),
+        amount_minor: integer(row, "amount_minor", 0),
+        currency: currency(row, "currency", Currency::Eur),
+        from_account_id: text(row, "from_account_id", ""),
+        to_account_id: text(row, "to_account_id", ""),
+        note: text(row, "note", ""),
+        created_at: text(row, "created_at", ""),
     }
 }
 
@@ -146,6 +173,7 @@ pub(crate) fn map_subscription(row: &Row<'_>) -> Subscription {
         plan: optional_text(row, "plan"),
         notes: text(row, "notes", ""),
         external_payment: boolean(row, "external_payment"),
+        account_id: text(row, "account_id", ""),
         archived: boolean(row, "archived"),
         archived_at: optional_text(row, "archived_at"),
         created_at: text(row, "created_at", ""),
@@ -225,6 +253,7 @@ pub(crate) fn map_income(row: &Row<'_>) -> Income {
         paused: boolean(row, "paused"),
         notes: text(row, "notes", ""),
         actual_amount_minor: optional_integer(row, "actual_amount_minor"),
+        account_id: text(row, "account_id", ""),
         created_at: text(row, "created_at", ""),
     }
 }
@@ -243,6 +272,7 @@ pub(crate) fn map_expense(row: &Row<'_>) -> Expense {
         status: expense_status(row, "status"),
         notes: text(row, "notes", ""),
         actual_amount_minor: optional_integer(row, "actual_amount_minor"),
+        account_id: text(row, "account_id", ""),
         created_at: text(row, "created_at", ""),
     }
 }
@@ -257,6 +287,7 @@ pub(crate) fn map_charge(row: &Row<'_>) -> ActualCharge {
         currency: currency(row, "currency", Currency::Eur),
         rate_scaled: optional_integer(row, "rate_scaled"),
         note: text(row, "note", ""),
+        account_id: text(row, "account_id", ""),
         created_at: text(row, "created_at", ""),
     }
 }

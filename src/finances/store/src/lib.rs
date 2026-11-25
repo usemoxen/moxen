@@ -1,19 +1,28 @@
-//! Moxen Finances store: SQLite persistence for the app, ported from the
-//! scrubbed TypeScript reference (`src/server/*.ts` and `src/core/seed.ts` at
-//! 8aaad15b). The schema is the reference's, table for table, so a database
-//! it created opens here unchanged and one created here opens there.
+//! Moxen Finances store: SQLite persistence for the app, from the scrubbed
+//! TypeScript reference (`src/server/*.ts` at 8aaad15b) to LOCAL-025's
+//! several accounts.
 //!
 //! - [`Store`] opens the file (WAL, foreign keys on, a busy timeout), runs the
-//!   forward-only migrations and refuses a database from a newer build.
-//! - [`repo`] holds every operation the reference's repository has:
+//!   forward-only migrations — refusing a database from a newer build, and
+//!   copying the file to `<name>.pre-v2.bak` before the schema-2 migration —
+//!   and refuses a database from a newer build.
+//! - [`repo`] holds every operation the reference's repository has —
 //!   subscriptions with their effective-dated history, incomes, expenses,
-//!   real charges, exchange rates, settings, the account and its opening
-//!   balance, the audit log and the whole-state read.
+//!   real charges, exchange rates, settings, the audit log and the
+//!   whole-state read — plus the account operations LOCAL-025 adds: create,
+//!   rename, archive, reorder and delete (refused while the account has
+//!   movements).
 //! - [`derive`] assembles what the views need from that state, including the
-//!   projection anchored on the opening balance.
+//!   projection anchored on the opening balance, per account and as a total
+//!   across accounts converted to one currency.
 //! - [`backup`] is the JSON backup and restore, [`csv`] the CSV export and
-//!   append-only import.
+//!   append-only import, [`ledger`] the incomes, expenses, charges, rates
+//!   and the transfers between accounts.
 //! - [`seed`] is the FICTIONAL demo data written on first run.
+//!
+//! **Schema 2 is one-way**: the TypeScript reference cannot open a database
+//! this build migrated (it has no `accounts` table and no `user_version`
+//! check); that is accepted — see [`schema`] and this crate's README.
 //!
 //! Money is always integer minor units and dates are `YYYY-MM-DD` strings,
 //! both from `moxen-finances-core`, which also owns the projection, the
@@ -38,10 +47,12 @@ use rusqlite::Connection;
 
 pub use backup::{BACKUP_VERSION, Backup};
 pub use csv::{CsvKind, ImportSummary};
+pub use derive::TotalState;
 pub use error::{Result, StoreError};
-pub use ledger::{ChargeInput, ExpenseInput, IncomeInput, RateInput};
+pub use ledger::{ChargeInput, ExpenseInput, IncomeInput, RateInput, TransferInput};
 pub use repo::{
-    AccountPatch, PlanInput, PriceInput, SubscriptionAction, SubscriptionInput, SubscriptionPatch,
+    AccountInput, AccountPatch, PlanInput, PriceInput, SubscriptionAction, SubscriptionInput,
+    SubscriptionPatch,
 };
 pub use row::AuditEntry;
 pub use schema::{MIGRATIONS, SCHEMA_VERSION};
@@ -77,7 +88,7 @@ impl Store {
         }
         let mut connection = Connection::open(path)?;
         prepare(&mut connection)?;
-        schema::migrate(&connection)?;
+        schema::migrate(&connection, Some(path))?;
         Ok(Self {
             connection,
             path: Some(path.to_path_buf()),
@@ -116,11 +127,12 @@ impl Store {
     }
 
     /// An in-memory database with the current schema and no seed. Handy for
-    /// throwaway work; nothing is written to disk.
+    /// throwaway work; nothing is written to disk. Its migration runs without
+    /// the file backup of schema 2 (there is no file to copy).
     pub fn open_in_memory() -> Result<Self> {
         let mut connection = Connection::open_in_memory()?;
         prepare(&mut connection)?;
-        schema::migrate(&connection)?;
+        schema::migrate(&connection, None)?;
         Ok(Self {
             connection,
             path: None,
@@ -153,7 +165,7 @@ impl Store {
     fn account_count(&self) -> Result<i64> {
         Ok(self
             .connection
-            .query_row("SELECT COUNT(*) FROM account", [], |row| row.get(0))?)
+            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?)
     }
 }
 

@@ -1,11 +1,15 @@
-//! The JSON backup and restore: `exportAll` and `importAll` of the
-//! reference's `src/server/repo.ts`, and the payload shape of its
-//! `/api/export/json` file, so a backup made by the TypeScript app restores
-//! here and one made here restores there.
+//! The JSON backup and restore, from the reference's `exportAll` and
+//! `importAll` (`src/server/repo.ts` at 8aaad15b) to LOCAL-025's several
+//! accounts.
 //!
-//! The payload is the whole state plus `version` and `exportedAt`; restoring
-//! replaces the data in one transaction and records what it replaced in the
-//! audit log, which the reference also keeps.
+//! A schema-1 backup (the reference's, or ours before version 2) still
+//! restores into a schema 2 database **as the first account**: it carries one
+//! `account` object and rows without an account, and [`Backup::state`] turns
+//! that into the single first account every row belongs to. A version 2
+//! backup carries `accounts` and `transfers` as well.
+//!
+//! Restoring replaces the data in one transaction and records what it
+//! replaced in the audit log, which the reference also keeps.
 
 use std::collections::BTreeMap;
 
@@ -14,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use moxen_finances_core::types::{
     Account, ActualCharge, AppState, ExchangeRate, Expense, Income, SubscriptionWithHistory,
+    Transfer,
 };
 
 use crate::Store;
@@ -22,7 +27,11 @@ use crate::row::{log_audit, now};
 use crate::state::insert_state;
 
 /// The backup format this build writes and the newest it restores.
-pub const BACKUP_VERSION: i64 = 1;
+///
+/// Version 1 is the reference's payload (one account, no transfers); the
+/// extra fields here default, so one reads back unchanged and restores as
+/// the first account.
+pub const BACKUP_VERSION: i64 = 2;
 
 /// The JSON backup file. Field order and names match
 /// `{ version, exportedAt, ...state }`.
@@ -34,6 +43,10 @@ pub struct Backup {
     #[serde(default)]
     pub exported_at: String,
     pub account: Account,
+    /// LOCAL-025: every account. Absent in a version 1 payload, which is the
+    /// single `account` above.
+    #[serde(default)]
+    pub accounts: Vec<Account>,
     #[serde(default)]
     pub subscriptions: Vec<SubscriptionWithHistory>,
     #[serde(default)]
@@ -46,6 +59,9 @@ pub struct Backup {
     /// not carry it.
     #[serde(default)]
     pub charges: Vec<ActualCharge>,
+    /// LOCAL-025: the transfers between accounts.
+    #[serde(default)]
+    pub transfers: Vec<Transfer>,
     #[serde(default)]
     pub settings: BTreeMap<String, String>,
 }
@@ -55,15 +71,27 @@ fn default_version() -> i64 {
 }
 
 impl Backup {
-    /// The state the payload carries.
+    /// The state the payload carries. A version 1 payload (no `accounts`)
+    /// becomes the one account its rows belong to.
     pub fn state(&self) -> AppState {
+        let accounts = if self.accounts.is_empty() {
+            vec![self.account.clone()]
+        } else {
+            self.accounts.clone()
+        };
+        let account = accounts
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.account.clone());
         AppState {
-            account: self.account.clone(),
+            account,
+            accounts,
             subscriptions: self.subscriptions.clone(),
             incomes: self.incomes.clone(),
             expenses: self.expenses.clone(),
             rates: self.rates.clone(),
             charges: self.charges.clone(),
+            transfers: self.transfers.clone(),
             settings: self.settings.clone(),
         }
     }
@@ -89,11 +117,13 @@ pub(crate) fn export_all(conn: &Connection) -> Result<Backup> {
         version: BACKUP_VERSION,
         exported_at: now(),
         account: state.account,
+        accounts: state.accounts,
         subscriptions: state.subscriptions,
         incomes: state.incomes,
         expenses: state.expenses,
         rates: state.rates,
         charges: state.charges,
+        transfers: state.transfers,
         settings: state.settings,
     })
 }
@@ -129,7 +159,8 @@ pub(crate) fn restore_all(conn: &Connection, backup: &Backup) -> Result<()> {
     )?;
     // Children before parents, exactly like the reference; the cascade would
     // take them anyway, but the order keeps a half-deleted database
-    // impossible even with foreign keys off.
+    // impossible even with foreign keys off. The transfers go with the
+    // movements, the single `account` table is gone since schema 2.
     for table in [
         "subscription_prices",
         "subscription_plans",
@@ -140,9 +171,10 @@ pub(crate) fn restore_all(conn: &Connection, backup: &Backup) -> Result<()> {
         "subscription_charges",
         "incomes",
         "expenses",
+        "transfers",
         "exchange_rates",
         "settings",
-        "account",
+        "accounts",
     ] {
         transaction.execute(&format!("DELETE FROM {table}"), [])?;
     }

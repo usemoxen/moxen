@@ -7,6 +7,7 @@ use rusqlite::{Connection, params};
 
 use moxen_finances_core::types::{
     Account, ActualCharge, AppState, ExchangeRate, Expense, Income, SubscriptionWithHistory,
+    Transfer,
 };
 
 use crate::error::Result;
@@ -17,22 +18,70 @@ use crate::error::Result;
 /// list, which is what the seed does so the demo keeps its order; the
 /// reference's `importAll` writes `0` for every row instead, and a restore
 /// does the same.
+///
+/// LOCAL-025: the accounts come from `state.accounts`, falling back to the
+/// single `state.account` of a schema-1 payload, and every row that declares
+/// no account lands on the first account. That is how a backup made at
+/// schema 1 restores into a schema 2 database as the first account.
 pub(crate) fn insert_state(conn: &Connection, state: &AppState, by_position: bool) -> Result<()> {
-    insert_account(conn, &state.account)?;
+    let accounts: Vec<Account> = if state.accounts.is_empty() {
+        vec![state.account.clone()]
+    } else {
+        state.accounts.clone()
+    };
+    for account in &accounts {
+        insert_account(conn, account)?;
+    }
+    let first_account = accounts
+        .first()
+        .map(|account| account.id.clone())
+        .unwrap_or_default();
+
+    // Every row carries its account; a row without one (the schema-1
+    // payload) belongs to the first account.
     for (index, item) in state.subscriptions.iter().enumerate() {
-        insert_subscription(conn, item, if by_position { index as i64 } else { 0 })?;
+        let mut item = item.clone();
+        if item.subscription.account_id.is_empty() {
+            item.subscription.account_id = first_account.clone();
+        }
+        insert_subscription(conn, &item, if by_position { index as i64 } else { 0 })?;
     }
-    for income in &state.incomes {
-        insert_income(conn, income)?;
+
+    let mut income = state.incomes.clone();
+    for row in &mut income {
+        if row.account_id.is_empty() {
+            row.account_id = first_account.clone();
+        }
     }
-    for expense in &state.expenses {
-        insert_expense(conn, expense)?;
+    for row in &income {
+        insert_income(conn, row)?;
     }
-    for charge in &state.charges {
-        insert_charge(conn, charge)?;
+
+    let mut expense = state.expenses.clone();
+    for row in &mut expense {
+        if row.account_id.is_empty() {
+            row.account_id = first_account.clone();
+        }
     }
+    for row in &expense {
+        insert_expense(conn, row)?;
+    }
+
+    let mut charge = state.charges.clone();
+    for row in &mut charge {
+        if row.account_id.is_empty() {
+            row.account_id = first_account.clone();
+        }
+    }
+    for row in &charge {
+        insert_charge(conn, row)?;
+    }
+
     for rate in &state.rates {
         insert_rate(conn, rate)?;
+    }
+    for transfer in &state.transfers {
+        insert_transfer(conn, transfer)?;
     }
     insert_settings(conn, &state.settings)?;
     Ok(())
@@ -40,13 +89,14 @@ pub(crate) fn insert_state(conn: &Connection, state: &AppState, by_position: boo
 
 fn insert_account(conn: &Connection, account: &Account) -> Result<()> {
     conn.execute(
-        "INSERT INTO account
-          (id, name, currency, balance_minor, balance_date, balance_set,
-           opening_balance_minor, opening_balance_date, opening_balance_set, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO accounts
+          (id, name, kind, currency, balance_minor, balance_date, balance_set,
+           opening_balance_minor, opening_balance_date, opening_balance_set, archived, sort_order, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             account.id,
             account.name,
+            account.kind.as_str(),
             account.currency.as_str(),
             account.balance_minor,
             account.balance_date,
@@ -54,7 +104,29 @@ fn insert_account(conn: &Connection, account: &Account) -> Result<()> {
             account.opening_balance_minor,
             account.opening_balance_date,
             account.opening_balance_set,
+            account.archived,
+            account.sort_order,
             account.notes
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_transfer(conn: &Connection, transfer: &Transfer) -> Result<()> {
+    conn.execute(
+        "INSERT INTO transfers
+          (id, date, time, amount_minor, currency, from_account_id, to_account_id, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            transfer.id,
+            transfer.date,
+            transfer.time,
+            transfer.amount_minor,
+            transfer.currency.as_str(),
+            transfer.from_account_id,
+            transfer.to_account_id,
+            transfer.note,
+            transfer.created_at
         ],
     )?;
     Ok(())
@@ -70,8 +142,8 @@ fn insert_subscription(
         "INSERT INTO subscriptions
           (id, name, description, currency, price_minor, frequency, start_date, billing_day,
            next_billing_override, end_date, status, cancelled_at, plan, notes, external_payment,
-           archived, archived_at, sort_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+           archived, archived_at, sort_order, created_at, updated_at, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             sub.id,
             sub.name,
@@ -92,7 +164,8 @@ fn insert_subscription(
             sub.archived_at,
             sort_order,
             sub.created_at,
-            sub.updated_at
+            sub.updated_at,
+            sub.account_id
         ],
     )?;
 
@@ -182,8 +255,8 @@ fn insert_income(conn: &Connection, income: &Income) -> Result<()> {
     conn.execute(
         "INSERT INTO incomes
           (id, concept, amount_minor, currency, date, time, frequency, end_date, status, paused,
-           notes, actual_amount_minor, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+           notes, actual_amount_minor, created_at, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             income.id,
             income.concept,
@@ -197,7 +270,8 @@ fn insert_income(conn: &Connection, income: &Income) -> Result<()> {
             income.paused,
             income.notes,
             income.actual_amount_minor,
-            income.created_at
+            income.created_at,
+            income.account_id
         ],
     )?;
     Ok(())
@@ -207,8 +281,8 @@ fn insert_expense(conn: &Connection, expense: &Expense) -> Result<()> {
     conn.execute(
         "INSERT INTO expenses
           (id, concept, category, amount_minor, currency, date, time, frequency, end_date,
-           status, notes, actual_amount_minor, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+           status, notes, actual_amount_minor, created_at, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             expense.id,
             expense.concept,
@@ -222,7 +296,8 @@ fn insert_expense(conn: &Connection, expense: &Expense) -> Result<()> {
             expense.status.as_str(),
             expense.notes,
             expense.actual_amount_minor,
-            expense.created_at
+            expense.created_at,
+            expense.account_id
         ],
     )?;
     Ok(())
@@ -231,8 +306,8 @@ fn insert_expense(conn: &Connection, expense: &Expense) -> Result<()> {
 fn insert_charge(conn: &Connection, charge: &ActualCharge) -> Result<()> {
     conn.execute(
         "INSERT INTO subscription_charges
-          (id, subscription_id, charge_date, time, amount_minor, currency, rate_scaled, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          (id, subscription_id, charge_date, time, amount_minor, currency, rate_scaled, note, created_at, account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             charge.id,
             charge.subscription_id,
@@ -242,7 +317,8 @@ fn insert_charge(conn: &Connection, charge: &ActualCharge) -> Result<()> {
             charge.currency.as_str(),
             charge.rate_scaled,
             charge.note,
-            charge.created_at
+            charge.created_at,
+            charge.account_id
         ],
     )?;
     Ok(())

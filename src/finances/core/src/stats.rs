@@ -388,6 +388,7 @@ mod tests {
             status: None,
             category: category.map(|c| c.into()),
             affects_balance: None,
+            account_id: String::new(),
         }
     }
 

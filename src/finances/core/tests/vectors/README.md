@@ -24,6 +24,23 @@ invented fixtures around it. There is no real personal data in any vector.
 | `exchange.json` | `findRateAt` (direct pair in force, inverse, latest-effective ties, approximate fallback, none) and `convertToAccountCurrency` (same currency, approximate, missing rates). |
 | `projection.json` | `priceAt` (effective windows, same-date ties decided by `createdAt`), `collectEvents` (warnings, sort order), `nextBillingFor`, and 21 `projectBalance` scenarios over the seed state: real charges replacing estimates (exact date, ±7-day window, grouped charges, 0-charge cycles, unmatched charges), external payments, end/cancel dates, missing prices/rates, approximate rates, incomes (paused, actual amounts, USD), recurring expenses, first negative day, and a ten-year projection. Days are compact rows `[date, balanceMinor, incomeMinor, expenseMinor, [event ids]]`; events and warnings are complete objects. |
 | `stats.json` | `totalsForEvents`/`totalsForMonth`, `distributionByCategory` (stable ordering), `monthlyEquivalentMinor`/`annualizedMinor` (all frequencies, rounding half cases), `normalizedMonthlyCost` (paused/finished excluded), `savingsFromInactive`, `subscriptionCostRanking`, `subscriptionCostEvolution`, `monthRange`. |
+| `accounts.json` | LOCAL-025's multi-account specification (see below): `totalBalanceMinor` (same currency, a converted USD account, a missing rate flagged approximate), the account scope of `collectEvents` (transfers out/in as expense/income events, transfers never emitted under the all-accounts scope, rows of other accounts out of scope, a subscription belonging to its paying account, missing/approximate transfer rates) and scoped `projectBalance`. |
+
+## Where `accounts.json` comes from
+
+Every file above is captured from the TypeScript reference, which has **no
+multi-account support**: one `account` row, one currency, and an
+"paid from another account" flag. LOCAL-025 changes that, so `accounts.json`
+is a **hand-written new specification**, not a reference capture. The
+scenarios were derived from the issue's design (movement rows carry an
+`accountId`; the account scope picks one account or all; a transfer between
+two accounts is a movement of each account and never changes the total; the
+all-accounts total converts through the effective-dated rates of
+`exchange.json`, flagged approximate when a rate is missing), and the
+expected values were computed by hand from those rules and then checked
+against the implementation. The single-account guarantee is pinned by the
+other files: they deserialize without any account data (the new fields all
+default) and must keep passing byte for byte.
 
 ## Regenerating
 

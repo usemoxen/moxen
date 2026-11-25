@@ -13,12 +13,13 @@
 
 use std::cmp::Ordering;
 
+use moxen_finances_core::accounts::{AccountScope, TotalBalance, total_balance_minor};
 use moxen_finances_core::dates::compare_iso_dates;
 use moxen_finances_core::projection::{
     CollectedEvents, DailyPoint, EventCollectionInput, ProjectionEvent, ProjectionInput,
     ProjectionResult, collect_events, project_balance,
 };
-use moxen_finances_core::types::{Account, AppState};
+use moxen_finances_core::types::{Account, AppState, Currency};
 
 use crate::Store;
 use crate::error::Result;
@@ -100,7 +101,42 @@ pub fn clip_projection(mut result: ProjectionResult, from: &str) -> ProjectionRe
 /// The movements of a range, without a balance walk.
 pub fn events_for(state: &AppState, from: &str, to: &str) -> Result<CollectedEvents> {
     Ok(collect_events(&EventCollectionInput {
+        scope: AccountScope::All,
+        transfers: &state.transfers,
         account_currency: state.account.currency,
+        subscriptions: &state.subscriptions,
+        incomes: &state.incomes,
+        expenses: &state.expenses,
+        rates: &state.rates,
+        charges: &state.charges,
+        from_date: from,
+        to_date: to,
+        extra_events: &[],
+    })?)
+}
+
+/// The movements of one account's range: its own rows and the transfers that
+/// touch it, converted to its currency.
+pub fn events_for_account(
+    state: &AppState,
+    account_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<CollectedEvents> {
+    let Some(account) = state
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
+    else {
+        return Ok(CollectedEvents {
+            events: Vec::new(),
+            warnings: Vec::new(),
+        });
+    };
+    Ok(collect_events(&EventCollectionInput {
+        scope: AccountScope::One(account_id.to_string()),
+        transfers: &state.transfers,
+        account_currency: account.currency,
         subscriptions: &state.subscriptions,
         incomes: &state.incomes,
         expenses: &state.expenses,
@@ -121,6 +157,44 @@ pub fn projection_for(
     extra_events: &[ProjectionEvent],
 ) -> Result<ProjectionResult> {
     let anchor = anchor_for(&state.account, from);
+    projection_for_account_anchored(state, anchor, &AccountScope::All, from, to, extra_events)
+}
+
+/// LOCAL-025: the same walk for one account, anchored on that account's
+/// opening balance.
+pub fn projection_for_account(
+    state: &AppState,
+    account_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<Option<ProjectionResult>> {
+    let Some(account) = state
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
+    else {
+        return Ok(None);
+    };
+    let scope = AccountScope::One(account_id.to_string());
+    let anchor = anchor_for(account, from);
+    Ok(Some(projection_for_account_anchored(
+        state,
+        anchor,
+        &scope,
+        from,
+        to,
+        &[],
+    )?))
+}
+
+fn projection_for_account_anchored(
+    state: &AppState,
+    anchor: Account,
+    scope: &AccountScope,
+    from: &str,
+    to: &str,
+    extra_events: &[ProjectionEvent],
+) -> Result<ProjectionResult> {
     // Project from the anchor (even when it is earlier than the range) and
     // clip afterwards, so the starting balance includes every movement in
     // between.
@@ -132,6 +206,8 @@ pub fn projection_for(
     let result = project_balance(&ProjectionInput {
         account: &anchor,
         events: EventCollectionInput {
+            scope: scope.clone(),
+            transfers: &state.transfers,
             account_currency: anchor.currency,
             subscriptions: &state.subscriptions,
             incomes: &state.incomes,
@@ -150,17 +226,134 @@ pub fn projection_for(
     }
 }
 
+/// A total across accounts: what every account holds, converted into one
+/// currency, and whether some of it could only be converted approximately.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TotalState {
+    pub state: AppState,
+    pub total: TotalBalance,
+}
+
+/// LOCAL-025: the "all accounts" state, whose synthetic account carries the
+/// converted total and whose walk starts from it. The total is the sum at
+/// the *latest* balance date, with balances taken as current until then;
+/// the opening balance only reconstructs when every account declares one.
+pub fn total_state_for(state: &AppState, target: Currency) -> TotalState {
+    let accounts: Vec<Account> = if state.accounts.is_empty() {
+        vec![state.account.clone()]
+    } else {
+        state.accounts.clone()
+    };
+
+    let balance_date = accounts
+        .iter()
+        .map(|account| account.balance_date.clone())
+        .max()
+        .unwrap_or_else(|| state.account.balance_date.clone());
+    let total = total_balance_minor(&accounts, target, &state.rates, &balance_date);
+
+    let all_opening = accounts.iter().all(|account| account.opening_balance_set);
+    let opening_balance_date = accounts
+        .iter()
+        .filter_map(|account| account.opening_balance_date.clone())
+        .min();
+    let opening_balance_set = all_opening && opening_balance_date.is_some();
+    let opening_total = opening_balance_date
+        .clone()
+        .map(|date| total_balance_minor(&accounts, target, &state.rates, &date))
+        .unwrap_or(TotalBalance {
+            total_minor: 0,
+            approximate: false,
+        });
+
+    let synthetic = Account {
+        id: "total".to_string(),
+        name: "Total".to_string(),
+        kind: accounts
+            .first()
+            .map(|account| account.kind)
+            .unwrap_or(moxen_finances_core::types::AccountKind::Checking),
+        currency: target,
+        balance_minor: total.total_minor,
+        balance_date,
+        balance_set: accounts.iter().any(|account| account.balance_set),
+        opening_balance_minor: opening_total.total_minor,
+        opening_balance_date,
+        opening_balance_set,
+        archived: false,
+        sort_order: 0,
+        notes: String::new(),
+    };
+
+    let mut total_state = state.clone();
+    total_state.account = synthetic;
+    total_state.accounts = accounts;
+    TotalState {
+        state: total_state,
+        total,
+    }
+}
+
 impl Store {
-    /// The projection of the stored state, closing balance included.
+    /// The projection of the stored state, closing balance included: the
+    /// first account's, the single-account view there always was.
     pub fn projection(&self, from: &str, to: &str) -> Result<ProjectionResult> {
         let state = self.app_state()?;
         projection_for(&state, from, to, &[])
     }
 
-    /// The movements of a range.
+    /// The projection of one account, `None` when the account does not
+    /// exist.
+    pub fn account_projection(
+        &self,
+        account_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Option<ProjectionResult>> {
+        let state = self.account_state(account_id)?;
+        match state {
+            Some(state) => projection_for_account(&state, account_id, from, to),
+            None => Ok(None),
+        }
+    }
+
+    /// The projection of the total across accounts: it starts from the
+    /// converted sum of every balance, and transfers (which never change the
+    /// total) do not appear in it.
+    pub fn total_projection(
+        &self,
+        target: Currency,
+        from: &str,
+        to: &str,
+    ) -> Result<ProjectionResult> {
+        let state = self.app_state()?;
+        let total_state = total_state_for(&state, target);
+        projection_for(&total_state.state, from, to, &[])
+    }
+
+    /// The movements of a range: every account together.
     pub fn events(&self, from: &str, to: &str) -> Result<CollectedEvents> {
         let state = self.app_state()?;
         events_for(&state, from, to)
+    }
+
+    /// The movements of a range that belong to one account: its rows and
+    /// its transfers.
+    pub fn account_events(
+        &self,
+        account_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<CollectedEvents> {
+        let state = self.app_state()?;
+        events_for_account(&state, account_id, from, to)
+    }
+
+    /// The "all accounts" state: a synthetic account holding the converted
+    /// total, and the flag that says whether that total is approximate.
+    pub fn total_state(&self, target: Currency) -> Result<TotalState> {
+        let state = self.app_state()?;
+        Ok(total_state_for(&state, target))
     }
 
     /// The account a projection starting at `from` has to anchor on.
@@ -178,6 +371,7 @@ mod tests {
         Account {
             id: "account-primary".to_string(),
             name: "Demo".to_string(),
+            kind: moxen_finances_core::types::AccountKind::Checking,
             currency: Currency::Eur,
             balance_minor: 100_000,
             balance_date: "2026-11-18".to_string(),
@@ -185,6 +379,8 @@ mod tests {
             opening_balance_minor: 50_000,
             opening_balance_date: Some("2026-06-01".to_string()),
             opening_balance_set: true,
+            archived: false,
+            sort_order: 0,
             notes: String::new(),
         }
     }
@@ -215,6 +411,7 @@ mod tests {
     fn a_projection_before_the_balance_starts_from_the_opening_balance() {
         let state = AppState {
             account: account(),
+            accounts: Vec::new(),
             subscriptions: Vec::new(),
             incomes: Vec::new(),
             expenses: vec![Expense {
@@ -230,10 +427,12 @@ mod tests {
                 status: ExpenseStatus::Planned,
                 notes: String::new(),
                 actual_amount_minor: None,
+                account_id: "account-primary".to_string(),
                 created_at: "2026-06-01T00:00:00.000Z".to_string(),
             }],
             rates: Vec::new(),
             charges: Vec::new(),
+            transfers: Vec::new(),
             settings: Default::default(),
         };
         let result = projection_for(&state, "2026-07-05", "2026-07-15", &[]).unwrap();
@@ -249,6 +448,7 @@ mod tests {
     fn clipping_keeps_the_balance_of_the_day_before() {
         let state = AppState {
             account: account(),
+            accounts: Vec::new(),
             subscriptions: Vec::new(),
             incomes: Vec::new(),
             expenses: vec![Expense {
@@ -264,10 +464,12 @@ mod tests {
                 status: ExpenseStatus::Planned,
                 notes: String::new(),
                 actual_amount_minor: None,
+                account_id: "account-primary".to_string(),
                 created_at: "2026-11-01T00:00:00.000Z".to_string(),
             }],
             rates: Vec::new(),
             charges: Vec::new(),
+            transfers: Vec::new(),
             settings: Default::default(),
         };
         // The balance is from the 18th (after the expense), so the walk back
