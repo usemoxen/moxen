@@ -1,5 +1,37 @@
+# Moxen Finances store: SQLite persistence, the repository, CSV and JSON
+# backup, and the fictional demo seed. The schema is the TypeScript
+# reference's (8aaad15b), table for table, so an existing Finances database
+# opens unchanged on both sides.
 [package]
 name = "moxen-finances-store"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+# The domain types and the pure logic (projection, stats, money parsing):
+# the store must not duplicate any of them. Path dependency, same workspace.
+moxen-finances-core = { path = "../core" }
+# SQLite, with SQLite itself compiled in (the `bundled` feature), so Windows
+# needs no system SQLite and every platform runs the same version.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Derive Serialize/Deserialize for the backup payload and its row shapes.
+serde = { version = "1", features = ["derive"] }
+# Read and write the JSON backup the reference app produces.
+serde_json = "1"
+# The CSV export/import: RFC 4180 quoting and streaming, instead of a
+# hand-written parser. The reference writes `;` between fields and a BOM.
+csv = "1"
+# The platform data folder (`<data dir>/Moxen/Finances`) without hardcoding
+# `~/Library`, `%APPDATA%` or `$XDG_DATA_HOME` for any of them.
+dirs = "6"
+# One typed error enum for the crate, with the source errors chained.
+thiserror = "2"
+
+[dev-dependencies]
+# Temporary directories for every test: no test may touch a real data path.
+tempfile = "3"
+# The compatibility tests load the reference's SQL dump into a bare file
+# before the store opens it, and inspect `sqlite_master`/`PRAGMA user_version`
+# of a database side by side, which the safe API does not expose.
+rusqlite = { version = "0.37", features = ["bundled"] }
