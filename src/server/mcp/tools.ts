@@ -1111,7 +1111,7 @@ function argFolder(args: Record<string, unknown>, key = "cwd"): string {
  * `\\server` names no share, so none of those may name a folder.
  */
 export function fullyQualifiedFolder(value: string, platform: NodeJS.Platform = process.platform): boolean {
-  if (platform === "win32") return /^([A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/.test(value);
+  if (platform === "win32") return /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(value);
   return value.startsWith("/");
 }
 

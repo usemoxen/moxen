@@ -1223,7 +1223,7 @@ out, as the CLI's own list leaves it). `project_resolve` resolves one
 folder to the project Moxen keys it by — the Git root in repo workspace
 mode, the canonical folder otherwise, per the server's `workspaceMode`
 setting — with the same workspace read the CLI gives, and reports no
-project plainly when the folder has none. Each takes a fully qualified
+project plainly when the folder has none. It takes a fully qualified
 absolute path: the folder lives on the machine Moxen runs on, and a
 relative path is refused rather than resolved against the server's own
 working directory. On Windows the path must name its volume (`C:\folder`)

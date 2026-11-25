@@ -179,6 +179,10 @@ describe("fullyQualifiedFolder: only a complete path may name a folder", () => {
       ["\\\\server\\share\\folder", true],
       ["\\\\server\\share", true],
       ["\\\\server", false], // a UNC server without a share names no folder
+      ["\\\\server\\", false], // nor with a trailing separator: Windows reads it on the current drive
+      ["//server/", false],
+      ["\\\\server\\\\", false],
+      ["//server/share", true], // either separator names the same share
       ["\\\\", false],
       ["C:\\", true], // a drive root keeps its separator
       ["/folder", false], // path.isAbsolute says true on win32 without a volume; a volume is what makes it a folder
