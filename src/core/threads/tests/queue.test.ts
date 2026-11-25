@@ -586,12 +586,7 @@ describe("setup failures behind a recovery", () => {
     const w = await world();
     const thread = await w.make();
     const running = await sendTurn(w.store, thread.id, { prompt: "work" });
-    const steered = await sendTurn(w.store, thread.id, {
-      prompt: "task settled",
-      delivery: "steer",
-      origin: "task-notification",
-      notification: { tasks: [] },
-    });
+    const steered = await sendTurn(w.store, thread.id, { prompt: "see this", delivery: "steer" });
     expect(steered.delivery).toBe("steered");
     // The runner died with the steer mid-flight: nothing will ever settle it.
     await w.store.updateTurn(thread.id, running.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
@@ -599,17 +594,36 @@ describe("setup failures behind a recovery", () => {
     const turns = await w.store.readTurns(thread.id);
     expect(turns.find((turn) => turn.id === running.turn.id)?.status).toBe("interrupted");
     const messages = await w.store.readMessages(thread.id);
-    const copies = messages.filter((message) => message.text === "task settled");
+    const copies = messages.filter((message) => message.text === "see this");
     expect(copies).toHaveLength(2);
-    // The redelivery keeps the notification's facts, so it still notifies.
-    expect(copies.find((message) => message.id !== steered.messageId)).toMatchObject({ origin: "task-notification", notification: { tasks: [] } });
     const activities = await w.store.readActivities(thread.id);
     expect(activities.filter((activity) => activity.kind === "steer.redelivered")).toHaveLength(1);
     expect(activities.find((activity) => activity.kind === "steer.redelivered")?.payload).toMatchObject({ messageId: steered.messageId });
     // A repeated recovery sends nothing twice: the orphan is gone, and the mark holds.
     expect(await recoverOrphanedTurn(w.ctx, thread.id)).toBe(false);
-    expect((await w.store.readMessages(thread.id)).filter((message) => message.text === "task settled")).toHaveLength(2);
+    expect((await w.store.readMessages(thread.id)).filter((message) => message.text === "see this")).toHaveLength(2);
     expect((await w.store.readActivities(thread.id)).filter((activity) => activity.kind === "steer.redelivered")).toHaveLength(1);
+  });
+
+  it("leaves an orphaned turn's task notice alone instead of sending it a second time (MXN-410)", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const running = await sendTurn(w.store, thread.id, { prompt: "work" });
+    const steered = await sendTurn(w.store, thread.id, {
+      prompt: "<task-notification>\nA task you delegated has settled.\n</task-notification>",
+      delivery: "steer",
+      origin: "task-notification",
+      notification: { tasks: [] },
+    });
+    expect(steered.delivery).toBe("steered");
+    // A restart finds the turn orphaned. The notice reached the conversation
+    // as the run's steer, so redelivery must not report that settle again.
+    await w.store.updateTurn(thread.id, running.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
+    expect(await recoverOrphanedTurn(w.ctx, thread.id)).toBe(true);
+    const notices = (await w.store.readMessages(thread.id)).filter((message) => message.origin === "task-notification");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.id).toBe(steered.messageId);
+    expect((await w.store.readActivities(thread.id)).filter((activity) => activity.kind === "steer.redelivered")).toEqual([]);
   });
 
   it("runs the redelivered copy when an orphaned steer has nothing queued behind it (MXN-312)", async () => {

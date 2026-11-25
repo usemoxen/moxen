@@ -910,13 +910,18 @@ message was still being taken). So a steer counts as delivered when the
 provider confirms it reached the conversation — Claude echoes every
 streamed message's id on the reply frames and result of the turn that
 consumes it — and whatever is still unconfirmed when the turn settles goes
-out again, each as a queued turn of its own. Notifications are therefore
+out again, each as a queued turn of its own. A sent message is therefore
 at-least-once and never silently lost. Interrupting a turn redelivers its
 pending steers even where no echo could confirm them — our own interrupt
 ended the turn with the CLI queue — so an interrupted steer can arrive
 twice. A provider with no arrival signal keeps push-means-delivered on
 turns that end any other way, and a steer on a session that dies with its
 process goes out again when the orphaned turn is recovered.
+
+A task notice is the one exception: it is never sent again by this path,
+however it was delivered. The notification queue reports a settle exactly once,
+mid-turn included (see below), and a second copy would read as the same
+finished task reporting again.
 
 ### Messaging a delegated task (`task_send`)
 
@@ -960,7 +965,20 @@ lists what is still running and for how long; past `backgroundForgottenAfter`
 on its own. Where Moxen cannot check — no live session here, or a provider
 that cannot report it all (OpenCode reports only the background shells and
 subagents its own server started) — the notification and `task_status` say so
-plainly instead of implying nothing is running.
+plainly instead of implying nothing is running. A check that failed names no
+work, so it wakes no follow-up: the parent hears about that task again only
+when the task really does settle after running more. The duration a
+notification shows is the task's last turn, not the wall clock since it was
+delegated, so the idle hours between rounds are not reported as time spent
+finishing.
+
+A settle reaches its parent once. The report is acknowledged in
+`task-notification-delivered.json` beside the batches, and that marker is what
+every delivery path reads before reporting: the batch window, the mid-turn copy
+a running turn already took, a watcher, the startup replay after a restart, and
+a second reporter of the same settle all find the task's current settle already
+told. A later turn of the same task, and a pause or a cancellation of it, are
+reports of their own and still go out.
 
 ### A delegated task that runs out of usage
 
