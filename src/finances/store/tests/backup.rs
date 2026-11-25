@@ -57,13 +57,16 @@ fn the_export_is_the_reference_payload() {
     let test = TestStore::initialized();
     let json = test.store.export_json().expect("export");
 
-    // Compact JSON, the reference's keys in the reference's order.
+    // Compact JSON, the reference's keys in the reference's order, with
+    // LOCAL-025's `accounts` and `transfers` after the single `account`.
     assert!(
-        json.starts_with("{\"version\":1,\"exportedAt\":\""),
+        json.starts_with("{\"version\":2,\"exportedAt\":\""),
         "{json:.80}"
     );
     for key in [
         "\"account\":",
+        "\"accounts\":",
+        "\"transfers\":",
         "\"subscriptions\":",
         "\"incomes\":",
         "\"expenses\":",
@@ -74,7 +77,9 @@ fn the_export_is_the_reference_payload() {
         assert!(json.contains(key), "missing {key}");
     }
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-    assert_eq!(parsed["version"], 1);
+    assert_eq!(parsed["version"], 2);
+    assert_eq!(parsed["accounts"].as_array().unwrap().len(), 3);
+    assert_eq!(parsed["transfers"].as_array().unwrap().len(), 2);
     assert_eq!(parsed["subscriptions"].as_array().unwrap().len(), 10);
     // The subscription's history sits next to its fields, flattened like the
     // reference's `SubscriptionWithHistory`.
@@ -120,7 +125,7 @@ fn a_backup_from_a_newer_version_is_refused_and_changes_nothing() {
     match error {
         StoreError::NewerBackup { found, supported } => {
             assert_eq!(found, 7);
-            assert_eq!(supported, 1);
+            assert_eq!(supported, 2);
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -183,14 +188,33 @@ fn restoring_replaces_the_data_and_keeps_the_audit_history() {
 }
 
 #[test]
-fn the_reference_s_backup_restores_and_its_own_export_matches() {
+fn the_reference_s_backup_restores_as_the_first_account() {
     let mut test = TestStore::empty();
+    // A backup made at schema 1: one `account`, no `accounts`, no
+    // `transfers`, and rows that declare no account.
     test.store
         .restore_json(&fixture("reference-backup.json"))
         .expect("restore");
+
+    let state = test.store.app_state().expect("state");
+    assert_eq!(state.accounts.len(), 1, "the single account of the payload");
+    assert_eq!(state.account.id, "account-primary");
+    assert_eq!(state.transfers, Vec::new());
+    // Every row restored onto that first account.
+    for subscription in &state.subscriptions {
+        assert_eq!(
+            subscription.subscription.account_id, "account-primary",
+            "{}",
+            subscription.subscription.name
+        );
+    }
+
+    // Exporting the restored database now writes a version 2 payload.
     let json = test.store.export_json().expect("export");
     let backup = Backup::from_json(&json).expect("parse");
-    assert_eq!(backup.version, 1);
+    assert_eq!(backup.version, 2);
+    assert_eq!(backup.accounts.len(), 1);
+    assert_eq!(backup.account.id, "account-primary");
     assert_eq!(backup.subscriptions.len(), 10);
     assert_eq!(backup.rates.len(), 2);
     assert!(backup.incomes.is_empty());
@@ -198,4 +222,23 @@ fn the_reference_s_backup_restores_and_its_own_export_matches() {
         backup.settings.get("mainCurrency").map(String::as_str),
         Some("EUR")
     );
+}
+
+#[test]
+fn a_version_2_backup_round_trips_accounts_and_transfers() {
+    let test = TestStore::initialized();
+    let before = test.store.export_all().expect("export");
+    assert_eq!(before.version, 2);
+    assert_eq!(before.accounts.len(), 3);
+    assert_eq!(before.transfers.len(), 2);
+
+    let text = before.to_json().expect("to JSON");
+    let parsed = Backup::from_json(&text).expect("from JSON");
+    assert_eq!(parsed.state(), before.state());
+
+    // Restoring into another empty database reproduces every account, the
+    // transfers and the account of every row.
+    let mut other = TestStore::empty();
+    other.store.restore_json(&text).expect("restore");
+    assert_eq!(other.store.app_state().expect("state"), before.state());
 }

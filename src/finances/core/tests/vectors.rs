@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use moxen_finances_core::accounts::{AccountScope, TotalBalance, total_balance_minor};
 use moxen_finances_core::dates::{self, IsoDateParts};
 use moxen_finances_core::exchange::{self, ConversionResult, RateLookup};
 use moxen_finances_core::money;
@@ -19,8 +20,8 @@ use moxen_finances_core::projection::{
 use moxen_finances_core::recurrence::{self, CanChargeOptions, OccurrenceOptions};
 use moxen_finances_core::stats::{self, CategorySlice, PeriodTotals, SubscriptionCostPoint};
 use moxen_finances_core::types::{
-    Account, ActualCharge, Currency, ExchangeRate, Expense, Frequency, Income, PauseEntry,
-    SubscriptionStatus, SubscriptionWithHistory,
+    Account, AccountKind, ActualCharge, Currency, ExchangeRate, Expense, Frequency, Income,
+    PauseEntry, SubscriptionStatus, SubscriptionWithHistory, Transfer,
 };
 use moxen_finances_core::{CoreError, YearMonth};
 
@@ -883,6 +884,8 @@ fn projection_matches_the_reference() {
             .clone()
             .expect("projectBalance vectors carry an account");
         let collection = EventCollectionInput {
+            scope: AccountScope::All,
+            transfers: &[],
             account_currency: input.account_currency,
             subscriptions: &input.subscriptions,
             incomes: &input.incomes,
@@ -1007,6 +1010,8 @@ fn projection_matches_the_reference() {
     for scenario in &vectors.collect_events {
         let input = &scenario.input;
         let collected = projection::collect_events(&EventCollectionInput {
+            scope: AccountScope::All,
+            transfers: &[],
             account_currency: input.account_currency,
             subscriptions: &input.subscriptions,
             incomes: &input.incomes,
@@ -1257,6 +1262,199 @@ fn stats_match_the_reference() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// accounts.json (LOCAL-025: the new multi-account specification)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountsVectors {
+    total_balance: Vec<TotalBalanceCase>,
+    collect_events: Vec<AccountCollectScenario>,
+    project_balance: Vec<AccountBalanceScenario>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TotalBalanceCase {
+    name: String,
+    accounts: Vec<Account>,
+    target_currency: Currency,
+    rates: Vec<ExchangeRate>,
+    date: String,
+    expected: TotalBalance,
+}
+
+/// The multi-account collection input: the reference's inputs plus the scope
+/// and the transfers, absent (like the reference's `charges` and `rates`) in
+/// older data.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountCollectionInputJson {
+    scope: AccountScope,
+    account_currency: Currency,
+    #[serde(default)]
+    subscriptions: Vec<SubscriptionWithHistory>,
+    #[serde(default)]
+    incomes: Vec<Income>,
+    #[serde(default)]
+    expenses: Vec<Expense>,
+    #[serde(default)]
+    rates: Vec<ExchangeRate>,
+    #[serde(default)]
+    charges: Vec<ActualCharge>,
+    #[serde(default)]
+    transfers: Vec<Transfer>,
+    from_date: String,
+    to_date: String,
+}
+
+impl AccountCollectionInputJson {
+    fn collection(&self) -> EventCollectionInput<'_> {
+        EventCollectionInput {
+            scope: self.scope.clone(),
+            transfers: &self.transfers,
+            account_currency: self.account_currency,
+            subscriptions: &self.subscriptions,
+            incomes: &self.incomes,
+            expenses: &self.expenses,
+            rates: &self.rates,
+            charges: &self.charges,
+            from_date: &self.from_date,
+            to_date: &self.to_date,
+            extra_events: &[],
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountCollectScenario {
+    name: String,
+    input: AccountCollectionInputJson,
+    expected: CollectedJson,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountBalanceScenario {
+    name: String,
+    account: Account,
+    input: AccountCollectionInputJson,
+    expected: AccountExpectedBalance,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountExpectedBalance {
+    start_date: String,
+    end_date: String,
+    start_balance_minor: i64,
+    end_balance_minor: i64,
+    total_income_minor: i64,
+    total_expense_minor: i64,
+    net_minor: i64,
+    min_balance_minor: i64,
+    min_balance_date: Option<String>,
+    first_negative_date: Option<String>,
+    first_negative_deficit_minor: Option<i64>,
+    #[serde(default)]
+    warnings: Vec<ProjectionWarning>,
+}
+
+#[test]
+fn accounts_match_the_multi_account_specification() {
+    let vectors: AccountsVectors = load("accounts.json");
+
+    for case in &vectors.total_balance {
+        assert_eq!(
+            total_balance_minor(
+                &case.accounts,
+                case.target_currency,
+                &case.rates,
+                &case.date
+            ),
+            case.expected,
+            "{}",
+            case.name
+        );
+    }
+
+    for scenario in &vectors.collect_events {
+        let collected = projection::collect_events(&scenario.input.collection())
+            .unwrap_or_else(|error| panic!("{}: {error}", scenario.name));
+        assert_eq!(
+            collected.events,
+            scenario.expected.events,
+            "{}: events\nexpected [{}]",
+            scenario.name,
+            chunk(&scenario.expected.events)
+        );
+        assert_eq!(
+            collected.warnings, scenario.expected.warnings,
+            "{}: warnings",
+            scenario.name
+        );
+    }
+
+    for scenario in &vectors.project_balance {
+        let result = projection::project_balance(&ProjectionInput {
+            account: &scenario.account,
+            events: scenario.input.collection(),
+        })
+        .unwrap_or_else(|error| panic!("{}: {error}", scenario.name));
+        let expected = &scenario.expected;
+        assert_eq!(result.start_date, expected.start_date, "{}", scenario.name);
+        assert_eq!(result.end_date, expected.end_date, "{}", scenario.name);
+        assert_eq!(
+            result.start_balance_minor, expected.start_balance_minor,
+            "{}: start",
+            scenario.name
+        );
+        assert_eq!(
+            result.end_balance_minor, expected.end_balance_minor,
+            "{}: end",
+            scenario.name
+        );
+        assert_eq!(
+            result.total_income_minor, expected.total_income_minor,
+            "{}: income",
+            scenario.name
+        );
+        assert_eq!(
+            result.total_expense_minor, expected.total_expense_minor,
+            "{}: expense",
+            scenario.name
+        );
+        assert_eq!(result.net_minor, expected.net_minor, "{}", scenario.name);
+        assert_eq!(
+            result.min_balance_minor, expected.min_balance_minor,
+            "{}: min",
+            scenario.name
+        );
+        assert_eq!(
+            result.min_balance_date, expected.min_balance_date,
+            "{}: minDate",
+            scenario.name
+        );
+        assert_eq!(
+            result.first_negative_date, expected.first_negative_date,
+            "{}: firstNegative",
+            scenario.name
+        );
+        assert_eq!(
+            result.first_negative_deficit_minor, expected.first_negative_deficit_minor,
+            "{}: deficit",
+            scenario.name
+        );
+        assert_eq!(
+            result.warnings, expected.warnings,
+            "{}: warnings",
+            scenario.name
+        );
+    }
+}
+
 // The EventKind/EventSource enums appear in vectors as "income"/"expense",
 // already covered by the serde renames; keep the ident used so a rename
 // cannot silently break the JSON.
@@ -1273,6 +1471,36 @@ fn event_enums_keep_the_reference_names() {
     assert_eq!(
         serde_json::to_string(&EventSource::Subscription).expect("serialize"),
         r#""subscription""#
+    );
+}
+
+// The LOCAL-025 wire names: the account scope, the account kinds and the
+// transfer event source. New specification, pinned so they cannot drift.
+#[test]
+fn account_scope_kind_and_transfer_keep_the_wire_names() {
+    assert_eq!(
+        serde_json::to_string(&AccountScope::All).expect("serialize"),
+        r#""all""#
+    );
+    assert_eq!(
+        serde_json::to_string(&AccountScope::One("checking".into())).expect("serialize"),
+        r#"{"account":"checking"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&AccountKind::CreditCard).expect("serialize"),
+        r#""credit-card""#
+    );
+    for (kind, name) in [
+        (AccountKind::Checking, "checking"),
+        (AccountKind::Savings, "savings"),
+        (AccountKind::CreditCard, "credit-card"),
+        (AccountKind::Cash, "cash"),
+    ] {
+        assert_eq!(kind.as_str(), name);
+    }
+    assert_eq!(
+        serde_json::to_string(&EventSource::Transfer).expect("serialize"),
+        r#""transfer""#
     );
 }
 
