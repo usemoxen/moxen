@@ -330,9 +330,19 @@ a remote server, commands that resolve a project from a folder need
 otherwise. `moxen --json doctor` reports `checks.server.mode: "remote"` with
 the server's name and key fingerprint. `server status` and `server stop`
 manage this machine's server only and refuse `--server`; `server status`
-also reports the server's build and whether it needs a restart after an
-update, and `server stop` works against any build, which is how a server
+also reports the server's build, whether it needs a restart after an
+update, and whether a restart's drain is currently waiting on running
+turns; and `server stop` works against any build, which is how a server
 from another build is stopped.
+
+A stop drains first: running turns get up to `restartDrainTimeout` (2m) to
+finish before the server stops them, and nothing new starts while it waits
+(`SERVER_DRAINING` refuses a send that would start one). Queued and
+scheduled work is never stopped — it keeps its place and times and runs
+once the server is back. `server stop --force` interrupts the running turns
+at once instead of waiting, and the reply `server stop` waits for says what
+the drain got done: how many turns finished and how many it had to stop.
+Commands whose client vanished mid-drain behave as forced.
 
 Errors worth knowing: `REMOTE_PAIRING_REFUSED` (wrong, used or expired
 code — show a new one), `REMOTE_DEVICE_REFUSED` (revoked, or the token is

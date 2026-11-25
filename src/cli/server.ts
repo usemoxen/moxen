@@ -9,6 +9,7 @@ import type { CliConfig } from "../core/types.js";
 import { closeOnSignals, runServer } from "../server/main.js";
 import { defaultEndpoint, probe } from "../server/transport/endpoint.js";
 import { RemoteConnection } from "../server/transport/remote.js";
+import type { ShutdownDrainResult } from "../server/transport/wire.js";
 
 export async function serverStart(
   context: { config: CliConfig; configPath: string },
@@ -36,6 +37,7 @@ export async function serverStatus() {
       build: hello?.build ?? null,
       buildDisplay: hello?.buildDisplay ?? null,
       restartRequired: hello?.restartRequired ?? false,
+      draining: hello?.draining ?? null,
       ...(connection.buildMismatch === null ? {} : { buildMismatch: connection.buildMismatch.message }),
     };
   } finally {
@@ -43,20 +45,23 @@ export async function serverStatus() {
   }
 }
 
-export async function serverStop() {
+export async function serverStop(options: { readonly force?: boolean } = {}) {
   const endpoint = defaultEndpoint();
-  if (!(await probe(endpoint))) return { endpoint, stopped: false as const };
+  if (!(await probe(endpoint))) return { endpoint, stopped: false as const, drained: null };
   // Stopping is the fix for a mismatched server, so it works against any
   // build: the limited connection only lets `shutdown` through.
   const connection = await RemoteConnection.connect(endpoint, { reconnect: false, allowBuildMismatch: true });
+  let drained: ShutdownDrainResult | null = null;
   try {
-    await connection.shutdownServer();
+    // Held here while the server drains: running turns finish first, unless
+    // `force` interrupts them — the reply comes once the drain is done.
+    drained = await connection.shutdownServer(options.force ? { force: true } : {});
   } finally {
     await connection.close();
   }
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (!(await probe(endpoint))) return { endpoint, stopped: true as const };
+    if (!(await probe(endpoint))) return { endpoint, stopped: true as const, drained };
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new CliError("SERVER_STOP_FAILED", `The moxen server at ${endpoint} acknowledged stop but is still listening.`, {

@@ -109,6 +109,7 @@ import {
   type SendTurnResult,
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
+import { isDraining } from "./drain.js";
 import { parseScheduledTime } from "./scheduledtime.js";
 import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
@@ -589,6 +590,9 @@ export async function runDueScheduledTurn(ctx: OperationContext, threadId: strin
 }
 
 async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: QueueRow[], now: number): Promise<boolean> {
+  // A restart's drain admits nothing: queued and scheduled entries keep
+  // their place — and their times — and run once the next server is up.
+  if (isDraining()) return false;
   await recoverOrphanedTurn(ctx, threadId);
   const thread = await ctx.store.readThreadRecord(threadId);
   let index = rows.findIndex((r) => r.thread.id === threadId);

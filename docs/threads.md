@@ -46,6 +46,18 @@ another host is never judged. A running turn that a server shutdown stops
 is recorded interrupted with that reason, and so is one a settle ends, so a
 ledger never leaves an unexplained stop.
 
+A stop for a restart drains first. The server takes no new turns while it
+waits — a send that would start one is refused with `SERVER_DRAINING`, and
+admission and settle promotions hold their entries — while running turns
+get up to `restartDrainTimeout` (2m) to finish. Queued and scheduled work
+is never stopped by the drain: it keeps its place, its conditions and its
+times, and runs once the next server is up. Whatever is still running when
+the window closes — or at once, for a forced stop (`moxen server stop
+--force`) — is interrupted with a reason that names the restart. Connected
+clients see the wait as it happens (`app.server-draining` says how many
+turns it is waiting on and until when), and `moxen server status` reports a
+drain in progress.
+
 A queued message outlives the settle it was waiting for when the thread
 cannot take it: a snoozed thread, or a provider whose allowance is
 exhausted, holds it instead of starting it (the Work queue says the

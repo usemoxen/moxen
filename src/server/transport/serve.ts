@@ -36,6 +36,7 @@ import {
   toWireError,
   type HelloResult,
   type ServerMessage,
+  type ShutdownDrainResult,
 } from "./wire.js";
 
 /** Three missed heartbeats (`./remote.ts` pings every 2.5s when quiet). */
@@ -60,6 +61,8 @@ export interface ServeOptions {
    * to stand in for another one.
    */
   readonly greeting?: Partial<HelloResult> | (() => Partial<HelloResult>);
+  /** The restart drain a local `shutdown` runs before the server stops. */
+  readonly drain?: SocketContext["drain"];
 }
 
 export async function serve(options: ServeOptions): Promise<ServerHandle> {
@@ -85,7 +88,12 @@ export async function serve(options: ServeOptions): Promise<ServerHandle> {
 
   const server = net.createServer((socket) => {
     sockets.add(socket);
-    handleSocket(socket, api, { remote: false, shutdown: () => void close(), ...(options.greeting ? { greeting: options.greeting } : {}) });
+    handleSocket(socket, api, {
+      remote: false,
+      shutdown: () => void close(),
+      ...(options.drain ? { drain: options.drain } : {}),
+      ...(options.greeting ? { greeting: options.greeting } : {}),
+    });
     socket.once("close", () => sockets.delete(socket));
   });
 
@@ -117,6 +125,12 @@ export interface SocketContext<Socket extends Duplex = net.Socket> {
   readonly remote: boolean;
   /** Stop the server. Never offered to a remote socket. */
   readonly shutdown?: () => void;
+  /**
+   * The restart drain, before `shutdown`: let running turns finish up to
+   * the server's grace (`force` interrupts them at once) and report what the
+   * stop waited on. Local only, like `shutdown`.
+   */
+  readonly drain?: (force: boolean) => Promise<ShutdownDrainResult | null>;
   /**
    * Remote sockets only: vets the `hello` params (a pairing code, or a
    * device's id and token) before the socket is greeted, throwing to
@@ -324,13 +338,7 @@ export function handleSocket<Socket extends Duplex>(socket: Socket, api: ClientA
           send({ id, error: toWireError(new CliError("REMOTE_SHUTDOWN_REFUSED", "A remote client cannot stop the moxen server; stop it on its own machine.")) });
           break;
         }
-        // The reply must be on the wire before the server stops: stopping
-        // destroys this socket, which drops a reply still being flushed
-        // (Windows named-pipe writes complete asynchronously, so an
-        // immediate destroy can eat the reply `server stop` waits for).
-        // The socket's own close stops the server too, for a client that
-        // is already gone.
-        if (!socket.destroyed) {
+        {
           let stopping = false;
           const stop = (): void => {
             if (!stopping) {
@@ -338,10 +346,27 @@ export function handleSocket<Socket extends Duplex>(socket: Socket, api: ClientA
               shutdown();
             }
           };
-          socket.write(encode({ id, result: null }), stop);
+          // The socket's own close stops the server too, for a client that
+          // is already gone — including one that gave up on a draining stop:
+          // a vanished requester is a forced one.
           socket.once("close", stop);
-        } else {
-          shutdown();
+          // The drain runs before the reply and before the stop: a restart
+          // holds off while running turns finish (up to its grace; `force`
+          // takes them down at once), and only then does the reply say the
+          // server is about to go — with what the drain waited on. The
+          // reply must be on the wire before the stop destroys this socket
+          // (Windows named-pipe writes complete asynchronously, so an
+          // immediate destroy can eat the reply `server stop` waits for).
+          void Promise.resolve(context.drain ? context.drain(params.force === true) : null)
+            .catch(() => null)
+            .then((drained) => {
+              if (stopping) return;
+              if (!socket.destroyed) {
+                socket.write(encode({ id, result: drained ?? null }), stop);
+              } else {
+                stop();
+              }
+            });
         }
         break;
       default:

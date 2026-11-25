@@ -14,6 +14,7 @@ import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
+import { isDraining, serverDrainingError } from "./drain.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
@@ -471,6 +472,18 @@ export async function sendTurn(
     const joinsWaitingReset = input.scheduleReason === "usage-reset" && turns.some((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset");
     const gateQueued =
       gateHeldQueue || usageHeld || autoHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && openTurn(turns) !== null);
+    // A restart's drain ends every turn eventually, so nothing new may start
+    // while it waits: a send that would run now is refused before the ledger
+    // is touched, from the same prediction the manual-continuation gate
+    // below is cut from. What still goes through reaches work that is
+    // already running — a steer, an injected message — or keeps as durable
+    // rows that wait (queued, scheduled) and run once the server is back.
+    if (
+      isDraining() && !joinsExisting
+      && (manualContinuation || (!gateQueued && !(openTurn(turns) !== null && (delivery === "auto" || delivery === "steer"))))
+    ) {
+      throw serverDrainingError();
+    }
     if (joinsExisting ? false : live !== null || manualContinuation || !gateQueued) {
       const admission = await continuationInFlight(store, thread);
       thread = admission.thread;
@@ -641,6 +654,9 @@ export async function sendTurn(
     if ((usageHeld || autoHeld) && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
     const status = heldQueue || usageHeld || autoHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    // The hard net behind the pre-flight gate above: the prediction can
+    // drift, and a turn written `running` during the drain would start nowhere.
+    if (status === "running" && isDraining()) throw serverDrainingError();
     // A manual continuation in flight owns the checkout now: no turn may
     // start beside its destination while it prepares. Queued and scheduled
     // turns are not starting, so they pass; the handoff clears the claim

@@ -126,9 +126,11 @@ import {
   ensureDriverSession,
   subscribeDriverThread,
   liveTurnText,
+  flushTurnRunners,
   type TurnDriver,
   type TurnDriverFactories,
 } from "../core/threads/execute.js";
+import { RESTART_INTERRUPT_REASON, restartDrainTimeoutMs, setDraining } from "../core/threads/drain.js";
 import { onScheduledTurnDue } from "../core/threads/schedule.js";
 import { onThreadFailure } from "../core/threads/failures.js";
 import {
@@ -221,6 +223,7 @@ import {
   type PermissionDecision,
   type UserInputAnswers,
 } from "./protocol.js";
+import type { DrainingStatus, ShutdownDrainResult } from "./transport/wire.js";
 import { nativeSubagents } from "./subagentrows.js";
 
 /** How often finished worktree threads are tidied while the server runs. */
@@ -357,6 +360,8 @@ export interface DirectConnectionOptions {
   readonly drivers?: TurnDriverFactories;
   readonly shellPollMs?: number;
   readonly threadPollMs?: number;
+  /** How often the restart drain rechecks running turns (tests pass milliseconds). */
+  readonly drainPollMs?: number;
   /** Bound for every driver's `stopAll` inside `close()`; defaults to `CLOSE_DRIVER_TIMEOUT_MS` (tests pass milliseconds). */
   readonly closeDriverTimeoutMs?: number;
   /** Provider source override (tests); defaults to probing the live providers. */
@@ -409,6 +414,7 @@ export class DirectConnection implements ClientApi {
   private readonly factories: TurnDriverFactories;
   private readonly shellPollMs: number;
   private readonly threadPollMs: number;
+  private readonly drainPollMs: number;
   private readonly closeDriverTimeoutMs: number;
   private readonly catalog: () => Promise<ConfigPayload>;
   private readonly providers: () => Promise<ProviderSummary[]>;
@@ -439,6 +445,13 @@ export class DirectConnection implements ClientApi {
   private migrationPromise: Promise<void> | null = null;
   /** Set once an update or rollback has landed: the running code is stale. */
   private restartPending = false;
+  /** The restart drain in progress, joined by every later stop request; null once it has finished. */
+  private restartDrain: Promise<ShutdownDrainResult | null> | null = null;
+  /** True once a drain was forced: the wait ends and the rest are interrupted. */
+  private restartDrainForced = false;
+  /** What the drain waits on right now, as the hello and shell events report it; null outside a drain. */
+  private restartDrainStatus: DrainingStatus | null = null;
+  private readonly restartDrainTurnCache = new Map<string, { version: string; turns: StoredTurn[] }>();
   /** Distinguishes this connection's claim from another's in the same process. */
   private readonly claimToken = randomUUID();
   private readonly driversOwner = {};
@@ -472,6 +485,7 @@ export class DirectConnection implements ClientApi {
     this.providerAccountLoginDeps = options.providerAccountLoginDeps;
     this.shellPollMs = options.shellPollMs ?? 1500;
     this.threadPollMs = options.threadPollMs ?? 750;
+    this.drainPollMs = options.drainPollMs ?? 250;
     this.closeDriverTimeoutMs = options.closeDriverTimeoutMs ?? CLOSE_DRIVER_TIMEOUT_MS;
     this.providers = options.providers ?? (async () => {
       // A config that cannot be read must not hide the providers that need none of it.
@@ -966,6 +980,109 @@ export class DirectConnection implements ClientApi {
   /** Whether an update or rollback has landed since this server started. */
   get serverRestartRequired(): boolean {
     return this.restartPending;
+  }
+
+  /** The restart drain in progress, as the hello reports it: what it waits on, until when. Null outside a drain. */
+  get draining(): DrainingStatus | null {
+    return this.restartDrainStatus;
+  }
+
+  /**
+   * The pre-restart drain (see `core/threads/drain.ts`): a stop asked with
+   * running turns holds off for the grace window while they finish, and
+   * whatever survives — or a forced stop — is interrupted with a reason
+   * that names the restart. Idempotent: a stop asked while a drain already
+   * runs joins it, and a forced one escalates the running drain. With
+   * nothing running it resolves at once, with nothing to report.
+   */
+  drainForRestart(options: { readonly force?: boolean } = {}): Promise<ShutdownDrainResult | null> {
+    if (this.closed) return Promise.resolve(null);
+    if (options.force === true) this.restartDrainForced = true;
+    this.restartDrain ??= this.runRestartDrain();
+    return this.restartDrain;
+  }
+
+  private async runRestartDrain(): Promise<ShutdownDrainResult | null> {
+    const startedAt = Date.now();
+    const startedRunning = this.restartDrainForced;
+    try {
+      if (this.closed) return null;
+      const ctx = await this.context();
+      const graceMs = startedRunning ? 0 : restartDrainTimeoutMs(ctx.config);
+      // The gate is the whole point: from here until the drain ends, no new
+      // turn starts (see `drain.ts`); what is already running gets to finish.
+      setDraining(true);
+      const deadline = graceMs > 0 ? new Date(startedAt + graceMs).toISOString() : null;
+      let running = await this.drainRunningTurns(ctx);
+      const wasRunning = running.length;
+      this.setDrainStatus({ running: wasRunning, deadline });
+      while (
+        !this.restartDrainForced && !this.closed && deadline !== null && running.length > 0 && Date.now() < Date.parse(deadline)
+      ) {
+        const timer = new Promise((resolve) => {
+          const handle = setTimeout(resolve, this.drainPollMs);
+          handle.unref?.();
+        });
+        await timer;
+        const next = await this.drainRunningTurns(ctx);
+        if (next.length !== running.length) this.setDrainStatus({ running: next.length, deadline });
+        running = next;
+      }
+      let interrupted = 0;
+      if (running.length > 0 && !this.closed) {
+        for (const turn of running) {
+          // The pair every stop path uses: the driver cancels the session's
+          // turn, the ledger row settles with the reason.
+          await Effect.runPromise(this.driverFor(turn.instanceId).interruptTurn(turn.threadId)).catch(() => undefined);
+          const stopped = await interruptTurn(ctx.store, turn.threadId, turn.turnId, undefined, { reason: RESTART_INTERRUPT_REASON }).catch(() => null);
+          if (stopped?.interrupted === true) interrupted += 1;
+        }
+        // The interrupts abort the runners; their own settle writes are
+        // bounded, like close()'s, so one stuck runner cannot hang the stop.
+        await flushTurnRunners(this.closeDriverTimeoutMs).catch(() => undefined);
+      }
+      return { finished: wasRunning - interrupted, interrupted, waitedMs: Date.now() - startedAt };
+    } finally {
+      // The stop that asked for this follows right behind; still, a drain
+      // whose stop never came leaves the server taking work again rather
+      // than wedged, and the next drain starts from a clean slate.
+      setDraining(false);
+      this.restartDrainForced = false;
+      this.restartDrain = null;
+      this.setDrainStatus(null);
+    }
+  }
+
+  /** Every turn still `running`, across all threads, with the driver each needs. Ledgers are reread only where their version moved. */
+  private async drainRunningTurns(ctx: OperationContext): Promise<readonly { threadId: string; turnId: string; instanceId: string }[]> {
+    const store = ctx.store;
+    const out: Array<{ threadId: string; turnId: string; instanceId: string }> = [];
+    const ids = await store.listThreadIds();
+    for (const id of ids) {
+      const version = await store.threadVersion(id).catch(() => null);
+      const cached = this.restartDrainTurnCache.get(id);
+      const turns = version !== null && cached && cached.version === version ? cached.turns : await store.readTurns(id).catch(() => []);
+      if (version !== null && (!cached || cached.version !== version)) this.restartDrainTurnCache.set(id, { version, turns });
+      for (const turn of turns) {
+        if (turn.status !== "running") continue;
+        const instanceId = turn.modelSelection?.instanceId
+          ?? (await store.readThreadRecord(id).catch(() => null))?.modelSelection.instanceId
+          ?? "";
+        out.push({ threadId: id, turnId: turn.id, instanceId });
+      }
+    }
+    for (const id of [...this.restartDrainTurnCache.keys()]) if (!ids.includes(id)) this.restartDrainTurnCache.delete(id);
+    return out;
+  }
+
+  /** Records the drain's progress and tells every shell subscriber with one event. */
+  private setDrainStatus(next: DrainingStatus | null): void {
+    this.restartDrainStatus = next;
+    const frame: ShellFrame = {
+      kind: "event",
+      event: { type: "app.server-draining", payload: { running: next?.running ?? 0, deadline: next?.deadline ?? null } },
+    };
+    for (const listener of this.updateListeners) listener(frame);
   }
 
   /**

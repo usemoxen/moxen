@@ -23,6 +23,7 @@ import type { BackgroundTaskSummary, RateLimitWindow } from "../providers/spi.js
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { chatgptHarnessConfigFor } from "./longthreads.js";
 import { armScheduledTurn } from "./schedule.js";
+import { isDraining } from "./drain.js";
 import { recordUsageWindows, standingLimit, usageKeyForInstance } from "../usage/limits.js";
 import { resolveContextCostUsd } from "../usage/prices.js";
 import type { McpServerSpec } from "../mcp.js";
@@ -628,6 +629,36 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     );
     if (!next || !store.claimRun(next.id)) return;
     claimed = next.id;
+    // Nothing new starts while the server drains for a restart: the
+    // promotion goes back to the queue, held for the admission path, with
+    // its message and scheduled time untouched — the next server runs it.
+    // Released under the thread lock together with the requeue, exactly as
+    // the other-provider handback below, so a racing admission cannot start
+    // it in between.
+    if (isDraining()) {
+      await store.withThreadLock(threadId, async () => {
+        store.untrackRunning(next.id);
+        claimed = null;
+        const fresh = (await store.readTurns(threadId)).find((turn) => turn.id === next.id);
+        if (!fresh || fresh.status !== "running") return;
+        const now = store.nowIso();
+        await store.updateTurn(threadId, next.id, {
+          status: "queued",
+          heldAtSettle: true,
+          owner: null,
+          updatedAt: now,
+        });
+        await store.appendLedger(threadId, "activity", {
+          id: store.newId(),
+          threadId,
+          turnId: next.id,
+          kind: "turn.held",
+          summary: "Held for the server restart",
+          createdAt: now,
+        });
+      });
+      return;
+    }
     const thread = await store.readThreadRecord(threadId);
     if (!thread) return;
     const selection = next.modelSelection ?? thread.modelSelection;

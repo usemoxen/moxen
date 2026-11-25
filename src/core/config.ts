@@ -287,6 +287,9 @@ export function normalizeFileConfig(raw: unknown, skipped?: SkippedConfigEntry[]
   if (input.backgroundForgottenAfter !== undefined) guarded(skipped, "backgroundForgottenAfter", input.backgroundForgottenAfter, () => {
     result.backgroundForgottenAfter = asString(input.backgroundForgottenAfter, "backgroundForgottenAfter");
   });
+  if (input.restartDrainTimeout !== undefined) guarded(skipped, "restartDrainTimeout", input.restartDrainTimeout, () => {
+    result.restartDrainTimeout = asString(input.restartDrainTimeout, "restartDrainTimeout");
+  });
   if (input.instructions !== undefined) guarded(skipped, "instructions", input.instructions, () => {
     const value = asString(input.instructions, "instructions").trim();
     if (value) result.instructions = value;
@@ -409,7 +412,7 @@ export function normalizeFileConfig(raw: unknown, skipped?: SkippedConfigEntry[]
   const knownTop = new Set([
     "formatVersion",
     "projectPolicy", "workspaceMode", "openMode", "threadEnvMode", "runtimeMode", "interactionMode",
-    "provider", "model", "promptImprover", "speedMode", "thinkingEffort", "sessionTtl", "backgroundForgottenAfter",
+    "provider", "model", "promptImprover", "speedMode", "thinkingEffort", "sessionTtl", "backgroundForgottenAfter", "restartDrainTimeout",
     "instructions", "memory", "memoryEmbeddings", "memoryEmbeddingLoading",
     "usageProtection", "usageRecovery", "usageContinuation", "usageColdResume",
     "usageMinimumSession", "usageMinimumWeekly", "usageColdResumeAfter", "usageColdResumeTokens",
