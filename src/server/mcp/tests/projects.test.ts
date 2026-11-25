@@ -13,8 +13,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { testHarness } from "../../../core/testing/harness.js";
+import type { ClientApi } from "../../api.js";
 import { DirectConnection } from "../../connection.js";
-import { callMoxenTool, moxenToolsFor, PROJECT_TOOLS } from "../tools.js";
+import { availableMoxenTools, callMoxenTool, fullyQualifiedFolder, moxenToolsFor, PROJECT_TOOLS } from "../tools.js";
 
 /** Paths meet the registry once canonicalized: on macOS `/var` and `/private/var` are the same folder. */
 const real = realpathSync.native;
@@ -217,16 +218,190 @@ describe("project_register", () => {
     try {
       const result = await register({ cwd: "some/folder" });
       expect(result.isError).toBe(true);
-      expect(result.text).toContain("must be an absolute path");
+      expect(result.text).toContain("must be a fully qualified absolute path");
       expect(result.text).toContain("not resolved against your working directory");
       const resolveToo = await resolve(connection, "some/folder");
       expect(resolveToo.isError).toBe(true);
-      expect(resolveToo.text).toContain("must be an absolute path");
+      expect(resolveToo.text).toContain("must be a fully qualified absolute path");
       const badFlag = await register({ cwd: harness.root, dryRun: "yes" });
       expect(badFlag.isError).toBe(true);
       expect(badFlag.text).toContain("dryRun must be true or false");
     } finally {
       await connection.close();
     }
+  });
+
+  it("preserves a folder's exact path, one whose name ends in a space", async () => {
+    const { harness, connection, register } = await setup();
+    try {
+      const folder = path.join(harness.root, "proj-with-space ");
+      await mkdir(folder);
+      const created = await register({ cwd: folder });
+      const canonical = JSON.parse(created.text) as { project: { workspaceRoot: string } };
+      expect(canonical.project.workspaceRoot).toBe(real(folder));
+      expect(canonical.project.workspaceRoot.endsWith("proj-with-space ")).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
+describe("project_register: which thread may write the registry", () => {
+  /** A connection whose parent thread runs in the given mode, with its work folder already registered. */
+  async function setupMode(runtimeMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access") {
+    const { harness, connection } = await connect();
+    const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+    const parent = await connection.dispatch({ type: "thread.create", projectId: ensured.project.id, runtimeMode });
+    const register = async (args: Record<string, unknown>) => callMoxenTool(connection, parent.threadId, "project_register", args);
+    return { harness, connection, register };
+  }
+
+  it("registers from a thread running in Auto or Full access, and refuses the lower modes", async () => {
+    for (const [mode, allowed] of [
+      ["full-access", true],
+      ["auto", true],
+      ["auto-accept-edits", false],
+      ["approval-required", false],
+    ] as const) {
+      const { harness, connection, register } = await setupMode(mode);
+      try {
+        const folder = path.join(harness.root, `mode-${mode}`);
+        await mkdir(folder);
+        const result = await register({ cwd: folder });
+        if (allowed) {
+          expect(result.isError).toBe(false);
+          expect((JSON.parse(result.text) as { created: boolean }).created).toBe(true);
+        } else {
+          expect(result.isError).toBe(true);
+          expect(result.text).toContain(`runs in ${mode}`);
+          expect(result.text).toContain("Auto or Full access");
+          expect(result.text).toContain("moxen projects ensure");
+        }
+      } finally {
+        await connection.close();
+      }
+    }
+  });
+
+  it("lets a lower-mode thread preview with dryRun, and refuses a thread whose mode cannot be read", async () => {
+    const { harness, connection, register } = await setupMode("approval-required");
+    try {
+      const folder = path.join(harness.root, "preview");
+      await mkdir(folder);
+      const dry = await register({ cwd: folder, dryRun: true });
+      expect(dry.isError).toBe(false);
+      expect(JSON.parse(dry.text)).toMatchObject({ dryRun: true, created: true });
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+    // No thread to inspect: an unresolvable mode refuses rather than answering as anyone.
+    const { connection: refusedConnection } = await connect();
+    try {
+      const refused = await callMoxenTool(refusedConnection, "no-such-thread", "project_register", { cwd: harness.root });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("permission mode");
+      expect(refused.text).toContain("could not be read");
+    } finally {
+      await refusedConnection.close();
+    }
+  });
+
+  /** A stub api where the calling thread's live research state (and inspect result) are what the test says. */
+  function researchApi(run: { readonly leadThreadId: string; readonly endedAt?: string } | null, runtimeMode = "auto"): ClientApi {
+    const ensured = { workspace: {}, project: { id: "p-1", title: "x", workspaceRoot: "/x", createdAt: "now" }, created: true, dispatch: null };
+    return {
+      query: async (query: { readonly type: string } & Record<string, unknown>) => {
+        switch (query.type) {
+          case "research.run":
+            return run;
+          case "thread.inspect":
+            return { thread: { runtimeMode } };
+          case "image-generation.availability":
+            return { available: false, reason: null };
+          case "handoff.pending":
+            return { requestId: null };
+          default:
+            throw new Error(`unexpected query ${query.type}`);
+        }
+      },
+      dispatch: async () => ensured,
+    } as unknown as ClientApi;
+  }
+
+  it("agrees between the listing and the call: a research run's lead is refused, stale session flags or not", async () => {
+    const api = researchApi({ leadThreadId: "thread-1" });
+    const listed = (await availableMoxenTools(api, "thread-1", {})).map((tool) => tool.name);
+    expect(listed).not.toContain("project_register");
+    // The session was started before the run began: its own flags are stale, but the live read refuses.
+    const result = await callMoxenTool(api, "thread-1", "project_register", { cwd: "/abs" }, {});
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("not available while a research run is active");
+  });
+
+  it("agrees between the listing and the call: a research role is refused, and an ended run frees the lead", async () => {
+    const role = researchApi({ leadThreadId: "thread-lead" });
+    expect((await availableMoxenTools(role, "thread-role", {})).map((tool) => tool.name)).not.toContain("project_register");
+    const refused = await callMoxenTool(role, "thread-role", "project_register", { cwd: "/abs" }, {});
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toContain("in a research run");
+    // The run has ended: the lead is itself again, and the registration proceeds.
+    const ended = researchApi({ leadThreadId: "thread-1", endedAt: "yesterday" });
+    expect((await availableMoxenTools(ended, "thread-1", {})).map((tool) => tool.name)).toContain("project_register");
+    const result = await callMoxenTool(ended, "thread-1", "project_register", { cwd: "/abs" }, {});
+    expect(result.isError).toBe(false);
+  });
+});
+
+describe("project_register: a removed project comes back", () => {
+  it("reports a revival instead of saying nothing changed, and previews it with the original id", async () => {
+    const { harness, connection, register, work } = await setup();
+    try {
+      const folder = path.join(harness.root, "proj-revive");
+      await mkdir(folder);
+      const first = await register({ cwd: folder });
+      const project = JSON.parse(first.text) as { project: { id: string } };
+      await connection.dispatch({ type: "project.remove", projectId: project.project.id });
+
+      // The dry run previews the revival with the row's original id, not a synthesized one.
+      const dry = await register({ cwd: folder, dryRun: true });
+      expect(JSON.parse(dry.text)).toMatchObject({ dryRun: true, revived: true, created: false, project: { id: project.project.id, workspaceRoot: real(folder) } });
+      expect(dry.text).toContain("would revive its original project");
+      expect((await registered(connection)).some((entry) => entry.id === project.project.id)).toBe(false);
+
+      const revived = await register({ cwd: folder });
+      expect(JSON.parse(revived.text)).toMatchObject({ revived: true, created: false, project: { id: project.project.id } });
+      expect(revived.text).toContain("Revived");
+      expect(revived.text).not.toContain("nothing was changed");
+      // The revival is in the registry with its threads' id, and the parent's own folder still resolves.
+      expect((await registered(connection)).some((entry) => entry.id === project.project.id)).toBe(true);
+      // The parent's own folder still resolves as already registered — a revival is not it.
+      const existing = await register({ cwd: harness.work });
+      expect(JSON.parse(existing.text)).toMatchObject({ created: false });
+      expect(existing.text).toContain("already has a project");
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
+describe("fullyQualifiedFolder: only a fully qualified path may name a folder", () => {
+  it("takes a Windows drive or UNC path, and refuses what resolves against something else", () => {
+    const win32 = [
+      ["C:\\folder", true],
+      ["c:/folder", true],
+      ["\\\\server\\share\\folder", true],
+      ["/folder", false], // path.isAbsolute says true on win32 without a volume; a volume is what makes it a folder
+      ["C:folder", false], // drive-relative: the current folder on C
+      ["C:", false],
+      ["folder\\x", false],
+    ] as const;
+    for (const [value, expected] of win32) expect(fullyQualifiedFolder(value, "win32")).toBe(expected);
+    const darwin = [
+      ["/folder", true],
+      ["C:\\folder", false],
+      ["folder", false],
+    ] as const;
+    for (const [value, expected] of darwin) expect(fullyQualifiedFolder(value, "darwin")).toBe(expected);
   });
 });

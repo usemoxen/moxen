@@ -44,6 +44,7 @@ import { runProcess } from "../infra/process.js";
 import { renameReplacing, writeAtomic } from "../infra/atomic.js";
 import {
   ensureStoredProject,
+  findStoredProject,
   listStoredProjects,
   projectForWorkspace,
   resolveStoredProject,
@@ -3562,6 +3563,8 @@ export interface EnsuredProject {
   readonly workspace: WorkspaceResolution;
   readonly project: StoredProject;
   readonly created: boolean;
+  /** The folder's removed project came back with its id (and its threads). */
+  readonly revived?: true;
   readonly command: ProjectCommand | null;
 }
 
@@ -3593,24 +3596,30 @@ function previewProject(workspaceRoot: string): { project: StoredProject; comman
 
 /**
  * The project for a workspace, created under the `create` policy. A dry
- * run resolves the same way and reports what it would create, without
- * writing; `existing` fails identically either way.
+ * run answers with what the real one would do, without writing: the project
+ * as it would be — a removed row keeps its own id, so the preview names the
+ * revival it promises, never a synthesized one — with `existing` failing
+ * identically either way.
  */
 async function ensureProjectFor(
   ctx: OperationContext,
   workspace: WorkspaceResolution,
   policy: ProjectPolicy,
   dryRun: boolean,
-): Promise<{ project: StoredProject; created: boolean; command: ProjectCommand | null }> {
+): Promise<{ project: StoredProject; created: boolean; revived?: true; command: ProjectCommand | null }> {
   if (!dryRun) {
     const ensured = await ensureStoredProject(ctx.storeRoot, { workspaceRoot: workspace.workspaceRoot, policy });
-    return { project: ensured.project, created: ensured.created, command: ensured.command };
+    return { project: ensured.project, created: ensured.created, ...(ensured.revived ? { revived: ensured.revived } : {}), command: ensured.command };
   }
   const existing = await resolveStoredProject(ctx.storeRoot, workspace.workspaceRoot);
   if (existing) return { project: existing, created: false, command: null };
   if (policy === "existing") {
     // Throws PROJECT_NOT_FOUND through the same path a real run takes.
     await ensureStoredProject(ctx.storeRoot, { workspaceRoot: workspace.workspaceRoot, policy });
+  }
+  const removed = await findStoredProject(ctx.storeRoot, workspace.workspaceRoot);
+  if (removed && removed.deletedAt != null) {
+    return { project: { ...removed, deletedAt: null, updatedAt: new Date().toISOString() }, created: false, revived: true, command: null };
   }
   // Key order is printed by `--json`: project, created, command.
   const preview = previewProject(workspace.workspaceRoot);

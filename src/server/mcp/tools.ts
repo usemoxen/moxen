@@ -460,9 +460,11 @@ export const THREAD_TOOLS: readonly McpTool[] = [
 /**
  * Moxen's own projects registry (`core/projects/`), as a session sees it
  * (MXN-415): list and resolve are reads every session gets, register is a
- * registry write only the orchestrator's own thread has (a delegated task
- * works inside the project it was started in, and a provider with
- * orchestration switched off shares the same `delegated` gate).
+ * registry write only the orchestrator's own thread has, live — a delegated
+ * task (and a provider with orchestration switched off, which shares the
+ * same `delegated` flag), a research run, and outside a dry run any thread
+ * not running in Auto or Full access are refused when they call
+ * (`registryWriteBarred`).
  */
 export const PROJECT_TOOLS: readonly McpTool[] = [
   {
@@ -494,7 +496,8 @@ export const PROJECT_TOOLS: readonly McpTool[] = [
       "The folder must exist and be a directory (nothing is created); the project takes its folder's name as its title. " +
       "The registered `projectPolicy` setting decides what a folder without a project does, and is honoured, never bypassed: `existing` refuses with PROJECT_NOT_FOUND, `create` registers it. " +
       "Pass dryRun: true to report what would be registered without changing anything. " +
-      "Registering a folder back after it was removed revives its original project and threads. Only for the orchestrator's own thread, never a delegated task.",
+      "Registering a folder back after it was removed revives its original project and threads. " +
+      "Only the orchestrator's own thread — never a delegated task, a research run's lead or one of its roles — and, outside a dry run, only running in Auto or Full access: the write has no approval of its own, and in a lower mode a provider that never asks would register silently. Every refusal says what the user can do instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -970,6 +973,8 @@ export async function callMoxenTool(
       case "project_register": {
         if (args.dryRun !== undefined && typeof args.dryRun !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "dryRun must be true or false.");
         const dryRun = args.dryRun === true;
+        const barred = await registryWriteBarred(api, parentThreadId, options, dryRun);
+        if (barred !== null) return barred;
         // No `projectPolicy` of its own: the server takes the configured
         // setting, so a policy that refuses creation is honoured, never
         // bypassed (a refusal surfaces as this tool's error).
@@ -978,12 +983,17 @@ export async function callMoxenTool(
           project: { id: ensured.project.id, title: ensured.project.title, workspaceRoot: ensured.project.workspaceRoot, createdAt: ensured.project.createdAt },
           workspaceRoot: ensured.workspace.workspaceRoot,
           created: ensured.created,
+          ...("revived" in ensured && ensured.revived === true ? { revived: true } : {}),
           ...(dryRun ? { dryRun: true } : {}),
           note: dryRun
-            ? "Dry run: nothing was written. Call project_register again without dryRun to register the folder."
-            : ensured.created
-              ? "Registered: threads for this folder now live under this project, which appears in the user's project list."
-              : "This folder already has a project; nothing was changed.",
+            ? ensured.revived === true
+              ? "Dry run: nothing was written. Registering this folder would revive its original project with the id shown, and its threads with it."
+              : "Dry run: nothing was written. Call project_register again without dryRun to register the folder."
+            : ensured.revived === true
+              ? "Revived: the folder's removed project came back with its id, its threads and its per-project settings."
+              : ensured.created
+                ? "Registered: threads for this folder now live under this project, which appears in the user's project list."
+                : "This folder already has a project; nothing was changed.",
         });
       }
       case "memory_search": {
@@ -1133,17 +1143,81 @@ export async function callMoxenTool(
 const SEARCH_SNIPPET_CHARS = 120;
 
 /**
- * A folder argument for the project tools: non-empty and absolute. The
- * folder lives on the machine Moxen runs on, where the server resolves it —
- * a relative path would land against the server's own working directory,
- * not the caller's, so it is refused instead of meaning the wrong folder.
+ * A folder argument for the project tools: non-empty and fully qualified,
+ * and preserved exactly — a folder's name may end in a space, which a trim
+ * would silently turn into a different folder. The folder lives on the
+ * machine Moxen runs on, where the server resolves it — a relative path
+ * would land against the server's own working directory, not the caller's,
+ * so it is refused instead of meaning the wrong folder.
  */
 function argFolder(args: Record<string, unknown>, key = "cwd"): string {
-  const value = argString(args, key, true)!;
-  if (!path.isAbsolute(value)) {
-    throw new CliError("INVALID_TOOL_INPUT", `${key} must be an absolute path on the machine Moxen runs on; it is not resolved against your working directory.`);
+  const value = args[key];
+  if (typeof value !== "string" || value === "") throw new CliError("INVALID_TOOL_INPUT", `${key} must be a non-empty string.`);
+  if (!fullyQualifiedFolder(value)) {
+    throw new CliError("INVALID_TOOL_INPUT", `${key} must be a fully qualified absolute path on the machine Moxen runs on (a Windows one names its volume, like C:\\folder): it is not resolved against your working directory.`);
   }
   return value;
+}
+
+/**
+ * Absolute for the server's own platform, and on Windows fully qualified:
+ * `path.isAbsolute("/folder")` is true there without a volume, and paths
+ * like `C:folder` are drive-relative — neither names a folder safely, so
+ * only a drive path (`C:\` or `C:/`) or a UNC one (`\\server\share`) passes.
+ */
+export function fullyQualifiedFolder(value: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform === "win32") return /^([A-Za-z]:[\\/]|\\\\)/.test(value);
+  return value.startsWith("/");
+}
+
+/**
+ * Who may write the projects registry: the orchestrator's own thread, live.
+ * The flags a session was started with are advice, not authority — a thread
+ * that became a research lead mid-life can call a tool it was never shown,
+ * and some providers run MCP tools against a registry write without asking
+ * the user anything (OpenCode's default allows MCP tools). So the write
+ * answers for the thread as the server sees it now: a delegated task and an
+ * active research run (its lead and every role) refuse, and outside a dry
+ * run the thread must be running in Auto or Full access — Moxen shows no
+ * approval of its own for an MCP tool, so the user's say is the mode they
+ * run the thread in (or registering the folder themselves). A thread whose
+ * mode cannot be read refuses rather than answering as anyone.
+ */
+async function registryWriteBarred(
+  api: ClientApi,
+  parentThreadId: string,
+  options: { readonly delegated?: boolean },
+  dryRun: boolean,
+): Promise<ToolResult | null> {
+  if (options.delegated === true) {
+    return { text: "project_register is not available in a delegated task: registration is the orchestrator's call. Say what needs registering in your report.", isError: true };
+  }
+  const run = await api.query({ type: "research.run", threadId: parentThreadId }).catch(() => null);
+  if (run !== null && (isResearchRunActive(run) || run.leadThreadId !== parentThreadId)) {
+    return {
+      text:
+        run.leadThreadId === parentThreadId
+          ? "project_register is not available while a research run is active: the lead registers nothing mid-run. Name the folder and what it is for in the run's report; the user can also register it with `moxen projects ensure --cwd <folder>`."
+          : "project_register is not available in a research run: its roles register nothing. Name the folder and what it is for in your report.",
+      isError: true,
+    };
+  }
+  if (dryRun) return null;
+  const inspected = await api.query({ type: "thread.inspect", threadId: parentThreadId }).catch(() => null);
+  const mode = inspected?.thread.runtimeMode;
+  if (mode === "auto" || mode === "full-access") return null;
+  if (mode == null) {
+    return {
+      text: "project_register needs the thread's permission mode, and it could not be read here, so the registration is refused rather than answered as anyone. The user can register the folder themselves with `moxen projects ensure --cwd <folder>`; dryRun: true still previews what would be registered.",
+      isError: true,
+    };
+  }
+  return {
+    text:
+      `project_register writes the projects registry with no approval of its own, so the thread must be running in Auto or Full access: this one runs in ${mode}, ` +
+      "where a provider that never asks (OpenCode allows MCP tools by default) would register silently. The user can register the folder themselves (`moxen projects ensure --cwd <folder>`), switch the thread's permission mode, or ask with dryRun: true to preview first.",
+    isError: true,
+  };
 }
 
 /**

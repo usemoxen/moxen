@@ -1229,10 +1229,23 @@ shows in the user's project list; the tool says whether it created the
 project or the folder already had one.
 
 The two reads come with the `moxen` server for every session, delegated
-tasks included. Registering belongs to the orchestrator's own thread: a
-delegated task (and a provider with orchestration switched off, which
-shares the same gate) is offered none of the register and is refused when
-it calls anyway, pointed at its report.
+tasks included. Registering belongs to the orchestrator's own thread, and
+the write answers for the thread as the server sees it live, never for the
+flags its session was started with: a delegated task (and a provider with
+orchestration switched off, which shares the same gate), a research run
+(its lead and every role), is offered none of the register and is refused
+when it calls anyway, pointed at its report. A real registration — not a
+`dryRun` — also needs the calling thread to be running in Auto or Full
+access: Moxen shows no approval of its own for an MCP tool, and some
+providers run MCP tools without asking anything (OpenCode allows them by
+default), so a lower mode could register silently. Approval-required and
+auto-accept-edits threads, and any thread whose mode cannot be read, are
+refused with the mode named; the refusal says the user can register the
+folder themselves or switch the thread's mode, and `dryRun` stays
+available to preview. A removed folder's project, when it is registered
+back, is revived — its original id and its threads return — and both the
+result and a dry run say so by id and title instead of reporting a new
+creation.
 
 ### Continuing in a new thread (palette / `threads continue`)
 

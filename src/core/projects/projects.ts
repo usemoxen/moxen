@@ -47,23 +47,30 @@ export function registryFile(root: string): string {
  * stripped, case-insensitive on win32 only. The one path-equality rule for
  * workspace roots; `./workspace.ts` resolves them.
  */
+/**
+ * Trailing separators off a resolved root — except a Windows volume root
+ * keeps its own: stripping `C:\` to `C:` would name the drive's *current
+ * folder*, not the drive, so two different roots would compare equal and a
+ * registered drive would key under the wrong path. Pure, so every platform
+ * tests the same strings.
+ */
+export function stripTrailingSeparators(resolved: string): string {
+  while (resolved.length > 1 && (resolved.endsWith(path.sep) || resolved.endsWith("/")) && !/^[A-Za-z]:[\\/]$/.test(resolved)) {
+    resolved = resolved.slice(0, -1);
+  }
+  return resolved;
+}
+
 export function workspaceRootsEqual(left: string, right: string): boolean {
   const normalize = (value: string): string => {
-    let resolved = path.normalize(path.resolve(value));
-    while (resolved.length > 1 && (resolved.endsWith(path.sep) || resolved.endsWith("/"))) {
-      resolved = resolved.slice(0, -1);
-    }
+    const resolved = stripTrailingSeparators(path.normalize(path.resolve(value)));
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
   };
   return normalize(left) === normalize(right);
 }
 
 function normalizeRoot(root: string): string {
-  let resolved = path.normalize(path.resolve(root));
-  while (resolved.length > 1 && (resolved.endsWith(path.sep) || resolved.endsWith("/"))) {
-    resolved = resolved.slice(0, -1);
-  }
-  return resolved;
+  return stripTrailingSeparators(path.normalize(path.resolve(root)));
 }
 
 async function loadAll(root: string): Promise<StoredProject[]> {
@@ -116,6 +123,43 @@ export async function resolveStoredProject(root: string, workspaceRoot: string):
   return projects.find((project) => workspaceRootsEqual(project.workspaceRoot, workspaceRoot)) ?? null;
 }
 
+/**
+ * First project keyed by the workspace root, removed ones included: a
+ * revival keeps the removed row's id, so a preview that means to promise the
+ * registration must name it (and not a synthesized one).
+ */
+export async function findStoredProject(root: string, workspaceRoot: string): Promise<StoredProject | null> {
+  const projects = await loadAll(root);
+  return projects.find((project) => workspaceRootsEqual(project.workspaceRoot, workspaceRoot)) ?? null;
+}
+
+/**
+ * Registry mutations serialize on one chain: a mutation is a read, a
+ * transform and a whole-file rename, so two interleaved ones could each
+ * acknowledge their write yet keep only the last. This makes mutations safe
+ * within one process — the server, which is where every registry write goes
+ * (clients drive it over `ClientApi`). Across processes the guarantee stays
+ * what it was: the write itself is an atomic rename, so a reader never sees a
+ * torn file, but two processes writing at once still keep only the last
+ * write.
+ */
+let registryWriteQueue: Promise<unknown> = Promise.resolve();
+
+async function serializeRegistryWrite<T>(work: () => Promise<T>): Promise<T> {
+  const prior = registryWriteQueue;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  registryWriteQueue = gate;
+  await prior;
+  try {
+    return await work();
+  } finally {
+    release();
+  }
+}
+
 export interface EnsureProjectInput {
   /** Explicit id (imports/tests); generated when omitted. */
   readonly id?: string;
@@ -131,6 +175,11 @@ export interface EnsureProjectInput {
 export interface EnsureProjectResult {
   readonly project: StoredProject;
   readonly created: boolean;
+  /**
+   * A removed project came back with its id (and the threads keyed under
+   * it); never with `created`, which says a new row was written.
+   */
+  readonly revived?: true;
   /**
    * Synthesized `project.create` command (envelope compat; applied
    * synchronously, so `dispatch` stays null). Null when the project
@@ -172,6 +221,10 @@ export function projectForWorkspace<P extends ProjectEnvelope>(projects: readonl
 }
 
 export async function ensureStoredProject(root: string, input: EnsureProjectInput): Promise<EnsureProjectResult> {
+  return await serializeRegistryWrite(() => ensureStoredProjectLocked(root, input));
+}
+
+async function ensureStoredProjectLocked(root: string, input: EnsureProjectInput): Promise<EnsureProjectResult> {
   const normalized = normalizeRoot(input.workspaceRoot);
   const existing = await resolveStoredProject(root, normalized);
   if (existing) return { project: existing, created: false, command: null };
@@ -197,7 +250,7 @@ export async function ensureStoredProject(root: string, input: EnsureProjectInpu
       root,
       all.map((entry) => (entry.id === deleted.id ? revived : entry)),
     );
-    return { project: revived, created: false, command: null };
+    return { project: revived, created: false, revived: true, command: null };
   }
   const now = input.now ?? (() => new Date().toISOString());
   const createdAt = now();
@@ -231,6 +284,15 @@ export async function renameStoredProject(
   title: string,
   now: () => string = () => new Date().toISOString(),
 ): Promise<StoredProject> {
+  return await serializeRegistryWrite(() => renameStoredProjectLocked(root, projectId, title, now));
+}
+
+async function renameStoredProjectLocked(
+  root: string,
+  projectId: string,
+  title: string,
+  now: () => string,
+): Promise<StoredProject> {
   const normalized = normalizeProjectTitle(title);
   if (!normalized) {
     throw new CliError("INVALID_PROJECT", "A project title cannot be empty.", { exitCode: 2 });
@@ -261,16 +323,18 @@ export async function rewriteStoredProjects(
   root: string,
   transform: (project: StoredProject) => StoredProject | null,
 ): Promise<number> {
-  const all = await loadAll(root);
-  let changed = 0;
-  const next = all.map((entry) => {
-    const updated = transform(entry);
-    if (updated === null) return entry;
-    changed += 1;
-    return updated;
+  return await serializeRegistryWrite(async () => {
+    const all = await loadAll(root);
+    let changed = 0;
+    const next = all.map((entry) => {
+      const updated = transform(entry);
+      if (updated === null) return entry;
+      changed += 1;
+      return updated;
+    });
+    if (changed > 0) await saveAll(root, next);
+    return changed;
   });
-  if (changed > 0) await saveAll(root, next);
-  return changed;
 }
 
 /** Removes a project: a soft delete, so its threads stay readable. */
@@ -278,6 +342,14 @@ export async function removeStoredProject(
   root: string,
   projectId: string,
   now: () => string = () => new Date().toISOString(),
+): Promise<StoredProject> {
+  return await serializeRegistryWrite(() => removeStoredProjectLocked(root, projectId, now));
+}
+
+async function removeStoredProjectLocked(
+  root: string,
+  projectId: string,
+  now: () => string,
 ): Promise<StoredProject> {
   const all = await loadAll(root);
   const at = all.findIndex((entry) => entry.id === projectId);
