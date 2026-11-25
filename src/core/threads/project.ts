@@ -26,6 +26,7 @@ import type {
   ActivityEnvelope,
   TurnInteractionMode,
 } from "../types.js";
+import { maintenanceTurnIds } from "./maintenance.js";
 import { isKnownTurnStatus } from "./problems.js";
 import type {
   StoredActivity,
@@ -175,6 +176,8 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     }));
   const turnModes: Record<string, TurnInteractionMode> = {};
   const turnUsagePauses = Object.fromEntries(turns.flatMap((turn) => turn.usagePause ? [[turn.id, turn.usagePause]] : []));
+  // Maintenance turns are not work (see `maintenanceTurnIds`).
+  const maintenanceTurns = maintenanceTurnIds(turns, input.messages ?? []);
   for (const turn of turns) {
     // A queued message that follows the thread takes its mode when it starts (MXN-223): until then it has none to show.
     if (turn.interactionMode === "default" || (turn.status === "queued" && turn.interactionModeExplicit !== true)) continue;
@@ -215,6 +218,7 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     ),
     // Only when a turn ran outside Build, so older envelopes stay byte-for-byte as they were.
     ...(Object.keys(turnModes).length > 0 ? { turnInteractionModes: turnModes } : {}),
+    ...(maintenanceTurns.length > 0 ? { maintenanceTurns } : {}),
     ...(Object.keys(turnUsagePauses).length > 0 ? { turnUsagePauses } : {}),
     ...(thread.usagePause && (thread.usagePause.forced || thread.usagePause.phase !== "resuming") ? { protection: {
       protected: true as const, forced: thread.usagePause.forced === true,

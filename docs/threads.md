@@ -68,7 +68,13 @@ first — the new message rides along in the older turn when model and mode
 match, or runs next once it settles.
 
 A due held turn starts after the running turn settles, oldest first, with
-later held messages batched into it as one turn. It never starts while the
+later held messages batched into it as one turn. A `/compact` turn is never
+batched, in either direction: folded into an ordinary follow-up it would send
+the command as text no provider runs, and would carry the maintenance marker
+over a turn that did real work. It is also a batching boundary — only messages
+queued on the same side of it travel together, so nothing queued after a
+`/compact` overtakes it — and it keeps its own turn. It never starts
+while the
 limit still stands, while usage protection holds the thread, or while the
 thread is snoozed or settled: those wait for the reset, the release, or the
 thread becoming active again. An automatic continue whose time came while
@@ -87,7 +93,10 @@ stopped for a compaction whose follow-up could not start, and a hand-off you
 queued yourself that wants a model summary completes on its stored summary
 rather than waiting on a summary the gate would hold. The
 entry shows why it waits, and runs with your next message or when you turn the
-setting on. Delegating a new task to Antigravity is refused outright while off
+setting on. Recovering a turn whose process died interrupts it either way, but
+the follow-up it had queued is never dispatched past the gate: it goes back to
+queued for the admission path, which holds it like any other automatic prompt.
+Delegating a new task to Antigravity is refused outright while off
 (`ANTIGRAVITY_DELEGATION_OFF`), before a thread or worktree is created; an
 agent's `task_send`/wake and `thread_continue` onto Antigravity are refused the
 same way. What you type, queue, schedule or click always runs, and a turn the
@@ -944,7 +953,16 @@ is told again, by a task notification, when the task next has nothing left to
 run: the notification is not one-shot, and covers a queued message's turn too.
 `task_status` reports `running` from the moment of the wake.
 
-A turn-end notification always fires on time and nothing can hold it. When the
+A turn-end notification always fires on time and nothing can hold it. A bare
+`/compact` turn is maintenance, not a report: the notification reads the task's
+last turn that did real work, and a batch that comes due while the task is
+still compacting waits for it and then goes out once, instead of being
+dropped. The wait is durable: the entry stays in the batch file, so a restart
+reconciles the task's turn first (a compaction the dead process left `running`
+is interrupted like any orphan), then reads what it has left to run and sends
+once. Waking a batch that was already delivered sends nothing: a run recovered
+while its task's notice is held wakes that entry instead of filing a second
+one, and a run covered by no entry files its own. When the
 task's turn ends with background work still running, the notification names
 that work and for how long (for example "turn ended, 1 background process
 still running: bun run check, 4m"), and reads as not finished: the parent must
@@ -1403,8 +1421,10 @@ is read as it arrives) is over the line that would compact the thread once the t
 ended (`auto`, a delegated task, or past the hard line on `ask`), Moxen stops the
 turn, compacts, and sends a continue so the task goes on from where it was
 (`compactMidTurn` in `core/threads/operations.ts`). A compaction that left the thread
-past its line is not repeated until it has dropped below it once. `off`: nobody
-compacts. With Claude Code compacting by itself, a model's own Compact at size
+past its line is not repeated until it has dropped below it once. A hand-off
+document skips a compaction turn when it names the request the thread began
+with and last received, and when it decides whether the work may already be
+done. `off`: nobody compacts. With Claude Code compacting by itself, a model's own Compact at size
 becomes that model's auto-compact window (100K to 1M) when its session starts;
 on the Moxen Harness a profile's own compaction still wins for its models. The Moxen Harness compacts inside its own loop: its own
 compaction is `auto` (so a global `provider` means `auto` there). On `ask` it

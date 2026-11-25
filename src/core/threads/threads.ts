@@ -12,8 +12,10 @@ import { readFile } from "node:fs/promises";
 
 import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
+import { isCompactCommand } from "../providers/spi.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
+import { isMaintenanceTurn } from "./maintenance.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
@@ -664,6 +666,7 @@ export async function sendTurn(
         : delivery === "restart" ? "restarted"
         : "started",
       messageId: store.newId(),
+      ...(isCompactCommand(prompt) ? { maintenance: true as const } : {}),
       runtimeMode,
       interactionMode,
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
@@ -1254,12 +1257,20 @@ function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): 
  * carries its automatic wait: that queue holds no conditions of its own, so
  * the folded messages ride the same reset. Any other queue-carrying turn (a
  * wake-up, a handoff, a held entry) keeps its own turn, as before.
+ *
+ * A maintenance turn (`/compact`) never folds either way: folded into an
+ * ordinary follow-up it keeps the marker and hides the real reply, and an
+ * ordinary message folded into it would send `/compact` as text no provider
+ * runs as a compaction. It is also a batching boundary: only messages queued
+ * on the same side of it travel with `next`, so nothing queued after a
+ * `/compact` overtakes it. Each keeps its own turn.
  */
 async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode): Promise<void> {
   if (next.queue && next.scheduleReason !== "usage-reset") return;
-  const batch = turns.filter(
+  const nextAt = turns.findIndex((turn) => turn.id === next.id);
+  const onwards = nextAt < 0 ? [] : turns.slice(nextAt + 1);
+  const candidates = onwards.filter(
     (turn) =>
-      turn.id !== next.id &&
       turn.status === "queued" &&
       !turn.queue &&
       (turn.scheduleReason !== "usage-hold" || next.scheduleReason === "usage-reset" || next.scheduleReason === "usage-hold") &&
@@ -1268,9 +1279,15 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
       waitingInteractionMode(turn, threadMode) === waitingInteractionMode(next, threadMode) &&
       sameModel(turn, next),
   );
+  if (candidates.length === 0) return;
+  const messages = await store.readMessages(threadId);
+  if (isMaintenanceTurn(next, messages)) return;
+  // Everything after the first queued maintenance turn is on its far side.
+  const boundary = onwards.findIndex((turn) => turn.status === "queued" && isMaintenanceTurn(turn, messages));
+  const side = new Set((boundary < 0 ? onwards : onwards.slice(0, boundary)).map((turn) => turn.id));
+  const batch = candidates.filter((turn) => side.has(turn.id) && !isMaintenanceTurn(turn, messages));
   if (batch.length === 0) return;
   const folded = new Set(batch.map((turn) => turn.id));
-  const messages = await store.readMessages(threadId);
   await store.rewriteLedger(threadId, "messages", messages.map((message) => (folded.has(message.turnId) ? { ...message, turnId: next.id } : message)));
   await store.rewriteLedger(threadId, "turns", turns.filter((turn) => !folded.has(turn.id)));
   await store.appendLedger(threadId, "activity", {

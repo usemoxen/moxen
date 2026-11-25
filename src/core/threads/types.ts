@@ -225,6 +225,13 @@ export interface StoredTurn {
   readonly threadId: string;
   readonly status: TurnStatus;
   readonly delivery: TurnDelivery;
+  /**
+   * A Moxen maintenance turn (a bare `/compact`), not work the user asked
+   * for: its reply is the provider's compaction output, so task reports and
+   * hand-off documents read the last turn that did real work instead. Turns
+   * written before this field existed are recognised by their prompt.
+   */
+  readonly maintenance?: true;
   readonly messageId: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: InteractionMode;
