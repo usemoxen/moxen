@@ -13,7 +13,7 @@ import { readFile } from "node:fs/promises";
 import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
-import { hasSnoozeConditions, providerExhausted, type QueueCondition } from "./queue.js";
+import { hasSnoozeConditions, providerExhausted, snoozeActive, type QueueCondition } from "./queue.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
@@ -56,16 +56,13 @@ function requireThreadId(threadId: string): string {
 }
 
 /**
- * A snooze ends in one of two ways: the clock runs past `snoozedUntil`, or
- * `wakeDueSnoozes` sees the conditions it waits for met and clears the mark.
- * Either way the thread reads snoozed until then.
+ * A snooze ends in one of two ways: the clock runs past `snoozedUntil`, or a
+ * pass (`wakeDueSnoozes`) sees the conditions it waits for met and clears the
+ * mark. Either way the thread reads snoozed until then.
  */
 function isSnoozed(thread: StoredThread, now: number): boolean {
   if (thread.settledAt != null) return false;
-  if (hasSnoozeConditions(thread)) return true;
-  if (thread.snoozedUntil === null) return false;
-  const parsed = Date.parse(thread.snoozedUntil);
-  return Number.isFinite(parsed) && parsed > now;
+  return snoozeActive(thread, now);
 }
 
 /** Identical rule to the CLI `threadStatus`: settled wins, then snoozed. */
@@ -1812,7 +1809,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
       // forever. Settling ends it. An automatic hold stays: its recovery entry
       // is managed through the Work queue, and automatic input never unsettles
       // a settled thread while held.
-      const next: StoredThread = { ...thread, settledAt: now, settledOverride: null, snoozedUntil: null, snoozeConditions: null, updatedAt: now, ...(thread.usagePause?.forced ? { usagePause: null } : {}) };
+      const next: StoredThread = { ...thread, settledAt: now, settledOverride: null, snoozedUntil: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now, ...(thread.usagePause?.forced ? { usagePause: null } : {}) };
       await store.writeThreadRecord(next);
       store.emit(thread.id, "settled");
       if (thread.id === threadId) result = next;
@@ -1843,8 +1840,8 @@ export async function unsettleThread(store: ThreadStore, rawThreadId: string): P
 
 /**
  * Snooze a thread until a time, or until conditions it waits for are met
- * (`task_snooze`): without `until` the snooze ends only when `wakeDueSnoozes`
- * clears it. Returns the requested thread's record.
+ * (`task_snooze`): without `until` the snooze ends only when a wake pass
+ * (`applySnoozeCheck`) clears it. Returns the requested thread's record.
  */
 export async function snoozeThread(
   store: ThreadStore,
@@ -1861,7 +1858,9 @@ export async function snoozeThread(
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotArchived(thread, "be snoozed");
-    const next: StoredThread = { ...thread, snoozedUntil, snoozedAt: now, snoozeConditions: conditions.length === 0 ? null : conditions, updatedAt: now };
+    // A snooze replaces the one before it whole: a latch its conditions earned
+    // says nothing about these.
+    const next: StoredThread = { ...thread, snoozedUntil, snoozedAt: now, snoozeConditions: conditions.length === 0 ? null : conditions, snoozeLatched: null, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, "snoozed");
     return next;
@@ -1874,9 +1873,60 @@ export async function unsnoozeThread(store: ThreadStore, rawThreadId: string): P
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotArchived(thread, "be unsnoozed");
-    const next: StoredThread = { ...thread, snoozedUntil: null, snoozeConditions: null, updatedAt: now };
+    const next: StoredThread = { ...thread, snoozedUntil: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, "unsnoozed");
+    return next;
+  });
+}
+
+/**
+ * Identifies one snooze, so a pass that judged it can tell it from a newer one
+ * set since: a wake that lands after a second `task_snooze` must not clear the
+ * snooze it never looked at, nor write back what it learned about the old one.
+ */
+export function snoozeKey(thread: StoredThread): string {
+  return JSON.stringify([thread.snoozedAt ?? null, thread.snoozedUntil ?? null, thread.snoozeConditions ?? null]);
+}
+
+/** What one wake pass learned about a thread's snooze. */
+export interface SnoozeCheck {
+  /** `snoozeKey` of the snooze the pass judged. */
+  readonly key: string;
+  /** Its conditions, with whatever the pass resolved into them (a reset time). */
+  readonly conditions: readonly QueueCondition[];
+  /** The `provider … after` events it saw, latched like the queue's own. */
+  readonly latched: readonly number[];
+  /** The time passed and every condition is met: clear the snooze. */
+  readonly due: boolean;
+}
+
+/**
+ * Record a wake pass's verdict, under the thread lock and only for the snooze
+ * that pass judged (`snoozeKey`): a snooze set in between decides its own end,
+ * and the stale verdict is dropped. Due clears the whole mark (the thread is
+ * active again, no turn started); not due keeps what the pass learned — the
+ * reset time it resolved, the provider event it saw — so the next pass does not
+ * start over, the same way queue admission stores a turn's latched conditions.
+ * Returns the record it wrote, or null when a newer snooze took its place.
+ */
+export async function applySnoozeCheck(store: ThreadStore, rawThreadId: string, check: SnoozeCheck): Promise<StoredThread | null> {
+  const threadId = requireThreadId(rawThreadId);
+  return await store.withThreadLock(threadId, async () => {
+    const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
+    if (snoozeKey(thread) !== check.key) return null;
+    const now = store.nowIso();
+    if (check.due) {
+      const next: StoredThread = { ...thread, snoozedUntil: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now };
+      await store.writeThreadRecord(next);
+      store.emit(threadId, "unsnoozed");
+      return next;
+    }
+    const unchanged = JSON.stringify(thread.snoozeConditions ?? null) === JSON.stringify(check.conditions)
+      && JSON.stringify(thread.snoozeLatched ?? null) === JSON.stringify(check.latched.length === 0 ? null : check.latched);
+    if (unchanged) return null;
+    const next: StoredThread = { ...thread, snoozeConditions: check.conditions, snoozeLatched: check.latched.length === 0 ? null : check.latched, updatedAt: now };
+    await store.writeThreadRecord(next);
     return next;
   });
 }

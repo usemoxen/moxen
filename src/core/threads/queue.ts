@@ -179,11 +179,14 @@ export function providerExhausted(provider: string, now = Date.now(), model?: st
 }
 
 /**
- * Mirrors `isSnoozed` in threads.ts (settled wins there; settled is checked
- * beside this here): a past-due snooze reads as active, not held, and a
- * snooze that waits on conditions holds until one clears it (`wakeDueSnoozes`).
+ * Whether a thread is snoozed right now: its `snoozedUntil` still lies ahead,
+ * or its snooze waits on conditions (`task_snooze`) a pass has yet to clear.
+ * The one stored-thread rule, read by the store status, queue admission, usage
+ * protection and the wake pass; `isSnoozedThread` in `views.ts` is the same
+ * rule over a client's envelope. Settled is checked beside it, and settled
+ * wins there.
  */
-function snoozeActive(thread: StoredThread, now: number): boolean {
+export function snoozeActive(thread: StoredThread, now: number = Date.now()): boolean {
   if (hasSnoozeConditions(thread)) return true;
   if (thread.snoozedUntil === null) return false;
   const parsed = Date.parse(thread.snoozedUntil);
@@ -333,7 +336,7 @@ export interface ConditionsPass {
   readonly rows: readonly QueueRow[];
   readonly now: number;
   /** Indices of `provider … after` conditions whose event was already seen. */
-  readonly latched?: readonly number[] | undefined;
+  readonly latched?: readonly number[] | null | undefined;
 }
 
 /**
@@ -378,6 +381,11 @@ export function conditionBlockers(pass: ConditionsPass): { blocked: string[]; la
       if (condition.mode === "after" && (met || happened) && !latched.includes(index)) latched.push(index);
       if (!(condition.mode === "after" ? latched.includes(index) : met)) blocked.push(`${condition.mode} ${condition.provider} is ${condition.state}`);
     } else {
+      // A dependency condition a client wrote without the thread (or, for an
+      // entry, without the turn) can never be judged: it is skipped rather than
+      // waited on forever, which would wedge its queue entry and its snooze.
+      const named = condition.type === "entry" ? condition.threadId && condition.turnId : condition.threadId;
+      if (!named) continue;
       const dependency = rows.find((r) => r.thread.id === condition.threadId);
       if (!dependency) blocked.push("Dependency is unavailable");
       else if (condition.type === "entry" ? entryPending(rows, condition.threadId, condition.turnId) : dependency.turns.some((t) => t.status === "running" || t.status === "queued")) blocked.push(`Waiting for ${dependency.thread.title}`);

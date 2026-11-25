@@ -19,7 +19,7 @@ import { untrustedContext } from "../../core/untrusted.js";
 import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type HarnessProviderConfig, type WebConfig } from "../../core/types.js";
-import type { DelegatedTaskStatus } from "../../core/threads/views.js";
+import { isSnoozedThread, type DelegatedTaskStatus } from "../../core/threads/views.js";
 import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
@@ -1058,7 +1058,12 @@ export async function callMoxenTool(
           status: unsettled.status,
           workStatus: unsettled.workStatus,
           startedTurn: unsettled.startedTurn,
-          next: "The task is active again and no turn was started. Send it work with task_send, queue it with message_queue, or settle it again when the new work is done.",
+          ...(unsettled.worktreeRemoved ? { worktreeRemoved: true } : {}),
+          // A task whose checkout was cleared at settle cannot take a message
+          // (task_send refuses it), so the advice names the way that works.
+          next: unsettled.worktreeRemoved
+            ? "The task is active again but its worktree checkout was removed when it settled, so a message cannot start work in it: re-delegate the follow-up as a new task (task_send fails with TASK_WORKTREE_REMOVED). Its branch is kept."
+            : "The task is active again and no turn was started. Send it work with task_send, queue it with message_queue, or settle it again when the new work is done.",
         });
       }
       case "task_snooze": {
@@ -1638,11 +1643,26 @@ async function statusTool(
     described = await api.query({ type: "thread.task.status", parentThreadId, taskId });
   }
   const finished = TERMINAL.has(described.task.status);
+  // The thread's lifecycle beside the task's work status: a snoozed task can
+  // be finished (its last turn ended) and out of the active set at once, and
+  // the two say different things to the caller.
+  const snoozed = isSnoozedThread(described.child);
   return {
     taskId,
     status: described.task.status,
     finished,
     ...(described.child.worktreePath ? { worktree: described.child.worktreePath, branch: described.child.branch } : {}),
+    ...(snoozed
+      ? {
+        snoozed: {
+          until: described.child.snoozedUntil ?? null,
+          conditions: described.child.snoozeConditions ?? [],
+          wakes: described.child.snoozedUntil
+            ? `at ${described.child.snoozedUntil}${described.child.snoozeConditions?.length ? ", once its conditions are met too" : ""}`
+            : "when its conditions are met",
+        },
+      }
+      : {}),
     ...(finished ? { report: described.task.summary } : { next: "Still running. Do not call task_status in a loop: a task notification arrives when it settles." }),
     background: {
       unknown: described.background.unknown,

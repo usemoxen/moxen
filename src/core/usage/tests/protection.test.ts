@@ -979,6 +979,76 @@ describe("usage protection", () => {
     expect(w.sent).toHaveLength(2);
   });
 
+  it("keeps a deferred recovery pending while its thread is snoozed, and treats a lapsed snooze as no hold", async () => {
+    const w = await world();
+    const now = Date.now();
+    const reset = new Date(now + 3_600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: reset }]);
+    // Two threads the server died on between persisting recovery admission and
+    // recording its turn: one snoozed past the tick, one whose snooze lapsed.
+    const held = await w.make("snoozed recovery");
+    const lapsed = await w.make("lapsed snooze");
+    for (const id of [held, lapsed]) {
+      const turn = openTurn(await w.store.readTurns(id))!;
+      await completeTurn(w.store, id, turn.id, { text: "idle" });
+    }
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(held))!,
+      snoozedUntil: new Date(now + 600_000).toISOString(), snoozedAt: new Date(now).toISOString(),
+      usagePause: { provider: "codex", phase: "resuming", resetsAt: null, order: 1, handoff: false, turnId: "recovery-admission-lost" },
+    });
+    const last = (await w.store.readTurns(lapsed)).at(-1)!;
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(lapsed))!,
+      snoozedUntil: new Date(now - 1000).toISOString(), snoozedAt: new Date(now - 3_600_000).toISOString(),
+      usagePause: { provider: "codex", phase: "resuming", resetsAt: null, order: 2, handoff: false, turnId: last.id },
+    });
+    try {
+      await w.guard.tick(now);
+      // The paused hold is the only record of that recovery: a snoozed thread keeps it.
+      expect((await w.store.readThreadRecord(held))?.usagePause).toMatchObject({ phase: "resuming", turnId: "recovery-admission-lost" });
+      // A snooze whose time has passed is no hold at all: the recovery restarts.
+      await expect.poll(async () => w.sent, { timeout: 10_000 }).toEqual([lapsed]);
+      expect((await w.store.readThreadRecord(lapsed))?.usagePause).toMatchObject({ phase: "resuming" });
+    } finally { w.guard.close(); }
+  });
+
+  it("holds a pending recovery only while its snooze is live, so a lapsed one still starts it", async () => {
+    const w = await world();
+    const now = Date.now();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(now + 3_600_000).toISOString() }]);
+    const snoozed = await w.make("snoozed hold");
+    const lapsed = await w.make("lapsed hold");
+    for (const id of [snoozed, lapsed]) {
+      await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    }
+    const hold = async (id: string, snoozedUntil: string, order: number) => {
+      await w.store.writeThreadRecord({
+        ...(await w.store.readThreadRecord(id))!,
+        snoozedAt: new Date(now - 60_000).toISOString(),
+        snoozedUntil,
+        usagePause: { provider: "codex", phase: "pending", resetsAt: null, order, handoff: false },
+      });
+    };
+    // The lapsed thread sorts first, so a pass that wrongly holds it would also
+    // keep the provider busy and hide the mistake.
+    await hold(snoozed, new Date(now + 600_000).toISOString(), 2);
+    await hold(lapsed, new Date(now - 1_000).toISOString(), 1);
+    try {
+      await w.guard.tick(now);
+      // A live snooze holds its recovery: no wrap-up is started in it.
+      expect((await w.store.readThreadRecord(snoozed))?.usagePause).toMatchObject({ phase: "pending" });
+      expect(w.sent).not.toContain(snoozed);
+      // A snooze whose time has passed is no hold at all, so the pending
+      // recovery starts exactly as it would on an unsnoozed thread.
+      await expect.poll(async () => (await w.store.readThreadRecord(lapsed))?.usagePause?.phase, { timeout: 10_000 }).toBe("wrapping");
+      // Its wrap-up turn is the one it recorded, and the prompt is the wrap-up.
+      const started = (await w.store.readThreadRecord(lapsed))!.usagePause!.turnId;
+      expect((await w.store.readTurns(lapsed)).some((turn) => turn.id === started)).toBe(true);
+      expect((await w.store.readMessages(lapsed)).some((message) => message.text === WRAP_UP_PROMPT)).toBe(true);
+    } finally { w.guard.close(); }
+  });
+
   it("fills a missing reset time from the recovery entry's window while no window runs hot", async () => {
     const w = await world();
     const id = await w.make("held");

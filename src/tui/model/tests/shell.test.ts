@@ -112,6 +112,14 @@ describe("threadStatus", () => {
     expect(threadStatus(blocked, Date.now())).toBe("settled");
   });
 
+  it("reads a snooze that waits on conditions as snoozed, with no time set", () => {
+    // A task snoozed until a condition (task_snooze) has no time to compare:
+    // the same rule the server reads decides what the sidebar shows.
+    const waiting = thread({ snoozedUntil: null, snoozeConditions: [{ type: "reset", provider: "codex", window: "session", resetsAt: null }] });
+    expect(threadStatus(waiting, Date.now())).toBe("snoozed");
+    expect(threadStatus(thread({ snoozedUntil: null, snoozeConditions: [] }), Date.now())).toBe("active");
+  });
+
   it("still reads a live session as running even on a settled thread", () => {
     const running = thread({
       settledOverride: "settled",

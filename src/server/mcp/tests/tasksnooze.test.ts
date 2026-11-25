@@ -172,6 +172,46 @@ describe("task_snooze", () => {
     }
   }, 30_000);
 
+  it("waits for both the time and the conditions when it is given both", async () => {
+    const t = await setup();
+    try {
+      const taskId = await t.delegate();
+      await waitForTurnDone(t.store, taskId);
+      const other = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Finished elsewhere", wait: true, threadEnvMode: "local" });
+      const ahead = new Date(Date.now() + 3_600_000).toISOString();
+      // The condition is met (the other thread has nothing left) and the clock is not.
+      const snoozed = await t.snooze(t.orchestrator, { taskId, at: ahead, conditions: [{ type: "thread", threadId: other.threadId }] });
+      expect(snoozed.json).toMatchObject({ status: "snoozed", snoozedUntil: ahead });
+      expect(snoozed.json!.wakes).toBe(`at ${ahead} at the earliest, once its conditions are met`);
+      expect(await wakeDueSnoozes(t.ctx)).toEqual([]);
+      expect(await statusOf(t.store, taskId)).toBe("snoozed");
+      // The clock is the only gate left, and a past-due time needs no pass.
+      await t.connection.dispatch({ type: "thread.snooze", threadId: taskId, snoozedUntil: new Date(Date.now() - 1000).toISOString() });
+      expect(await statusOf(t.store, taskId)).toBe("active");
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("shows the snooze in task_status beside the work status, and a condition snooze with no time", async () => {
+    const t = await setup();
+    try {
+      const taskId = await t.delegate();
+      await waitForTurnDone(t.store, taskId);
+      const other = await t.connection.dispatch({ type: "thread.handover", cwd: t.harness.work, prompt: "Busy", wait: false, threadEnvMode: "local" });
+      const conditions = [{ type: "thread", threadId: other.threadId }];
+      await t.snooze(t.orchestrator, { taskId, conditions });
+      const status = JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "task_status", { taskId, waitMs: 0 })).text) as Record<string, unknown>;
+      // The work status is the task's own last turn; the snooze is lifecycle, kept apart from it.
+      expect(status).toMatchObject({ taskId, status: "completed", finished: true, snoozed: { until: null, conditions } });
+      await t.connection.dispatch({ type: "thread.unsnooze", threadId: taskId });
+      const awake = JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "task_status", { taskId, waitMs: 0 })).text) as Record<string, unknown>;
+      expect(awake).not.toHaveProperty("snoozed");
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
   it("refuses a snooze with nothing to wait for, a malformed condition, a bad time, and a settled task", async () => {
     const t = await setup();
     try {
@@ -180,9 +220,11 @@ describe("task_snooze", () => {
       const nothing = await t.snooze(t.orchestrator, { taskId });
       expect(nothing.isError).toBe(true);
       expect(nothing.text).toContain("INVALID_TOOL_INPUT");
-      const badCondition = await t.snooze(t.orchestrator, { taskId, conditions: [{ type: "nonsense" }] });
-      expect(badCondition.isError).toBe(true);
-      expect(badCondition.text).toContain("INVALID_QUEUE");
+      for (const conditions of [[{ type: "nonsense" }], [{ type: "entry", threadId: taskId }]]) {
+        const badCondition = await t.snooze(t.orchestrator, { taskId, conditions });
+        expect(badCondition.isError).toBe(true);
+        expect(badCondition.text).toContain("INVALID_QUEUE");
+      }
       const badTime = await t.snooze(t.orchestrator, { taskId, at: "whenever" });
       expect(badTime.isError).toBe(true);
       expect(badTime.text).toContain("at takes an ISO date-time or HH:MM.");

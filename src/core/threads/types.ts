@@ -138,6 +138,13 @@ export interface StoredThread {
    * conditions.
    */
   readonly snoozeConditions?: readonly QueueCondition[] | null;
+  /**
+   * Indices of `snoozeConditions` whose `provider … after` event was already
+   * seen (the queue's `QueuePolicy.latched`, kept beside the conditions for the
+   * same reason): a provider that recovered since must not un-satisfy the wait
+   * that event released. Absent for a snooze that ends on the clock alone.
+   */
+  readonly snoozeLatched?: readonly number[] | null;
   /** Set by drivers; settle is blocked while either is true. */
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;

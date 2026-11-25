@@ -93,12 +93,14 @@ import {
   listThreads,
   liveTurn,
   openTurn,
+  applySnoozeCheck,
   promoteDueScheduledTurn,
   promoteQueuedTurn,
   redeliverOrphanedSteers,
   requeueUnownedTurn,
   sendTurn,
   settleThread,
+  snoozeKey,
   snoozeThread,
   threadFamily,
   trackContinuation,
@@ -608,10 +610,10 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
   if (at < 0) return false;
   // A snooze that waits on conditions ends here as soon as they are met: the
   // passage that would start this thread's queued work is the one that wakes
-  // it. A thread with nothing queued never reaches here — the server's sweep
-  // (`wakeDueSnoozes`) covers it.
-  const woken = await wakeDueSnooze(ctx, rows[at]!.thread, rows, now);
-  if (woken !== null) rows[at] = { ...rows[at]!, thread: woken };
+  // it. A thread with nothing queued never reaches here — the periodic watch
+  // (`SnoozeWatch`) covers it.
+  const wake = await wakeSnoozeNow(ctx, threadId, rows, now);
+  if (wake.thread) rows[at] = { ...rows[at]!, thread: wake.thread };
   const row = rows[at]!;
   // Provenance the admission pass reads: a turn whose origin lives only on
   // its message (pre-origin rows) is an automatic prompt when the ledger
@@ -716,7 +718,12 @@ async function queueRows(ctx: OperationContext): Promise<QueueRow[]> {
   return rows;
 }
 
-/** Candidate snapshots omit idle dependencies; load only those referenced by work. */
+/**
+ * Candidate snapshots omit idle dependencies; load only those referenced by
+ * work or by a snooze. One loader for both, so an `entry` condition follows
+ * every handoff its entry made whether a queued turn or a snooze is waiting on
+ * it.
+ */
 async function queueDependencies(ctx: OperationContext, rows: QueueRow[]): Promise<void> {
   const known = new Set(rows.map((row) => row.thread.id));
   const load = async (id: string): Promise<QueueRow | undefined> => {
@@ -727,21 +734,25 @@ async function queueDependencies(ctx: OperationContext, rows: QueueRow[]): Promi
     }
     return rows.find((row) => row.thread.id === id);
   };
-  for (const row of rows) for (const turn of row.turns) {
-    if (turn.status !== "queued") continue;
-    for (const condition of turn.queue?.conditions ?? []) {
-      if (condition.type !== "thread" && condition.type !== "entry") continue;
-      const dependency = await load(condition.threadId);
-      if (condition.type !== "entry") continue;
-      let target = dependency?.turns.find((turn) => turn.id === condition.turnId);
-      const seen = new Set<string>();
-      while (target?.handoff && !seen.has(target.id)) {
-        seen.add(target.id);
-        const { destinationThreadId, requestId } = target.handoff;
-        const destination = await load(destinationThreadId);
-        target = destination?.turns.find((turn) => turn.queue?.requestId === `handoff:${requestId}`);
-      }
+  const follow = async (condition: QueueCondition): Promise<void> => {
+    if (condition.type !== "thread" && condition.type !== "entry") return;
+    const dependency = await load(condition.threadId);
+    if (condition.type !== "entry") return;
+    let target = dependency?.turns.find((turn) => turn.id === condition.turnId);
+    const seen = new Set<string>();
+    while (target?.handoff && !seen.has(target.id)) {
+      seen.add(target.id);
+      const { destinationThreadId, requestId } = target.handoff;
+      const destination = await load(destinationThreadId);
+      target = destination?.turns.find((turn) => turn.queue?.requestId === `handoff:${requestId}`);
     }
+  };
+  for (const row of rows) {
+    for (const turn of row.turns) {
+      if (turn.status !== "queued") continue;
+      for (const condition of turn.queue?.conditions ?? []) await follow(condition);
+    }
+    for (const condition of row.thread.snoozeConditions ?? []) await follow(condition);
   }
 }
 
@@ -5697,6 +5708,11 @@ export interface UnsettledTask extends Omit<DescribedTask, "task"> {
   readonly workStatus: DelegatedTaskStatus;
   /** Always false: unsettling marks the thread active without starting a turn. */
   readonly startedTurn: false;
+  /**
+   * The task's worktree checkout is gone (cleared at settle): the task is
+   * active again, but a message cannot start work in a missing directory.
+   */
+  readonly worktreeRemoved: boolean;
 }
 
 /**
@@ -5722,7 +5738,20 @@ export async function unsettleTask(ctx: OperationContext, rawParentThreadId: str
   }
   await unsettleThread(ctx.store, row.childThreadId);
   const after = await describeTask(ctx, parentThreadId, row.childThreadId);
-  return { ...after, status: "active", workStatus: after.task.status, startedTurn: false };
+  return {
+    ...after,
+    status: "active",
+    workStatus: after.task.status,
+    startedTurn: false,
+    // A reopened task whose checkout was cleared at settle cannot take a
+    // message: the caller says so instead of advising a send that would refuse.
+    worktreeRemoved: taskWorktreeGone(target),
+  };
+}
+
+/** Whether a task's own worktree checkout is gone, so nothing can run in it. */
+function taskWorktreeGone(thread: StoredThread): boolean {
+  return thread.env.mode === "worktree" && thread.env.path.trim() !== "" && !existsSync(thread.env.path);
 }
 
 export interface SnoozeTaskRequest {
@@ -5772,10 +5801,15 @@ export async function snoozeTask(ctx: OperationContext, rawParentThreadId: strin
     );
   }
   const at = request.at === undefined ? null : parseScheduledTime(request.at, new Date(), "at");
-  const conditions = request.conditions ?? [];
-  if (at === null && conditions.length === 0) {
+  const asked = request.conditions ?? [];
+  if (at === null && asked.length === 0) {
     throw new CliError("INVALID_THREAD_OPTION", "A snooze needs a time (at) or conditions to wait for.", { exitCode: 2, details: { taskId: row.childThreadId } });
   }
+  // The same reading of `conditions` the queue makes, against the task's own
+  // model so a `reset` waits for the quota pool that model draws on.
+  const conditions = asked.length === 0
+    ? asked
+    : resolveQueueResetConditions(parseQueuePolicy({ conditions: asked, sequential: ctx.config.usageRecovery === "sequential" }, { deferReset: true }), target.modelSelection).conditions;
   const snoozed = await snoozeThread(ctx.store, row.childThreadId, at, conditions);
   const after = await describeTask(ctx, parentThreadId, row.childThreadId);
   const wakes = conditions.length === 0
@@ -5801,49 +5835,55 @@ export async function snoozeTask(ctx: OperationContext, rawParentThreadId: strin
  * provider state). Unsnoozing starts no turn — it puts the thread back in the
  * active set, and its queued entries are admitted on the next pass. A snooze
  * that ends on the clock needs nothing here: a past-due `snoozedUntil` already
- * reads as active. Returns the ids it woke.
+ * reads as active. This is the reconciliation pass, over every thread; the
+ * periodic watch judges the candidates it knows of instead. Returns the ids it
+ * woke.
  */
 export async function wakeDueSnoozes(ctx: OperationContext, now = Date.now(), snapshot?: readonly QueueRow[]): Promise<string[]> {
-  const waiting: StoredThread[] = [];
-  for (const id of await ctx.store.listThreadIds().catch(() => [] as string[])) {
-    const thread = await ctx.store.readThreadRecord(id).catch(() => null);
-    if (!thread || !hasSnoozeConditions(thread) || thread.settledAt != null || thread.deletedAt != null || thread.archivedAt != null) continue;
-    waiting.push(thread);
-  }
-  if (waiting.length === 0) return [];
   const rows = snapshot ? [...snapshot] : [];
-  await snoozeDependencies(ctx, waiting, rows);
   const woken: string[] = [];
-  for (const thread of waiting) {
-    const after = await wakeDueSnooze(ctx, thread, rows, now);
-    if (after !== null) woken.push(thread.id);
+  for (const id of await ctx.store.listThreadIds().catch(() => [] as string[])) {
+    const wake = await wakeSnoozeNow(ctx, id, rows, now);
+    if (wake.woken) woken.push(id);
   }
   return woken;
 }
 
-/**
- * The `thread`/`entry` conditions a snooze waits for, loaded into `rows` when
- * it does not already hold them: a snoozed task usually has no queued work, so
- * a candidate snapshot never contains its dependencies.
- */
-async function snoozeDependencies(ctx: OperationContext, waiting: readonly StoredThread[], rows: QueueRow[]): Promise<void> {
-  const known = new Set(rows.map((row) => row.thread.id));
-  for (const thread of waiting) for (const condition of thread.snoozeConditions ?? []) {
-    if (condition.type !== "thread" && condition.type !== "entry") continue;
-    if (known.has(condition.threadId)) continue;
-    known.add(condition.threadId);
-    const dependency = await ctx.store.readThreadRecord(condition.threadId).catch(() => null);
-    if (dependency && dependency.deletedAt == null) rows.push({ thread: dependency, turns: await ctx.store.readTurns(condition.threadId) });
-  }
+/** What one thread's wake pass did. */
+export interface SnoozeWake {
+  readonly threadId: string;
+  /** The thread as the pass left it: active again when the snooze was due. Null when it has none to judge. */
+  readonly thread: StoredThread | null;
+  /** The snooze was due: it is cleared and the thread is active again. */
+  readonly woken: boolean;
+  /** The thread still waits on conditions (so a watch should keep it). */
+  readonly waiting: boolean;
 }
 
 /**
- * Clear one thread's condition-snooze if it is due. Returns the woken record,
- * or null when the conditions are not met (or the thread holds no
- * condition-snooze at all).
+ * Judge one thread's condition-snooze and record the verdict: the periodic
+ * watch, the admission pass and the reconciliation pass all come through here,
+ * so what a snooze waits for and when it ends cannot differ between them.
+ *
+ * `rows` is the caller's queue snapshot, extended here with the thread and the
+ * dependencies its conditions name — the same loader admission uses, so an
+ * entry condition follows every handoff the entry made.
  */
-async function wakeDueSnooze(ctx: OperationContext, thread: StoredThread, rows: readonly QueueRow[], now: number): Promise<StoredThread | null> {
-  if (!hasSnoozeConditions(thread)) return null;
+export async function wakeSnoozeNow(
+  ctx: OperationContext,
+  rawThreadId: string,
+  rows: QueueRow[],
+  now = Date.now(),
+): Promise<SnoozeWake> {
+  const threadId = requireThreadId(rawThreadId);
+  const thread = await ctx.store.readThreadRecord(threadId).catch(() => null);
+  if (!thread || !hasSnoozeConditions(thread) || thread.settledAt != null || thread.deletedAt != null || thread.archivedAt != null) {
+    return { threadId, thread: null, woken: false, waiting: false };
+  }
+  const found = rows.findIndex((row) => row.thread.id === threadId);
+  const row: QueueRow = { thread, turns: await ctx.store.readTurns(threadId) };
+  const at = found < 0 ? rows.push(row) - 1 : (rows[found] = row, found);
+  await queueDependencies(ctx, rows);
   const selection = thread.modelSelection;
   const pass = conditionBlockers({
     conditions: thread.snoozeConditions ?? [],
@@ -5852,9 +5892,21 @@ async function wakeDueSnooze(ctx: OperationContext, thread: StoredThread, rows: 
     model: selection.model,
     rows,
     now,
+    latched: thread.snoozeLatched,
   });
-  if (pass.blocked.length > 0) return null;
-  return await unsnoozeThread(ctx.store, thread.id).catch(() => null);
+  // A snooze with both a time and conditions waits for both: met conditions are
+  // not due while the clock still holds the task.
+  const held = typeof thread.snoozedUntil === "string" && Date.parse(thread.snoozedUntil) > now;
+  const due = !held && pass.blocked.length === 0;
+  const applied = await applySnoozeCheck(ctx.store, threadId, { key: snoozeKey(thread), conditions: pass.conditions, latched: pass.latched, due }).catch(() => null);
+  if (applied) {
+    rows[at] = { ...rows[at]!, thread: applied };
+    return { threadId, thread: applied, woken: due, waiting: !due };
+  }
+  // A newer snooze replaced this one between the read and the lock: it decides
+  // its own end, and nothing here touched it.
+  const current = await ctx.store.readThreadRecord(threadId).catch(() => null);
+  return { threadId, thread: current, woken: false, waiting: current !== null && hasSnoozeConditions(current) && current.settledAt == null };
 }
 
 /** Running `git` for a worktree-removal check: null when it cannot answer. */
@@ -6077,7 +6129,7 @@ export async function sendTaskMessage(
   // An agent's message (or wake) starts a turn on the task: delegated work
   // on Antigravity, refused while the setting is off.
   requireAntigravityDelegation(ctx.config, target.modelSelection.instanceId);
-  if (target.env.mode === "worktree" && target.env.path.trim() !== "" && !existsSync(target.env.path)) {
+  if (taskWorktreeGone(target)) {
     throw new CliError(
       "TASK_WORKTREE_REMOVED",
       `Task ${row.childThreadId} cannot take the message: its worktree checkout was removed after it settled, and its branch ${target.env.branch ?? "(unknown)"} is kept. Re-delegate the follow-up as a new task.`,

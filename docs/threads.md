@@ -1174,6 +1174,17 @@ admission pass also clears it, so a task with queued work wakes on the pass that
 would run that work. Until then the task reads `snoozed` everywhere the list
 status is read (`threads list --status snoozed`, `inspect`, `status`).
 
+The conditions keep what a pass learns, exactly as a queued message's do: the
+reset time a `reset` condition resolves to (against the task's own model quota
+pool) and a `provider … after` signal are stored on the snooze, so a reset
+learned after snoozing is not looked up again. An `entry` condition follows the
+entry through every handoff it made, so a twice-moved entry does not wake the
+task while its copy still waits on the thread it landed on; one that names no
+turn cannot be judged and is skipped rather than waited on forever.
+`task_status` reports this life cycle beside the work: `status` stays `active`
+while the task waits, and a `snoozed` object (`until`, `conditions`, `wakes`)
+appears only while a snooze is set.
+
 Interactions to know:
 
 - **Queued messages wait behind it.** An entry queued on the task with
@@ -1186,6 +1197,10 @@ Interactions to know:
   message the user types: the snooze holds queued and automatic work, not an
   explicit act of the thread that owns the task. The mark itself is untouched
   and still ends on its own time or conditions.
+- **A usage hold stays put.** A deferred usage recovery is held while the task
+  is snoozed instead of being cleared or restarted: the pause stays as it was,
+  and it resumes once the snooze ends. A snooze whose time has passed is no hold
+  at all, so the recovery starts as it would on an unsnoozed task.
 - **Settling clears it.** A settle drops both the time and the conditions, so a
   settled task is never left behind a stale snooze.
 - **The user can always end it.** `threads unsnooze --thread <id>` clears the

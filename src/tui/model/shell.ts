@@ -1,4 +1,5 @@
 import type { ProjectEnvelope, ThreadEnvelope } from "../../core/types.js";
+import { isSnoozedThread } from "../../core/threads/views.js";
 import type { ResearchProposal, StoredResearchRun } from "../../server/api.js";
 
 export interface ShellState {
@@ -120,8 +121,9 @@ export function threadStatus(thread: ThreadEnvelope, now = Date.now()): ThreadSt
   if (session?.status === "running" || session?.status === "starting") return "running";
   if (isSettledThread(thread)) return "settled";
   if (typeof session?.lastError === "string" && /usage limit/i.test(session.lastError)) return "blocked";
-  const snoozedUntil = thread.snoozedUntil;
-  if (typeof snoozedUntil === "string" && Date.parse(snoozedUntil) > now) return "snoozed";
+  // The server's own rule (`isSnoozedThread`), so a snooze that waits on
+  // conditions shows as snoozed here too, with no time set.
+  if (isSnoozedThread(thread, now)) return "snoozed";
   return "active";
 }
 

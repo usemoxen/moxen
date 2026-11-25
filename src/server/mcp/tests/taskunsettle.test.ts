@@ -142,6 +142,30 @@ describe("task_unsettle", () => {
     }
   }, 30_000);
 
+  it("does not advise sending work to a task whose worktree checkout is gone", async () => {
+    const t = await setup();
+    try {
+      // A task with its own checkout that never committed settles with that
+      // checkout removed, so its directory is gone: `task_send` refuses it, and
+      // the advice must say so instead. Shared isolation has no checkout, so
+      // this task is delegated without it.
+      const delegated = await callMoxenTool(t.connection, t.orchestrator, "delegate", { task: "Do the work", title: "checkout" });
+      const taskId = JSON.parse(delegated.text).taskId as string;
+      await waitForTurnDone(t.store, taskId);
+      const settled = await callMoxenTool(t.connection, t.orchestrator, "task_settle", { taskId, removeWorktree: true });
+      expect(JSON.parse(settled.text)).toMatchObject({ settled: true, worktreeRemoved: true });
+      const unsettled = await t.unsettle(t.orchestrator, { taskId });
+      expect(unsettled.isError).toBe(false);
+      expect(unsettled.json).toMatchObject({ taskId, unsettled: true, status: "active", worktreeRemoved: true });
+      // Not the "send it work" advice an active task gets: sending is refused.
+      expect(unsettled.json!.next).not.toMatch(/Send it work/);
+      expect(unsettled.json!.next).toContain("re-delegate");
+      expect((await callMoxenTool(t.connection, t.orchestrator, "task_send", { taskId, message: "One more thing", wake: true })).text).toContain("TASK_WORKTREE_REMOVED");
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
   it("refuses a research run's lead and roles, which go through the run", async () => {
     const t = await setup();
     const unattended = t.connection.subscribeShell({ researchProposals: [t.orchestrator] }, () => {}, () => {});
