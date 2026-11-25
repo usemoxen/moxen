@@ -94,9 +94,13 @@ the setting in force at that moment, never the config the preceding turn
 started with — so no path can hand an automatic prompt to the driver: not
 the turn a settling run promotes, not recovery and steer redelivery, not
 admission, not a compaction or a hand-off, and not even a send whose
-session started while the setting was still on (the gate is rechecked
-immediately before the prompt leaves, and a denied turn goes back to the
-queue, held for admission). Eligibility is settled before a promotion
+session started while the setting was still on (the gate is rechecked at the boundary, immediately before the
+prompt leaves, and a denied turn goes back to the queue, held for
+admission — the facts the decision needs resolve first, then the setting is
+read at the moment of the send itself, so a change that lands during the
+gate's own reads is seen, not raced). What was queued behind a denied
+dispatch is handed back to promotion, so a message you wrote runs on its own
+instead of waiting on a held automatic entry. Eligibility is settled before a promotion
 rewrites the queue, and on Antigravity threads promotion never folds a
 message of Moxen's into one of yours or the other way round — even opted
 in, since the setting can change between the two — so a held entry is
@@ -112,8 +116,11 @@ the follow-up it had queued is never dispatched past the gate: it goes back to
 queued for the admission path, which holds it like any other automatic prompt.
 A task notice holds its exception only while a live turn of yours can carry
 it: steered into your running turn it rides, but a live turn Moxen started
-does not carry it, and redelivered standalone — a crash took the turn it
-steered into before the driver confirmed it — it is an automatic prompt like
+does not carry it — and the ride is verified at the steer itself, with the
+setting in force there, so a target turn that dies before the steer goes
+out keeps the notice durable instead — and redelivered standalone — a crash
+took the turn it steered into before the driver confirmed it — it is an
+automatic prompt like
 any other, held in its durable batch until you send again or turn the
 setting on. Nothing is lost either way: a held entry keeps its text and its
 metadata, and every path that holds it runs it the moment it may.

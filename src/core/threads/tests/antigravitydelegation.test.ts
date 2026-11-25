@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../errors.js";
 import { testHarness } from "../../testing/harness.js";
+import type { ThreadStore } from "../store.js";
 import { settleRuns } from "../../testing/turns.js";
 import { driverKindOfInstance } from "../../types.js";
 import type { ProviderRuntimeEvent } from "../../providers/spi.js";
@@ -778,13 +779,24 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
    * where asked, and lets the test flip the setting mid-session (`onSession`
    * runs as the session starts, inside the window before the prompt is sent).
    */
-  function raceDriver(hooks: { prompts: string[]; steers: string[]; stall?: string; release: (() => void)[]; withSteer?: boolean; onSession?: () => void }) {
+  function raceDriver(hooks: {
+    prompts: string[];
+    steers: string[];
+    stall?: string;
+    release: (() => void)[];
+    withSteer?: boolean;
+    onSession?: () => void;
+    /** Runs (awaited) before `startSession` resolves: a session start that stalls. */
+    sessionStall?: () => Promise<void>;
+    /** Runs (awaited) inside every `hasSession`: where a live turn can die mid-flush. */
+    onHasSession?: () => Promise<void> | void;
+  }) {
     const promptOf = new Map<string, string>();
     const sessions = new Set<string>();
     let turns = 0;
     const driver: TurnDriver = {
-      hasSession: (threadId: string) => Effect.succeed(sessions.has(threadId)),
-      startSession: (input: { threadId: string }) => Effect.sync(() => { sessions.add(input.threadId); hooks.onSession?.(); return {}; }),
+      hasSession: (threadId: string) => Effect.tryPromise(async () => { await hooks.onHasSession?.(); return sessions.has(threadId); }),
+      startSession: (input: { threadId: string }) => Effect.tryPromise(async () => { sessions.add(input.threadId); hooks.onSession?.(); if (hooks.sessionStall) await hooks.sessionStall(); return {}; }),
       sendTurn: (input: { threadId: string; prompt: string }) =>
         Effect.sync(() => {
           hooks.prompts.push(input.prompt);
@@ -947,4 +959,182 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     await settleRuns();
   }, 30_000);
 
+
+  it("reads the setting after the gate's reads resolve, not before them", async () => {
+    const prompts: string[] = [];
+    const sessionReleases: (() => void)[] = [];
+    let sessionStarted = false;
+    const w = await testHarness({ drivers: { antigravity: () => raceDriver({ prompts, steers: [], release: [], onSession: () => { sessionStarted = true; }, sessionStall: () => new Promise<void>((resolve) => sessionReleases.push(resolve)) }) } });
+    const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: () => w.drivers.antigravity!() };
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } };
+    const thread = await createThread(w.store, {
+      projectId: "p",
+      title: "Live read",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+    });
+
+    // The setting flips off inside the gate's own first store read — the read
+    // the decision is made from — with every earlier check passing on the old
+    // setting. The decision must still see it; the driver must not see the prompt.
+    const GATE_READ = 3;
+    let armed = false;
+    let threadReads = 0;
+    const liveStore = new Proxy(w.store, {
+      get(target: ThreadStore, prop: string | symbol) {
+        const value = Reflect.get(target, prop, target) as unknown;
+        if (prop !== "readThreadRecord" || typeof value !== "function") {
+          return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+        }
+        const readThread = value as (threadId: string) => Promise<unknown>;
+        return async (threadId: string) => {
+          const thread = await readThread.call(target, threadId);
+          if (armed) {
+            threadReads += 1;
+            if (threadReads === GATE_READ) {
+              armed = false;
+              ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: false } };
+            }
+          }
+          return thread;
+        };
+      },
+    });
+    const liveCtx: OperationContext = { ...ctx, store: liveStore as typeof w.store };
+    const queuing = queueAgentMessage(liveCtx, thread.id, { message: "Check the logs" });
+    await vi.waitFor(() => expect(sessionStarted).toBe(true), { timeout: 10_000 });
+    armed = true;
+    for (const resolve of sessionReleases.splice(0)) resolve();
+    await queuing;
+    await settleRuns();
+
+    expect(prompts.some((prompt) => prompt.includes("Check the logs"))).toBe(false);
+    const waitQueued = (await w.store.readTurns(thread.id)).find((turn) => turn.origin === "agent-message");
+    expect(waitQueued?.status).toBe("queued");
+  }, 30_000);
+
+  it("hands the turns queued behind a denied dispatch back, so the user's follow-up runs on its own", async () => {
+    const prompts: string[] = [];
+    const sessionReleases: (() => void)[] = [];
+    let sessionStarted = false;
+    const driver = raceDriver({ prompts, steers: [], release: [], onSession: () => { sessionStarted = true; }, sessionStall: () => new Promise<void>((resolve) => sessionReleases.push(resolve)) });
+    const w = await testHarness({ drivers: { antigravity: () => driver, codex: () => driver } });
+    const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: () => driver };
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } };
+    const thread = await createThread(w.store, {
+      projectId: "p",
+      title: "Hand back",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+    });
+
+    // The agent message starts and its session start stalls; the user's message
+    // queues behind it. The user opts out; the release reaches the send,
+    // which the gate denies — and the user's message must not be stranded.
+    const queuing = queueAgentMessage(ctx, thread.id, { message: "Check the logs" });
+    await vi.waitFor(() => expect(sessionStarted).toBe(true), { timeout: 10_000 });
+    const manual = await sendTurn(w.store, thread.id, { prompt: "Please continue", delivery: "queue" });
+    expect(manual.turn.status).toBe("queued");
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: false } };
+    for (const resolve of sessionReleases.splice(0)) resolve();
+    await queuing;
+    await settleRuns();
+
+    const statusOf = async (id: string) => (await w.store.readTurns(thread.id)).find((turn) => turn.id === id)?.status;
+    expect(await statusOf(manual.turn.id)).toBe("completed");
+    expect(prompts.some((prompt) => prompt.includes("Please continue"))).toBe(true);
+    expect(prompts.some((prompt) => prompt.includes("Check the logs"))).toBe(false);
+    expect(await statusOf((await w.store.readTurns(thread.id)).find((turn) => turn.origin === "agent-message")!.id)).toBe("queued");
+  }, 30_000);
+
+  it("steers no notice from a context whose captured setting is on, when the live supplier says off", async () => {
+    const prompts: string[] = [];
+    const steers: string[] = [];
+    const release: (() => void)[] = [];
+    const driver = raceDriver({ prompts, steers, stall: "Automatic task work", release, withSteer: true });
+    const w = await testHarness({ drivers: { antigravity: () => driver } });
+    const driversMap = new Map<string, TurnDriver>();
+    const ctx: OperationContext = {
+      store: w.store, storeRoot: w.root, config: w.config,
+      driverFor: (instance) => { const kind = driverKindOfInstance(instance)!; let d = driversMap.get(kind); if (!d) { d = kind === "antigravity" ? driver : (w.drivers[kind] ?? w.drivers.codex!)(); driversMap.set(kind, d); } return d; },
+    };
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } };
+    const parent = await createThread(w.store, { projectId: "p", title: "Parent", env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" } });
+    const child = await createThread(w.store, { projectId: "p", title: "Child", env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: "codex", model: "test-model" } });
+
+    // A task message keeps an automatic turn live; the user opts out.
+    await startTurn(ctx, { threadId: parent.id, prompt: "Automatic task work", origin: "task-message", onEvent: () => undefined });
+    await vi.waitFor(() => expect(prompts).toContain("Automatic task work"), { timeout: 10_000 });
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: false } };
+
+    // The flush runs with a captured context whose config says on, while its
+    // own live supplier says off: the notice must stay durable.
+    const staleCtx: OperationContext = {
+      ...ctx,
+      config: { ...ctx.config, providers: { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } } },
+      providersInForce: () => ctx.config.providers,
+    };
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parent.id, childThreadId: child.id, prompt: "Do it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const childTurn = (await sendTurn(w.store, child.id, { prompt: "Do it" })).turn;
+    await completeTurn(w.store, child.id, childTurn.id, { text: "Done." });
+    await queueTaskNotification(staleCtx, parent.id, child.id);
+    await flushTaskNotifications(staleCtx, parent.id);
+    expect(steers.length).toBe(0);
+    expect((await w.store.readTurns(parent.id)).some((turn) => turn.origin === "task-notification")).toBe(false);
+    expect(await readBatches(w.root)).toHaveProperty(parent.id);
+
+    // The automatic turn ends and the user's own turn rides the notice.
+    for (const resolve of release.splice(0)) resolve();
+    await settleRuns();
+    await startTurn(ctx, { threadId: parent.id, prompt: "Please continue", onEvent: () => undefined });
+    await vi.waitFor(() => expect(steers.length).toBe(1), { timeout: 10_000 });
+    await settleRuns();
+  }, 30_000);
+
+  it("refuses a steer whose target died before the driver took it, and keeps the notice durable", async () => {
+    const prompts: string[] = [];
+    const steers: string[] = [];
+    const release: (() => void)[] = [];
+    let armed = false;
+    let hasSessionCalls = 0;
+    let live: { readonly id: string } | null = null;
+    const w = await testHarness({});
+    const driver = raceDriver({
+      prompts, steers, stall: "User work", release, withSteer: true,
+      onHasSession: async () => {
+        if (armed && live !== null) {
+          hasSessionCalls += 1;
+          // The second look is the steer delivery's own: the turn it targets dies there.
+          if (hasSessionCalls === 2) await interruptTurn(w.store, parent.id, live!.id);
+        }
+      },
+    });
+    const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: () => driver };
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } };
+    const parent = await createThread(w.store, { projectId: "p", title: "Parent", env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" } });
+    const child = await createThread(w.store, { projectId: "p", title: "Child", env: { mode: "local", path: w.work, branch: null }, modelSelection: { instanceId: "codex", model: "test-model" } });
+
+    // The parent's own turn is stalled live; the notice's flush decides on it.
+    // Between the decision and the driver's steer, the turn dies — the steer
+    // must be refused and the notice kept durable, not steered into nothing.
+    live = (await startTurn(ctx, { threadId: parent.id, prompt: "User work", onEvent: () => undefined })).turn;
+    await vi.waitFor(() => expect(prompts).toContain("User work"), { timeout: 10_000 });
+    armed = true;
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parent.id, childThreadId: child.id, prompt: "Do it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const childTurn = (await sendTurn(w.store, child.id, { prompt: "Do it" })).turn;
+    await completeTurn(w.store, child.id, childTurn.id, { text: "Done." });
+    await queueTaskNotification(ctx, parent.id, child.id);
+    await flushTaskNotifications(ctx, parent.id);
+    expect(steers.length).toBe(0);
+    expect(await readBatches(w.root)).toHaveProperty(parent.id);
+
+    // The notice rides the next live user turn.
+    armed = false;
+    const retry = await startTurn(ctx, { threadId: parent.id, prompt: "User work again", onEvent: () => undefined });
+    await vi.waitFor(() => expect(steers.length).toBe(1), { timeout: 10_000 });
+    await interruptTurn(w.store, parent.id, retry.turn.id);
+    await settleRuns();
+  }, 30_000);
 });

@@ -111,7 +111,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchDenied, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchGate, antigravitySteerGate, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
@@ -479,7 +479,7 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
   }
   if (copies.length > 0) {
     for (const id of copies) await requeueUnownedTurn(ctx.store, threadId, id).catch(() => false);
-    const next = await promoteQueuedTurn(ctx.store, threadId, ctx.config.providers).catch(() => null);
+    const next = await promoteQueuedTurn(ctx.store, threadId, liveProvidersOf(ctx)).catch(() => null);
     if (next && !(await holdGatedPromotion(ctx, threadId, next)) && ctx.store.claimRun(next.id)) {
       await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
     }
@@ -488,14 +488,40 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
 }
 
 /**
- * The one dispatch gate decision for a turn a runner holds: the setting in
- * force, provenance read with the message ledger made whole, and the fresh
- * consent that releases a held entry (a user turn authored after it was
- * queued). This is the same verdict admission reaches, so recovery and the
- * dispatch boundary never drift apart.
+ * The one dispatch gate decision for a turn a runner holds: the facts are
+ * resolved first, then the setting in force at the decision — the live
+ * `providersInForce` supplier when the operation has one, else its config —
+ * never a predecessor turn's snapshot (LOCAL-034). Provenance reads with the
+ * message ledger made whole, and the fresh consent that releases a held
+ * entry (a user turn authored after it was queued), so this is the same
+ * verdict admission reaches and the dispatch boundary never drifts apart.
  */
 async function antigravityGateHoldsTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
-  return await antigravityDispatchDenied(ctx.store, ctx.config.providers, threadId, turn.id);
+  const gate = await antigravityDispatchGate(ctx.store, threadId, turn.id);
+  return gate !== null && gate.holds(() => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers));
+}
+
+/**
+ * The providers setting in force at this instant — the live supplier when the
+ * operation has one, else its own config — never a captured snapshot
+ * (LOCAL-034).
+ */
+function liveProvidersOf(ctx: OperationContext): CliConfig["providers"] {
+  return ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers;
+}
+
+/**
+ * A dispatch the gate denied hands the turns waiting behind it back to
+ * promotion: the next turn the gate does not hold is promoted and run on its
+ * own provider, so a message the user wrote never strands waiting on the
+ * automatic entry its owner can no longer release. Skipped turns stay
+ * untouched where they are.
+ */
+async function handBackDeniedDispatch(ctx: OperationContext, threadId: string): Promise<void> {
+  const next = await promoteQueuedTurn(ctx.store, threadId, liveProvidersOf(ctx)).catch(() => null);
+  if (next !== null && ctx.store.claimRun(next.id)) {
+    await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
+  }
 }
 
 /**
@@ -503,7 +529,9 @@ async function antigravityGateHoldsTurn(ctx: OperationContext, threadId: string,
  * Antigravity while automatic prompts are off. A promoted turn the gate would
  * hold goes back to queued for admission, which holds it — with its reason —
  * until the setting turns on or a later user turn releases it. Nothing is
- * sent, and the setting is never turned on here. Returns whether it was held.
+ * sent, and the setting is never turned on here. The turns queued behind it
+ * are handed back to promotion, so the user's own follow-up runs on its own.
+ * Returns whether it was held.
  *
  * Admission's own gate is the authority for turns it starts: it reads fresh
  * user consent from the ledger, so this only covers turns recovery promotes
@@ -513,6 +541,7 @@ async function holdGatedPromotion(ctx: OperationContext, threadId: string, turn:
   if (!(await antigravityGateHoldsTurn(ctx, threadId, turn))) return false;
   // Marked as a promotion no runner took, so admission takes it back.
   await requeueGatedDispatch(ctx.store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
+  await handBackDeniedDispatch(ctx, threadId);
   return true;
 }
 
@@ -547,6 +576,9 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     if (await antigravityGateHoldsTurn(ctx, threadId, turn)) {
       await requeueGatedDispatch(store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
       await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      // The turns queued behind the denied dispatch are handed back to
+      // promotion, so a message the user wrote runs on its own (LOCAL-034).
+      await handBackDeniedDispatch(ctx, threadId);
       return;
     }
     // One message, or several queued ones batched into this turn at promotion.
@@ -1110,14 +1142,14 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   // forbids: an automatic entry of any continuation (model or stored) is
   // held here — before preparation creates the handoff request, starts a
   // summary, or touches a destination thread.
-  const destinationHeld = antigravityAutoPromptsHeld(ctx.config, (turn.modelSelection ?? source.modelSelection).instanceId);
+  const destinationHeld = antigravityAutoPromptsHeld(ctx.config.providers, (turn.modelSelection ?? source.modelSelection).instanceId);
   if (destinationHeld && !userAuthorized) return;
   // A model summary is a prompt on the source thread, so the source's gate
   // holds it as surely as the destination's: while the source runs on a
   // held Antigravity the summary could only ever sit queued. A handoff the
   // user queued themselves completes on its stored summary instead; an
   // automatic one is held before any mutation.
-  const handoffHeldOff = turn.queue.continuation === "model" && antigravityAutoPromptsHeld(ctx.config, source.modelSelection.instanceId);
+  const handoffHeldOff = turn.queue.continuation === "model" && antigravityAutoPromptsHeld(ctx.config.providers, source.modelSelection.instanceId);
   if (handoffHeldOff && !userAuthorized) return;
   if (!turn.handoff) {
     const handoff = { requestId: store.newId(), destinationThreadId: store.newId() };
@@ -1422,7 +1454,7 @@ export async function compactMidTurn(ctx: OperationContext, threadId: string, us
   // Compacting mid-turn stops the running turn so the `/compact` and its
   // follow-up can take its place: while Antigravity's automatic prompts are
   // held there is no place for them, so the running turn is left alone.
-  if (antigravityAutoPromptsHeld(ctx.config, snapshot.instanceId)) return false;
+  if (antigravityAutoPromptsHeld(ctx.config.providers, snapshot.instanceId)) return false;
   // As it will stand when the turn has settled.
   const action = planLongThreadAction(ctx.config, { ...snapshot, turnRunning: false, usedTokens: usage.usedTokens, maxTokens: usage.maxTokens });
   if (action?.kind !== "compact") return false;
@@ -1466,7 +1498,7 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string, o
     // An automatic hand-off is a prompt the user did not write: held while
     // Antigravity delegation is off. The work stays in this thread; a notice
     // says why, once until something else lands in the ledger.
-    if (antigravityAutoPromptsHeld(ctx.config, snapshot.instanceId)) {
+    if (antigravityAutoPromptsHeld(ctx.config.providers, snapshot.instanceId)) {
       const activities = await ctx.store.readActivities(threadId);
       const last = activities.at(-1);
       if (!(last?.kind === "notice" && last.payload?.held === "antigravity-delegation")) {
@@ -3156,8 +3188,10 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
+    // A side question is the user's own; every other origin is one of Moxen's
+    // automatic prompts, which the steer gate weighs at the boundary.
     const text = imageMention(input.driverPrompt ?? input.prompt.trim(), uploads.map((upload) => upload.name));
-    return { ...sent, run: null, steerDelivered: await deliverSteer(driver, thread.id, text, providerImages(uploads), sent.messageId) };
+    return { ...sent, run: null, steerDelivered: await deliverSteer(ctx, driver, thread.id, text, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer") };
   }
   if (sent.turn.status === "queued" && typeof sent.turn.scheduledFor === "string") {
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
@@ -3307,15 +3341,34 @@ function providerImages(uploads: readonly ImageAttachmentUpload[]): ProviderImag
  * session. Never starts a session: a session opened just for this would be
  * a second, empty conversation, not the one doing the work.
  *
+ * The steer boundary's own gate (LOCAL-034): every asynchronous fact
+ * resolves first — the session's liveness, the very window where the target
+ * turn can die, then the target's row read after it — and the decision
+ * reads the setting in force at the moment of the steer, synchronously,
+ * with the steer going out right after it and nothing awaited in between.
+ * A refused steer delivers nothing: the caller keeps what it held durable,
+ * and the specific ride exception survives only into a live turn the user
+ * wrote.
+ *
  * True is the push being accepted, not the arrival: the steer carries the
  * ledger message id, and a driver with an arrival signal confirms it later
  * (`takeUnconfirmedSteers`); whatever settles unconfirmed goes out again
  * as a queued turn of its own.
  */
-async function deliverSteer(driver: TurnDriver, threadId: string, text: string, images: readonly ProviderImage[], steerId: string): Promise<boolean> {
+async function deliverSteer(
+  ctx: OperationContext,
+  driver: TurnDriver,
+  threadId: string,
+  text: string,
+  images: readonly ProviderImage[],
+  steerId: string,
+  payloadAutomatic: boolean,
+): Promise<boolean> {
   if (!driver.steerTurn) return false;
   const live = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
   if (!live) return false;
+  const gate = await antigravitySteerGate(ctx.store, threadId);
+  if (gate.refuses(() => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers), payloadAutomatic)) return false;
   return await Effect.runPromise(driver.steerTurn(threadId, text, images, steerId)).then(
     () => true,
     () => false,
@@ -4032,13 +4085,13 @@ const DELEGATE_DEFAULT_TIMEOUT_MS = 600_000;
  * consumer sign-in covers only prompts the user types themselves, so a
  * delegated task or an automatic turn is refused or held, never started.
  */
-function antigravityAutoPromptsHeld(config: CliConfig, instanceId: string): boolean {
-  return driverKindOfInstance(instanceId) === "antigravity" && !antigravityUnsupportedUseAllowed(config);
+function antigravityAutoPromptsHeld(providers: CliConfig["providers"], instanceId: string): boolean {
+  return driverKindOfInstance(instanceId) === "antigravity" && providers?.antigravity?.allowUnsupportedUse !== true;
 }
 
 /** Refuse starting delegated work on Antigravity while the setting is off, before anything is created. */
 function requireAntigravityDelegation(config: CliConfig, instanceId: string): void {
-  if (!antigravityAutoPromptsHeld(config, instanceId)) return;
+  if (!antigravityAutoPromptsHeld(config.providers, instanceId)) return;
   throw new CliError(
     "ANTIGRAVITY_DELEGATION_OFF",
     "Delegation and automatic prompts are off for Antigravity: Google does not support them on consumer plans and may suspend the account. Turn on providers.antigravity.allowUnsupportedUse to allow them.",
@@ -4269,8 +4322,9 @@ async function parentMustWaitForUsage(ctx: OperationContext, parent: StoredThrea
   const selection = openTurn(turns)?.modelSelection ?? parent.modelSelection;
   // An Antigravity parent with delegation off takes no automatic prompt:
   // the notice waits in the batch for the user's next message (or the
-  // setting turning on), exactly as a usage-held parent's does.
-  if (antigravityAutoPromptsHeld(ctx.config, selection.instanceId)) return true;
+  // setting turning on), exactly as a usage-held parent's does — read with
+  // the setting in force now, never this operation's snapshot (LOCAL-034).
+  if (antigravityAutoPromptsHeld(liveProvidersOf(ctx), selection.instanceId)) return true;
   return providerExhausted(usageKeyForInstance(selection.instanceId), Date.now(), selection.model);
 }
 
@@ -4330,8 +4384,10 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
       const receivable = held.archivedAt == null && held.deletedAt == null;
       // A running user turn is what the flush rides: the notice goes out
       // with it. Otherwise, an Antigravity parent with delegation off keeps
-      // the batch for the next message or the setting turning on.
-      const antigravityHeld = !rides && antigravityAutoPromptsHeld(ctx.config, activeSelection.instanceId);
+      // the batch for the next message or the setting turning on. The
+      // setting is read in force at the flush (LOCAL-034) — a timer's
+      // captured context is as stale as a predecessor turn's snapshot.
+      const antigravityHeld = !rides && antigravityAutoPromptsHeld(liveProvidersOf(ctx), activeSelection.instanceId);
       if (receivable && (parentNotificationsHeld(held) || antigravityHeld || (!running && spent))) {
         // Still held, or spent with no live turn to steer into: stay durable
         // in the batch file instead of starting a turn into the same wall —
@@ -4859,14 +4915,28 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   }
   const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
   const steerable = running && (await canSteer(ctx, parent));
-  await startTurn(ctx, {
-    threadId: parentThreadId,
-    prompt: taskNotificationText(all),
-    origin: "task-notification",
-    notification: { tasks: all },
-    delivery: steerable ? "steer" : "queue",
-    wakeSettled: true,
-  });
+  let started: Awaited<ReturnType<typeof startTurn>> | null = null;
+  try {
+    started = await startTurn(ctx, {
+      threadId: parentThreadId,
+      prompt: taskNotificationText(all),
+      origin: "task-notification",
+      notification: { tasks: all },
+      delivery: steerable ? "steer" : "queue",
+      wakeSettled: true,
+    });
+  } catch (cause) {
+    // A steered start that failed delivered nothing — a target that died
+    // between the flush's decision and the send is exactly this: the
+    // entries stay durable for the recovery, the user's next message, or
+    // the next restart to flush again, never forgotten as if a turn had
+    // taken them (LOCAL-034). A queued delivery's failure is a real
+    // failure of the flush itself, and it still throws: its batch was
+    // never reached, and it is on disk.
+    if (!steerable) throw cause;
+    started = null;
+  }
+  if (started === null || (steerable && started.steerDelivered !== true)) return [...deferred, ...mine];
   return deferred;
 }
 

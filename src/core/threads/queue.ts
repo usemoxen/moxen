@@ -347,33 +347,91 @@ export function antigravityHoldsAutomaticDispatch(
 }
 
 /**
- * The dispatch decision for a turn a runner is about to put in front of a
- * driver: whether Antigravity's gate holds it, read as late as possible —
- * from the providers setting handed in (the one in force at the send), the
- * turn's own provenance made whole with the message ledger, and the fresh
- * consent that releases a held entry. Unreadable rows hold (fail-closed); a
+ * The dispatch boundary's decision, split from its facts so no caller can
+ * pass a snapshot (LOCAL-034): the caller resolves every asynchronous fact
+ * first (the turn's row, its provenance made whole with the message ledger,
+ * the fresh consent that releases a held entry), then reads THIS
+ * synchronously with the setting in force at the moment of dispatch — the
+ * driver's send going out right after it, nothing awaited in between.
+ */
+export interface AntigravityDispatchGate {
+  /** Whether the dispatch is denied: `providersInForce` is read at the call, not before. */
+  holds(providersInForce: () => Pick<CliConfig, "providers">["providers"] | undefined): boolean;
+}
+
+/**
+ * Resolve the dispatch decision's facts for a turn a runner is about to put
+ * in front of a driver: whether Antigravity's gate holds it, decided as the
+ * dispatch happens. `antigravityDispatchGate` resolves the facts; the
+ * closure it returns reads the setting in force — never an earlier turn's
+ * or operation's config snapshot.
+ *
+ * Null when nothing running could be denied (no turn row, not Antigravity,
+ * not an automatic prompt, or fresh user consent releases it), so the
+ * caller dispatches with no gate. Unreadable rows fail closed: the closure
+ * holds regardless of the setting, so an unreadable ledger never sends. A
  * turn no longer running denies nothing, so a concurrent settle keeps its
  * own behavior.
  */
-export async function antigravityDispatchDenied(
+export async function antigravityDispatchGate(
   store: { readThreadRecord(threadId: string): Promise<StoredThread | null>; readTurns(threadId: string): Promise<readonly StoredTurn[]>; readMessages(threadId: string): Promise<readonly StoredMessage[]> },
-  providers: Pick<CliConfig, "providers">["providers"] | undefined,
   threadId: string,
   turnId: string,
-): Promise<boolean> {
+): Promise<AntigravityDispatchGate | null> {
   const thread = await store.readThreadRecord(threadId).catch(() => null);
-  if (!thread) return true;
+  if (!thread) return { holds: () => true };
   const turns = await store.readTurns(threadId).catch(() => null);
-  if (turns === null) return true;
+  if (turns === null) return { holds: () => true };
   const turn = turns.find((candidate) => candidate.id === turnId);
-  if (!turn || turn.status !== "running") return false;
-  if (driverKindOfInstance((turn.modelSelection ?? thread.modelSelection).instanceId) !== "antigravity") return false;
-  if (providers?.antigravity?.allowUnsupportedUse === true) return false;
-  const origins = await loadTurnOrigins(store, [{ thread, turns }], providers === undefined ? {} : { providers }).catch(() => null);
-  if (origins === null) return true;
+  if (!turn || turn.status !== "running") return null;
+  if (driverKindOfInstance((turn.modelSelection ?? thread.modelSelection).instanceId) !== "antigravity") return null;
+  // Provenance loads unconditionally: the facts cannot depend on a setting
+  // the decision has not read yet.
+  const origins = await loadTurnOrigins(store, [{ thread, turns }], {}).catch(() => null);
+  if (origins === null) return { holds: (providersInForce) => providersInForce()?.antigravity?.allowUnsupportedUse !== true };
   const origin = turn.origin ?? origins.get(turnOriginKey(threadId, turnId));
-  if (!automaticDispatchPrompt(turn, origin, turns)) return false;
-  return !freshUserConsentReleases(turns, turn, threadId, origins);
+  if (!automaticDispatchPrompt(turn, origin, turns)) return null;
+  if (freshUserConsentReleases(turns, turn, threadId, origins)) return null;
+  return { holds: (providersInForce) => providersInForce()?.antigravity?.allowUnsupportedUse !== true };
+}
+
+/**
+ * The steer boundary's decision, split from its facts the same way
+ * (LOCAL-034): the caller resolves the factual side — the target turn's row,
+ * read after whatever it awaited to reach the boundary — then reads THIS
+ * synchronously with the setting in force at the moment of the steer, the
+ * driver's steer going out right after it, nothing awaited in between.
+ */
+export interface AntigravitySteerRefusal {
+  refuses(providersInForce: () => Pick<CliConfig, "providers">["providers"] | undefined, payloadAutomatic: boolean): boolean;
+}
+
+/**
+ * Whether the steer the caller is about to hand a driver breaches the
+ * Antigravity gate. The ride exception is narrow: an automatic prompt may
+ * ride only a specific live turn the user wrote, and only one still running
+ * when the steer leaves. A target that died, or a turn Moxen started,
+ * refuses the steer so the caller keeps the notice durable instead — a
+ * refused steer never dispatches one of its own. The user's own steer is
+ * never held here, and an opted-in thread steers into any live turn.
+ */
+export async function antigravitySteerGate(
+  store: { readThreadRecord(threadId: string): Promise<StoredThread | null>; readTurns(threadId: string): Promise<readonly StoredTurn[]> },
+  threadId: string,
+): Promise<AntigravitySteerRefusal> {
+  const thread = await store.readThreadRecord(threadId).catch(() => null);
+  const turns = thread !== null ? await store.readTurns(threadId).catch(() => null) : null;
+  const target = (turns ?? []).find((turn) => turn.status === "running") ?? null;
+  const selection = target?.modelSelection ?? thread?.modelSelection ?? null;
+  const targetAntigravity = selection !== null && driverKindOfInstance(selection.instanceId) === "antigravity";
+  return {
+    refuses: (providersInForce, payloadAutomatic) => {
+      if (!payloadAutomatic) return false;
+      if (target === null) return true;
+      if (userAuthoredTurn(target)) return false;
+      return targetAntigravity && providersInForce()?.antigravity?.allowUnsupportedUse !== true;
+    },
+  };
 }
 
 export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly QueueRow[], config: CliConfig, now = Date.now(), origins?: TurnOrigins): { blocked: string[]; latched: number[]; conditions: QueueCondition[] } {

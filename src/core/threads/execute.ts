@@ -71,7 +71,7 @@ import { failureMessage, reportThreadFailure } from "./failures.js";
 import { ThreadStore } from "./store.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "./toolactivity.js";
 import { permissionActivityRow, userInputActivityRow, type UserInputRuntimeEvent } from "./requestactivity.js";
-import { ANTIGRAVITY_HELD_MESSAGE, antigravityDispatchDenied, antigravityHoldsAutomaticDispatch, loadTurnOrigins, turnOriginKey } from "./queue.js";
+import { ANTIGRAVITY_HELD_MESSAGE, antigravityDispatchGate } from "./queue.js";
 import type { StoredAttachment, StoredThread, StoredTurn, TurnUsage } from "./types.js";
 
 /** Structural driver surface the runner needs. All four drivers satisfy it. */
@@ -701,20 +701,23 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // One message, or several queued ones batched into this turn at promotion.
     const prompt = turnPrompt(await store.readMessages(threadId), next);
     if (prompt === null) return;
-    // The dispatch gate, read now with the setting in force — not the one this
-    // run started with: a promoted turn carrying one of Moxen's automatic
-    // prompts (a task message, an automatic continue, a notice that no longer
-    // rides a live user turn) must not reach an Antigravity driver while the
-    // setting is off. The turn goes back to the queue, marked for admission,
-    // which holds it with its reason until the setting turns on or a genuine
-    // fresh user turn releases it. Nothing is merged or dropped: the message
-    // and its metadata stay where they are.
-    const gate = gateProvidersOf(args);
-    const gateOrigins = await loadTurnOrigins(store, [{ thread, turns }], gate);
-    const gateTurns = await store.readTurns(threadId);
-    if (antigravityHoldsAutomaticDispatch(gate.providers, selection.instanceId, next, next.origin ?? gateOrigins.get(turnOriginKey(threadId, next.id)), gateTurns)) {
+    // The dispatch gate, split facts from decision like the send boundary
+    // (LOCAL-034): the reads resolve, then the setting in force at this
+    // promotion is read synchronously. A promoted turn carrying one of
+    // Moxen's automatic prompts (a task message, an automatic continue, a
+    // notice that no longer rides a live user turn) must not reach an
+    // Antigravity driver while the setting is off. The turn goes back to
+    // the queue, marked for admission, which holds it with its reason until
+    // the setting turns on or a genuine fresh user turn releases it.
+    // Nothing is merged or dropped: the message and its metadata stay where
+    // they are. The turns queued behind it are handed back the same way, so
+    // the user's own follow-up runs on its own instead of stranding.
+    const gate = await antigravityDispatchGate(store, threadId, next.id);
+    if (gate !== null && gate.holds(() => gateProvidersOf(args).providers)) {
       claimed = null;
       await requeueGatedDispatch(store, threadId, next.id, ANTIGRAVITY_HELD_MESSAGE);
+      await promoteQueuedTurn(store, threadId, gateProvidersOf(args).providers).catch(() => null);
+      await runPromotedTurn(args);
       return;
     }
     // Its images were saved when it was queued; the bytes come off disk.
@@ -1655,10 +1658,24 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     // A denied turn goes back to the queue for admission, held with the
     // gate's reason; nothing is sent and nothing is lost.
     const dispatchKind = args.modelSelection !== undefined ? driverKindOfInstance(args.modelSelection.instanceId) : null;
-    if (!args.driverTurnId && (dispatchKind === null || dispatchKind === "antigravity")
-      && (await antigravityDispatchDenied(store, gateProvidersOf(args).providers ?? undefined, threadId, storeTurnId))) {
-      await requeueGatedDispatch(store, threadId, storeTurnId, ANTIGRAVITY_HELD_MESSAGE);
-      return;
+    if (!args.driverTurnId && (dispatchKind === null || dispatchKind === "antigravity")) {
+      // The dispatch boundary, split facts from decision (LOCAL-034): every
+      // read resolves first — the turn, its provenance, the fresh consent —
+      // then the setting in force at the dispatch is read synchronously, and
+      // the send goes out right after it with nothing awaited in between. A
+      // session start can take the time the user needs to turn the setting
+      // off, and no earlier check may stand in for this one.
+      const gate = await antigravityDispatchGate(store, threadId, storeTurnId);
+      if (gate !== null && gate.holds(() => gateProvidersOf(args).providers)) {
+        // A denied turn goes back to the queue for admission, held with the
+        // gate's reason; nothing is sent and nothing is lost. The turns
+        // queued behind it are handed back to promotion, so a message the
+        // user wrote runs on its own instead of waiting on an automatic
+        // entry it can never release.
+        await requeueGatedDispatch(store, threadId, storeTurnId, ANTIGRAVITY_HELD_MESSAGE);
+        await promoteQueuedTurn(store, threadId, gateProvidersOf(args).providers).catch(() => null);
+        return;
+      }
     }
     const sent = args.driverTurnId
       ? { turnId: args.driverTurnId }
