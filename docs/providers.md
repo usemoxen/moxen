@@ -119,11 +119,13 @@ negotiates any other protocol version is refused loudly
   counter units, distinct from the booked turn-ledger sum: a reading with no
   turn open raises it (and establishes an unknown one — a fresh session's
   origin is zero, a resumed session's stays unknown until such a reading,
-  with post-resume prompt-result costs never establishing it), and a settled
-  turn advances it to the counter reading it actually used, or by the cost it
-  booked when the counter was silent or lagging — so spend already booked is
-  never rebooked when the counter catches up, and unattributed out-of-turn
-  growth is never charged to an arbitrary turn. At settle, the turn's cost is
+  with post-resume prompt-result costs never establishing it; the first idle
+  reading initialises it to at least the result costs booked in the meantime,
+  never their sum, since the reading may already include those charges), and a
+  settled turn advances it to the counter reading it actually used, or by the
+  cost it booked when the counter was silent or lagging — so spend already
+  booked is never rebooked when the counter catches up, and unattributed
+  out-of-turn growth is never charged to an arbitrary turn. At settle, the turn's cost is
   the in-turn counter delta above the baseline — the spec-defined cumulative
   counter wins over the prompt result's vendor-specific cost field — or the
   result cost when the counter did not move in-turn; a snapshot that never

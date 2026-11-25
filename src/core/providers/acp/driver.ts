@@ -346,6 +346,13 @@ interface AcpSession {
    * reported at all.
    */
   costBaselineUsd: number | null;
+  /**
+   * Sum of explicit prompt-result costs booked while the baseline was still
+   * unknown (a resumed session before its first idle reading). The first idle
+   * reading initialises the baseline to at least this sum: it may already
+   * include those charges, so the two are never added (LOCAL-009).
+   */
+  bookedWhileUnknownUsd: number;
   tier: string | null;
   readonly sessionAllowKeys: Set<string>;
   readonly transcript: AcpTranscriptTurn[];
@@ -1438,6 +1445,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           // prompt-result costs never do), because nothing else can say where
           // the provider's counter started.
           costBaselineUsd: resumed ? null : 0,
+          bookedWhileUnknownUsd: 0,
           tier,
           sessionAllowKeys: new Set(),
           transcript: [],
@@ -2365,9 +2373,13 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         // resumed session's origin) and raises a known one, but never lowers
         // it (the counter never resets). The excess above what the ledger
         // booked is unattributed spend that cannot be pinned on any turn — the
-        // next in-turn delta anchors on it instead.
+        // next in-turn delta anchors on it instead. Establishing an unknown
+        // origin uses at least the result costs booked while it was unknown:
+        // the reading may already include those charges, so the two are never
+        // added — a lagging first reading would otherwise re-anchor the
+        // baseline below spend the ledger already booked.
         if (parsed.costUsd !== undefined && !activeTurn) {
-          session.costBaselineUsd = Math.max(session.costBaselineUsd ?? 0, parsed.costUsd);
+          session.costBaselineUsd = Math.max(session.costBaselineUsd ?? session.bookedWhileUnknownUsd, parsed.costUsd);
         }
         session.context = {
           usedTokens: parsed.used,
@@ -3421,6 +3433,10 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     // baseline moves by the booked amount only, anticipating the counter
     // absorbing exactly that spend as it catches up. An unchanged or lower
     // reading never forces an explicit $0 and never invents a negative delta.
+    // While the origin is UNKNOWN the baseline never advances; result costs
+    // booked then accumulate in `bookedWhileUnknownUsd`, and the first idle
+    // reading initialises the baseline to at least their sum — the two are
+    // never added, because the reading may already include those charges.
     // Invariant: the booked turn ledger totals the counter's movement — the
     // baseline advances ONLY past spend already accounted for, later growth
     // reconciles against it instead of rebooking, and out-of-turn excess is
@@ -3433,8 +3449,16 @@ export class AcpDriver implements ProviderAdapter<CliError> {
     const turnCost: number | undefined = counterDelta !== undefined
       ? (resultCost !== undefined ? Math.max(counterDelta, resultCost) : counterDelta)
       : resultCost;
-    if (turnCost !== undefined && anchor !== null) {
-      session.costBaselineUsd = fromCounter ? counterHigh : anchor + turnCost;
+    if (turnCost !== undefined) {
+      if (anchor === null) {
+        // Result cost booked while the counter origin is unknown: the baseline
+        // stays unknown (result costs never establish it) and the sum is kept
+        // for the first idle reading to initialise against, so a lagging first
+        // reading cannot re-anchor below the spend already booked (LOCAL-009).
+        session.bookedWhileUnknownUsd += turnCost;
+      } else {
+        session.costBaselineUsd = fromCounter ? counterHigh : anchor + turnCost;
+      }
     }
     settleAndPublishTurn({
       open: turn,

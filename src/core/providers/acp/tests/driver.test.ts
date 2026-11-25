@@ -3409,3 +3409,36 @@ describe("LOCAL-009 round 6: the effective baseline advances with the counter", 
     await Effect.runPromise(driver.stopAll());
   });
 });
+
+describe("LOCAL-009 round 7: the first idle reading on a resumed session", () => {
+  it("treats a lagging first idle reading as at least the result costs already booked (LOCAL-009)", async () => {
+    const transport = new FakeAcpTransport({ sessionId: "acp-old" });
+    const driver = new AcpDriver({ provider: "antigravity", transport });
+    await Effect.runPromise(driver.startSession({ ...START, resumeCursor: "acp-old" }));
+    const server = transport.sessions[0]!.server;
+    // Turn A: no counter reading at all; its prompt result reports $0.125,
+    // booked while the resumed counter's origin is still unknown.
+    const tA = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "one" }));
+    server.finishPrompt("end_turn", { usage: { inputTokens: 500, outputTokens: 50, cost: 0.125 } });
+    const oA = await driver.awaitTurn("thread-1", tA.turnId);
+    expect(oA.usage?.costUsd).toBeCloseTo(0.125, 9);
+    // The FIRST idle reading arrives at $0.0625: the cumulative counter has
+    // only caught up to half of A's charge. It must not settle the origin
+    // below the spend already booked.
+    server.notifyUpdate("acp-old", { sessionUpdate: "usage_update", used: 100, size: 100_000, cost: 0.0625 });
+    await new Promise((r) => setTimeout(r, 10));
+    // Turn B spends $0.0625: its in-turn counter reaches $0.1875 and its
+    // prompt result confirms $0.0625 — never the $0.125 a re-anchored origin
+    // would double-book.
+    const tB = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "two" }));
+    server.notifyUpdate("acp-old", { sessionUpdate: "usage_update", used: 1_000, size: 100_000, cost: 0.1875 });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(driver.liveTurnUsage("thread-1")?.costUsd).toBeCloseTo(0.0625, 9);
+    server.finishPrompt("end_turn", { usage: { inputTokens: 300, outputTokens: 30, cost: 0.0625 } });
+    const oB = await driver.awaitTurn("thread-1", tB.turnId);
+    expect(oB.usage?.costUsd).toBeCloseTo(0.0625, 9);
+    // The booked ledger totals the counter's $0.1875 movement exactly.
+    expect(oA.usage!.costUsd! + oB.usage!.costUsd!).toBeCloseTo(0.1875, 9);
+    await Effect.runPromise(driver.stopAll());
+  });
+});

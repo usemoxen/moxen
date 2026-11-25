@@ -1163,6 +1163,15 @@ describe("ResponsesWsSession stream ownership round 5 (LOCAL-009)", () => {
     });
     const iterator = wsSession.stream(req(wsSession), () => ({ model: "gpt-6.2-sol", input: [] }), false);
     const first = iterator.next();
+    // Consume the replacement stream BEFORE returning the first: on a
+    // revision where return() cannot free the wedged owner, the second stream
+    // stays queued behind it forever.
+    const second = wsSession.stream(req(wsSession), () => ({ model: "gpt-6.2-sol", input: [] }), false);
+    const secondDone = (async () => {
+      const events: ModelEvent[] = [];
+      for await (const event of second) events.push(event);
+      return events;
+    })();
     // return() must free the owner at once by rejecting the handshake itself,
     // not by queueing behind an unresolved next() until the connect timeout.
     const returned = await Promise.race([
@@ -1174,11 +1183,9 @@ describe("ResponsesWsSession stream ownership round 5 (LOCAL-009)", () => {
     // No request was sent on the abandoned handshake's socket.
     expect(sockets[0]!.sent).toHaveLength(0);
     expect(wsSession.isDisabled).toBe(false);
-    // The abandoned owner released the session: a stream queued behind it can
-    // open a fresh socket, send its request, and complete.
-    const second = wsSession.stream(req(wsSession), () => ({ model: "gpt-6.2-sol", input: [] }), false);
-    const events: ModelEvent[] = [];
-    for await (const event of second) events.push(event);
+    // The abandoned owner released the session: the queued stream opened a
+    // fresh socket, sent exactly one request, and completed.
+    const events = await secondDone;
     expect(sockets[1]!.sent).toHaveLength(1);
     expect(events.at(-1)).toEqual({ type: "finish", reason: "stop" });
     wsSession.close();
