@@ -186,6 +186,15 @@ export class FakeOpencodeServerConnection implements OpencodeServerConnection {
     return this.messages ?? this.script.messages ?? [];
   }
 
+  /** What `session.inbox.list` answers: the session's still-enqueued, undelivered work. Empty — the drained default — a session at rest. */
+  inbox: ReadonlyArray<{ id: string; type: string }> = [];
+
+  async sessionInbox(sessionID: string): Promise<ReadonlyArray<{ readonly id: string; readonly type: string }>> {
+    this.calls.push({ method: "session.inbox.list", args: { sessionID } });
+    this.failChecked("session.inbox.list");
+    return this.inbox;
+  }
+
   async storedAuthTypes(): Promise<Record<string, string>> {
     this.calls.push({ method: "integration.list", args: {} });
     this.failChecked("integration.list");

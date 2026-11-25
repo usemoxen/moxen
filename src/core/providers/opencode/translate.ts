@@ -431,16 +431,18 @@ export class OpencodeEventTranslator {
         return [{ type: "session.idle", properties: { sessionID } }];
       }
       case "session.idle": {
-        // The session's own idle marker, emitted when it goes idle without an
+        // The session's own idle marker: emitted when it goes idle without an
         // execution to succeed — a compaction draining while the session is
-        // otherwise at rest, for one. A `/compact` turn sends no prompt, so
-        // this is the only idle it can ever hear; dropping it left the turn
-        // open forever when its `session.compaction.ended` had already been
-        // consumed by an earlier, merged compaction. Held back while a user
-        // item is still waiting to be delivered, exactly like the one above.
+        // otherwise at rest, for one. Its own name keeps it apart from the
+        // `session.idle` an execution's success becomes above: a raw marker
+        // may straggle in from an earlier run (the execution-succeeded idle
+        // of the run that just finished), so the driver treats the two very
+        // differently. Held back while a user item is still waiting to be
+        // delivered, exactly like the one above.
         const sessionID = asString(data.sessionID);
         if (!sessionID || this.hasPendingInbox(sessionID)) return [];
-        return [{ type: "session.idle", properties: { sessionID } }];
+        const created = asNumber(event.created);
+        return [{ type: "session.idle.marker", properties: { sessionID, ...(created !== undefined ? { created } : {}) } }];
       }
       case "session.execution.interrupted": {
         const sessionID = asString(data.sessionID);

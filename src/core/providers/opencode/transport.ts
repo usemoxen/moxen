@@ -148,6 +148,14 @@ export interface OpencodeServerConnection {
   /** The messages the model sees now (`session.context`: after the last compaction), oldest first. */
   sessionContext(sessionID: string): Promise<ReadonlyArray<OpencodeMessage>>;
   /**
+   * `session.inbox.list`: the session's durably enqueued work not yet
+   * delivered (user, synthetic, compaction and move items), oldest first.
+   * The server-side truth of what is still queued — a session whose list is
+   * empty has drained, which is what a raw idle marker is only safe to
+   * believe once it has already said.
+   */
+  sessionInbox(sessionID: string): Promise<ReadonlyArray<{ readonly id: string; readonly type: string }>>;
+  /**
    * Credential type per provider id (`api` | `oauth` | `env`) as this server
    * knows them (`GET /api/integration`). Connection types only, never a secret.
    */
@@ -452,6 +460,17 @@ export class LiveOpencodeServerConnection implements OpencodeServerConnection {
   async sessionContext(sessionID: string): Promise<ReadonlyArray<OpencodeMessage>> {
     const items = await request("session.context", () => this.client.session.context({ sessionID }));
     return translateTimeline(Array.isArray(items) ? items : []);
+  }
+
+  async sessionInbox(sessionID: string): Promise<ReadonlyArray<{ readonly id: string; readonly type: string }>> {
+    const result = await request("session.inbox.list", () => this.client.session.inbox.list({ sessionID }));
+    // The generated client unwraps the response's `data`; an envelope is tolerated anyway.
+    const items = Array.isArray(result) ? result : Array.isArray(asRecord(result)?.data) ? (asRecord(result)?.data as unknown[]) : [];
+    return items.flatMap((item) => {
+      const id = asString(asRecord(item)?.id);
+      const type = asString(asRecord(item)?.type);
+      return id && type ? [{ id, type }] : [];
+    });
   }
 
   async storedAuthTypes(): Promise<Record<string, string>> {
