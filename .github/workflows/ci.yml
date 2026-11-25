@@ -93,3 +93,45 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  finances:
+    name: finances (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
+        # Git Bash on Windows, so the same commands run everywhere.
+        shell: bash
+        working-directory: src/finances
+    steps:
+      # Windows would otherwise check files out with CRLF endings. Runs
+      # before checkout, when src/finances doesn't exist yet.
+      - name: Keep line endings as committed
+        working-directory: .
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      # The workspace pins its exact Rust version in rust-toolchain.toml;
+      # rustup honors it, and this step keeps the same setup as the
+      # desktop job (rustup, rustfmt and clippy components available).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/finances
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
