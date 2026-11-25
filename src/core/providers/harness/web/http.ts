@@ -103,6 +103,13 @@ async function hop(url: URL, options: HttpRequestOptions, method: "GET" | "POST"
         method,
         path: `${url.pathname}${url.search}`,
         headers,
+        // A connection of this request's own, never one left in the process-wide
+        // keep-alive pool by an earlier fetch: an idle socket in that pool can be
+        // dropped by either side's idle timer while it waits (the server's
+        // keep-alive timeout, the client's matching one), and a fetch handed that
+        // socket dies as a reset instead of reading the page. A page fetch is one
+        // request, or a handful of redirect hops, so reuse buys nothing here.
+        agent: false,
         // The certificate is checked against the name the page was asked for, not the address it was reached at.
         ...(secure ? { servername: url.hostname } : {}),
         signal: controller.signal,
