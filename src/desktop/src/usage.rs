@@ -852,6 +852,8 @@ pub(crate) fn estimate_breakdown(usage: &SnapshotUsage, thread: &Value) -> Break
         threshold: usage.threshold,
         compacts: usage.compacts,
         cost: usage.cost,
+        // An estimate from the transcript never carries the provider's split.
+        provider_cost: Vec::new(),
         categories,
         tools: tool_shares,
         estimated: true,
@@ -892,6 +894,73 @@ pub struct ToolShare {
     pub tokens: i64,
 }
 
+/// The provider's own per-model spend for its session (Claude Code's
+/// `modelUsage`), costliest first: its accounting, not the thread's turns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderCost {
+    pub model: String,
+    pub cost: f64,
+}
+
+/// One model's share of a thread's cost (`ThreadModelCost` in
+/// `src/core/usage/prices.ts`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelCost {
+    pub model: String,
+    /// None means no turn on it could be priced: unpriced, never $0.
+    pub cost: Option<f64>,
+    pub turns: i64,
+    pub unpriced_turns: i64,
+}
+
+/// What a thread's turns have cost, by model, from the `cost` field of
+/// `thread.context` and `thread.context-reading`. Computed from the turns on
+/// every read, never stored: the API-equivalent price of its tokens, not what
+/// a subscription is charged.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThreadCost {
+    pub total: Option<f64>,
+    /// Some turns could not be priced, so the total covers only the rest.
+    pub partial: bool,
+    pub priced_turns: i64,
+    pub unpriced_turns: i64,
+    pub reported: bool,
+    pub estimated: bool,
+    pub by_model: Vec<ModelCost>,
+}
+
+impl ThreadCost {
+    pub(crate) fn from_json(value: &Value) -> Option<Self> {
+        if !value.is_object() {
+            return None;
+        }
+        Some(Self {
+            total: value.get("totalUsd").and_then(Value::as_f64),
+            partial: value.get("partial").and_then(Value::as_bool) == Some(true),
+            priced_turns: number(value, &["pricedTurns"]).unwrap_or(0),
+            unpriced_turns: number(value, &["unpricedTurns"]).unwrap_or(0),
+            reported: value.get("reported").and_then(Value::as_bool) == Some(true),
+            estimated: value.get("estimated").and_then(Value::as_bool) == Some(true),
+            by_model: value
+                .get("byModel")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| {
+                            Some(ModelCost {
+                                model: text(row, &["model"])?.to_string(),
+                                cost: row.get("costUsd").and_then(Value::as_f64),
+                                turns: number(row, &["turns"]).unwrap_or(0),
+                                unpriced_turns: number(row, &["unpricedTurns"]).unwrap_or(0),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+}
+
 /// The live breakdown: the provider's own count, or its total without
 /// categories. `estimated` is true when the shares are moxen's estimate
 /// rather than the provider's own count.
@@ -903,6 +972,8 @@ pub struct Breakdown {
     pub threshold: Option<i64>,
     pub compacts: Option<bool>,
     pub cost: Option<f64>,
+    /// The provider's own split, when it keeps one (Claude Code's `modelUsage`).
+    pub provider_cost: Vec<ProviderCost>,
     pub categories: Vec<Category>,
     pub tools: Vec<ToolShare>,
     pub estimated: bool,
@@ -917,6 +988,20 @@ impl Breakdown {
             threshold: number(value, &["autoCompactThreshold"]),
             compacts: value.get("compactsAutomatically").and_then(Value::as_bool),
             cost: value.get("costUsd").and_then(Value::as_f64),
+            provider_cost: value
+                .get("costByModel")
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| {
+                            Some(ProviderCost {
+                                model: text(row, &["model"])?.to_string(),
+                                cost: row.get("costUsd").and_then(Value::as_f64)?,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             categories: value
                 .get("categories")
                 .and_then(Value::as_array)
@@ -989,6 +1074,8 @@ pub struct ContextData {
     pub live: bool,
     pub breakdown: Option<Breakdown>,
     pub reading: Option<Reading>,
+    /// What the thread's turns have cost, by model, from the same answers.
+    pub cost: Option<ThreadCost>,
     pub error: Option<String>,
 }
 
@@ -1431,8 +1518,11 @@ pub fn render(
     let compacts = breakdown
         .and_then(|breakdown| breakdown.compacts)
         .or_else(|| snapshot.and_then(|usage| usage.compacts));
+    // The live reading's own figure first (a provider that reports its session
+    // cost), then the thread's computed cost, which covers every provider.
     let cost = breakdown
         .and_then(|breakdown| breakdown.cost)
+        .or_else(|| data.cost.as_ref().and_then(|cost| cost.total))
         .or_else(|| snapshot.and_then(|usage| usage.cost));
     let processed = snapshot.and_then(|usage| usage.processed);
     let estimated = breakdown.is_some_and(|breakdown| breakdown.estimated);
@@ -1459,6 +1549,11 @@ pub fn render(
                             (None, _) => NO_DATA.to_string(),
                         }),
                 )
+                // The cost sits beside the size, as the mockup's
+                // "312k / 1m · 31% · $4.64" does.
+                .when_some(cost, |row, cost| {
+                    row.child(mono(format!("· {}", format_usd(cost))))
+                })
                 .child(mono(if data.live {
                     "live".to_string()
                 } else if data
@@ -1604,9 +1699,7 @@ pub fn render(
             );
         }
     }
-    if let Some(cost) = cost {
-        body = body.child(mono(format!("Session cost {}", format_usd(cost))));
-    }
+    body = body.child(cost_by_model(data, breakdown));
     if let Some(processed) = processed {
         body = body.child(mono(format!(
             "{} tokens processed",
@@ -1615,6 +1708,71 @@ pub fn render(
     }
     body = body.child(plan_usage(limits, provider_name, now));
     body
+}
+
+/// What the thread has cost, by model, from the provider's own accounting
+/// where it keeps one, else from the thread's turns. An unpriced model reads
+/// "unpriced", never $0.00, and a total that misses some turns says so.
+fn cost_by_model(data: &ContextData, breakdown: Option<&Breakdown>) -> Div {
+    let section = div().flex().flex_col().gap(px(6.));
+    let provider_rows = breakdown
+        .map(|breakdown| breakdown.provider_cost.as_slice())
+        .unwrap_or_default();
+    let thread_rows = data
+        .cost
+        .as_ref()
+        .map(|cost| cost.by_model.as_slice())
+        .unwrap_or_default();
+    if provider_rows.is_empty() && thread_rows.is_empty() {
+        return section;
+    }
+    let provider_split = !provider_rows.is_empty();
+    let mut section = section.child(
+        div()
+            .flex()
+            .items_baseline()
+            .gap(px(8.))
+            .child(ui::caps("Cost by model"))
+            // The figure is what these tokens would cost on the API, not a bill.
+            .child(mono("API-equivalent".to_string())),
+    );
+    if provider_split {
+        section = section.child(
+            div()
+                .text_size(px(12.))
+                .text_color(color("ink-2"))
+                .child("As the provider reports it, subagent calls included."),
+        );
+        section = section.children(provider_rows.iter().map(|row| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .text_size(px(13.))
+                .child(div().flex_1().child(row.model.clone()))
+                .child(mono(format_usd(row.cost)))
+        }));
+    } else {
+        section = section.children(thread_rows.iter().map(|row| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .text_size(px(13.))
+                .child(div().flex_1().child(row.model.clone()))
+                .child(mono(match row.cost {
+                    Some(cost) => format_usd(cost),
+                    None => "unpriced".to_string(),
+                }))
+        }));
+    }
+    if !provider_split && let Some(cost) = data.cost.as_ref().filter(|cost| cost.partial) {
+        section = section.child(mono(format!(
+            "{} turn(s) unpriced, so the total covers the rest",
+            cost.unpriced_turns
+        )));
+    }
+    section
 }
 
 /// Headroom is the useful number: how much more the thread can take before it
@@ -1822,6 +1980,7 @@ mod tests {
             live: true,
             breakdown,
             reading: None,
+            cost: None,
             error: None,
         };
         assert_eq!(super::context_percent(Some(&data), None), Some(66));
@@ -2022,6 +2181,34 @@ mod tests {
         .expect("resumed");
         assert!(resumed.detail(now).starts_with("The usage window reset"));
         assert!(resumed.actions().is_empty());
+    }
+
+    #[test]
+    fn thread_cost_keeps_an_unpriced_model_unpriced() {
+        let cost = super::ThreadCost::from_json(&json!({
+            "totalUsd": 2.0, "partial": true, "pricedTurns": 1, "unpricedTurns": 1,
+            "reported": false, "estimated": true,
+            "byModel": [
+                {"model": "gpt-6.2-sol", "costUsd": 2.0, "turns": 1, "unpricedTurns": 0},
+                {"model": "gpt-oss-120b-medium", "costUsd": null, "turns": 1, "unpricedTurns": 1},
+            ],
+        }))
+        .expect("cost");
+        assert_eq!(cost.total, Some(2.0));
+        assert!(cost.partial);
+        assert!(!cost.reported);
+        assert_eq!(cost.by_model.len(), 2);
+        // Reported as unpriced, never as $0.00: the total covers only the rest.
+        assert_eq!(cost.by_model[1].cost, None);
+        assert_eq!(cost.by_model[1].unpriced_turns, 1);
+        // The decoder refuses anything that is not an object, so a stale answer
+        // never reads as a thread that cost nothing.
+        assert!(super::ThreadCost::from_json(&json!(null)).is_none());
+        assert!(super::ThreadCost::from_json(&json!("$2.00")).is_none());
+        let empty =
+            super::ThreadCost::from_json(&json!({"totalUsd": null, "byModel": []})).expect("empty");
+        assert_eq!(empty.total, None);
+        assert!(empty.by_model.is_empty());
     }
 
     #[test]

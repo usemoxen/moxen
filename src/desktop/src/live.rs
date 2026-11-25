@@ -28,7 +28,7 @@ use crate::{
     settings::{self, Discovery},
     stats::StatsData,
     transcript::{self, Row},
-    usage::{Breakdown, Reading, estimate_breakdown},
+    usage::{Breakdown, Reading, ThreadCost, estimate_breakdown},
     wire::{Wire, WireError},
     work::{self, Background, Delegated, Delegation, InspectorData, Read, View},
 };
@@ -4400,12 +4400,25 @@ fn read_context(shared: &Arc<Shared>, id: ThreadId) {
                             .and_then(|previous| previous.reading.clone())
                     })
             };
+            // The thread's cost is in both answers; the live read's stands first.
+            let cost = breakdown
+                .as_ref()
+                .ok()
+                .and_then(|value| ThreadCost::from_json(&value["cost"]))
+                .or_else(|| {
+                    reading
+                        .as_ref()
+                        .ok()
+                        .and_then(|value| ThreadCost::from_json(&value["cost"]))
+                })
+                .or_else(|| previous.as_ref().and_then(|previous| previous.cost.clone()));
             state.contexts.insert(
                 id,
                 Arc::new(ContextData {
                     live,
                     breakdown: next,
                     reading: last,
+                    cost,
                     error,
                 }),
             );
@@ -6242,6 +6255,19 @@ mod tests {
                                             ],
                                             "tools": [{"name": "Bash", "tokens": 40_000}],
                                             "estimated": false,
+                                            "costByModel": [
+                                                {"model": "claude-opus-5", "costUsd": 11.63},
+                                                {"model": "claude-sonnet-5", "costUsd": 1.44},
+                                            ],
+                                        },
+                                        "cost": {
+                                            "totalUsd": 13.07, "partial": true, "pricedTurns": 11, "unpricedTurns": 2,
+                                            "reported": true, "estimated": true,
+                                            "byModel": [
+                                                {"model": "claude-opus-5", "costUsd": 11.63, "turns": 8, "unpricedTurns": 0},
+                                                {"model": "claude-sonnet-5", "costUsd": 1.44, "turns": 3, "unpricedTurns": 0},
+                                                {"model": "some-local-model", "costUsd": null, "turns": 2, "unpricedTurns": 2},
+                                            ],
                                         }})
                                     }
                                     Some("thread.context-reading") => {
@@ -7759,6 +7785,18 @@ mod tests {
         assert_eq!(breakdown.categories.len(), 5);
         assert_eq!(breakdown.tools.len(), 1);
         assert!(!breakdown.estimated);
+        // The provider's own split rides with the breakdown; the thread's cost
+        // by model rides beside it, unpriced rows included.
+        assert_eq!(breakdown.provider_cost.len(), 2);
+        assert_eq!(breakdown.provider_cost[0].model, "claude-opus-5");
+        let cost = context.cost.as_ref().expect("cost");
+        assert_eq!(cost.total, Some(13.07));
+        assert!(cost.partial && cost.reported && cost.estimated);
+        assert_eq!(cost.by_model.len(), 3);
+        assert_eq!(
+            cost.by_model[2].cost, None,
+            "a model with no price stays unpriced, never $0.00"
+        );
         let reading = context.reading.as_ref().expect("reading");
         assert_eq!((reading.used, reading.max), (600_000, Some(1_000_000)));
         assert!(!reading.compacted_since);
