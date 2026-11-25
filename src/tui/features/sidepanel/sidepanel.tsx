@@ -5,9 +5,10 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import { TextAttributes } from "@opentui/core";
 
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
+
 import { useHover } from "../../hooks/useHover.js";
 import { prettyToolName } from "../../model/activity.js";
-import { contextShares, planUsageGroups, subagentPreview, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab } from "../../model/sidepanel.js";
+import { contextShares, planUsageGroups, subagentPreview, type AgentThreadRow, type ContextBreakdown, type NativeSubagentRow, type SideTab, type ThreadCost } from "../../model/sidepanel.js";
 import { backgroundTaskKind, backgroundTaskTitle, untilLabel, type BackgroundTaskRow, type ContextUsage } from "../../model/thread.js";
 import { formatDuration, formatTokenCount, formatUsd } from "../../model/turns.js";
 import { COLOR, SURFACE } from "../../theme.js";
@@ -480,6 +481,7 @@ function BarRow({ width, fraction, filledColor }: { width: number; fraction: num
 export function ContextTab({
   breakdown,
   fallback,
+  cost,
   live,
   usageLimits,
   providerName,
@@ -489,6 +491,8 @@ export function ContextTab({
   breakdown: ContextBreakdown | null;
   /** The last recorded reading, when no live breakdown is available. */
   fallback: ContextUsage | null;
+  /** What this thread's turns have cost, by model, from the server. */
+  cost: ThreadCost | null;
   live: boolean;
   usageLimits: ProviderUsageLimits | null;
   providerName: string | null;
@@ -514,14 +518,34 @@ export function ContextTab({
   if (absorber !== undefined && shares.reduce((total, share) => total + share.percent, 0) >= 99.5) absorber.cells = Math.max(1, absorber.cells + drift);
   const threshold = breakdown?.autoCompactThreshold ?? fallback?.autoCompactThreshold ?? null;
   const compactsAutomatically = breakdown?.compactsAutomatically ?? fallback?.compactsAutomatically ?? null;
-  const cost = breakdown?.costUsd ?? fallback?.costUsd ?? null;
+  // One accounting scope for the figure, the rows and the partial state: the
+  // thread's own turns. The live session's native split is a different scope
+  // (it prices only what its own query ran) and is drawn as its own block.
+  // A turn-cost object that exists with no total is the thread's answer too:
+  // nothing could be priced, so the thread's figure is unknown, not the live
+  // session's — that stays in its own block below.
+  const costUsd = cost === null ? (breakdown?.costUsd ?? fallback?.costUsd ?? null) : cost.totalUsd;
+  const unknown = cost !== null && cost.totalUsd === null;
   const processed = fallback?.totalProcessedTokens ?? null;
+  const threadRows = cost?.byModel ?? [];
+  const partial = (cost?.unpricedTurns ?? 0) > 0;
+  const sessionRows = breakdown?.costByModel ?? [];
+  const sessionTotal = sessionRows.reduce((sum, row) => sum + row.costUsd, 0);
 
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
       <Heading text={t("side.context_usage_5621")} meta={live ? "live" : t("side.last_reading_d532")} />
       {used === null ? (
-        <Empty glyph="○" text={t("side.no_reading_yet_one_a155")} />
+        <>
+          <Empty glyph="○" text={t("side.no_reading_yet_one_a155")} />
+          {/* The cost is known from the turns even when the window is not measured. */}
+          {costUsd === null && !unknown ? null : (
+            <box style={{ flexDirection: "row", height: 1, flexShrink: 0, paddingLeft: 1 }}>
+              <text fg={COLOR.dim}>{t("side.cost")}</text>
+              {costUsd === null ? <text fg={COLOR.faint}>{t("side.unpriced")}</text> : <text fg={COLOR.text}>{formatUsd(costUsd)}</text>}
+            </box>
+          )}
+        </>
       ) : (
         <>
           <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
@@ -529,14 +553,19 @@ export function ContextTab({
             {max === null ? (
               <text fg={COLOR.dim}>{t("side.tokens_in_context_be58")}</text>
             ) : (
+              <text fg={COLOR.dim}>{t("side.ofMax", { max: formatTokenCount(max), percent: Math.round((used / max) * 100) })}</text>
+            )}
+            {costUsd === null ? (
+              unknown ? (
+                <>
+                  <text fg={COLOR.dim}>{" · "}</text>
+                  <text fg={COLOR.faint}>{t("side.unpriced")}</text>
+                </>
+              ) : null
+            ) : (
               <>
-                <text fg={COLOR.dim}>{t("side.ofMax", { max: formatTokenCount(max), percent: Math.round((used / max) * 100) })}</text>
-                {cost === null ? null : (
-                  <>
-                    <text fg={COLOR.dim}>{" · "}</text>
-                    <text fg={COLOR.text}>{formatUsd(cost)}</text>
-                  </>
-                )}
+                <text fg={COLOR.dim}>{" · "}</text>
+                <text fg={COLOR.text}>{formatUsd(costUsd)}</text>
               </>
             )}
           </box>
@@ -612,6 +641,36 @@ export function ContextTab({
             </>
           )}
         </>
+      )}
+      {threadRows.length === 0 && costUsd !== null ? null : (
+        <box style={{ flexDirection: "column", flexShrink: 0 }}>
+          <Heading text={t("side.costByModel")} meta={t("side.apiEquivalent")} />
+          {threadRows.map((row) => (
+            <box key={row.model} style={{ width: inner, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
+              <OverflowText fg={COLOR.text} width={Math.max(4, inner - 12)}>{row.model}</OverflowText>
+              <text fg={row.costUsd === null ? COLOR.faint : COLOR.text}>{row.costUsd === null ? t("side.unpriced") : formatUsd(row.costUsd)}</text>
+            </box>
+          ))}
+          {unknown ? (
+            <text fg={COLOR.dim} wrapMode="word">{t("side.costUnknown")}</text>
+          ) : partial ? (
+            <text fg={COLOR.dim} wrapMode="word">{t("side.costPartial", { count: cost?.unpricedTurns ?? 0 })}</text>
+          ) : null}
+        </box>
+      )}
+      {sessionRows.length === 0 ? null : (
+        // The live session's own accounting, which prices only what its query
+        // ran: its own subtotal, never mixed into the thread's figure above.
+        <box style={{ flexDirection: "column", flexShrink: 0 }}>
+          <Heading text={t("side.currentSession")} meta={formatUsd(sessionTotal)} />
+          <text fg={COLOR.dim} wrapMode="word">{t("side.providerCostSplit", { name: providerName ?? t("side.thisProvider") })}</text>
+          {sessionRows.map((row) => (
+            <box key={row.model} style={{ width: inner, flexDirection: "row", height: 1, flexShrink: 0, justifyContent: "space-between" }}>
+              <OverflowText fg={COLOR.text} width={Math.max(4, inner - 12)}>{row.model}</OverflowText>
+              <text fg={COLOR.text}>{formatUsd(row.costUsd)}</text>
+            </box>
+          ))}
+        </box>
       )}
       <Heading text={t("side.plan_usage_48f7")} {...(providerName === null ? {} : { meta: providerName })} />
       {usageLimits === null || (usageLimits.windows.length === 0 && typeof usageLimits.credits !== "number") ? (

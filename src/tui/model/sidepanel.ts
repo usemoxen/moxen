@@ -10,6 +10,9 @@ import type { QueryResult } from "../../server/api.js";
 
 /** What fills the context window, as the `thread.context` query reports it. */
 export type ContextBreakdown = NonNullable<QueryResult<"thread.context">["breakdown"]>;
+
+/** What the thread has cost, by model, as `thread.context` reports it. */
+export type ThreadCost = QueryResult<"thread.context">["cost"];
 import { threadStatus, type ThreadStatus } from "./shell.js";
 import type { ContextUsage } from "./thread.js";
 

@@ -234,8 +234,17 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "How full your own context window is: tokens used, the window size, the percent used, and when that reading was taken. " +
       "It is the same number the user's Moxen screen shows for this thread, taken from the latest reading Moxen recorded. " +
       "Totals only. It never estimates: with no reading yet it says so, and a reading from before a compaction is marked as not current. " +
-      "Use it before deciding to compact or hand off instead of guessing. It takes no argument: always your own thread.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      "It also returns what fills the window by category and the heaviest tools, as the user's context panel shows them, where the provider reports them; a provider that reports totals only says so instead of having shares guessed. " +
+      "And it returns what the thread has cost, by model: an API-equivalent price of the tokens, not what a subscription is charged, with unpriced turns said plainly rather than counted as zero. " +
+      "Pass taskId to read the same for a task you delegated (the same access rule as task_status, and only while that thread still exists in your project). " +
+      "Use it before deciding to compact or hand off instead of guessing. With no taskId it is always your own thread.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "A task you delegated. Omit for your own thread." },
+      },
+      additionalProperties: false,
+    },
     annotations: { readOnlyHint: true },
   },
   {
@@ -868,7 +877,7 @@ export async function callMoxenTool(
       case "models":
         return ok(await modelsTool(api, args));
       case "context_usage":
-        return ok(await contextUsageTool(api, parentThreadId));
+        return ok(await contextUsageTool(api, parentThreadId, args));
       case "usage_status":
         return ok(await usageStatusTool(api, parentThreadId, options.usageRefreshMs ?? USAGE_REFRESH_TIMEOUT_MS, options.delegated === true));
       case "todos": {
@@ -1608,29 +1617,89 @@ async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
 }
 
 /**
- * `context_usage`: the calling thread's latest recorded reading
- * (`thread.context-reading`), the same figure the TUI's composer shows.
- * Totals only, never an estimate. A reading from before a compaction is
- * returned with its time and `current: false`, so an old number is not
- * passed off as the one now.
+ * `context_usage`: how full the calling thread's context window is, what fills
+ * it, and what the thread has cost — the same figures the TUI's context panel
+ * shows. The reading is the latest one Moxen recorded (totals only, never an
+ * estimate); the categories and heaviest tools are the provider's own where it
+ * reports them, and a provider that reports totals only says so instead of
+ * having shares invented for it. With `taskId` it is the same read for a task
+ * this thread delegated, under `task_status`' ownership rule.
  */
-async function contextUsageTool(api: ClientApi, parentThreadId: string) {
-  const { reading } = await api.query({ type: "thread.context-reading", threadId: parentThreadId });
-  if (reading === null) {
-    return { reading: null, note: "No context reading for this thread yet. Moxen records one while a turn runs and as it ends; it never estimates." };
-  }
-  const percentUsed = reading.maxTokens === null || reading.maxTokens <= 0 ? null : Math.round((reading.usedTokens / reading.maxTokens) * 100);
+async function contextUsageTool(api: ClientApi, parentThreadId: string, args: Record<string, unknown>) {
+  const taskId = argString(args, "taskId");
+  const context = await api.query({
+    type: "thread.agent-context",
+    callerThreadId: parentThreadId,
+    ...(taskId === undefined ? {} : { taskId }),
+  });
+  const { reading, breakdown, cost } = context;
+  // `note` keeps its legacy contract exactly: it explains a missing reading and
+  // a reading from before a compaction, and says nothing otherwise. Every new
+  // explanation is a field of its own, so a reader of `note` is unaffected.
+  const note =
+    reading === null
+      ? "No context reading for this thread yet. Moxen records one while a turn runs and as it ends; it never estimates."
+      : reading.compactedSince
+        ? "A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that."
+        : null;
+  const categories = breakdown?.categories ?? [];
+  const breakdownNote =
+    categories.length === 0
+      ? `${context.provider ?? "This provider"} reports the window's total only, so there is no usage-by-category breakdown for this thread. Categories come from the provider where it reports them; Moxen does not invent them.`
+      : breakdown?.estimated === true
+        ? "The category shares are Moxen's estimate from the conversation, scaled to the provider's own total."
+        : null;
+  const costNote = [
+    cost.totalUsd === null
+      ? cost.unpricedTurns > 0
+        ? "No turn of this thread could be priced (its model has no price here), so its cost is unknown rather than zero."
+        : "This thread has no turn with a reported cost or a known price yet, so its cost is unknown rather than zero."
+      : cost.unpricedTurns > 0
+        ? `Partial: ${cost.unpricedTurns} of this thread's turns could not be priced, so the total covers only the rest.`
+        : null,
+    "Cost is the API-equivalent price of these tokens, not what a subscription is charged.",
+  ]
+    .filter((line): line is string => line !== null)
+    .join(" ");
+
   return {
-    reading: {
-      usedTokens: reading.usedTokens,
-      maxTokens: reading.maxTokens,
-      percentUsed,
-      takenAt: reading.takenAt,
-      current: !reading.compactedSince,
+    ...(taskId === undefined ? {} : { taskId }),
+    threadId: context.threadId,
+    provider: context.provider,
+    reading:
+      reading === null
+        ? null
+        : {
+            usedTokens: reading.usedTokens,
+            maxTokens: reading.maxTokens,
+            percentUsed: reading.maxTokens === null || reading.maxTokens <= 0 ? null : Math.round((reading.usedTokens / reading.maxTokens) * 100),
+            takenAt: reading.takenAt,
+            current: !reading.compactedSince,
+          },
+    categories: categories.map((category) => ({ name: category.name, tokens: category.tokens, kind: category.kind })),
+    heaviestTools: (breakdown?.tools ?? []).map((tool) => ({ name: tool.name, tokens: tool.tokens })),
+    cost: {
+      totalUsd: cost.totalUsd,
+      partial: cost.unpricedTurns > 0,
+      pricedTurns: cost.pricedTurns,
+      unpricedTurns: cost.unpricedTurns,
+      reported: cost.reported,
+      estimated: cost.estimated,
+      byModel: cost.byModel.map((row) => ({
+        model: row.model,
+        costUsd: row.costUsd,
+        turns: row.turns,
+        unpricedTurns: row.unpricedTurns,
+      })),
     },
-    ...(reading.compactedSince
-      ? { note: "A compaction has happened since this reading, so it is not current. Moxen records a new one when the compaction ends: call context_usage again after that." }
-      : {}),
+    // The provider's own per-model split where it keeps one (Claude Code's
+    // `modelUsage`): its own accounting, so it need not match the rows above.
+    ...(breakdown?.costByModel === undefined || breakdown.costByModel.length === 0
+      ? {}
+      : { providerCostByModel: breakdown.costByModel.map((row) => ({ model: row.model, costUsd: row.costUsd })) }),
+    ...(note === null ? {} : { note }),
+    ...(breakdownNote === null ? {} : { breakdownNote }),
+    costNote,
   };
 }
 

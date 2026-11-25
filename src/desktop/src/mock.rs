@@ -154,11 +154,24 @@ fn fixture_context() -> ContextData {
         ],
         "tools": [{"name": "Bash", "tokens": 40_000}],
         "estimated": false,
+        "costUsd": 4.64,
+        "costByModel": [
+            {"model": "claude-opus-5", "costUsd": 11.63},
+            {"model": "claude-sonnet-5", "costUsd": 1.44},
+        ],
     }));
     ContextData {
         live: true,
         breakdown,
         reading: None,
+        cost: crate::usage::ThreadCost::from_json(&json!({
+            "totalUsd": 13.07, "pricedTurns": 12, "unpricedTurns": 0,
+            "reported": true, "estimated": false,
+            "byModel": [
+                {"model": "claude-opus-5", "costUsd": 11.63, "turns": 9, "unpricedTurns": 0},
+                {"model": "claude-sonnet-5", "costUsd": 1.44, "turns": 3, "unpricedTurns": 0},
+            ],
+        })),
         error: None,
     }
 }

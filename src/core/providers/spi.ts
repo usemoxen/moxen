@@ -134,6 +134,13 @@ export interface ContextBreakdown extends ContextWindowUsage {
   readonly estimated: boolean;
   /** Per-tool shares of the conversation, heaviest first, when the provider reports them. */
   readonly tools?: ReadonlyArray<{ readonly name: string; readonly tokens: number }>;
+  /**
+   * The provider's own per-model spend for this session, costliest first —
+   * Claude Code's `modelUsage`, which prices every call it made (subagents and
+   * auxiliary calls included), so it does not always match the thread's turns.
+   * Absent where the provider reports no such split.
+   */
+  readonly costByModel?: ReadonlyArray<{ readonly model: string; readonly costUsd: number }>;
 }
 
 export interface ProviderSession {

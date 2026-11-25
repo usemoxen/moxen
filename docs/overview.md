@@ -182,7 +182,16 @@ percent used and the time the reading was taken — the same reading the
 composer shows, totals only. It never estimates: a thread with no reading yet
 is told so, and a reading from before a compaction is returned with its time
 and marked not current, since Moxen records a fresh one when the compaction
-ends.
+ends. Beside that it carries what fills the window by category and the
+heaviest tools, as the context panel shows them, where the provider reports
+them — and says so plainly where a provider reports totals only. It also
+carries the thread's cost by model: the API-equivalent price of its turns, not
+what a subscription is charged, with unpriced turns said to be unpriced rather
+than counted as zero. Pass a `taskId` to read the same for a task the thread
+delegated, under the ownership rule `task_status` uses, and only while that
+thread still exists in the caller's project — a deleted or foreign one is the
+same `TASK_NOT_FOUND` a stranger gets. Each explanation is its own field
+(`breakdownNote`, `costNote`) so `note` says exactly what it always said.
 
 `usage_status` answers with every set-up provider's allowance: each window's
 percent used, reset time and label, when that reading was taken, and whether

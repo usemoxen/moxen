@@ -3,7 +3,8 @@ import type { MutableRefObject } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
 
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
-import type { ContextBreakdown } from "../../model/sidepanel.js";
+
+import type { ContextBreakdown, ThreadCost } from "../../model/sidepanel.js";
 import type { ClientApi } from "../../../server/api.js";
 import type { QueryResults } from "../../../server/protocol.js";
 import type { SideTab } from "../../model/sidepanel.js";
@@ -41,8 +42,9 @@ const CONTEXT_REFRESH_MS = 5_000;
 
 /**
  * The open thread's live context breakdown, re-read while the Context tab
- * is showing (and whenever `refreshKey` moves — a turn settling, say).
- * Null until the first answer, or when no session runs here.
+ * is showing (and whenever `refreshKey` moves — a turn settling, say), with
+ * the thread's cost by model. Null until the first answer, or when no session
+ * runs here.
  */
 export function useContextBreakdown(
   client: ClientApi,
@@ -50,11 +52,15 @@ export function useContextBreakdown(
   active: boolean,
   refreshKey: unknown,
   intervalMs: number = CONTEXT_REFRESH_MS,
-): { breakdown: ContextBreakdown | null; live: boolean } {
-  const [state, setState] = useState<{ breakdown: ContextBreakdown | null; live: boolean }>({ breakdown: null, live: false });
+): { breakdown: ContextBreakdown | null; live: boolean; cost: ThreadCost | null } {
+  const [state, setState] = useState<{ breakdown: ContextBreakdown | null; live: boolean; cost: ThreadCost | null }>({
+    breakdown: null,
+    live: false,
+    cost: null,
+  });
   const visible = useTerminalVisible();
   useEffect(() => {
-    setState({ breakdown: null, live: false });
+    setState({ breakdown: null, live: false, cost: null });
   }, [threadId]);
   useEffect(() => {
     if (!active || threadId === null) return;
@@ -63,7 +69,7 @@ export function useContextBreakdown(
       client
         .query({ type: "thread.context", threadId })
         .then((result) => {
-          if (!cancelled) setState({ breakdown: result.breakdown, live: result.live });
+          if (!cancelled) setState({ breakdown: result.breakdown, live: result.live, cost: result.cost });
         })
         .catch(() => undefined);
     const stop = startPolling(read, visible ? intervalMs : null);

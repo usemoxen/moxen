@@ -157,6 +157,8 @@ import {
   type DelegateRequest,
   recordChecklist,
   describeTask,
+  agentTaskThread,
+  confirmAgentTaskThread,
   ensureProject,
   handover,
   inspectThreadView,
@@ -191,7 +193,7 @@ import { antigravityAccountBlockedReason, antigravityOffUseLaunchBlockedReason, 
 import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
-import { resolveContextCostUsd, threadCostUsd } from "../core/usage/prices.js";
+import { emptyThreadCost, resolveContextCostUsd, threadCostSplit, threadCostUsd, type ThreadCost } from "../core/usage/prices.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
 import type { ClientApi } from "./api.js";
 import type { RemoteAccess } from "./transport/remoteaccess.js";
@@ -1664,6 +1666,44 @@ export class DirectConnection implements ClientApi {
       ...(subagentRows.length > 0 ? { subagentRows } : {}),
       ...(contextUsage ? { contextUsage } : {}),
     };
+  }
+
+  /**
+   * The context breakdown the thread's live session reports, priced with its
+   * cost; null when no session runs here or it reports no reading. The
+   * provider's own per-category shares and tool weights stand as it sent them,
+   * and a provider that reports totals only yields `categories: []`.
+   */
+  private async liveBreakdown(threadId: string, driver: TurnDriver | null): Promise<ContextBreakdown | null> {
+    if (!driver) return null;
+    const rawBreakdown = driver.contextBreakdown ? await driver.contextBreakdown(threadId).catch(() => null) : null;
+    const rawUsage = rawBreakdown ? null : driver.contextUsage ? await driver.contextUsage(threadId).catch(() => null) : null;
+    const base: ContextBreakdown | null = rawBreakdown ?? (rawUsage ? { ...rawUsage, categories: [], estimated: false } : null);
+    if (!base) return null;
+    const store = await this.store();
+    const [thread, turns] = await Promise.all([store.readThreadRecord(threadId).catch(() => null), store.readTurns(threadId).catch(() => [])]);
+    return thread ? await this.priceContext(thread, turns, base, driver, false) : base;
+  }
+
+  /**
+   * What the thread's turns have cost, by model, including the turn running
+   * now — computed on every read from the turns (never stored on the thread),
+   * with the stats screen's rules. Cheap enough to answer beside a reading.
+   */
+  private async threadCostOf(threadId: string): Promise<ThreadCost> {
+    const store = await this.store();
+    const [thread, turns, config] = await Promise.all([
+      store.readThreadRecord(threadId).catch(() => null),
+      store.readTurns(threadId).catch(() => []),
+      this.loadConfig(),
+    ]);
+    if (!thread) return emptyThreadCost();
+    const open = openTurn(turns);
+    const driver = open ? await this.sessionDriver(threadId) : null;
+    const liveUsage = open ? (driver?.liveTurnUsage?.(threadId) ?? null) : null;
+    const inFlight =
+      open && liveUsage ? { turnId: open.id, modelSelection: open.modelSelection ?? thread.modelSelection, usage: liveUsage } : null;
+    return threadCostSplit(thread, turns, config, inFlight);
   }
 
   private async priceContext<T extends ContextWindowUsage>(
@@ -3194,22 +3234,48 @@ export class DirectConnection implements ClientApi {
         const partial = latestKind === "opencode" || latestKind === "acp" || latestKind === "antigravity";
         return { live: true, partial, tasks: driver.backgroundTasks?.(query.threadId) ?? [] };
       }
-      case "thread.context-reading":
-        return await readContextReading(await this.store(), query.threadId);
+      case "thread.context-reading": {
+        const store = await this.store();
+        const reading = await readContextReading(store, query.threadId);
+        return { ...reading, cost: await this.threadCostOf(query.threadId) };
+      }
+      case "thread.agent-context": {
+        const ctx2 = await this.context();
+        const taskId = query.taskId;
+        const authorized = taskId === undefined ? null : await agentTaskThread(ctx2, query.callerThreadId, taskId);
+        const threadId = authorized?.threadId ?? query.callerThreadId;
+        const store = await this.store();
+        // Live data is a bonus: with no session here (or no thread record, as a
+        // torn-down caller leaves) the recorded reading still answers.
+        const [thread, turns, reading, driver] = await Promise.all([
+          store.readThreadRecord(threadId).catch(() => null),
+          store.readTurns(threadId).catch(() => []),
+          readContextReading(store, threadId),
+          this.sessionDriver(threadId).catch(() => null),
+        ]);
+        const selection = [...turns].reverse().find((turn) => turn.modelSelection !== undefined)?.modelSelection ?? thread?.modelSelection ?? null;
+        const answer = {
+          threadId,
+          provider: selection === null ? null : driverKindOfInstance(selection.instanceId),
+          reading: reading.reading,
+          breakdown: await this.liveBreakdown(threadId, driver),
+          cost: await this.threadCostOf(threadId),
+        };
+        // The authorization was true of an instant; a deletion during these
+        // reads must not be answered with the telemetry they produced.
+        if (taskId !== undefined && authorized !== null) {
+          await confirmAgentTaskThread(ctx2, query.callerThreadId, taskId, authorized.threadId, authorized.projectId);
+        }
+        return answer;
+      }
       case "thread.context": {
         const driver = await this.sessionDriver(query.threadId);
-        if (!driver) return { live: false, breakdown: null };
-        const rawBreakdown = driver.contextBreakdown ? await driver.contextBreakdown(query.threadId).catch(() => null) : null;
-        const rawUsage = rawBreakdown ? null : driver.contextUsage ? await driver.contextUsage(query.threadId).catch(() => null) : null;
-        const base: ContextBreakdown | null = rawBreakdown ?? (rawUsage ? { ...rawUsage, categories: [], estimated: false } : null);
-        if (!base) return { live: true, breakdown: null };
-        const store = await this.store();
-        const [thread, turns] = await Promise.all([
-          store.readThreadRecord(query.threadId).catch(() => null),
-          store.readTurns(query.threadId).catch(() => []),
-        ]);
-        const breakdown = thread ? await this.priceContext(thread, turns, base, driver, false) : base;
-        return { live: true, breakdown };
+        // A thread with no session here still has a cost: its settled turns.
+        return {
+          live: driver !== null,
+          breakdown: await this.liveBreakdown(query.threadId, driver),
+          cost: await this.threadCostOf(query.threadId),
+        };
       }
       case "thread.subagent": {
         // OpenCode keeps each subagent as a child session only a driver holding the thread's session can read.
@@ -3517,16 +3583,19 @@ async function latestContextUsage(store: ThreadStore, threadId: string): Promise
   return null;
 }
 
+/** One recorded context reading; callers pair it with the thread's cost. */
+type ContextReadingRow = NonNullable<QueryResults["thread.context-reading"]["reading"]>;
+
 /**
  * The latest reading the turn runner recorded, with when it was taken, for
- * `thread.context-reading`. A compaction reported after that reading (every
- * driver publishes one, for a `/compact` turn or its own threshold) makes it
- * out of date: the old figure still stands in the store until the next
- * reading lands, so it is marked rather than dropped. The times are compared
- * rather than the row order, since tool activity is written through a chain
- * and a notice can land after a reading it was emitted before.
+ * `thread.context-reading` and the agent's own read. A compaction reported
+ * after that reading (every driver publishes one, for a `/compact` turn or its
+ * own threshold) makes it out of date: the old figure still stands in the
+ * store until the next reading lands, so it is marked rather than dropped. The
+ * times are compared rather than the row order, since tool activity is written
+ * through a chain and a notice can land after a reading it was emitted before.
  */
-async function readContextReading(store: ThreadStore, threadId: string): Promise<QueryResults["thread.context-reading"]> {
+async function readContextReading(store: ThreadStore, threadId: string): Promise<{ readonly reading: ContextReadingRow | null }> {
   const activities = await store.readActivities(threadId).catch(() => []);
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index]!;

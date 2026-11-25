@@ -223,23 +223,83 @@ function diffRunningUsage(before: TurnUsage | undefined, current: TurnUsage): Tu
   };
 }
 
+/** One model's share of a thread's cost, as the thread's own turns add up. */
+export interface ThreadModelCost {
+  /** The model slug the turns selected. */
+  readonly model: string;
+  /** USD for its turns; null when none of them could be priced (unpriced, never $0). */
+  readonly costUsd: number | null;
+  readonly turns: number;
+  /** Its turns that could not be priced, so `costUsd` covers only the rest. */
+  readonly unpricedTurns: number;
+}
+
 /**
- * Total cost in USD across a thread's turns — settled turns from the store plus
- * any live in-flight turn usage not yet written — using the same rules as
- * `computeUsageStats` (provider-reported costs win; Claude turns store running
- * totals and count gains over the previous turn; unreported turns price at the
- * user's per-provider rates over Moxen's shipped list). Null when no turn can
- * be priced (never invents $0).
+ * What a thread has cost: the sum of its priced turns, by model. The rules are
+ * `computeUsageStats`' — a provider-reported cost beats Moxen's price list,
+ * Claude turns store running totals so each counts the gain over the one
+ * before it, and an unpriced model stays unpriced rather than zero. Computed
+ * from the turns on every read; never stored on the thread.
  */
-export function threadCostUsd(
+export interface ThreadCost {
+  /** USD over every priced turn; null when no turn could be priced. */
+  readonly totalUsd: number | null;
+  readonly pricedTurns: number;
+  /** Turns that could not be priced; when above zero `totalUsd` is partial. */
+  readonly unpricedTurns: number;
+  /** Some cost came from a provider's own report rather than a price list. */
+  readonly reported: boolean;
+  /** Some cost was priced from Moxen's list, so the total is partly an estimate. */
+  readonly estimated: boolean;
+  /** Per model, costliest first (unpriced last, then by model); sums to `totalUsd`. */
+  readonly byModel: readonly ThreadModelCost[];
+}
+
+interface ModelCostAccumulator {  costUsd: number | null;
+  turns: number;
+  unpricedTurns: number;
+}
+
+/** No turns to price at all — a thread that has not run, or an unknown one. */
+export function emptyThreadCost(): ThreadCost {
+  return { totalUsd: null, pricedTurns: 0, unpricedTurns: 0, reported: false, estimated: false, byModel: [] };
+}
+
+/**
+ * A thread's cost by model — settled turns from the store plus any live
+ * in-flight turn usage not yet written, priced exactly as `threadCostUsd` and
+ * the stats screen do. `byModel` adds up to `totalUsd` by construction, so a
+ * client never has to reconcile two figures.
+ */
+export function threadCostSplit(
   thread: Pick<StoredThread, "modelSelection">,
   turns: ReadonlyArray<StoredTurn>,
   config: Pick<CliConfig, "providers">,
   inFlight?: InFlightTurnUsage | null,
-): number | null {
+): ThreadCost {
   const previousClaude = new Map<string, TurnUsage>();
-  let total: number | null = null;
+  const models = new Map<string, ModelCostAccumulator>();
+  let pricedTurns = 0;
+  let unpricedTurns = 0;
+  let reported = false;
+  let estimated = false;
   let inFlightConsumed = false;
+
+  const bucketOf = (selection: ModelSelection): ModelCostAccumulator => {
+    const existing = models.get(selection.model);
+    if (existing) return existing;
+    const created: ModelCostAccumulator = { costUsd: null, turns: 0, unpricedTurns: 0 };
+    models.set(selection.model, created);
+    return created;
+  };
+
+  /** Count one turn that carries no usage: it spent nothing knowable, so it is unpriced rather than free. */
+  const unpriced = (selection: ModelSelection): void => {
+    const bucket = bucketOf(selection);
+    bucket.turns += 1;
+    bucket.unpricedTurns += 1;
+    unpricedTurns += 1;
+  };
 
   const account = (selection: ModelSelection, usage: TurnUsage): void => {
     const kind = driverKindOfInstance(selection.instanceId);
@@ -253,9 +313,17 @@ export function threadCostUsd(
       spend,
       isFastSelection(selection),
     );
+    const bucket = bucketOf(selection);
+    bucket.turns += 1;
     if (cost !== null && Number.isFinite(cost.usd)) {
-      total = (total ?? 0) + cost.usd;
+      bucket.costUsd = (bucket.costUsd ?? 0) + cost.usd;
+      pricedTurns += 1;
+      if (cost.source === "reported") reported = true;
+      else estimated = true;
+      return;
     }
+    bucket.unpricedTurns += 1;
+    unpricedTurns += 1;
   };
 
   for (const turn of turns) {
@@ -276,7 +344,10 @@ export function threadCostUsd(
       account(selection, effective);
       continue;
     }
-    if (!turn.usage) continue;
+    if (!turn.usage) {
+      unpriced(selection);
+      continue;
+    }
     account(selection, turn.usage);
   }
 
@@ -284,7 +355,45 @@ export function threadCostUsd(
     account(inFlight.modelSelection ?? thread.modelSelection, inFlight.usage);
   }
 
-  return total;
+  const byModel = [...models.entries()]
+    .map(([model, bucket]): ThreadModelCost => ({ model, ...bucket }))
+    .sort((left, right) => {
+      const leftCost = left.costUsd ?? -1;
+      const rightCost = right.costUsd ?? -1;
+      return rightCost - leftCost || left.model.localeCompare(right.model);
+    });
+  // The total is the fold over the rows as returned, not a running sum over the
+  // turns: adding in a different order can land on a different double ($0.1 +
+  // $0.1 + $0.4 is $0.6000000000000001 turn by turn, $0.6 by model), and a
+  // client that adds the rows it was given must get the figure we printed.
+  const total = byModel.reduce<number | null>((sum, row) => (row.costUsd === null ? sum : (sum ?? 0) + row.costUsd), null);
+
+  return {
+    totalUsd: total,
+    pricedTurns,
+    unpricedTurns,
+    reported,
+    estimated,
+    byModel,
+  };
+}
+
+/**
+ * Total cost in USD across a thread's turns — settled turns from the store plus
+ * any live in-flight turn usage not yet written — using the same rules as
+ * `computeUsageStats` (provider-reported costs win; Claude turns store running
+ * totals and count gains over the previous turn; unreported turns price at the
+ * user's per-provider rates over Moxen's shipped list). Null when no turn can
+ * be priced (never invents $0). `threadCostSplit` is the same sum with its
+ * per-model breakdown.
+ */
+export function threadCostUsd(
+  thread: Pick<StoredThread, "modelSelection">,
+  turns: ReadonlyArray<StoredTurn>,
+  config: Pick<CliConfig, "providers">,
+  inFlight?: InFlightTurnUsage | null,
+): number | null {
+  return threadCostSplit(thread, turns, config, inFlight).totalUsd;
 }
 
 /**
