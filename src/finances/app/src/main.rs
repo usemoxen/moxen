@@ -6,6 +6,8 @@
 #[cfg(feature = "render-harness")]
 mod automation;
 mod bank_sync;
+#[cfg(feature = "render-harness")]
+mod preview;
 mod settings_file;
 mod store_data;
 #[cfg(test)]
@@ -19,7 +21,7 @@ use moxen_finances_ui::commands::FinancesMutations;
 use moxen_finances_ui::data::FinancesData;
 use moxen_finances_ui::demo::DemoData;
 use moxen_finances_ui::shell::FinancesApp;
-use moxen_finances_ui::theme;
+use moxen_finances_ui::{theme, title_bar};
 use std::borrow::Cow;
 use std::rc::Rc;
 
@@ -48,6 +50,14 @@ struct DataSource {
 fn build_data() -> DataSource {
     let demo = std::env::var_os("MOXEN_FINANCES_DEMO")
         .is_some_and(|value| value == "1" || value == "true");
+    #[cfg(feature = "render-harness")]
+    if demo && preview::requested() {
+        return DataSource {
+            data: Rc::new(preview::PreviewData(DemoData::new())),
+            mutations: Some(Rc::new(preview::NoMutations)),
+            startup_error: None,
+        };
+    }
     if demo {
         return DataSource {
             data: Rc::new(DemoData::new()),
@@ -158,9 +168,16 @@ fn main() {
                         show: visible,
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         titlebar: Some(TitlebarOptions {
-                            appears_transparent: true,
+                            // Only macOS keeps its window buttons on a
+                            // transparent title bar. Elsewhere gpui would hide
+                            // them and this app draws none, so the system's
+                            // title bar stays.
+                            appears_transparent: cfg!(target_os = "macos"),
                             title: Some("Moxen Finances".into()),
-                            ..Default::default()
+                            traffic_light_position: Some(point(
+                                px(title_bar::TRAFFIC_LIGHTS.0),
+                                px(title_bar::TRAFFIC_LIGHTS.1),
+                            )),
                         }),
                         ..Default::default()
                     },

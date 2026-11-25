@@ -21,5 +21,5 @@ pub mod model;
 pub mod shell;
 mod sidebar;
 pub mod theme;
-mod title_bar;
+pub mod title_bar;
 pub mod views;

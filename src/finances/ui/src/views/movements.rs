@@ -104,9 +104,9 @@ fn movement_row(
                         .child(div().size(px(6.)).rounded_full().bg(color(status_token)))
                         .child(
                             div()
-                                .font_family(theme::MONO)
-                                .text_size(px(10.5))
-                                .line_height(px(14.))
+                                .font_family(theme::FONT)
+                                .text_size(px(12.))
+                                .line_height(px(17.))
                                 .text_color(color("ink-2"))
                                 .child(message(status_label(movement))),
                         )
@@ -116,9 +116,9 @@ fn movement_row(
                                     .flex()
                                     .items_center()
                                     .gap(px(3.))
-                                    .font_family(theme::MONO)
-                                    .text_size(px(10.5))
-                                    .line_height(px(14.))
+                                    .font_family(theme::FONT)
+                                    .text_size(px(12.))
+                                    .line_height(px(17.))
                                     .text_color(color("ink-2"))
                                     .child(kit::icon("repeat", "ink-2", 10.))
                                     .child(message(movement.frequency.key())),
@@ -128,9 +128,9 @@ fn movement_row(
                 .child(
                     div()
                         .truncate()
-                        .font_family(theme::MONO)
-                        .text_size(px(11.))
-                        .line_height(px(14.))
+                        .font_family(theme::FONT)
+                        .text_size(px(12.))
+                        .line_height(px(17.))
                         .text_color(color("ink-2"))
                         .child(row_subtitle(movement, today)),
                 ),
@@ -270,8 +270,7 @@ fn movement_actions(app: &FinancesApp, cx: &mut Context<FinancesApp>) -> Vec<Any
     .map(|(id, icon, key, kind)| {
         if app.can_mutate() {
             let kind = *kind;
-            kit::button((*id, 0usize), message(key).to_string())
-                .child(kit::icon(icon, "ink-2", 13.))
+            kit::icon_label_button((*id, 0usize), icon, message(key).to_string())
                 .control(message(key))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     dialog::open(this, Dialog::NewMovement(kind), cx);
@@ -418,13 +417,11 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                 Some(if totals.net >= 0 { "added" } else { "broken" }),
             ))
             .into_any_element(),
-        // The toolbar: tabs, search, status, sort and grouping.
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(8.))
-            .child(kit::segmented(
+        // The toolbar, in two rows: what is listed (kind and search), then
+        // how it is narrowed (status) and arranged (sort and grouping).
+        {
+            let row = || div().flex().flex_wrap().items_center().gap(px(8.));
+            let kind = kit::segmented(
                 "movements-kind",
                 &kind_options,
                 kind_selected,
@@ -439,16 +436,16 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         cx,
                     );
                 },
-            ))
-            .child(div().w(px(200.)).child(kit::text_field(
+            );
+            let search = div().flex_1().min_w(px(200.)).child(kit::search_field(
                 "movements-search",
                 &filter.query,
                 message("movements.search.placeholder"),
                 window,
                 cx,
                 |this, query, cx| this.set_movements_query(query, cx),
-            )))
-            .child(kit::segmented(
+            ));
+            let status = kit::segmented(
                 "movements-status",
                 &status_options,
                 status_selected,
@@ -464,8 +461,8 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         cx,
                     );
                 },
-            ))
-            .child(kit::segmented(
+            );
+            let sort = kit::segmented(
                 "movements-sort",
                 &sort_options,
                 sort_selected,
@@ -480,8 +477,8 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         cx,
                     )
                 },
-            ))
-            .child(kit::segmented(
+            );
+            let group = kit::segmented(
                 "movements-group",
                 &group_options,
                 group_selected,
@@ -492,8 +489,21 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
                         cx,
                     )
                 },
-            ))
-            .into_any_element(),
+            );
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(row().child(kind).child(search))
+                .child(
+                    row()
+                        .child(status)
+                        .child(div().flex_1())
+                        .child(sort)
+                        .child(group),
+                )
+                .into_any_element()
+        },
     ];
 
     if movements.is_empty() {
@@ -577,9 +587,9 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
 
     children.push(
         div()
-            .font_family(theme::MONO)
-            .text_size(px(11.))
-            .line_height(px(15.))
+            .font_family(theme::FONT)
+            .text_size(px(12.))
+            .line_height(px(17.))
             .text_color(color("ink-2"))
             .child(message("movements.footer"))
             .into_any_element(),

@@ -41,6 +41,9 @@ impl Render for Tooltip {
 pub trait Control: Sized {
     /// An interactive control: hover and press fills, a focus ring, a tooltip.
     fn control(self, tooltip: impl Into<SharedString>) -> Self;
+    /// [`Control::control`] for a filled primary button: it keeps its fill and
+    /// fades on hover.
+    fn primary_control(self, tooltip: impl Into<SharedString>) -> Self;
     /// Unavailable right now: dimmed, arrow cursor, a tooltip saying why.
     fn disabled(self, tooltip: impl Into<SharedString>) -> Self;
 }
@@ -57,6 +60,17 @@ impl Control for Stateful<Div> {
             .tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone())).into())
     }
 
+    fn primary_control(self, tooltip: impl Into<SharedString>) -> Self {
+        let text = tooltip.into();
+        self.cursor_pointer()
+            .focusable()
+            .tab_index(0)
+            .hover(|s| s.opacity(0.88))
+            .active(|s| s.opacity(0.75))
+            .focus_visible(|s| s.shadow(theme::focus_ring()))
+            .tooltip(move |_, cx| cx.new(|_| Tooltip(text.clone())).into())
+    }
+
     fn disabled(self, tooltip: impl Into<SharedString>) -> Self {
         let text = tooltip.into();
         self.opacity(0.45)
@@ -65,21 +79,58 @@ impl Control for Stateful<Div> {
     }
 }
 
-/// A secondary button row.
-pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+fn button_base(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
-        .h(px(28.))
+        .h(px(30.))
         .px(px(12.))
         .flex()
+        .flex_shrink_0()
         .items_center()
+        .justify_center()
         .gap(px(6.))
+        .whitespace_nowrap()
         .rounded(px(theme::radius("radius-md")))
-        .bg(color("sunk"))
+        .border(px(theme::px_token("stroke", "stroke-rule")))
         .font_family(theme::FONT)
+        .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(13.))
         .line_height(px(17.))
+}
+
+/// The design system's secondary `Button`: an `edge` outline, so an enabled
+/// button never reads as a disabled one. [`Control::disabled`] dims it.
+pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    button_base(id)
+        .border_color(color("edge"))
         .text_color(color("ink"))
+        .child(label.into())
+}
+
+/// A secondary button with its icon before the label.
+pub fn icon_label_button(
+    id: impl Into<ElementId>,
+    icon_name: &'static str,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    button_base(id)
+        .border_color(color("edge"))
+        .text_color(color("ink"))
+        .child(icon(icon_name, "ink", 13.))
+        .child(label.into())
+}
+
+/// The primary `Button` (`ink` fill), one per view: the main action.
+pub fn primary_button(
+    id: impl Into<ElementId>,
+    icon_name: Option<&'static str>,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    button_base(id)
+        .bg(color("ink"))
+        .border_color(color("ink"))
+        .text_color(color("on-ink"))
+        .when_some(icon_name, |s, name| s.child(icon(name, "on-ink", 13.)))
         .child(label.into())
 }
 
@@ -203,8 +254,40 @@ pub fn apply_keystroke(
 /// input element of its own): click to focus, type to append, backspace to
 /// delete, escape to clear, the `x` clears too. The value lives in the app
 /// entity, so every render rebuilds this with the current text.
+pub fn search_field<E: 'static>(
+    id: &'static str,
+    value: &str,
+    placeholder: &str,
+    window: &Window,
+    cx: &mut Context<E>,
+    on_change: impl Fn(&mut E, String, &mut Context<E>) + Clone + 'static,
+) -> Stateful<Div> {
+    field_base(
+        id,
+        Some("search"),
+        value,
+        placeholder,
+        window,
+        cx,
+        on_change,
+    )
+}
+
+/// The same field for a form value: no search icon.
 pub fn text_field<E: 'static>(
     id: &'static str,
+    value: &str,
+    placeholder: &str,
+    window: &Window,
+    cx: &mut Context<E>,
+    on_change: impl Fn(&mut E, String, &mut Context<E>) + Clone + 'static,
+) -> Stateful<Div> {
+    field_base(id, None, value, placeholder, window, cx, on_change)
+}
+
+fn field_base<E: 'static>(
+    id: &'static str,
+    leading: Option<&'static str>,
     value: &str,
     placeholder: &str,
     window: &Window,
@@ -217,29 +300,29 @@ pub fn text_field<E: 'static>(
     let current = value.to_string();
     let mut field = div()
         .id(id)
-        .h(px(28.))
+        .h(px(30.))
         .pl(px(9.))
         .pr(px(7.))
         .flex()
         .items_center()
         .gap(px(6.))
         .rounded(px(theme::radius("radius-md")))
-        .bg(color("sunk"))
-        .border_1()
-        .border_color(color(if focused { "live" } else { "rule" }))
+        .bg(color("raised"))
+        .border(px(theme::px_token("stroke", "stroke-rule")))
+        .border_color(color(if focused { "live" } else { "edge" }))
         .cursor_text()
         .focusable()
         .tab_index(0)
         .track_focus(&handle)
-        .child(icon("search", "ink-2", 13.))
+        .when_some(leading, |s, name| s.child(icon(name, "ink-2", 13.)))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .font_family(theme::MONO)
-                .text_size(px(12.5))
-                .line_height(px(16.))
+                .font_family(theme::FONT)
+                .text_size(px(13.))
+                .line_height(px(17.))
                 .text_color(color(if value.is_empty() { "ink-2" } else { "ink" }))
                 .child(if value.is_empty() {
                     placeholder.to_string()
