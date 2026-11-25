@@ -753,7 +753,12 @@ delegated review task (`delegate` with `mode: "review"`), or one prompt
 - **Delivery, cache-safe:** never in the system prompt. On Claude and the
   Moxen Harness the procedure goes ahead of the next prompt as a
   `<moxen-mode>` block, once; going back to Build sends a short "mode is
-  off" note the same way. Which mode each provider's conversation was told
+  off" note the same way. On Codex it is a developer-role item
+  (`thread/inject_items`), so the model reads it as Moxen's and the user's
+  prompt arrives exactly as they typed it; an older Codex app-server that
+  has no such method gets the `<moxen-mode>` block ahead of the prompt
+  instead (see [Live updates](#live-updates)).
+  Which mode each provider's conversation was told
   is kept on the thread (`modeState`), and forgotten after a compaction or
   a revert so the procedure is sent again. On OpenCode it is an instruction
   entry (`moxen-research`, `moxen-orchestrate`, `moxen-review`), removed in Build.
@@ -1282,7 +1287,22 @@ the held thread. Background turns are refused while protection holds it.
 
 The instructions a conversation began with are kept, not rewritten. What
 changes since — edited rule files (sent as a patch, never the whole file),
-MCP server sets, skills — rides ahead of the next prompt.
+MCP server sets, skills, a runtime instruction update, the mode, a settled
+task's notice, the continue after a usage limit with what protection stopped
+behind it — reaches the next turn as Moxen's own text rather than the user's.
+
+Codex has a channel for it: those items go in as developer-role messages
+(`thread/inject_items`, codex-cli 0.169 and later), which start no turn and
+read as Moxen's. The user's own prompt is then sent unchanged, and a turn
+that carries nothing but a notice (a task settling, a usage continue) starts
+with an empty user input. An app-server older than that refuses the method
+("method not found", or "not supported yet"); the session remembers the
+refusal and sends the same text ahead of the prompt as the tagged block
+(`<moxen-mode>`, `<moxen-instructions-update>`, `<moxen-context-update>`,
+`<task-notification>`) — once, in one channel, so nothing is lost and
+nothing is said twice. Claude, the Moxen Harness and OpenCode always take
+the tagged block. A notice pushed into a turn already running is a steer,
+and that is typed text in every provider.
 
 ## Long threads: compaction and hand-off
 

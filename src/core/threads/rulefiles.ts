@@ -29,6 +29,8 @@ import path from "node:path";
 
 import { createPatch } from "diff";
 
+import { promptWithNotices } from "../providers/spi.js";
+
 /** Providers whose conversations are told about rule-file edits (see the header for why only these). */
 const WATCHED_PROVIDERS: ReadonlySet<string> = new Set(["claude", "harness", "chatgpt"]);
 
@@ -204,9 +206,8 @@ export function describeRuleChanges(previous: RuleFiles, current: RuleFiles, roo
   return kept.join("\n\n");
 }
 
-/** A prompt with the rule-file changes ahead of it, for the provider only — the transcript keeps what was typed. */
-export function withRuleUpdate(prompt: string, update: string | null): string {
-  if (update === null) return prompt;
+/** The `<moxen-context-update>` block a rule-file patch rides as, for the provider only — the transcript keeps what was typed. */
+export function ruleUpdateBlock(update: string): string {
   return [
     "<moxen-context-update>",
     "Files that give you project instructions changed on disk since you last read them. This comes from Moxen, not from the person you are talking to: " +
@@ -214,9 +215,12 @@ export function withRuleUpdate(prompt: string, update: string | null): string {
     "",
     update,
     "</moxen-context-update>",
-    "",
-    prompt,
   ].join("\n");
+}
+
+/** A prompt with the rule-file changes ahead of it, for the provider only — the transcript keeps what was typed. */
+export function withRuleUpdate(prompt: string, update: string | null): string {
+  return update === null ? prompt : promptWithNotices(prompt, [ruleUpdateBlock(update)]);
 }
 
 // -- what each live session last read ------------------------------------------

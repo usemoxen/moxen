@@ -165,7 +165,18 @@ export interface UnconfirmedSteer {
 
 export interface ProviderSendTurnInput {
   readonly threadId: ThreadId;
+  /** What the user said. A driver with `developerNotices` sends it unchanged, however this turn's notices read. */
   readonly prompt: string;
+  /**
+   * Moxen's own text for the model rather than the user's: a task notice, a
+   * usage continue, an instruction update, a mode procedure. A driver with
+   * `developerNotices` delivers each one on its developer-role channel and
+   * sends `prompt` as it is; every other driver folds them ahead of the
+   * prompt (`promptWithNotices`), the tagged-block convention. Empty
+   * `prompt` with notices is a notice-only turn: Moxen starts the turn and
+   * the user said nothing in it.
+   */
+  readonly notices?: readonly string[];
   /**
    * Images for the model to see, in each provider's native form. A driver
    * whose provider cannot take them names them in the prompt instead —
@@ -175,6 +186,19 @@ export interface ProviderSendTurnInput {
   readonly modelSelection?: ModelSelection;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: InteractionMode;
+}
+
+/**
+ * What a driver without a developer channel sends: Moxen's notices ahead of
+ * the prompt, the tagged-block convention (`<moxen-mode>`,
+ * `<moxen-instructions-update>`, `<moxen-context-update>`,
+ * `<task-notification>`). A notice-only turn has no prompt, so its text is
+ * the notices themselves.
+ */
+export function promptWithNotices(prompt: string, notices: readonly string[] | undefined): string {
+  if (!notices || notices.length === 0) return prompt;
+  if (prompt.length === 0) return notices.join("\n\n");
+  return `${notices.map((notice) => `${notice}\n\n`).join("")}${prompt}`;
 }
 
 export interface ProviderTurnStartResult {
@@ -239,6 +263,13 @@ export interface ProviderAdapterCapabilities {
   readonly promptlessTurnContinuation?: boolean;
   /** False when native conversation history cannot be rewound. */
   readonly supportsConversationRollback?: boolean;
+  /**
+   * `ProviderSendTurnInput.notices` reach the model as developer-role items
+   * rather than riding ahead of the user's prompt. The driver falls back on
+   * the text convention itself when the runtime it talks to turns out not to
+   * take them (an older Codex app-server, say), so a turn is never lost.
+   */
+  readonly developerNotices?: boolean;
 }
 
 export interface ProviderThreadTurnSnapshot {

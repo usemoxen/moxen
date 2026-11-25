@@ -13,6 +13,7 @@ export const CODEX_METHODS = {
   threadRollback: "thread/rollback",
   threadRevert: "thread/revert",
   threadCompactStart: "thread/compact/start",
+  threadInjectItems: "thread/inject_items",
   turnStart: "turn/start",
   turnSteer: "turn/steer",
   turnInterrupt: "turn/interrupt",

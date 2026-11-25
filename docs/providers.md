@@ -385,6 +385,17 @@ Moxen replaces Codex's own base prompt (`baseInstructions`, built in
 instructions. `bun scripts/system-prompt.ts --provider codex` prints both. Resumed
 threads send the new base prompt too, so their cached prefix is read afresh once.
 
+Moxen's own text for a turn — an instruction update, a rule-file patch, a mode
+procedure, a settled task's notice, the continue after a usage limit — goes in
+through `thread/inject_items` as developer-role messages, so the model can tell it
+from what the user typed and the user's prompt is sent exactly as it is. Such items
+start no turn and appear in no item list; the next turn's request simply reads them.
+The method arrived in codex-cli 0.169: an older app-server refuses it, and from then
+on that session sends the same text ahead of the prompt as a tagged block instead
+(the `<moxen-mode>`, `<moxen-instructions-update>`, `<moxen-context-update>` and
+`<task-notification>` blocks every other provider gets), so an older runtime loses
+nothing and no notice arrives twice.
+
 That base prompt doesn't state a model, and neither does the Moxen Harness's, and
 Claude Code's names the model but not the effort, so the runtime instructions tell
 every session its model and effort. A change mid-thread reaches it as an

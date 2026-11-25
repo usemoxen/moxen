@@ -8,9 +8,12 @@ import { CliError } from "../../../errors.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
 import { CodexDriver, codexContextUsageOf } from "../driver.js";
 import { codexDisabledToolConfig } from "../../../nativetools.js";
-import { FakeCodexTransport } from "./fakes.js";
+import { FakeCodexTransport, type FakeCodexServer } from "./fakes.js";
 import { McpClient } from "../../harness/mcpclient.js";
 import { CodexHarnessTools, CODEX_HARNESS_SERVER } from "../tools.js";
+import { instructionsUpdateBlock } from "../../../threads/instructions.js";
+import { taskNotificationText } from "../../../threads/notify.js";
+import { USAGE_CONTINUE_PROMPT } from "../../../threads/views.js";
 
 async function collectEvents(driver: CodexDriver, count: number): Promise<ProviderRuntimeEvent[]> {
   const chunk = await Effect.runPromise(Stream.runCollect(Stream.take(driver.streamEvents, count)));
@@ -1079,5 +1082,111 @@ describe("Codex lifecycle boundaries", () => {
     await expect(answer).resolves.toEqual({ text: "Because.", withContext: true });
     expect(transport.sessions[0]!.client.closed).toBe(true);
     expect(server.requestsTo("thread/start")).toEqual([]);
+  });
+});
+
+describe("codex runtime notices", () => {
+  // The three kinds Moxen sends: an instructions update, the usage continue,
+  // and a settled task's notice.
+  const INSTRUCTIONS = instructionsUpdateBlock("Answer in short sentences from now on.");
+  const USAGE = USAGE_CONTINUE_PROMPT;
+  const TASK = taskNotificationText([
+    {
+      taskId: "task-1",
+      title: "Run the checks",
+      status: "completed",
+      durationMs: 65_000,
+      model: "codex/gpt-test",
+      branch: "moxen/checks",
+      headline: "Every check passes.",
+      filesChanged: 1,
+      additions: 4,
+      deletions: 1,
+      background: [],
+      backgroundUnknown: false,
+    },
+  ]);
+
+  /** What arrived in each turn's user half: the text blocks of `turn/start`. */
+  function userInputs(server: FakeCodexServer): string[] {
+    return server.requestsTo("turn/start").map((request) =>
+      ((request.params as { input?: ReadonlyArray<{ type: string; text?: string }> }).input ?? [])
+        .filter((block) => block.type === "text")
+        .map((block) => block.text ?? "")
+        .join(""),
+    );
+  }
+
+  async function settleTurn(driver: CodexDriver, server: FakeCodexServer, sent: { turnId: string }): Promise<void> {
+    server.notify("turn/completed", { threadId: "codex-thread-1", turn: { status: "completed" } });
+    await driver.awaitTurn(START.threadId, sent.turnId);
+  }
+
+  it("sends Moxen's notices as developer items and the user's prompt unchanged", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS] }));
+    await settleTurn(driver, server, first);
+    // A usage continue and a task notice are turns of Moxen's own text: the
+    // user said nothing in them, so the prompt is empty and only the notice goes in.
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "", notices: [USAGE] }));
+    await settleTurn(driver, server, second);
+    const third = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "", notices: [TASK] }));
+    await settleTurn(driver, server, third);
+
+    const developer = (text: string) => [{ type: "message", role: "developer", content: [{ type: "input_text", text }] }];
+    expect(server.requestsTo("thread/inject_items").map((request) => request.params)).toEqual([
+      { threadId: "codex-thread-1", items: developer(INSTRUCTIONS) },
+      { threadId: "codex-thread-1", items: developer(USAGE) },
+      { threadId: "codex-thread-1", items: developer(TASK) },
+    ]);
+    // The user's prompt is what it was, with none of Moxen's text in it.
+    expect(userInputs(server)).toEqual(["run the checks", "", ""]);
+  });
+
+  it("falls back to the tagged text, once, when the app-server has no thread/inject_items", async () => {
+    const transport = new FakeCodexTransport({ failRequests: { "thread/inject_items": "thread/inject_items is not supported yet" } });
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS] }));
+    await settleTurn(driver, server, first);
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "", notices: [TASK] }));
+    await settleTurn(driver, server, second);
+
+    // Ahead of the prompt exactly as before, and never in both channels: the
+    // failed injection applied nothing, so the notice is not delivered twice.
+    expect(userInputs(server)).toEqual([`${INSTRUCTIONS}\n\nrun the checks`, TASK]);
+    // Asked once per session: the runtime said it has no such method.
+    expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+    // Nothing failed over it: both turns ran with a prompt of their own.
+    expect(server.requestsTo("turn/start")).toHaveLength(2);
+  });
+
+  it("reads a method-not-found reply as an older runtime, not as a failed turn", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    // A pre-0.169 app-server answers `-32601`, which the peer surfaces as this.
+    const spy = vi.spyOn(client, "request").mockImplementation((method: string, params?: unknown, timeoutMs?: number) =>
+      method === "thread/inject_items"
+        ? Promise.reject(new CliError("PEER_REQUEST_FAILED", "Request failed: Method not found: thread/inject_items", { details: { code: -32601 } }))
+        : request(method, params, timeoutMs),
+    );
+    try {
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS] }));
+      await settleTurn(driver, server, sent);
+      await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "and again", notices: [USAGE] }));
+      expect(userInputs(server)).toEqual([`${INSTRUCTIONS}\n\nrun the checks`, `${USAGE}\n\nand again`]);
+      // Asked, and only once: the refusal is remembered for the session.
+      expect(spy.mock.calls.filter(([method]) => method === "thread/inject_items")).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
   });
 });
