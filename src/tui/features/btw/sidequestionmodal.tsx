@@ -1,3 +1,4 @@
+import { MarkdownView } from "../../ui/markdown.js";
 import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
 import { useKeyLayer } from "../../hooks/useKeyLayer.js";
@@ -65,7 +66,7 @@ export function SideQuestionModal({
           <text fg={COLOR.danger} bg={SURFACE.raised}>{entry.error ?? t("btw.no_answer_8836")}</text>
         ) : (
           // `selectable`: `<markdown>` is not by default, and the answer is what gets dragged.
-          <markdown content={entry.answer ?? ""} fg={COLOR.text} syntaxStyle={markdownSyntaxStyle()} selectable />
+          <MarkdownView content={entry.answer ?? ""} fg={COLOR.text} syntaxStyle={markdownSyntaxStyle()} selectable />
         )}
       </scrollbox>
       <box style={{ flexDirection: "row", height: 1, flexShrink: 0, marginTop: 1 }}>
