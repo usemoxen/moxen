@@ -253,6 +253,7 @@ export function encodeThread(thread: StoredThread): ThreadRow {
   if (thread.researchRole !== undefined) rest.researchRole = thread.researchRole;
   if (thread.researchPicker !== undefined) rest.researchPicker = thread.researchPicker;
   if (thread.continueClaim !== undefined) rest.continueClaim = thread.continueClaim;
+  if (thread.handoffFacts !== undefined) rest.handoffFacts = thread.handoffFacts;
   if (thread.usageProtectionOverride !== undefined) rest.usageProtectionOverride = thread.usageProtectionOverride;
   if (thread.providerSessions !== undefined) rest.providerSessions = thread.providerSessions;
   if (thread.instructionState !== undefined) rest.instructionState = thread.instructionState;
@@ -326,6 +327,7 @@ export function decodeThread(row: ThreadRow): StoredThread {
     ...(rest.researchRole === undefined ? {} : { researchRole: rest.researchRole as NonNullable<StoredThread["researchRole"]> }),
     ...(rest.researchPicker === undefined ? {} : { researchPicker: rest.researchPicker as NonNullable<StoredThread["researchPicker"]> }),
     ...(rest.continueClaim === undefined ? {} : { continueClaim: rest.continueClaim as NonNullable<StoredThread["continueClaim"]> }),
+    ...(rest.handoffFacts === undefined ? {} : { handoffFacts: rest.handoffFacts as NonNullable<StoredThread["handoffFacts"]> }),
     ...(rest.usageProtectionOverride === undefined ? {} : { usageProtectionOverride: rest.usageProtectionOverride as NonNullable<StoredThread["usageProtectionOverride"]> }),
     ...(rest.providerSessions === undefined ? {} : { providerSessions: rest.providerSessions as NonNullable<StoredThread["providerSessions"]> }),
     ...(rest.instructionState === undefined ? {} : { instructionState: rest.instructionState as NonNullable<StoredThread["instructionState"]> }),
@@ -352,6 +354,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
     rest.handoff = handoff;
   }
   if (turn.usagePause !== undefined) rest.usagePause = turn.usagePause;
+  if (turn.handoffOpen !== undefined) rest.handoffOpen = turn.handoffOpen;
   if (turn.interactionModeExplicit !== undefined) rest.interactionModeExplicit = turn.interactionModeExplicit;
   if (turn.unanswered !== undefined) rest.unanswered = turn.unanswered;
   if (turn.generation !== undefined) rest.generation = turn.generation;
@@ -431,6 +434,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     completedAt: row.completed_at,
     ...(rest.startedAt === undefined ? {} : { startedAt: rest.startedAt as string }),
     ...(rest.usagePause === undefined ? {} : { usagePause: rest.usagePause as NonNullable<StoredTurn["usagePause"]> }),
+    ...(rest.handoffOpen === undefined ? {} : { handoffOpen: true as const }),
     ...(rest.unanswered === undefined ? {} : { unanswered: true as const }),
     ...(rest.generation === undefined ? {} : { generation: rest.generation as NonNullable<StoredTurn["generation"]> }),
     ...(rest.turnOutputTokens === undefined ? {} : { turnOutputTokens: rest.turnOutputTokens as number }),

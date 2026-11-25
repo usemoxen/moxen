@@ -45,7 +45,7 @@ CREATE TABLE threads (
   usage_pause            TEXT,            -- JSON: read and rewritten on every send
   rest                   TEXT NOT NULL    -- JSON: researchRun, pastResearchRuns, researchRole, researchPicker,
                                          -- continueClaim, providerSessions, instructionState, modeState,
-                                         -- nativeSubagents, unsettledAt, usageProtectionOverride,
+                                         -- nativeSubagents, unsettledAt, usageProtectionOverride, handoffFacts,
                                          -- modelSelection.options
 ) STRICT;
 CREATE INDEX threads_created ON threads(deleted_at, archived_at, hidden, created_at);
@@ -77,7 +77,7 @@ CREATE TABLE turns (
                                    -- handoff minus destinationThreadId, modelSelection, usagePause,
                                    -- usage, error, parentTurnId, runtimeMode, interactionMode,
                                    -- interactionModeExplicit, startedAt, unanswered, generation,
-                                   -- turnOutputTokens
+                                   -- turnOutputTokens, handoffOpen
 ) STRICT;
 CREATE INDEX turns_id ON turns(thread_id, id);
 CREATE INDEX turns_thread ON turns(thread_id, seq);

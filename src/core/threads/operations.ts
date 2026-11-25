@@ -111,7 +111,7 @@ import {
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
 import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
-import { buildHandoff, continuedTitle } from "./handoff.js";
+import { prepareHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
@@ -998,6 +998,15 @@ export async function submitHandoff(ctx: OperationContext, threadId: string, req
 }
 
 const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
+
+/**
+ * How many continuations a walk follows through a chain — task resolution,
+ * live-thread lookup and handoff-key retries alike — before it stops and
+ * says the chain ends there. Bounded so a corrupt cycle cannot spin
+ * forever, generous enough that a real chain (a task continued dozens of
+ * times) still resolves to the thread doing the work.
+ */
+const CONTINUATION_FOLLOW_HOPS = 128;
 
 /** @internal Exported for tests: the queue pass prepares one entry's handoff. */
 export async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, turnId: string, now: number): Promise<void> {
@@ -2473,7 +2482,10 @@ async function continueThreadReserved(
   // handoff projects exactly the claim-time source, so work accepted after
   // the claim stays on the source and out of the destination snapshot.
   const claim = transfersQueuedMessages(request) ? await stageQueuedMessages(ctx, source.id, destinationId) : null;
-  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}), ...(claim ? { knownTurnIds: claim.known, excludedTurnIds: [...claim.claimed, ...claim.restaged] } : {}) });
+  // The document and the facts its destination carries forward are built from
+  // the same read, so what the reader sees and what the chain keeps stay
+  // one view of the thread.
+  const handoff = await prepareHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.firstMessage !== undefined ? { firstAction: request.firstMessage } : {}), ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}), ...(claim ? { knownTurnIds: claim.known, excludedTurnIds: [...claim.claimed, ...claim.restaged] } : {}) });
   const existing = await store.readThreadRecord(destinationId);
   const created = existing ?? await createThread(store, {
     id: destinationId,
@@ -2484,11 +2496,20 @@ async function continueThreadReserved(
     interactionMode,
     env: source.env,
     continuedFrom: source.id,
+    handoffFacts: handoff.facts,
   });
-  if (existing && existing.continuedFrom === undefined) {
+  if (existing) {
+    // A retry rejoining a reserved destination: its record predates this
+    // attempt's facts, so the attempt fills them in — and a reservation
+    // that never carried `continuedFrom` up to now takes it here too.
     await store.withThreadLock(existing.id, async () => {
       const current = await store.readThreadRecord(existing.id);
-      if (current) await store.writeThreadRecord({ ...current, continuedFrom: source.id });
+      if (current === null) return;
+      await store.writeThreadRecord({
+        ...current,
+        ...(current.continuedFrom === undefined ? { continuedFrom: source.id } : {}),
+        handoffFacts: handoff.facts,
+      });
     });
   }
   const live = await store.readThreadRecord(source.id);
@@ -2543,9 +2564,12 @@ async function continueThreadReserved(
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
-      prompt: handoff + runningTasksNote(adopted) + firstMessageNote(request.firstMessage),
+      prompt: handoff.document + runningTasksNote(adopted) + firstMessageNote(request.firstMessage),
       ...(request.queue ? { queue: request.queue } : {}),
       ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
+      // The opening prompt is a generated document, not the user speaking;
+      // the next hand-off recognizes it by this flag, never by its text.
+      handoffOpen: true,
       // Noop subscriber: the driver's shared pump exists before any client subscribes.
       onEvent: () => undefined,
     });
@@ -2969,7 +2993,7 @@ async function delegationOf(
 async function continuedLiveThread(store: ThreadStore, threadId: string): Promise<string | null> {
   let current: string | undefined = threadId;
   let latest: string | null = null;
-  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+  for (let hops = 0; current !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
     const notes = await store.readActivities(current).catch(() => []);
     const next = notes.findLast((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string")?.payload?.threadId as string | undefined;
     if (next === undefined) break;
@@ -4955,7 +4979,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       // whose continuation row holds no key (MXN-290).
       let row = initial;
       let current = true;
-      for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+      for (let hops = 0; row.continuedIn !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
         const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
         if (!next) {
           current = false;
@@ -5385,7 +5409,7 @@ async function isTaskVisibleToParent(ctx: OperationContext, parentThreadId: stri
   const rows = await ctx.store.readDelegations();
   const lineage = await threadLineage(ctx, parentThreadId);
   let current: string | undefined = taskId;
-  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+  for (let hops = 0; current !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
     if (rows.some((row) => row.childThreadId === current && lineage.has(row.parentThreadId))) return true;
     current = rows.find((row) => row.childThreadId === current)?.continuedIn;
   }
@@ -5419,7 +5443,7 @@ async function ownedDelegation(ctx: OperationContext, parentThreadId: string, ra
   }
   // A task that carried on in a new thread is that thread now.
   let row = owned;
-  for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+  for (let hops = 0; row.continuedIn !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
     const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
     if (!next) break;
     row = next;

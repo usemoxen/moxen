@@ -15,18 +15,25 @@
  * for recent turns, where the detail is; older turns shrink to a line each
  * so a long thread still fits a context window.
  *
- * A continued thread continues in its turn: the hand-off that opened it is
- * itself the thread's first prompt, so a hand-off built from a chain of
- * continuations would nest the previous hand-off inside itself, multiplying
- * with every hop. So the opening hand-off is recognized by its head
- * line and never retold: only its bounded facts (the goal, the last request,
- * the plan, the files, the images) are carried forward, and this thread's
- * own transcript is told instead. Every section is capped, so one document
- * has a ceiling however many hops the chain behind it had.
+ * A continued thread carries its chain in its turn: the hand-off that
+ * opened it is itself the thread's first prompt, so a hand-off built from
+ * a chain of continuations would nest the previous hand-off inside itself,
+ * multiplying with every hop. So the opening hand-off is never retold. It
+ * is recognized by its persisted provenance (the turn's `handoffOpen`
+ * flag), never by its text, and the bounded facts of the chain — the goal,
+ * the last request, the first action, the latest wrap-up, the checklist,
+ * the files, the images — travel as structured data on the thread record
+ * (`HandoffFacts`), never parsed back out of a rendered document. Queued
+ * requests are durable work rather than history excerpts: they travel
+ * whole, with their identity and start conditions, and are never cut.
+ * Every section that is not pending work is capped, and every cut or
+ * omission names the thread whose ledger holds the full text, so
+ * `thread_read` can recover it. Threads stored before the facts field
+ * existed read with nothing carried.
  */
 import type { ThreadStore } from "./store.js";
 import { isTransferLanded } from "./queue.js";
-import type { StoredActivity, StoredMessage, StoredThread, StoredTurn } from "./types.js";
+import type { HandoffFacts, HandoffPendingRequest, HandoffText, StoredActivity, StoredMessage, StoredThread, StoredTurn, } from "./types.js";
 
 /** Turns kept word for word; older ones become a one-line summary each. */
 const VERBATIM_TURNS = 12;
@@ -34,18 +41,28 @@ const VERBATIM_TURNS = 12;
 const TARGET_CHARS = 60_000;
 /** Tool calls listed per turn before "+N more". */
 const MAX_TOOL_LINES = 40;
-/** Every hand-off document starts with this line, so one can be told apart from a user message. */
-const HANDOFF_HEAD = "# Continuing: ";
 /** A single prompt or reply kept word for word before it is cut. */
 const PIECE_CHARS = 16_000;
-/** The largest a "last request, verbatim" (or an unsent message) is kept before it is cut. */
+/** The largest carried goal, request or instruction is kept before it is cut. */
 const REQUEST_CHARS = 16_000;
-/** The largest a model wrap-up is kept at, matching the submit tool's own cap. */
+/** The largest a wrap-up is kept at, matching the submit tool's own cap. */
 const WRAPUP_CHARS = 64_000;
-/** Carried checklist steps and image lines kept from the opening hand-off. */
-const CARRY_LINES = 60;
-/** Carried file rows kept from the opening hand-off. */
-const CARRY_FILES = 200;
+/** Checklist rows kept; older ones drop, marked. */
+const PLAN_ROWS = 40;
+/** Changed-file rows kept; the rest drop, marked. */
+const FILES_ROWS = 100;
+/** Image rows kept; the rest drop, marked. */
+const IMAGES_ROWS = 40;
+/** One-line summaries of older turns kept; earlier turns drop, marked. */
+const SUMMARY_ROWS = 300;
+/**
+ * The final budget of rendered context on every path, pending work aside:
+ * every section is capped so the document cannot exceed it by construction
+ * (goal 16k + last request 16k + wrap-up 64k + plan, files, images rows +
+ * conversation 60k target), and the render loop below keeps it true when a
+ * thread's history alone would dwarf the rest.
+ */
+const RENDER_BUDGET = 180_000;
 
 function oneLine(text: string, max = 140): string {
   const line = text.split(/\r?\n/u).map((row) => row.trim()).find((row) => row.length > 0) ?? "";
@@ -53,16 +70,22 @@ function oneLine(text: string, max = 140): string {
   return single.length <= max ? single : `${single.slice(0, max)}…`;
 }
 
-/** Cut a verbatim section to its cap, saying so: the full text lives in the thread's ledger. */
-function clamped(text: string, max: number): string {
+/** Verbatim text cut at its cap, naming the ledger that holds the full text. */
+function clamped(text: string, max: number, threadId: string): string {
   if (text.length <= max) return text;
-  return `${text.slice(0, max)}\n…(cut at ${max} of ${text.length} characters; the full text stays in this thread's ledger)`;
+  return `${text.slice(0, max)}…(cut at ${max} of ${text.length} characters; the full text is thread ${threadId}'s to read)`;
 }
 
 /** A single prompt or reply, cut when a block would dwarf the whole document. */
-function piece(text: string): string {
-  if (text.length <= PIECE_CHARS) return text;
-  return `${text.slice(0, PIECE_CHARS)}…(cut at ${PIECE_CHARS} of ${text.length} characters)`;
+function piece(text: string, threadId: string, cap = PIECE_CHARS): string {
+  if (text.length <= cap) return text;
+  return `${text.slice(0, cap)}…(cut at ${cap} of ${text.length} characters; the full text is thread ${threadId}'s to read)`;
+}
+
+/** A carried text, cut once when it enters the facts so the record stays bounded. */
+function carriedText(text: string | null | undefined, sourceThreadId: string, max: number): HandoffText | null {
+  const trimmed = text?.trim();
+  return trimmed ? { text: clamped(trimmed, max, sourceThreadId), sourceThreadId } : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -88,28 +111,28 @@ interface TurnBlock {
   readonly prompts: readonly StoredMessage[];
   readonly replies: readonly StoredMessage[];
   readonly tools: readonly string[];
-  /** The id of the hand-off that opened this thread, when this block's first prompt is it. */
-  readonly openerId: string | null;
+  /** The message that opened this thread with a hand-off document, when this block holds it. */
+  readonly openerMessageId: string | null;
 }
 
 /** The line standing in for the opening hand-off in the conversation: its facts live in this document's head. */
 const OPENER_LINE = "_This prompt was the hand-off record that opened this thread; the sections above carry its goal and its last request, and this document supersedes it._";
 
-function verbatim(block: TurnBlock, index: number): string {
+function verbatim(block: TurnBlock, index: number, threadId: string, pieceCap = PIECE_CHARS): string {
   const lines: string[] = [`### Turn ${index + 1}${block.turn.status === "completed" ? "" : ` (${block.turn.status})`}`];
-  for (const prompt of block.prompts) lines.push("", "**User:**", "", prompt.id === block.openerId ? OPENER_LINE : piece(prompt.text.trim()));
+  for (const prompt of block.prompts) lines.push("", "**User:**", "", prompt.id === block.openerMessageId ? OPENER_LINE : piece(prompt.text.trim(), threadId, pieceCap));
   if (block.tools.length > 0) {
     lines.push("", "**Work:**");
     for (const tool of block.tools.slice(0, MAX_TOOL_LINES)) lines.push(`- ${tool}`);
     if (block.tools.length > MAX_TOOL_LINES) lines.push(`- …and ${block.tools.length - MAX_TOOL_LINES} more tool calls`);
   }
-  for (const reply of block.replies) lines.push("", "**Assistant:**", "", piece(reply.text.trim()));
+  for (const reply of block.replies) lines.push("", "**Assistant:**", "", piece(reply.text.trim(), threadId, pieceCap));
   if (block.turn.status === "failed" && block.turn.error) lines.push("", `_Failed: ${oneLine(block.turn.error, 300)}_`);
   return lines.join("\n");
 }
 
 function summarized(block: TurnBlock, index: number): string {
-  const asked = block.prompts[0] !== undefined && block.prompts[0]!.id === block.openerId
+  const asked = block.prompts[0] !== undefined && block.prompts[0]!.id === block.openerMessageId
     ? "the hand-off that opened this thread"
     : block.prompts[0] ? oneLine(block.prompts[0].text, 120) : "(no prompt)";
   const answered = block.replies.at(-1) ? oneLine(block.replies.at(-1)!.text, 120) : block.turn.status;
@@ -117,81 +140,18 @@ function summarized(block: TurnBlock, index: number): string {
   return `- Turn ${index + 1}: asked "${asked}" → ${answered}${work}`;
 }
 
-/**
- * The bounded facts carried forward from the hand-off that opened this
- * thread — all a chain of continuations may keep of the documents before
- * it, so a hand-off never nests an earlier one.
- */
-interface CarriedHandoff {
-  /** "The thread began with": the goal, as far as it was ever written down. */
-  readonly goal: string | null;
-  /** "The last request, verbatim": the request the chain is still working on. */
-  readonly lastRequest: string | null;
-  /** The checklist steps as the opening hand-off last recorded them. */
-  readonly plan: readonly string[];
-  /** Files the thread behind already changed, summed like the section below sums its own. */
-  readonly files: readonly { readonly path: string; readonly additions: number; readonly deletions: number }[];
-  /** The formatted image lines of the opening hand-off's "Original images" section. */
-  readonly images: readonly string[];
-}
-
-/** Section headings that end a carried prose block: everything a hand-off's head may follow one with. */
-const CARRIED_STOPS = [
-  "The thread began with:",
-  "The last request, verbatim:",
-  "Its checklist when it stopped",
-  "The user had queued",
-  "The user queued these",
-  "## ",
-  "---",
-];
-
-/** The prose after a section heading, cut at its stop: the goal or the last request as the opener carried them. */
-function carriedProse(text: string, heading: string): string | null {
-  const lines = text.split(/\r?\n/u);
-  const start = lines.findIndex((line) => line.startsWith(heading));
-  if (start === -1) return null;
-  const rows: string[] = [];
-  for (let index = start + 1; index < lines.length; index += 1) {
-    const line = lines[index]!;
-    if (CARRIED_STOPS.some((stop) => line.startsWith(stop))) break;
-    if (rows.length === 0 && line.trim() === "") continue;
-    rows.push(line);
-  }
-  const joined = rows.join("\n").trim();
-  return joined.length > 0 ? clamped(joined, REQUEST_CHARS) : null;
-}
-
-/** The `- ` list after a section heading, only lines matching `keep`'s shape, at most `cap` of them. */
-function carriedList(text: string, heading: string, keep: (line: string) => boolean, cap: number): string[] {
-  const lines = text.split(/\r?\n/u);
-  const start = lines.findIndex((line) => line.startsWith(heading));
-  if (start === -1) return [];
-  const rows: string[] = [];
-  for (let index = start + 1; index < lines.length && index <= start + 8 && rows.length < cap; index += 1) {
-    const line = lines[index]!.trim();
-    if (line.startsWith("## ") || line === "" || line.startsWith("---")) continue;
-    if (keep(line)) rows.push(line);
-  }
-  return rows;
-}
-
-/** The opening hand-off's bounded facts, parsed out of the document this thread opened with. */
-function carriedHandoff(text: string): CarriedHandoff {
+/** The latest checklist the thread was working through, its rows capped, the oldest dropped and marked. */
+function planFacts(activities: readonly StoredActivity[], threadId: string): { rows: string[]; omitted: number } {
+  const rows = openPlan(activities);
+  if (rows.length <= PLAN_ROWS) return { rows, omitted: 0 };
+  const dropped = rows.length - PLAN_ROWS;
   return {
-    goal: carriedProse(text, "The thread began with:")?.replace(/^>\s*/u, "") ?? null,
-    lastRequest: carriedProse(text, "The last request, verbatim:"),
-    plan: carriedList(text, "Its checklist when it stopped", (line) => /^- \[[x~ ]\] /u.test(line), CARRY_LINES),
-    files: carriedList(text, "## Files already changed", (line) => /^- .+ \+\d+ −\d+$/u.test(line), CARRY_FILES)
-      .map((line) => {
-        const match = /^- (.+) \+(\d+) −(\d+)$/u.exec(line)!;
-        return { path: match[1]!, additions: Number(match[2]), deletions: Number(match[3]) };
-      }),
-    images: carriedList(text, "## Original images", (line) => /^- ".*": ".*"$/u.test(line), CARRY_LINES),
+    rows: [`- …${dropped} earlier checklist steps not shown; read thread ${threadId}`, ...rows.slice(-PLAN_ROWS)],
+    omitted: dropped,
   };
 }
 
-/** The latest checklist the thread was working through, if any. */
+/** Rows of the thread's open plan, uncapped, oldest last. */
 function openPlan(activities: readonly StoredActivity[]): string[] {
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index]!;
@@ -229,6 +189,8 @@ export interface HandoffOptions {
   readonly projectTitle?: string | null;
   readonly preferModelSummary?: boolean;
   readonly modelSummary?: string;
+  /** The first instruction the new thread is being given with this hand-off (the continue request's first message). */
+  readonly firstAction?: string;
   readonly queuedTurnIds?: readonly string[];
   /**
    * The source turns visible when a manual continue claimed its moves: the
@@ -246,7 +208,13 @@ export interface HandoffOptions {
   readonly excludedTurnIds?: readonly string[];
 }
 
-export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
+/** A hand-off document next to the facts its destination's record carries forward. */
+export interface PreparedHandoff {
+  readonly document: string;
+  readonly facts: HandoffFacts;
+}
+
+export async function prepareHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<PreparedHandoff> {
   const thread = (await store.readThreadRecord(threadId)) as StoredThread | null;
   if (!thread) throw new Error(`No thread ${threadId}.`);
   const [allTurns, messages, activities, checkpoints] = await Promise.all([
@@ -268,17 +236,13 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     ? checkpoints.filter((checkpoint) => checkpoint.turnId == null || knownTurns.has(checkpoint.turnId))
     : checkpoints;
 
-  // The hand-off that opened this thread, when it was opened by one: Moxen
-  // wrote that prompt, not the user. Retelling it — in the head as the last
-  // request or in the conversation as a turn — is what made each hop's
-  // hand-off embed the whole one before it and double chain-wide, so it is
-  // never retold: only its bounded facts are carried forward (`carried`).
-  // A continued thread whose opening prompt began with the hand-off head
-  // line is one by construction; nothing else Moxen writes starts with it.
-  const opener = thread.continuedFrom === undefined
-    ? null
-    : messages.find((message) => message.role === "user" && message.origin === undefined && message.text.startsWith(HANDOFF_HEAD)) ?? null;
-  const carried = opener === null ? null : carriedHandoff(opener.text);
+  // The hand-off that opened this thread, by the provenance the continue
+  // path records on the turn — never by its text, which a user message can
+  // quote. It is never retold: retelling it is what multiplied a chain of
+  // continuations hop by hop.
+  const openerTurn = turns.find((turn) => turn.handoffOpen === true) ?? null;
+  const openerMessageId = openerTurn === null ? null : openerTurn.messageId;
+  const carried = thread.handoffFacts ?? null;
 
   // A turn has reached the agent once it produced something. One that is
   // queued, or was promoted to `running` by a settle but never ran (the
@@ -303,61 +267,131 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     prompts: messages.filter((message) => message.turnId === turn.id && message.role === "user"),
     replies: messages.filter((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0),
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
-    openerId: opener === null ? null : opener.id,
+    openerMessageId,
   }));
-  const unsent = turns
-    .filter((turn) => !reached(turn) && !movedIds.has(turn.id) && !(options.preferModelSummary && turn.scheduledFor) && (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)))
-    .flatMap((turn) => {
-      if (opener !== null && turn.messageId === opener.id) {
-        // The queued opening hand-off is the task itself, not a request of
-        // the user's: retold as one line, never as the document inside.
-        return ["(the hand-off record that opened this thread — it never ran; this document carries its request)",];
-      }
-      return messages
-        .filter((message) => message.id === turn.messageId && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary")
-        .map((message) => message.text.trim());
-    })
-    .map((text) => clamped(text, REQUEST_CHARS));
 
-  // Files the thread changed, summed across every turn's checkpoint, with
-  // the ones the chain behind it already changed carried forward.
-  const files = new Map<string, { additions: number; deletions: number }>();
-  for (const file of carried?.files ?? []) files.set(file.path, { additions: file.additions, deletions: file.deletions });
+  // Pending requests: durable work, carried whole. The queued turns of this
+  // thread, plus the ones the chain behind it already carried whose message
+  // never landed here — an entry that did land became this thread's own.
+  const messageIds = new Set(messages.map((message) => message.id));
+  const queuedIds = new Set(options.queuedTurnIds);
+  const unsentTurns = turns.filter(
+    (turn) => turn.handoffOpen !== true
+      && !reached(turn)
+      && !movedIds.has(turn.id)
+      && !(options.preferModelSummary && turn.scheduledFor)
+      && (!options.queuedTurnIds || queuedIds.has(turn.id)),
+  );
+  const ownPending: HandoffPendingRequest[] = unsentTurns.flatMap((turn) => {
+    const message = messages.find(
+      (entry) => entry.id === turn.messageId
+        && entry.origin !== "usage-continue"
+        && entry.origin !== "usage-protection"
+        && entry.origin !== "handoff-summary",
+    );
+    if (message === undefined) return [];
+    return [{
+      sourceThreadId: thread.id,
+      turnId: turn.id,
+      messageId: message.id,
+      text: message.text.trim(),
+      ...(turn.scheduledFor !== undefined && turn.scheduledFor !== null ? { scheduledFor: turn.scheduledFor } : {}),
+    }];
+  });
+  const carriedPending = (carried?.pending ?? []).filter((entry) => !messageIds.has(entry.messageId) && !ownPending.some((own) => own.messageId === entry.messageId));
+  const pending = [...carriedPending, ...ownPending];
+
+  // Files the chain already changed, summed across every turn's checkpoint
+  // and the ones carried forward, capped with the omissions counted.
+  const fileMap = new Map<string, { additions: number; deletions: number }>();
+  for (const file of carried?.files ?? []) fileMap.set(file.path, { additions: file.additions, deletions: file.deletions });
   for (const checkpoint of scopedCheckpoints) {
     for (const file of checkpoint.files ?? []) {
-      const stat = files.get(file.path) ?? { additions: 0, deletions: 0 };
-      files.set(file.path, { additions: stat.additions + file.additions, deletions: stat.deletions + file.deletions });
+      const stat = fileMap.get(file.path) ?? { additions: 0, deletions: 0 };
+      fileMap.set(file.path, { additions: stat.additions + file.additions, deletions: stat.deletions + file.deletions });
     }
   }
+  const files = [...fileMap.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const filesKept = files.slice(0, FILES_ROWS).map(([path, stat]) => ({ path, additions: stat.additions, deletions: stat.deletions }));
+  const filesOmitted = files.length - filesKept.length;
 
-  const userPrompts = blocks.flatMap((block) => block.prompts).filter((message) => !message.origin && message.id !== opener?.id);
-  const firstPrompt = userPrompts[0]?.text.trim() ?? carried?.goal ?? null;
-  const lastPrompt = userPrompts.at(-1)?.text.trim() ?? carried?.lastRequest ?? null;
-  const ownPlan = openPlan(scopedActivities);
-  const plan = ownPlan.length > 0 ? ownPlan : [...(carried?.plan ?? [])];
+  // The chain's images: this thread's own attachments plus the carried ones, deduped by path.
+  const images = [
+    ...messages
+      .filter((message) => !knownTurns || knownTurns.has(message.turnId))
+      .flatMap((message) => message.attachments ?? [])
+      .filter((attachment) => attachment.type === "image")
+      .map((attachment) => ({ name: attachment.name, path: attachment.path })),
+    ...(carried?.images ?? []),
+  ];
+  const imagesKept = images.filter((image, index, all) => all.findIndex((candidate) => candidate.path === image.path) === index).slice(0, IMAGES_ROWS);
+  const imagesOmitted = images.length - imagesKept.length;
+
+  const planFactsOfThisThread = planFacts(scopedActivities, thread.id);
+  const plan = planFactsOfThisThread.rows.length > 0 ? planFactsOfThisThread.rows : [...(carried?.plan ?? [])];
+
+  const hasAnswer = [...messages].some((message) => message.role === "assistant" && message.text.trim().length > 0);
+  const userPrompts = blocks.flatMap((block) => block.prompts).filter((message) => !message.origin && message.id !== openerMessageId);
+  // The chain's goal never yields to a later steer: the original request
+  // stays the goal, the newest request the last request.
+  const goal = carried?.goal ?? carriedText(userPrompts[0]?.text, thread.id, REQUEST_CHARS);
+  const lastRequest = carriedText(userPrompts.at(-1)?.text, thread.id, REQUEST_CHARS) ?? carried?.lastRequest ?? null;
+  const firstAction = options.firstAction !== undefined
+    ? carriedText(options.firstAction, thread.id, REQUEST_CHARS)
+    : hasAnswer ? null : carried?.firstAction ?? null;
+
+  const summaryBlock = thread.usagePause?.turnId ? blocks.find((block) => block.turn.id === thread.usagePause!.turnId) : blocks.at(-1);
+  const authoredSummary = options.modelSummary
+    ?? (options.preferModelSummary ? summaryBlock?.replies.map((reply) => reply.text.trim()).join("\n\n") ?? null : null);
+  const wrapUp = carriedText(authoredSummary, thread.id, WRAPUP_CHARS) ?? carried?.wrapUp ?? null;
+  // The wrap-up rendered *here* is this thread's own (below), never one this
+  // hop already consumed into `authoredSummary`; a carried one renders only
+  // while the chain has not answered beyond it.
+  const carriedWrapUp = authoredSummary === null && !hasAnswer ? carried?.wrapUp ?? null : null;
+
   const stopped = stoppedBecause(blocks.at(-1), activities);
   // Only a last turn that ran to completion, with nothing queued, nothing
   // moved, and no open checklist step, may be a finished task.
-  const finished = stopped.completed && unsent.length === 0 && moved.length === 0 && plan.every((row) => row.startsWith("- [x]"));
+  const finished = stopped.completed && pending.length === 0 && moved.length === 0 && plan.every((row) => row.startsWith("- [x]"));
   const where = thread.env.branch ? `${thread.env.path} (branch ${thread.env.branch})` : thread.env.path;
 
   const head: string[] = [
     `# Continuing: ${thread.title}`,
     "",
-    `You are picking up a thread another session worked on${finished ? "" : " and did not finish"}. Below is its record, written by Moxen from the thread's ledger — you have none of the original context beyond this. Read "Where it stopped" first.`,
+    `You are picking up a thread another session worked on${finished ? "" : " and did not finish"}. Below is its record, written by Moxen from the thread's ledger — you have none of the original context beyond this. Read "Where it stopped" first. Every cut or omission below names the thread whose ledger holds the full text.`,
     "",
     `- Working directory: ${where}`,
     ...(options.projectTitle ? [`- Project: ${options.projectTitle}`] : []),
     `- Model it ran on: ${thread.modelSelection.instanceId}/${thread.modelSelection.model}`,
     `- Turns so far: ${blocks.length}`,
+    `- Its record before this one: thread ${thread.id}`,
     "",
     "## Where it stopped",
     "",
     stopped.text,
   ];
-  if (firstPrompt !== null && firstPrompt !== lastPrompt) head.push("", "The thread began with:", "", options.preferModelSummary || options.modelSummary ? clamped(firstPrompt, REQUEST_CHARS) : `> ${oneLine(firstPrompt, 400)}`);
-  if (lastPrompt !== null) head.push("", "The last request, verbatim:", "", clamped(lastPrompt, REQUEST_CHARS));
+  const facts: HandoffFacts = {
+    sourceThreadId: thread.id,
+    goal,
+    lastRequest,
+    firstAction,
+    wrapUp,
+    plan,
+    files: filesKept,
+    ...(filesOmitted > 0 ? { filesOmitted } : {}),
+    images: imagesKept,
+    ...(imagesOmitted > 0 ? { imagesOmitted } : {}),
+    pending,
+  };
+
+  if (goal !== null && goal.text !== lastRequest?.text) {
+    head.push("", "The thread began with:", "", authoredSummary !== null ? goal.text : `> ${oneLine(goal.text, 400)}`);
+  }
+  if (lastRequest !== null) head.push("", "The last request, verbatim:", "", lastRequest.text);
   if (plan.length > 0) head.push("", "Its checklist when it stopped (`[x]` done, `[~]` in progress, `[ ]` open):", "", ...plan);
+  if (firstAction !== null && options.firstAction === undefined) {
+    head.push("", "## What to do first", "", "This instruction came with the chain and nothing has answered it yet:", "", firstAction.text);
+  }
   if (moved.length > 0) {
     head.push(
       "",
@@ -367,30 +401,39 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
       "",
     );
   }
-  if (unsent.length > 0) {
+  const pendingChars = pending.reduce((sum, entry, index) => sum + entry.text.length
+    + `${index + 1}. `.length
+    + (entry.sourceThreadId === thread.id ? 0 : `(from thread ${entry.sourceThreadId}) `.length)
+    + (entry.scheduledFor != null ? `(do not start before ${entry.scheduledFor}) `.length : 0), 0);
+  if (pending.length > 0) {
     head.push("", "The user queued these and they were never sent — treat them as part of the task, in this order:", "");
-    unsent.forEach((text, index) => head.push(`${index + 1}. ${text}`));
+    pending.forEach((entry, index) => {
+      const prefix = [
+        ...(entry.sourceThreadId === thread.id ? [] : [`(from thread ${entry.sourceThreadId})`]),
+        ...(entry.scheduledFor != null ? [`(do not start before ${entry.scheduledFor})`] : []),
+      ];
+      head.push(`${index + 1}. ${prefix.join(" ")}${prefix.length > 0 ? " " : ""}${entry.text}`);
+    });
   }
-  if (files.size > 0) {
+  if (filesKept.length > 0 || filesOmitted > 0) {
     head.push("", "## Files already changed", "", "These edits, from this thread and the chain behind it, are on disk now. Check the working tree before redoing anything — some work may be partly done.", "");
-    for (const [path, stat] of [...files.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-      head.push(`- ${path} +${stat.additions} −${stat.deletions}`);
-    }
+    for (const file of filesKept) head.push(`- ${file.path} +${file.additions} −${file.deletions}`);
+    if (filesOmitted > 0) head.push(`- …and ${filesOmitted} more changed files not shown; read thread ${thread.id}`);
   }
-  const images = [...messages
-    .filter((message) => !knownTurns || knownTurns.has(message.turnId))
-    .flatMap((message) => message.attachments ?? [])
-    .filter((attachment) => attachment.type === "image")
-    .map((image) => `- ${JSON.stringify(image.name)}: ${JSON.stringify(image.path)}`),
-    ...(carried?.images ?? [])]
-    .filter((line, index, all) => all.indexOf(line) === index)
-    .slice(0, CARRY_LINES);
-  if (images.length > 0) {
-    head.push("", "## Original images", "", "These original image files remain on this server. Open them with your image/file tools when the task depends on visual input:", ...images);
+  if (imagesKept.length > 0 || imagesOmitted > 0) {
+    head.push("", "## Original images", "", "These original image files remain on this server. Open them with your image/file tools when the task depends on visual input:", "");
+    for (const image of imagesKept) head.push(`- ${JSON.stringify(image.name)}: ${JSON.stringify(image.path)}`);
+    if (imagesOmitted > 0) head.push(`- …and ${imagesOmitted} more original images not shown; read thread ${thread.id}`);
   }
-  const summaryBlock = thread.usagePause?.turnId ? blocks.find((block) => block.turn.id === thread.usagePause!.turnId) : blocks.at(-1);
-  const modelSummary = options.modelSummary ?? (options.preferModelSummary ? summaryBlock?.replies.map((reply) => reply.text.trim()).join("\n\n") : null);
-  if (modelSummary) return [...head, "", "## Model's wrap-up", "", clamped(modelSummary, WRAPUP_CHARS), "", "Continue the unfinished task from these notes; do not repeat completed work."].join("\n");
+  if (authoredSummary !== null) {
+    return {
+      document: [...head, "", "## Model's wrap-up", "", clamped(authoredSummary, WRAPUP_CHARS, thread.id), "", "Continue the unfinished task from these notes; do not repeat completed work."].join("\n"),
+      facts,
+    };
+  }
+  if (carriedWrapUp !== null) {
+    head.push("", "## Model's wrap-up", "", "The latest wrap-up the chain authored; this thread has not answered beyond it:", "", carriedWrapUp.text);
+  }
   const tail = [
     "",
     "---",
@@ -401,25 +444,54 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   ].join("\n");
 
   // Keep the most recent turns verbatim, shrinking older ones until the
-  // document fits: the latest turns are where the unfinished work is.
+  // document fits: the latest turns are where the unfinished work is. When
+  // even the summaries would not fit, the oldest turns drop, marked with
+  // the thread that holds them, and the verbatim pieces shrink — the
+  // rendered context never leaves its budget, however long the thread.
+  const pendingBudget = pendingChars;
   let verbatimFrom = Math.max(0, blocks.length - VERBATIM_TURNS);
+  let pieceCap = PIECE_CHARS;
+  let summaryRowCap = SUMMARY_ROWS;
   const render = (): string => {
     const older = blocks.slice(0, verbatimFrom).map((block, index) => summarized(block, index));
-    const recent = blocks.slice(verbatimFrom).map((block, index) => verbatim(block, verbatimFrom + index));
+    const recent = blocks.slice(verbatimFrom).map((block, index) => verbatim(block, verbatimFrom + index, thread.id, pieceCap));
+    let olderRows = older;
+    let droppedTurns = 0;
+    if (olderRows.length > summaryRowCap) {
+      droppedTurns = olderRows.length - summaryRowCap;
+      olderRows = [`…${droppedTurns} earlier turns not retold; read thread ${thread.id}`, ...olderRows.slice(-summaryRowCap)];
+    }
     const conversation = [
       "",
       "## Conversation",
-      ...(older.length > 0 ? ["", "Earlier turns, in brief:", "", ...older] : []),
+      ...(olderRows.length > 0 ? ["", "Earlier turns, in brief:", "", ...olderRows] : []),
       ...recent.flatMap((block) => ["", block]),
     ];
     return [...head, ...conversation].join("\n") + tail;
   };
   let document = render();
+  while (document.length - pendingBudget > RENDER_BUDGET) {
+    if (pieceCap > 1_000) {
+      pieceCap = Math.max(1_000, Math.floor(pieceCap / 4));
+    } else if (summaryRowCap > 20) {
+      summaryRowCap = Math.max(20, Math.floor(summaryRowCap / 4));
+    } else if (verbatimFrom < blocks.length - 1) {
+      verbatimFrom += 1;
+    } else {
+      break;
+    }
+    document = render();
+  }
   while (document.length > TARGET_CHARS && verbatimFrom < blocks.length - 1) {
     verbatimFrom += 1;
     document = render();
   }
-  return document;
+  return { document, facts };
+}
+
+/** The hand-off document alone, as every caller that writes no facts uses it. */
+export async function buildHandoff(store: ThreadStore, threadId: string, options: HandoffOptions = {}): Promise<string> {
+  return (await prepareHandoff(store, threadId, options)).document;
 }
 
 /** The new thread's title: the old one, marked, without piling up marks. */
