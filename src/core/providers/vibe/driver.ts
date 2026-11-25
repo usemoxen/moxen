@@ -825,7 +825,13 @@ export class VibeDriver implements ProviderAdapter<CliError> {
     }
 
     // 2. Automatic approval based on runtime mode and Harness command safety.
-    if (approvalShouldAutoAllow(session.runtimeMode, toolName, effectKind, input, session.workingDirectory)) {
+    // The gate is the stricter of the mode the server is believed to run and
+    // the caller's latest selection: a tightening Vibe answered `pending` is
+    // already live on the running turn, and a widening write that is still
+    // deferred or unacknowledged must never loosen the local gate.
+    const gatingMode =
+      modeRank(session.desiredMode) < modeRank(session.runtimeMode) ? session.desiredMode : session.runtimeMode;
+    if (approvalShouldAutoAllow(gatingMode, toolName, effectKind, input, session.workingDirectory)) {
       void this.sendCallbackResult(session, callbackId, {
         type: "approval",
         decision: { type: "approve" },
@@ -1412,6 +1418,8 @@ export class VibeDriver implements ProviderAdapter<CliError> {
           raw: turnMeta,
         }),
     });
+    // The session may now be idle with a widening write still unapplied.
+    this.applySelectedModeWhenIdle(session);
   }
 
   private failTurn(session: VibeSession, turn: VibeTranscriptTurn, error: string): void {
@@ -1760,10 +1768,44 @@ export class VibeDriver implements ProviderAdapter<CliError> {
       session.runtimeMode = mode;
       return;
     }
-    // A refused write is not swallowed: the next turn start queues another
+    // The queued write is skipped when a newer selection supersedes it and
+    // deferred when it would widen a live turn (see applySelectedMode). A
+    // refused write is not swallowed: the next turn start queues another
     // admission and refuses to run until the desired policy is acknowledged.
-    void this.enqueueAdmission(session, () => this.writePolicy(session, mode)).catch(() => undefined);
+    void this.enqueueAdmission(session, () => this.applySelectedMode(session, mode)).catch(() => undefined);
   };
+
+  /**
+   * One queued `setRuntimeMode` write, running on the admission chain. A
+   * selection the caller has since replaced is skipped before any RPC. A
+   * write that would widen the live policy is deferred while a turn is
+   * running (Vibe 3.1.4 applies a policy change to the running turn live);
+   * the turn-completion hook re-applies the latest selection once the session
+   * is idle. A narrowing write goes out at once, mid-turn included.
+   */
+  private async applySelectedMode(session: VibeSession, mode: RuntimeMode): Promise<void> {
+    if (session.desiredMode !== mode) return; // superseded by a newer selection
+    const target = vibeApprovalPolicyForRuntimeMode(mode);
+    const believed = vibeApprovalPolicyForRuntimeMode(session.runtimeMode);
+    if (policyRank(target) > policyRank(believed) && this.runningTurn(session) !== undefined) return;
+    await this.writePolicy(session, mode);
+  }
+
+  /**
+   * After a turn settles, an idle session picks up a widening write a
+   * `setRuntimeMode` deferred while the turn ran: the latest selection
+   * applies now.
+   */
+  private applySelectedModeWhenIdle(session: VibeSession): void {
+    if (session.closed || session.isolation) return;
+    if (this.runningTurn(session) !== undefined) return;
+    const mode = session.desiredMode;
+    void this.enqueueAdmission(session, async () => {
+      if (session.closed || session.desiredMode !== mode) return;
+      if (this.runningTurn(session) !== undefined) return;
+      await this.writePolicy(session, session.desiredMode);
+    }).catch(() => undefined);
+  }
 
   /**
    * Append one task to the session's serialized admission chain (policy writes

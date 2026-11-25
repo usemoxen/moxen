@@ -1403,6 +1403,142 @@ describe("VibeDriver round-4 regressions", () => {
   });
 });
 
+describe("VibeDriver round-5 regressions", () => {
+  it("recomputes deny patterns after a drop so a retained server's exclusion still matches its published name", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-replan",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [inProcessServer("a-b", ["lock", "LOCK", "write"]), inProcessServer("a_b", ["write"])],
+      disabledMcpTools: ["mcp__a-b__lock", "mcp__a_b__write"],
+    }));
+    const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    // a-b is withheld (its excluded `lock` cannot be separated from `LOCK`);
+    // with a-b gone, a_b's `write` collision suffix disappears, so the deny
+    // must be recomputed against the retained catalog or the tool stays
+    // callable.
+    expect((agentCfg["mcpServers"] as unknown[]).map((s) => (s as { name: string }).name)).toEqual(["a_b"]);
+    const disabled = agentCfg["disabledTools"] as string[];
+    expect(vibeDisabledMatches(disabled, "a_b_write")).toBe(true);
+    expect(disabled.some((p) => p.startsWith("re:a_b_write_"))).toBe(false);
+    await Effect.runPromise(driver.stopSession("th-replan"));
+  });
+
+  it("skips a queued superseded mode setter instead of widening a live turn", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const applied: string[] = [];
+    let releaseUpgrade: () => void = () => {};
+    let gatedWrites = 0;
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, async (params) => {
+      const policy = (params as Record<string, unknown>)["approvalPolicy"] as string;
+      // Only the admission's own upgrade write is parked; a later one answers at once.
+      if (policy === "auto-approve" && gatedWrites++ === 0) {
+        await new Promise<void>((resolve) => { releaseUpgrade = resolve; });
+      }
+      applied.push(policy);
+      return { runtime: { approvalPolicy: policy }, status: "applied" };
+    });
+    const startPolicies: string[] = [];
+    let currentPolicy = "ask";
+    server.on(VIBE_METHODS.turnStart, () => {
+      startPolicies.push(currentPolicy);
+      return { turn: { id: `t${startPolicies.length}`, inputEntryId: `u${startPolicies.length}`, status: "in_progress" } };
+    });
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-superskip", workingDirectory: "/tmp/repo", runtimeMode: "approval-required" }));
+
+    // A blocks the admission chain on its own gated write.
+    const sending = Effect.runPromise(driver.sendTurn({ threadId: "th-superskip", prompt: "A", runtimeMode: "full-access" }));
+    await sleep(20);
+    driver.setRuntimeMode("th-superskip", "full-access"); // queued setter 1, not yet started
+    await sleep(10);
+    driver.setRuntimeMode("th-superskip", "approval-required"); // newer selection supersedes it
+    releaseUpgrade();
+
+    const sent = await sending; // the admission rechecks and starts under the narrowed selection
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+    await driver.awaitTurn("th-superskip", sent.turnId);
+    await sleep(30); // let the queued setters drain
+    expect(startPolicies).toEqual(["ask"]);
+    // The superseded setter must never issue its widening RPC.
+    expect(applied).toEqual(["auto-approve", "ask"]);
+    await Effect.runPromise(driver.stopSession("th-superskip"));
+  });
+
+  it("defers a widening mode write until no turn is running", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const applied: string[] = [];
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, (params) => {
+      const policy = (params as Record<string, unknown>)["approvalPolicy"] as string;
+      applied.push(policy);
+      return { runtime: { approvalPolicy: policy }, status: "applied" };
+    });
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } }));
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-deferwiden", workingDirectory: "/tmp/repo", runtimeMode: "approval-required" }));
+
+    const a = await Effect.runPromise(driver.sendTurn({ threadId: "th-deferwiden", prompt: "A" }));
+    driver.setRuntimeMode("th-deferwiden", "full-access"); // widening write while A runs
+    await sleep(30);
+    // Vibe applies a policy write to the running turn live: a widening one
+    // must wait for the turn to end.
+    expect(applied).toEqual([]);
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+    await driver.awaitTurn("th-deferwiden", a.turnId);
+    // When the session is idle again, the latest selection is applied.
+    for (let i = 0; i < 20 && !applied.includes("auto-approve"); i += 1) await sleep(20);
+    expect(applied).toEqual(["auto-approve"]);
+    await Effect.runPromise(driver.stopSession("th-deferwiden"));
+  });
+
+  it("clamps local approval gating to the tightened selection even when the wire write answers pending", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const callbackResults: unknown[] = [];
+    server.on(VIBE_METHODS.callbackResult, (params) => {
+      callbackResults.push(params);
+      return { accepted: true };
+    });
+    // The tightening write is applied live on the server (the running turn
+    // starts to ask) and only then answered `pending`.
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, (params) => {
+      const policy = (params as Record<string, unknown>)["approvalPolicy"] as string;
+      return { runtime: { approvalPolicy: policy }, status: "pending" };
+    });
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } }));
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
+    await Effect.runPromise(driver.startSession({ threadId: "th-clamp", workingDirectory: "/tmp/repo", runtimeMode: "full-access" }));
+
+    await Effect.runPromise(driver.sendTurn({ threadId: "th-clamp", prompt: "A" }));
+    driver.setRuntimeMode("th-clamp", "approval-required"); // narrowed; live-applied, answered pending
+    await sleep(20);
+    // The server now asks: a file write reaches Moxen's callback.
+    await server.sendRequest(VIBE_METHODS.callbackCall, {
+      callback: {
+        callbackId: "cb-tight",
+        detail: {
+          kind: "approval",
+          effect: { kind: "file_write", toolName: "write_file", input: { filePath: "/tmp/repo/x.ts", content: "x" } },
+        },
+      },
+    });
+    await sleep(20);
+    // The local gate must be no wider than the tightened selection, so the
+    // call parks for the user instead of being auto-approved.
+    expect(callbackResults).toEqual([]);
+    expect(events.some((e) => e.type === "permission.request.opened")).toBe(true);
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    await Effect.runPromise(driver.stopSession("th-clamp"));
+  });
+});
+
 describe("vibe catalog launcher diagnostics", () => {
   it("surfaces an actionable status for an unsupported batch wrapper", async () => {
     forgetVibeCatalogCache();
