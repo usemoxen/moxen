@@ -1,3 +1,4 @@
+import { MarkdownView } from "../../ui/markdown.js";
 import { overflowColumns } from "../../model/textoverflow.js";
 import { OverflowText } from "../../ui/overflowtext.js";
 import { t } from "../../i18n/index.js";
@@ -227,7 +228,7 @@ export function AnswerPanel({
             style={{ flexDirection: "column", flexShrink: 0, marginTop: 1, paddingLeft: 1, paddingRight: 1, maxHeight: PREVIEW_MAX_ROWS }}
             backgroundColor={SURFACE.raised}
           >
-            <markdown content={preview} fg={COLOR.text} syntaxStyle={markdownSyntaxStyle()} />
+            <MarkdownView content={preview} fg={COLOR.text} syntaxStyle={markdownSyntaxStyle()} />
           </box>
         )}
       </box>

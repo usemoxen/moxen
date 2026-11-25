@@ -1,4 +1,5 @@
 import { OverflowText } from "../../ui/overflowtext.js";
+import { MarkdownView } from "../../ui/markdown.js";
 import { act } from "react";
 import type { TestRendererSetup } from "@opentui/core/testing";
 import { ChangelogModal } from "../../features/experience/experiencemodal.js";
@@ -24,7 +25,7 @@ import { Slider, SliderDefault } from "../../ui/slider.js";
 import { MonitoringBackdrop } from "../../ui/backdrop.js";
 import { TextField } from "../../features/settings/textfield.js";
 import { SideTabBar } from "../../features/sidepanel/sidepanel.js";
-import { COLOR, SURFACE } from "../../theme.js";
+import { COLOR, SURFACE, markdownSyntaxStyle } from "../../theme.js";
 import { usageProtectionNotices } from "../../model/usageprotection.js";
 import { Caption, Stage, type GalleryEntry } from "./registry.js";
 
@@ -369,6 +370,37 @@ export const UI_GALLERY: GalleryEntry[] = [
         <SideTabBar tab="context" badges={{ agents: "1", context: "42%" }} onTab={noop} onClose={noop} />
         <Caption text="a delegated thread's Info tab" />
         <SideTabBar tab="agents" badges={{}} onTab={noop} onClose={noop} agentsLabel="Info" />
+      </Stage>
+    ),
+  },
+  {
+    id: "ui-markdown-view",
+    group: "ui",
+    title: "MarkdownView: tables inside a list item and a blockquote render; fenced pipes stay code",
+    width: 60,
+    height: 24,
+    element: () => (
+      <Stage width={60} height={24}>
+        <MarkdownView
+          content={[
+            "- item with a table",
+            "  | a | b |",
+            "  |---|---|",
+            "  | 1 | 2 |",
+            "",
+            "> quote with a table",
+            "> | q | r |",
+            "> |---|---|",
+            "> | 3 | 4 |",
+            "",
+            "```",
+            "| fenced | pipes |",
+            "```",
+          ].join("\n")}
+          fg={COLOR.text}
+          syntaxStyle={markdownSyntaxStyle()}
+          selectable
+        />
       </Stage>
     ),
   },
