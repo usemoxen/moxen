@@ -270,6 +270,18 @@ export function automaticDispatchPrompt(turn: StoredTurn, origin: MessageOrigin 
 }
 
 /**
+ * Whether a turn is one the user wrote: no origin, none of the queue's
+ * automatic flags, none of the usage schedules. Moxen-written prompts never
+ * count, whatever their kind — the one predicate every exception that needs
+ * "the user's own turn" shares.
+ */
+export function userAuthoredTurn(turn: StoredTurn): boolean {
+  return turn.origin === undefined
+    && turn.queue?.automatic !== true && turn.queue?.wakeUp !== true
+    && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold";
+}
+
+/**
  * Whether a notice turn still rides the user turn it was queued behind: the
  * nearest terminal turn before it completed as the user's own. The notice's
  * exception ends there — an interrupted or failed turn never carried it, and
@@ -283,9 +295,7 @@ function noticeRidesUserTurn(turns: readonly StoredTurn[], turn: StoredTurn): bo
   for (let at = index - 1; at >= 0; at -= 1) {
     const candidate = turns[at]!;
     if (candidate.status !== "completed" && candidate.status !== "failed" && candidate.status !== "interrupted") continue;
-    return candidate.status === "completed" && candidate.origin === undefined
-      && candidate.queue?.automatic !== true && candidate.queue?.wakeUp !== true
-      && candidate.scheduleReason !== "usage-reset" && candidate.scheduleReason !== "usage-hold";
+    return candidate.status === "completed" && userAuthoredTurn(candidate);
   }
   return false;
 }
@@ -334,6 +344,36 @@ export function antigravityHoldsAutomaticDispatch(
   return driverKindOfInstance(instanceId) === "antigravity"
     && providers?.antigravity?.allowUnsupportedUse !== true
     && automaticDispatchPrompt(turn, origin, turns);
+}
+
+/**
+ * The dispatch decision for a turn a runner is about to put in front of a
+ * driver: whether Antigravity's gate holds it, read as late as possible —
+ * from the providers setting handed in (the one in force at the send), the
+ * turn's own provenance made whole with the message ledger, and the fresh
+ * consent that releases a held entry. Unreadable rows hold (fail-closed); a
+ * turn no longer running denies nothing, so a concurrent settle keeps its
+ * own behavior.
+ */
+export async function antigravityDispatchDenied(
+  store: { readThreadRecord(threadId: string): Promise<StoredThread | null>; readTurns(threadId: string): Promise<readonly StoredTurn[]>; readMessages(threadId: string): Promise<readonly StoredMessage[]> },
+  providers: Pick<CliConfig, "providers">["providers"] | undefined,
+  threadId: string,
+  turnId: string,
+): Promise<boolean> {
+  const thread = await store.readThreadRecord(threadId).catch(() => null);
+  if (!thread) return true;
+  const turns = await store.readTurns(threadId).catch(() => null);
+  if (turns === null) return true;
+  const turn = turns.find((candidate) => candidate.id === turnId);
+  if (!turn || turn.status !== "running") return false;
+  if (driverKindOfInstance((turn.modelSelection ?? thread.modelSelection).instanceId) !== "antigravity") return false;
+  if (providers?.antigravity?.allowUnsupportedUse === true) return false;
+  const origins = await loadTurnOrigins(store, [{ thread, turns }], providers === undefined ? {} : { providers }).catch(() => null);
+  if (origins === null) return true;
+  const origin = turn.origin ?? origins.get(turnOriginKey(threadId, turnId));
+  if (!automaticDispatchPrompt(turn, origin, turns)) return false;
+  return !freshUserConsentReleases(turns, turn, threadId, origins);
 }
 
 export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly QueueRow[], config: CliConfig, now = Date.now(), origins?: TurnOrigins): { blocked: string[]; latched: number[]; conditions: QueueCondition[] } {

@@ -62,7 +62,7 @@ import {
   pinCheckpointRef,
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
-import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta, type GateProviders } from "./threads.js";
+import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueGatedDispatch, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta, type GateProviders } from "./threads.js";
 import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, withRuleUpdate } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
@@ -71,7 +71,7 @@ import { failureMessage, reportThreadFailure } from "./failures.js";
 import { ThreadStore } from "./store.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "./toolactivity.js";
 import { permissionActivityRow, userInputActivityRow, type UserInputRuntimeEvent } from "./requestactivity.js";
-import { ANTIGRAVITY_HELD_MESSAGE, antigravityHoldsAutomaticDispatch, loadTurnOrigins, turnOriginKey } from "./queue.js";
+import { ANTIGRAVITY_HELD_MESSAGE, antigravityDispatchDenied, antigravityHoldsAutomaticDispatch, loadTurnOrigins, turnOriginKey } from "./queue.js";
 import type { StoredAttachment, StoredThread, StoredTurn, TurnUsage } from "./types.js";
 
 /** Structural driver surface the runner needs. All four drivers satisfy it. */
@@ -713,23 +713,8 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     const gateOrigins = await loadTurnOrigins(store, [{ thread, turns }], gate);
     const gateTurns = await store.readTurns(threadId);
     if (antigravityHoldsAutomaticDispatch(gate.providers, selection.instanceId, next, next.origin ?? gateOrigins.get(turnOriginKey(threadId, next.id)), gateTurns)) {
-      store.untrackRunning(next.id);
       claimed = null;
-      await store.withThreadLock(threadId, async () => {
-        const fresh = (await store.readTurns(threadId)).find((turn) => turn.id === next.id);
-        if (!fresh || fresh.status !== "running" || store.isTracked(fresh.id)) return;
-        const now = store.nowIso();
-        await store.updateTurn(threadId, next.id, { status: "queued", heldAtSettle: true, owner: null, updatedAt: now });
-        await store.appendLedger(threadId, "activity", {
-          id: store.newId(),
-          threadId,
-          turnId: next.id,
-          kind: "turn.held",
-          summary: ANTIGRAVITY_HELD_MESSAGE,
-          createdAt: now,
-        });
-        store.emit(threadId, "turn-held");
-      }).catch(() => undefined);
+      await requeueGatedDispatch(store, threadId, next.id, ANTIGRAVITY_HELD_MESSAGE);
       return;
     }
     // Its images were saved when it was queued; the bytes come off disk.
@@ -1663,6 +1648,18 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       }
       return;
     }
+    // Rechecked as late as one read allows, immediately before the prompt
+    // leaves: a session start can take the time the user needs to turn the
+    // setting off, and no earlier check may stand in for this one. Every
+    // dispatch path converges here — a fresh send, a promotion, a recovery.
+    // A denied turn goes back to the queue for admission, held with the
+    // gate's reason; nothing is sent and nothing is lost.
+    const dispatchKind = args.modelSelection !== undefined ? driverKindOfInstance(args.modelSelection.instanceId) : null;
+    if (!args.driverTurnId && (dispatchKind === null || dispatchKind === "antigravity")
+      && (await antigravityDispatchDenied(store, gateProvidersOf(args).providers ?? undefined, threadId, storeTurnId))) {
+      await requeueGatedDispatch(store, threadId, storeTurnId, ANTIGRAVITY_HELD_MESSAGE);
+      return;
+    }
     const sent = args.driverTurnId
       ? { turnId: args.driverTurnId }
       : await Effect.runPromise(
@@ -1686,6 +1683,16 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
         captureFinalObservedUsage();
         await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       }
+      // The abort's first capture could not name this run's driver turn
+      // (the prompt was still going out), so it read the thread's open turn
+      // instead — exactly what LOCAL-009 forbids. Re-capture, now that the
+      // driver turn id is known, so the interrupted usage stays this turn's.
+      finalObservedUsage = null;
+      captureFinalObservedUsage();
+      // And never enter the wait: an abort that already fired cannot reach a
+      // driver waiter registered this late, so a run stopped mid-send would
+      // sit forever. The interruption path below settles the turn.
+      throw new CliError("TURN_ABORTED", `Turn ${storeTurnId} was aborted while its prompt was going out.`, {});
     }
     // Persisted as soon as the turn is under way, not only at settle: a
     // process that dies mid-turn is exactly the one whose successor needs it.

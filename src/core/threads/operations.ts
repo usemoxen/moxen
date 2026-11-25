@@ -96,6 +96,7 @@ import {
   promoteDueScheduledTurn,
   promoteQueuedTurn,
   redeliverOrphanedSteers,
+  requeueGatedDispatch,
   requeueUnownedTurn,
   sendTurn,
   settleThread,
@@ -110,7 +111,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, automaticDispatchPrompt, freshUserConsentReleases, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchDenied, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
@@ -494,15 +495,7 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
  * dispatch boundary never drift apart.
  */
 async function antigravityGateHoldsTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
-  const thread = await ctx.store.readThreadRecord(threadId).catch(() => null);
-  if (!thread) return true;
-  const selection = turn.modelSelection ?? thread.modelSelection;
-  if (!antigravityAutoPromptsHeld(ctx.config, selection.instanceId)) return false;
-  const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
-  const origins = await loadTurnOrigins(ctx.store, [{ thread, turns }], ctx.config).catch(() => null);
-  const origin = turn.origin ?? origins?.get(turnOriginKey(threadId, turn.id));
-  if (!automaticDispatchPrompt(turn, origin, turns)) return false;
-  return origins === null || !freshUserConsentReleases(turns, turn, threadId, origins);
+  return await antigravityDispatchDenied(ctx.store, ctx.config.providers, threadId, turn.id);
 }
 
 /**
@@ -518,14 +511,8 @@ async function antigravityGateHoldsTurn(ctx: OperationContext, threadId: string,
  */
 async function holdGatedPromotion(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
   if (!(await antigravityGateHoldsTurn(ctx, threadId, turn))) return false;
-  ctx.store.untrackRunning(turn.id);
-  await ctx.store.withThreadLock(threadId, async () => {
-    const fresh = (await ctx.store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
-    if (fresh && fresh.status === "running") {
-      // Marked as a promotion no runner took, so admission takes it back.
-      await ctx.store.updateTurn(threadId, turn.id, { status: "queued", heldAtSettle: true, owner: null, updatedAt: ctx.store.nowIso() });
-    }
-  }).catch(() => undefined);
+  // Marked as a promotion no runner took, so admission takes it back.
+  await requeueGatedDispatch(ctx.store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
   return true;
 }
 
@@ -558,22 +545,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // setting releases it, exactly as admission would. The config is the
     // operation's, the setting in force at dispatch.
     if (await antigravityGateHoldsTurn(ctx, threadId, turn)) {
-      store.untrackRunning(turn.id);
-      await ctx.store.withThreadLock(threadId, async () => {
-        const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
-        if (fresh && fresh.status === "running") {
-          await store.updateTurn(threadId, turn.id, { status: "queued", heldAtSettle: true, owner: null, updatedAt: store.nowIso() });
-          await store.appendLedger(threadId, "activity", {
-            id: store.newId(),
-            threadId,
-            turnId: turn.id,
-            kind: "turn.held",
-            summary: ANTIGRAVITY_HELD_MESSAGE,
-            createdAt: store.nowIso(),
-          });
-          store.emit(threadId, "turn-held");
-        }
-      }).catch(() => undefined);
+      await requeueGatedDispatch(store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
       await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
       return;
     }
@@ -4345,15 +4317,21 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     if (held !== null) {
       const turns = await ctx.store.readTurns(parentThreadId).catch(() => [] as StoredTurn[]);
       const running = openTurn(turns) !== null;
+      // The ride exception holds only while the live turn the notice would
+      // ride is the user's own: one Moxen started (a task message, a
+      // continue) is an automatic conversation, and steering into it would
+      // feed exactly what the setting forbids — so it keeps the notice
+      // durable like an idle thread, ready for the user's message.
+      const rides = running && userAuthoredTurn(openTurn(turns)!);
       const activeSelection = openTurn(turns)?.modelSelection ?? held.modelSelection;
       const spent = providerExhausted(usageKeyForInstance(activeSelection.instanceId), Date.now(), activeSelection.model);
       // An archived or deleted parent can never receive again: drop the
       // batch at once instead of keeping what no flush could deliver.
       const receivable = held.archivedAt == null && held.deletedAt == null;
-      // A running turn is the user's own (the flush rides their send): the
-      // notice goes out with it. Idle, an Antigravity parent with delegation
-      // off keeps the batch for the next message or the setting turning on.
-      const antigravityHeld = !running && antigravityAutoPromptsHeld(ctx.config, activeSelection.instanceId);
+      // A running user turn is what the flush rides: the notice goes out
+      // with it. Otherwise, an Antigravity parent with delegation off keeps
+      // the batch for the next message or the setting turning on.
+      const antigravityHeld = !rides && antigravityAutoPromptsHeld(ctx.config, activeSelection.instanceId);
       if (receivable && (parentNotificationsHeld(held) || antigravityHeld || (!running && spent))) {
         // Still held, or spent with no live turn to steer into: stay durable
         // in the batch file instead of starting a turn into the same wall —

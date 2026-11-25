@@ -72,12 +72,15 @@ negotiates any other protocol version is refused loudly
   queue and notice batch instead of starting them, and never signs in an
   account with its own isolated home folder. The gate is one decision at the
   dispatch boundary, so every path - the turn a settling run promotes,
-  recovery and steer redelivery, admission - holds alike, reading the setting
-  in force at that moment. A task notice rides only a live turn of yours:
-  redelivered standalone (the turn it steered into died unconfirmed) it is
-  held like any other automatic prompt. A held entry is never batched into
-  one of your messages, and nothing of it is lost: it keeps its text and runs
-  with your next message or when you turn the setting on.
+  recovery and steer redelivery, admission, a send whose session started
+  while the setting was still on - holds alike, reading the setting in force
+  at that moment, immediately before the prompt leaves the driver. A task
+  notice rides only a live turn you wrote: redelivered standalone, or with
+  only a Moxen-started turn live, it is held in its durable batch like any
+  other automatic prompt. On Antigravity threads a promotion never folds a
+  message of Moxen's into one of yours either way, even opted in; other
+  providers batch as before. Nothing of a held entry is lost: it keeps its
+  text and runs with your next message or when you turn the setting on.
   A launch or login input that
   moves the login off the host environment — an account `env` override of
   `HOME`, `USERPROFILE`, `SSH_CONNECTION` or the home/profile/config-dir

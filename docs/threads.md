@@ -93,10 +93,16 @@ place from the same provenance — at the dispatch boundary itself, reading
 the setting in force at that moment, never the config the preceding turn
 started with — so no path can hand an automatic prompt to the driver: not
 the turn a settling run promotes, not recovery and steer redelivery, not
-admission, not a compaction or a hand-off. Eligibility is settled before a
-promotion rewrites the queue, so a held entry is never folded into your
-message and your message is never stranded in a held one: what runs past the
-gate carries only what could run. A running turn is never
+admission, not a compaction or a hand-off, and not even a send whose
+session started while the setting was still on (the gate is rechecked
+immediately before the prompt leaves, and a denied turn goes back to the
+queue, held for admission). Eligibility is settled before a promotion
+rewrites the queue, and on Antigravity threads promotion never folds a
+message of Moxen's into one of yours or the other way round — even opted
+in, since the setting can change between the two — so a held entry is
+never merged into your message and your message is never stranded in a
+held one: what runs past the gate carries only what could run. Other
+providers batch queued messages exactly as before. A running turn is never
 stopped for a compaction whose follow-up could not start, and a hand-off you
 queued yourself that wants a model summary completes on its stored summary
 rather than waiting on a summary the gate would hold. The
@@ -105,9 +111,10 @@ setting on. Recovering a turn whose process died interrupts it either way, but
 the follow-up it had queued is never dispatched past the gate: it goes back to
 queued for the admission path, which holds it like any other automatic prompt.
 A task notice holds its exception only while a live turn of yours can carry
-it: steered into your running turn it rides, but redelivered standalone — a
-crash took the turn it steered into before the driver confirmed it — it is an
-automatic prompt like any other, held until you send again or turn the
+it: steered into your running turn it rides, but a live turn Moxen started
+does not carry it, and redelivered standalone — a crash took the turn it
+steered into before the driver confirmed it — it is an automatic prompt like
+any other, held in its durable batch until you send again or turn the
 setting on. Nothing is lost either way: a held entry keeps its text and its
 metadata, and every path that holds it runs it the moment it may.
 Delegating a new task to Antigravity is refused outright while off
