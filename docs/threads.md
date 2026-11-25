@@ -1281,6 +1281,28 @@ compaction comes back marked not current, with its time, rather than passed off
 as the figure now. An agent told to hand off at a size can therefore measure
 instead of guessing.
 
+**What it costs.** The context panel shows the thread's cost beside the size
+reading, and the same cost is in `context_usage` and in the `thread.context`
+and `thread.context-reading` queries every client reads. It is computed from
+the thread's turns on every read — never stored on the thread — with the rules
+Stats uses: what a turn's provider reported beats Moxen's price for the same
+tokens, Claude turns store the session's running total so each counts the gain
+over the one before it, and a turn nobody priced stays unpriced. A model with
+no price shows as `unpriced` and the total is marked partial rather than the
+turn counting as zero; a thread with nothing priceable has no cost at all, not
+`$0.00`. The figure is an **API-equivalent price**, not what a subscription is
+charged, and every surface labels it that way.
+
+The split by model is shown where a thread ran on more than one: Moxen's rows
+add up to the thread's total by construction, and where the provider keeps its
+own accounting (Claude Code's per-model `modelUsage`, which includes the calls
+its subagents made inside a turn) that split is shown instead, said to be the
+provider's. Categories and heaviest tools come from the provider where it reports
+them; one that reports the total only says so, and nothing is estimated in its
+place. A delegated task's context and cost are read with `context_usage` and a
+`taskId`, under exactly the ownership rule `task_status` uses, and its cost is
+not rolled into the delegating thread's.
+
 **Shared usage.** An agent sees every set-up provider's allowance with the
 `usage_status` tool (on the `moxen` server, a delegated task included): each
 window's percent used, reset time and label, when that reading was taken, and

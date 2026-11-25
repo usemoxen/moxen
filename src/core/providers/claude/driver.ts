@@ -266,6 +266,13 @@ interface ClaudeSession {
   transcript: TranscriptTurn[];
   waiters: TurnWaiters<DriverTurnOutcome>;
   usage: UsageTotals;
+  /**
+   * The provider's own cumulative spend per model for this session, from the
+   * SDK result's `modelUsage`, which shares `total_cost_usd`'s lifecycle: each
+   * result carries the running total, so the latest replaces the previous
+   * map rather than adding to it. Keyed by canonical model id.
+   */
+  modelCosts: Map<string, number>;
   compacted: boolean;
   turnsSinceCompaction: number;
   announcedRateLimits: Map<TurnId, Set<string>>;
@@ -579,6 +586,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         transcript: [],
         waiters: new Map(),
         usage: emptyUsage(),
+        modelCosts: new Map(),
         compacted: false,
         turnsSinceCompaction: 0,
         announcedRateLimits: new Map(),
@@ -808,8 +816,35 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     const raw = await session.query.getContextUsage({ detail: "summary" });
     const usage = claudeContextUsageOf(raw);
     if (usage === null) return null;
-    return { ...usage, costUsd: session.usage.costUsd, ...claudeContextCategoriesOf(raw) };
+    const costByModel = [...session.modelCosts.entries()]
+      .map(([model, costUsd]) => ({ model, costUsd }))
+      .sort((left, right) => right.costUsd - left.costUsd || left.model.localeCompare(right.model));
+    return {
+      ...usage,
+      costUsd: session.usage.costUsd,
+      ...claudeContextCategoriesOf(raw),
+      ...(costByModel.length === 0 ? {} : { costByModel }),
+    };
   };
+
+  /**
+   * The provider's own per-model spend from a result's `modelUsage`, which is
+   * cumulative for the session and keyed by the raw model string each entry
+   * names (its `canonicalModel` is the id it was priced as). The latest figure
+   * per model stands, since each result carries the running total.
+   */
+  private recordModelCosts(session: ClaudeSession, message: Extract<SDKMessage, { type: "result" }>): void {
+    const byModel = (message as { modelUsage?: Record<string, { costUSD?: number; canonicalModel?: string }> }).modelUsage;
+    if (byModel === null || byModel === undefined || typeof byModel !== "object") return;
+    const costs = new Map<string, number>();
+    for (const [rawModel, entry] of Object.entries(byModel)) {
+      const usd = entry?.costUSD;
+      if (typeof usd !== "number" || !Number.isFinite(usd) || usd <= 0) continue;
+      const model = typeof entry.canonicalModel === "string" && entry.canonicalModel ? entry.canonicalModel : rawModel;
+      costs.set(model, (costs.get(model) ?? 0) + usd);
+    }
+    if (costs.size > 0) session.modelCosts = costs;
+  }
 
   /**
    * Skills and slash commands as Claude Code resolves them for `cwd` — user,
@@ -2113,6 +2148,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     // The SDK's total is the session's running spend, even on failure; the highest figure seen stands.
     const cost = Math.max(session.usage.costUsd, typeof message.total_cost_usd === "number" ? message.total_cost_usd : 0);
     session.usage = { ...session.usage, costUsd: cost };
+    this.recordModelCosts(session, message);
     const open = session.transcript.find((turn) => turn.status === "running");
     if (message.subtype === "success") {
       // A steer that arrived too late to fold into this run is queued as the
@@ -2563,6 +2599,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         turnsSinceCompaction: Math.max(0, session.turnsSinceCompaction - numTurns),
         announcedRateLimits: new Map(),
         usageProbedAt: 0,
+        modelCosts: new Map(),
         sdkMessages: new Map(),
         stream: { messageId: null, blocks: new Map() },
         textPublished: new Map(),

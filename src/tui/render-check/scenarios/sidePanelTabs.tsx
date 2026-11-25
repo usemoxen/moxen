@@ -88,6 +88,17 @@ export async function runSidePanelTabs(): Promise<void> {
                 ],
               }}
               fallback={null}
+              cost={{
+                totalUsd: 13.07,
+                pricedTurns: 12,
+                unpricedTurns: 0,
+                reported: true,
+                estimated: false,
+                byModel: [
+                  { model: "claude-opus-5", costUsd: 11.63, turns: 9, unpricedTurns: 0 },
+                  { model: "claude-sonnet-5", costUsd: 1.44, turns: 3, unpricedTurns: 0 },
+                ],
+              }}
               live
               usageLimits={{
                 checkedAt: "2026-09-25T09:58:00.000Z",
@@ -133,6 +144,11 @@ export async function runSidePanelTabs(): Promise<void> {
   console.log("--- side panel: context tab ---");
   console.log(context);
   for (const expected of ["Context usage", "84k / 200k", "42%", "Messages", "System prompt", "Free space", "Auto-compacts at 167k · 83k to go", "Heaviest tools", "Plan usage", "Session", "Weekly", "91%", "↻ 2h"]) {
+    if (!context.includes(expected)) fail(`context tab is missing "${expected}"`);
+  }
+  // The thread's cost by model, said to be an API-equivalent price, with each
+  // model its own row: the split the panel shows where a thread ran on more.
+  for (const expected of ["Cost by model", "API-equivalent", "claude-opus-5", "$11.63", "claude-sonnet-5", "$1.44"]) {
     if (!context.includes(expected)) fail(`context tab is missing "${expected}"`);
   }
   // Each tool is one row, and every bar ends on the same column.

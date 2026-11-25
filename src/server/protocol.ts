@@ -88,6 +88,7 @@ import type { ConfigProblem } from "../core/config.js";
 import type { ExperienceSnapshot } from "../core/experience/experience.js";
 import type { EmbeddingStatus } from "../core/memory/embedding-runtime.js";
 import type { StatsRange, UsageStats } from "../core/usage/stats.js";
+import type { ThreadCost } from "../core/usage/prices.js";
 import { type CardPalette, isCardPalette } from "../core/usage/card.js";
 import type { UsageCard } from "../core/usage/statsstore.js";
 import type { UsageProtectionSnapshot } from "../core/usage/protection.js";
@@ -732,6 +733,14 @@ export type Query =
    */
   | { readonly type: "thread.context-reading"; readonly threadId: string }
   /**
+   * What an agent may read about a thread's context and cost: the recorded
+   * reading, the live breakdown, and the thread's cost by model. With no
+   * `taskId` it is the caller's own thread; with one it is a task it
+   * delegated, gated by exactly the rule behind `task_status` (a thread that
+   * did not delegate the task gets `TASK_NOT_FOUND`).
+   */
+  | { readonly type: "thread.agent-context"; readonly callerThreadId: string; readonly taskId?: string }
+  /**
    * One native subagent's own conversation (Claude's Agent tool), read from
    * the transcript the provider keeps for it; `available: false` when it
    * keeps none this machine can read.
@@ -881,7 +890,7 @@ export interface QueryResults {
   "memory.embeddings.status": EmbeddingStatus & { readonly busy: boolean; readonly indexed: number };
   "memory.read": Memory;
   "memory.search": MemorySearch;
-  "thread.context": { readonly live: boolean; readonly breakdown: ContextBreakdown | null };
+  "thread.context": { readonly live: boolean; readonly breakdown: ContextBreakdown | null; readonly cost: ThreadCost };
   "thread.context-reading": {
     readonly reading: {
       readonly usedTokens: number;
@@ -890,6 +899,23 @@ export interface QueryResults {
       /** A compaction happened after this reading, so it is no longer current. */
       readonly compactedSince: boolean;
     } | null;
+    /** What the thread's turns have cost; computed on every read, never stored. */
+    readonly cost: ThreadCost;
+  };
+  "thread.agent-context": {
+    /** The thread the numbers are about: the task's live thread, or the caller's own. */
+    readonly threadId: string;
+    /** The provider kind behind it (`claude`, `codex`, `opencode`…), for saying who reports what. */
+    readonly provider: string | null;
+    readonly reading: {
+      readonly usedTokens: number;
+      readonly maxTokens: number | null;
+      readonly takenAt: string;
+      readonly compactedSince: boolean;
+    } | null;
+    /** The live breakdown, when a session runs here; null when none does. */
+    readonly breakdown: ContextBreakdown | null;
+    readonly cost: ThreadCost;
   };
   "thread.subagent": SubagentTranscript;
   "usage.stats": UsageStats;
@@ -2146,6 +2172,12 @@ export function decodeQuery(value: unknown): Query {
     case "thread.context":
     case "thread.context-reading":
       return { type, threadId: requireThreadId(record.threadId) };
+    case "thread.agent-context":
+      return {
+        type,
+        callerThreadId: requireThreadId(record.callerThreadId),
+        ...(record.taskId === undefined ? {} : { taskId: requireThreadId(record.taskId) }),
+      };
     case "thread.subagent":
       return { type, threadId: requireThreadId(record.threadId), agentId: requireField(record.agentId, type, "agentId") };
     case "thread.background.output":

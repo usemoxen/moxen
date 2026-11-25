@@ -5,9 +5,11 @@ import { extractOpencodePrices, mergeOpencodePrices } from "../../../../scripts/
 import {
   DEFAULT_MODEL_PRICES,
   HAND_EDITED_MODEL_PRICES,
+  emptyThreadCost,
   modelPriceFor,
   priceUsage,
   resolveContextCostUsd,
+  threadCostSplit,
   threadCostUsd,
   usageCost,
   type ModelPrice,
@@ -284,5 +286,75 @@ describe("threadCostUsd and resolveContextCostUsd (MXN-412)", () => {
     expect(
       resolveContextCostUsd({ modelSelection: agy }, [t1, t2Done], { providers: {} }, 0.5, { turnId: "a2", modelSelection: agy, usage: live }),
     ).toBeCloseTo(0.5, 9);
+  });
+});
+
+describe("threadCostSplit (MXN-412)", () => {
+  it("splits a thread's cost by model so the rows add up to the total exactly", () => {
+    const opus = { instanceId: "claude/default", model: "claude-opus-5-5" };
+    const sonnet = { instanceId: "claude/default", model: "claude-sonnet-5-5" };
+    // Claude's turns store the session's running total, so each counts its gain:
+    // Opus $1.00 + $2.00 = $3.00, Sonnet $0.40.
+    const turns = [
+      storedTurn("c1", opus, { input: 10, cacheRead: 0, cacheCreate: 0, output: 5, thinking: 0, costUsd: 1.0 }),
+      storedTurn("c2", opus, { input: 20, cacheRead: 0, cacheCreate: 0, output: 5, thinking: 0, costUsd: 3.0 }),
+      storedTurn("c3", sonnet, { input: 10, cacheRead: 0, cacheCreate: 0, output: 5, thinking: 0, costUsd: 3.4 }),
+    ];
+    const split = threadCostSplit({ modelSelection: opus }, turns, { providers: {} });
+    expect(split.totalUsd).toBeCloseTo(3.4, 9);
+    expect(split.byModel.map((row) => [row.model, row.costUsd, row.turns])).toEqual([
+      ["claude-opus-5-5", expect.closeTo(3, 9), 2],
+      ["claude-sonnet-5-5", expect.closeTo(0.4, 9), 1],
+    ]);
+    // The invariant every client leans on: the rows and the total cannot disagree.
+    expect(split.byModel.reduce((sum, row) => sum + (row.costUsd ?? 0), 0)).toBeCloseTo(split.totalUsd!, 9);
+    expect(split).toMatchObject({ pricedTurns: 3, unpricedTurns: 0, reported: true, estimated: false });
+    // The flat total is the same figure, since both come from one pass over the turns.
+    expect(threadCostUsd({ modelSelection: opus }, turns, { providers: {} })).toBe(split.totalUsd);
+  });
+
+  it("keeps a model with no price unpriced and flags the total partial, never counting it as zero", () => {
+    const priced = { instanceId: "chatgpt/default", model: "gpt-6.2-sol" };
+    const unpriced = { instanceId: "antigravity/default", model: "gpt-oss-120b-medium" };
+    const turns = [
+      storedTurn("p1", priced, { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 }), // $2.00
+      storedTurn("u1", unpriced, { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 }),
+      storedTurn("u2", unpriced, null),
+    ];
+    const split = threadCostSplit({ modelSelection: priced }, turns, { providers: {} });
+    expect(split.totalUsd).toBeCloseTo(2, 9);
+    expect(split).toMatchObject({ pricedTurns: 1, unpricedTurns: 2, estimated: true, reported: false });
+    expect(split.byModel.find((row) => row.model === "gpt-oss-120b-medium")).toEqual({
+      model: "gpt-oss-120b-medium",
+      costUsd: null,
+      turns: 2,
+      unpricedTurns: 2,
+    });
+    // A turn that reported nothing is not free either: the total covers only the rest.
+    expect(split.byModel.reduce((sum, row) => sum + (row.costUsd ?? 0), 0)).toBeCloseTo(2, 9);
+
+    // Nothing priceable at all: null, not $0.
+    const nothing = threadCostSplit({ modelSelection: unpriced }, [turns[1]!], { providers: {} });
+    expect(nothing.totalUsd).toBeNull();
+    expect(nothing.unpricedTurns).toBe(1);
+  });
+
+  it("takes a provider's reported cost over Moxen's price for the same turn", () => {
+    const claude = { instanceId: "claude/default", model: "claude-opus-5-5" };
+    // 1M input at $4/M would price at $4.00; the provider said $2.50, and it wins.
+    const reported = storedTurn("r1", claude, { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0, costUsd: 2.5 });
+    const split = threadCostSplit({ modelSelection: claude }, [reported], { providers: {} });
+    expect(split.totalUsd).toBeCloseTo(2.5, 9);
+    expect(split).toMatchObject({ reported: true, estimated: false });
+
+    const estimated = threadCostSplit({ modelSelection: claude }, [storedTurn("e1", claude, { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 })], { providers: {} });
+    expect(estimated.totalUsd).toBeCloseTo(4, 9);
+    expect(estimated).toMatchObject({ reported: false, estimated: true });
+  });
+
+  it("leaves out a turn still queued and reports an empty thread as no cost", () => {
+    const chatgpt = { instanceId: "chatgpt/default", model: "gpt-6.2-sol" };
+    const queued = storedTurn("q1", chatgpt, { input: 1_000_000, cacheRead: 0, cacheCreate: 0, output: 0, thinking: 0 }, "queued");
+    expect(threadCostSplit({ modelSelection: chatgpt }, [queued], { providers: {} })).toEqual(emptyThreadCost());
   });
 });

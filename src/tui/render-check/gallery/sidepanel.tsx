@@ -2,7 +2,8 @@ import { FileSection } from "../../features/diffpanel/diffpanel.js";
 import { GitFooter } from "../../features/gitpanel/gitpanel.js";
 import { ActionText, AgentsTab, BackgroundTab, ContextTab, DiffEmptyTab, Heading, InfoTab, SidePanelFrame } from "../../features/sidepanel/sidepanel.js";
 import type { ProviderUsageLimits } from "../../../core/catalog/summary.js";
-import type { ContextBreakdown } from "../../model/sidepanel.js";
+import type { ContextBreakdown, ThreadCost } from "../../model/sidepanel.js";
+
 import type { ForgeDetection } from "../../../core/forge/forge.js";
 import type { GitOverview } from "../../../core/git/history.js";
 import type { BackgroundTaskRow } from "../../model/thread.js";
@@ -37,12 +38,25 @@ const BREAKDOWN: ContextBreakdown = {
   ],
 };
 
-const LIMITS: ProviderUsageLimits = {
-  checkedAt: ago(30),
+const LIMITS: ProviderUsageLimits = {  checkedAt: ago(30),
   unavailable: null,
   windows: [
     { id: "s", kind: "session", label: "Session", usedPercent: 38, resetsAt: new Date(NOW + 2 * 3600_000).toISOString() },
     { id: "w", kind: "weekly", label: "Weekly", usedPercent: 91, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+  ],
+};
+
+/** A thread that ran on two models, one of them unpriced: the split as it reads then. */
+const COST: ThreadCost = {
+  totalUsd: 13.07,
+  pricedTurns: 11,
+  unpricedTurns: 2,
+  reported: true,
+  estimated: true,
+  byModel: [
+    { model: "claude-opus-5", costUsd: 11.63, turns: 8, unpricedTurns: 0 },
+    { model: "claude-sonnet-5", costUsd: 1.44, turns: 3, unpricedTurns: 0 },
+    { model: "some-local-model", costUsd: null, turns: 2, unpricedTurns: 2 },
   ],
 };
 
@@ -207,8 +221,8 @@ export const SIDEPANEL_GALLERY: GalleryEntry[] = [
     height: 34,
     element: () => (
       <Stage width={54} height={34}>
-        <ContextTab breakdown={BREAKDOWN} fallback={null} live usageLimits={LIMITS} providerName="Claude" width={54} now={NOW} />
-        <ContextTab breakdown={null} fallback={null} live={false} usageLimits={null} providerName={null} width={54} now={NOW} />
+        <ContextTab breakdown={BREAKDOWN} fallback={null} cost={COST} live usageLimits={LIMITS} providerName="Claude" width={54} now={NOW} />
+        <ContextTab breakdown={null} fallback={null} cost={null} live={false} usageLimits={null} providerName={null} width={54} now={NOW} />
       </Stage>
     ),
   },

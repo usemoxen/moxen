@@ -4557,8 +4557,30 @@ export interface DescribedTask {
   readonly review: ReviewFacts | null;
 }
 
-/** A delegated task by parent + task id; the task id is the child thread id. */
-export async function describeTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string): Promise<DescribedTask> {
+/** A delegated task a caller may read, with the threads the read needs. */
+export interface AgentTaskThread {
+  readonly parent: ThreadEnvelope;
+  /** The task id it was asked for, which is the child's thread id. */
+  readonly taskId: string;
+  /** The live thread holding the task: the one it carried on in, else its own. */
+  readonly child: ThreadEnvelope;
+  /** The direct delegation row, null when the task is reachable through the caller's lineage only. */
+  readonly delegation: StoredDelegation | null;
+}
+
+/**
+ * The delegated task `parentThreadId` may read — the gate behind `task_status`
+ * and every other read of a task's state, so one rule governs them all: the
+ * task it delegated (a continuation inheriting what was delegated to its
+ * lineage included, and a research run's roles), and nothing else. A thread
+ * that did not delegate it, a task in another project, and a task that does
+ * not exist are all the same `TASK_NOT_FOUND`.
+ */
+export async function requireAgentTaskThread(
+  ctx: OperationContext,
+  rawParentThreadId: string,
+  rawTaskId: string,
+): Promise<AgentTaskThread> {
   const parentThreadId = requireThreadId(rawParentThreadId);
   const taskId = requireThreadId(rawTaskId);
   const parent = await threadWithLedger(ctx.store, parentThreadId);
@@ -4576,6 +4598,29 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
       details: { taskId, parentThreadId },
     });
   }
+  return { parent, taskId, child, delegation };
+}
+
+/**
+ * The thread an agent reads a delegated task's context and cost from
+ * (`context_usage` with a task id): the task, followed to the thread it
+ * carried on in, under the ownership rule `task_status` uses. A thread that
+ * did not delegate it gets the same `TASK_NOT_FOUND`.
+ */
+export async function agentTaskThread(
+  ctx: OperationContext,
+  rawCallerThreadId: string,
+  rawTaskId: string,
+): Promise<{ readonly threadId: string }> {
+  const { child } = await requireAgentTaskThread(ctx, rawCallerThreadId, rawTaskId);
+  const live = await ownedDelegation(ctx, rawCallerThreadId, rawTaskId).catch(() => null);
+  return { threadId: live?.childThreadId ?? child.id };
+}
+
+/** A delegated task by parent + task id; the task id is the child thread id. */
+export async function describeTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string): Promise<DescribedTask> {
+  const parentThreadId = requireThreadId(rawParentThreadId);
+  const { parent, taskId, child, delegation } = await requireAgentTaskThread(ctx, rawParentThreadId, rawTaskId);
   // The live thread, following the same continuedIn chain task control
   // resolves: asking about a task that carried on reads the continuation,
   // the thread a send would steer — never the dormant source.

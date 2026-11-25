@@ -33,10 +33,17 @@ function stubApi(
           return { available: false, reason: null };
         case "handoff.pending":
           return { requestId: null };
-        case "thread.context-reading": {
-          const threadId = query.threadId as string;
+        case "thread.agent-context": {
+          // The reading the routed thread's own read answers with, so a mis-route shows.
+          const threadId = query.callerThreadId as string;
           seen.toolQueries.push(threadId);
-          return { reading: { usedTokens: 1, maxTokens: 100, takenAt: `reading-for:${threadId}`, compactedSince: false } };
+          return {
+            threadId,
+            provider: "claude",
+            reading: { usedTokens: 1, maxTokens: 100, takenAt: `reading-for:${threadId}`, compactedSince: false },
+            breakdown: null,
+            cost: { totalUsd: null, pricedTurns: 0, unpricedTurns: 0, reported: false, estimated: false, byModel: [] },
+          };
         }
         default:
           throw new Error(`unexpected query ${query.type}`);

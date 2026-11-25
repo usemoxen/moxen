@@ -3389,6 +3389,7 @@ export function App({
                   <ContextTab
                     breakdown={effectiveBreakdown}
                     fallback={threadState.contextUsage}
+                    cost={contextBreakdown.cost}
                     live={contextLive}
                     usageLimits={threadUsageLimits}
                     providerName={currentProvider?.displayName ?? null}
