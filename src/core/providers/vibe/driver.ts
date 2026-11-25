@@ -264,6 +264,8 @@ interface VibeSession {
   readonly pendingSteers: PendingSteer[];
   /** The latest requested mode (see the admission-state table above). */
   desiredMode: RuntimeMode;
+  /** The widening write the live-turn check deferred, to replay once idle; null when nothing was deferred. */
+  deferredWidening: RuntimeMode | null;
   /** The wire approval policy the server has definitely acknowledged; null once uncertain. */
   acknowledgedPolicy: string | null;
   /** Startup notices (e.g. withheld MCP servers) kept until the first turn subscriber can see them. */
@@ -562,6 +564,18 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             ? "ask"
             : vibeApprovalPolicyForRuntimeMode(runtimeMode);
           const mcpPlan = vibeMcpExclusionPlan(input.mcpServers ?? [], input.disabledMcpTools ?? []);
+          if (mcpPlan.unsatisfiable) {
+            // Vibe 3.1.4 sends no MCP override for an empty `mcpServers` list
+            // (`_runtime.py` guards `if options.mcp_servers:`), so withholding
+            // every offered server would fall back to the native Vibe MCP
+            // configuration — where the excluded tools may stay callable, with
+            // no deny at all. Refuse instead of sending an empty override.
+            const listed = mcpPlan.unsatisfiableExclusions.map((name) => `"${name}"`).join(", ");
+            throw new CliError(
+              "VIBE_MCP_EXCLUSION_UNENFORCEABLE",
+              `The MCP tool exclusion${mcpPlan.unsatisfiableExclusions.length > 1 ? "s" : ""} ${listed} cannot be enforced: it would withhold every offered MCP server, and Mistral Vibe would then fall back to its native MCP configuration, which may still expose the excluded tool. Remove the exclusion or rename the conflicting tools, then send the session again.`,
+            );
+          }
           const disabledTools = mergeDisabledTools(input, mcpPlan.patterns);
           const mcpServers = vibeMcpServersOf(
             (input.mcpServers ?? []).filter((server) => !mcpPlan.dropServers.has(server.name)),
@@ -599,6 +613,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             parkedInputs: new Map(),
             pendingSteers: [],
             desiredMode: runtimeMode,
+            deferredWidening: null,
             acknowledgedPolicy: approvalPolicy,
             admissionChain: Promise.resolve(),
             pendingCompletions: new Map(),
@@ -1779,31 +1794,53 @@ export class VibeDriver implements ProviderAdapter<CliError> {
    * One queued `setRuntimeMode` write, running on the admission chain. A
    * selection the caller has since replaced is skipped before any RPC. A
    * write that would widen the live policy is deferred while a turn is
-   * running (Vibe 3.1.4 applies a policy change to the running turn live);
-   * the turn-completion hook re-applies the latest selection once the session
-   * is idle. A narrowing write goes out at once, mid-turn included.
+   * running (Vibe 3.1.4 applies a policy change to the running turn live) and
+   * recorded as the session's deferred widening; the turn-completion hook
+   * replays exactly that one write once the session is idle. A narrowing
+   * write goes out at once, mid-turn included.
    */
   private async applySelectedMode(session: VibeSession, mode: RuntimeMode): Promise<void> {
     if (session.desiredMode !== mode) return; // superseded by a newer selection
     const target = vibeApprovalPolicyForRuntimeMode(mode);
     const believed = vibeApprovalPolicyForRuntimeMode(session.runtimeMode);
-    if (policyRank(target) > policyRank(believed) && this.runningTurn(session) !== undefined) return;
+    if (policyRank(target) > policyRank(believed) && this.runningTurn(session) !== undefined) {
+      session.deferredWidening = mode;
+      return;
+    }
+    session.deferredWidening = null; // this selection is written now, not deferred
     await this.writePolicy(session, mode);
   }
 
   /**
-   * After a turn settles, an idle session picks up a widening write a
-   * `setRuntimeMode` deferred while the turn ran: the latest selection
-   * applies now.
+   * After a turn settles, replay ONLY the widening write the live-turn check
+   * actually deferred — never a pending tightening (Vibe already applied it
+   * live and answered `pending`, so a replay would issue a redundant write
+   * whose failure would invalidate a healthy session) and never the caller's
+   * latest selection generally (a per-turn mode is not a completion-time
+   * write). If the caller has since selected something narrower than the
+   * deferred widening, the deferral is dropped instead of re-widening past it.
    */
   private applySelectedModeWhenIdle(session: VibeSession): void {
     if (session.closed || session.isolation) return;
     if (this.runningTurn(session) !== undefined) return;
-    const mode = session.desiredMode;
+    const mode = session.deferredWidening;
+    if (!mode) return;
+    if (policyRank(vibeApprovalPolicyForRuntimeMode(session.desiredMode))
+      < policyRank(vibeApprovalPolicyForRuntimeMode(mode))) {
+      session.deferredWidening = null;
+      return;
+    }
     void this.enqueueAdmission(session, async () => {
-      if (session.closed || session.desiredMode !== mode) return;
-      if (this.runningTurn(session) !== undefined) return;
-      await this.writePolicy(session, session.desiredMode);
+      if (session.closed || session.deferredWidening !== mode) return;
+      // A newer selection outranks the deferred write unless it is narrower.
+      if (policyRank(vibeApprovalPolicyForRuntimeMode(session.desiredMode))
+        < policyRank(vibeApprovalPolicyForRuntimeMode(mode))) {
+        session.deferredWidening = null;
+        return;
+      }
+      if (this.runningTurn(session) !== undefined) return; // a new turn beat us; the deferral replays after it
+      session.deferredWidening = null;
+      await this.writePolicy(session, mode);
     }).catch(() => undefined);
   }
 

@@ -993,12 +993,14 @@ describe("VibeDriver round-3 regressions", () => {
     await Effect.runPromise(driver.startSession({
       threadId: "th-casefold",
       workingDirectory: "/tmp/repo",
-      mcpServers: [{ name: "Demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      mcpServers: [{ name: "Demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }, { name: "extra", type: "http", url: "http://127.0.0.1:9997/mcp", headers: {} }],
       disabledMcpTools: ["mcp__Demo__read", "mcp__Demo__READ"],
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    expect(agentCfg["mcpServers"]).toBeUndefined();
+    // Demo is withheld; the bystander keeps a nonempty override (an empty one
+    // would make the session refuse to start — see the round-6 test below).
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name)).toEqual(["extra"]);
     const disabled = agentCfg["disabledTools"] as string[];
     expect(vibeDisabledMatches(disabled, "Demo_READ")).toBe(false);
     // The withheld-server notice rides the first send, so a turn subscriber
@@ -1019,12 +1021,13 @@ describe("VibeDriver round-3 regressions", () => {
       mcpServers: [
         { name: "demo", type: "http", url: "http://127.0.0.1:9998/mcp", headers: {} },
         { name: "demo__x", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} },
+        { name: "extra", type: "http", url: "http://127.0.0.1:9997/mcp", headers: {} },
       ],
       disabledMcpTools: ["mcp__demo__x__read"],
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    expect(agentCfg["mcpServers"]).toBeUndefined();
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name)).toEqual(["extra"]);
     await Effect.runPromise(driver.stopSession("th-flat"));
   });
 
@@ -1228,7 +1231,7 @@ describe("VibeDriver round-4 regressions", () => {
     await Effect.runPromise(driver.startSession({
       threadId: "th-collide-tool",
       workingDirectory: "/tmp/repo",
-      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }, { name: "extra", type: "http", url: "http://127.0.0.1:9997/mcp", headers: {} }],
       // A real server offering both spellings: Vibe digest-suffixes BOTH
       // display names, and no unsuffixed pattern can match either. Moxen
       // cannot see the sibling, so the server itself must be withheld.
@@ -1236,7 +1239,7 @@ describe("VibeDriver round-4 regressions", () => {
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    expect(agentCfg["mcpServers"]).toBeUndefined();
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name)).toEqual(["extra"]);
     await Effect.runPromise(driver.stopSession("th-collide-tool"));
   });
 
@@ -1272,14 +1275,15 @@ describe("VibeDriver round-4 regressions", () => {
     await Effect.runPromise(driver.startSession({
       threadId: "th-case-sibling",
       workingDirectory: "/tmp/repo",
-      mcpServers: [inProcessServer("demo", ["write", "WRITE", "read"])],
+      mcpServers: [inProcessServer("demo", ["write", "WRITE", "read"]), inProcessServer("extra", ["read"])],
       disabledMcpTools: ["mcp__demo__write"],
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
     // `re:demo_write` matches `demo_WRITE` case-insensitively; WRITE is not
-    // excluded, so the whole server is withheld rather than over-hidden.
-    expect(agentCfg["mcpServers"]).toBeUndefined();
+    // excluded, so the whole server is withheld rather than over-hidden while
+    // the bystander keeps a nonempty override.
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name)).toEqual(["extra"]);
     expect((agentCfg["disabledTools"] as string[]).some((p) => p.startsWith("re:demo_write"))).toBe(false);
     await Effect.runPromise(driver.stopSession("th-case-sibling"));
   });
@@ -1316,7 +1320,7 @@ describe("VibeDriver round-4 regressions", () => {
     await Effect.runPromise(driver.startSession({
       threadId: "th-noticelate",
       workingDirectory: "/tmp/repo",
-      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }],
+      mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }, { name: "extra", type: "http", url: "http://127.0.0.1:9997/mcp", headers: {} }],
       disabledMcpTools: ["mcp__demo__write-file"],
     }));
     const threadEvents: ProviderRuntimeEvent[] = [];
@@ -1536,6 +1540,106 @@ describe("VibeDriver round-5 regressions", () => {
     expect(events.some((e) => e.type === "permission.request.opened")).toBe(true);
     await Effect.runPromise(Fiber.interrupt(fiber));
     await Effect.runPromise(driver.stopSession("th-clamp"));
+  });
+});
+
+describe("VibeDriver round-6 regressions", () => {
+  it("refuses to start when every offered MCP server would be withheld and an exclusion exists", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    const exit = await Effect.runPromiseExit(driver.startSession({
+      threadId: "th-unsatisfiable",
+      workingDirectory: "/tmp/repo",
+      moxenTools: undefined,
+      // Both servers must be withheld: a-b cannot separate lock/LOCK, and
+      // withheld a-b unsuffixes a_b/write whose own WRITE sibling cannot be
+      // separated either. An empty override is no deny on Vibe 3.1.4 — the
+      // native configuration (with its own a-b copy exposing lock) would come
+      // back — so startup must refuse.
+      mcpServers: [inProcessServer("a-b", ["lock", "LOCK", "write"]), inProcessServer("a_b", ["write", "WRITE"])],
+      disabledMcpTools: ["mcp__a-b__lock", "mcp__a_b__write"],
+    } as never));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      const cause = exit.cause as { failure?: CliError; reasons?: ReadonlyArray<{ error?: CliError }> };
+      const failure = cause.failure ?? cause.reasons?.[0]?.error;
+      expect(failure?.code).toBe("VIBE_MCP_EXCLUSION_UNENFORCEABLE");
+      expect(failure?.message).toMatch(/mcp__a-b__lock/);
+      expect(failure?.message).toMatch(/native MCP configuration/);
+      expect(failure?.message).toMatch(/Remove the exclusion/);
+    }
+    // Fail fast: no session was opened on the peer.
+    expect(server.received.some((r) => r.method === VIBE_METHODS.sessionStart)).toBe(false);
+    expect(await Effect.runPromise(driver.hasSession("th-unsatisfiable"))).toBe(false);
+  });
+
+  it("replays only a deferred widening on turn completion, never a tightening or a plain selection", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    const applied: string[] = [];
+    server.on(VIBE_METHODS.sessionApprovalPolicyUpdate, (params) => {
+      const policy = (params as Record<string, unknown>)["approvalPolicy"] as string;
+      applied.push(policy);
+      // The first write (the tightening) is live-applied and answered pending;
+      // anything later is recorded and applied, so a retried write is visible.
+      return { runtime: { approvalPolicy: policy }, status: applied.length === 1 ? "pending" : "applied" };
+    });
+    server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } }));
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    await Effect.runPromise(driver.startSession({ threadId: "th-hookenv", workingDirectory: "/tmp/repo", runtimeMode: "full-access" }));
+
+    await Effect.runPromise(driver.sendTurn({ threadId: "th-hookenv", prompt: "A" }));
+    driver.setRuntimeMode("th-hookenv", "approval-required"); // narrowed; live-applied, answered pending
+    await sleep(30);
+    // The narrowing write went out once; record that.
+    expect(applied).toEqual(["ask"]);
+    server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+    await sleep(30);
+    // Nothing was deferred (the tightening was not), so the hook writes
+    // nothing further and the session stays open.
+    expect(applied).toEqual(["ask"]);
+
+    // An explicit send still works and issues exactly the write it needs.
+    await Effect.runPromise(driver.sendTurn({ threadId: "th-hookenv", prompt: "B", runtimeMode: "full-access" }));
+    await sleep(20);
+    expect(applied).toEqual(["ask", "auto-approve"]);
+    expect(await Effect.runPromise(driver.hasSession("th-hookenv"))).toBe(true);
+    await Effect.runPromise(driver.stopSession("th-hookenv"));
+  });
+
+  it("resolves internal tool conflicts first and drops the same set regardless of input order", async () => {
+    const probe = async (
+      threadId: string,
+      servers: readonly McpServerSpec[],
+      disabled: readonly string[],
+    ): Promise<{ readonly offered: readonly string[]; readonly patterns: readonly string[] }> => {
+      const server = new FakeVibeServer();
+      setupDefaultServer(server);
+      const driver = new VibeDriver({ transport: makeTransport([server]) });
+      await Effect.runPromise(driver.startSession({ threadId, workingDirectory: "/tmp/repo", mcpServers: [...servers], disabledMcpTools: [...disabled] }));
+      const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+      const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+      const offered = (agentCfg["mcpServers"] as Array<{ name: string }> | undefined)?.map((s) => s.name) ?? [];
+      const disabledList = agentCfg["disabledTools"] as string[];
+      const patterns = disabledList.filter((p) => p.startsWith("re:")).sort();
+      await Effect.runPromise(driver.stopSession(threadId));
+      return { offered, patterns };
+    };
+    const specA = (name: string, tools: readonly string[]): McpServerSpec => inProcessServer(name, tools);
+    const exclusion = (server: string, tool: string): string => `mcp__${server}__${tool}`;
+
+    // Probe 1: A[l] vs A[L] is an internal conflict; a[y] collides only with A's Y.
+    const first = await probe("th-order1", [specA("A", ["x", "l", "L", "Y"]), specA("a", ["X", "y"])], [exclusion("a", "y"), exclusion("A", "x"), exclusion("A", "l")]);
+    const firstShuffled = await probe("th-order1s", [specA("a", ["X", "y"]), specA("A", ["x", "l", "L", "Y"])], [exclusion("A", "l"), exclusion("a", "y"), exclusion("A", "x")]);
+    expect(first).toEqual({ offered: ["a"], patterns: ["re:a_y"] });
+    expect(firstShuffled).toEqual(first);
+
+    // Probe 2: no l/L pair, but the external a/X can shadow A's internal X conflict.
+    const second = await probe("th-order2", [specA("A", ["x", "X", "Y"]), specA("a", ["X", "y"])], [exclusion("a", "y"), exclusion("A", "x")]);
+    const secondShuffled = await probe("th-order2s", [specA("a", ["X", "y"]), specA("A", ["x", "X", "Y"])], [exclusion("A", "x"), exclusion("a", "y")]);
+    expect(second).toEqual({ offered: ["a"], patterns: ["re:a_y"] });
+    expect(secondShuffled).toEqual(second);
   });
 });
 

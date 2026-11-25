@@ -278,7 +278,22 @@ export interface VibeMcpExclusionPlan {
   readonly patterns: string[];
   /** Sanitized notes explaining each dropped server. */
   readonly notes: string[];
+  /**
+   * True when the plan would withhold every offered server while exclusions
+   * exist: Vibe 3.1.4 sends no MCP override for an empty list, so a native
+   * copy of the withheld servers from the user's own Vibe configuration (which
+   * may still expose the excluded tools) stays in scope. The session must
+   * refuse to start rather than send an ineffective empty override.
+   */
+  readonly unsatisfiable: boolean;
+  /** The `mcp__server__tool` exclusions that cannot be enforced. */
+  readonly unsatisfiableExclusions: string[];
 }
+
+const UNSATISFIABLE_PLAN = (exclusions: readonly string[]): Pick<VibeMcpExclusionPlan, "unsatisfiable" | "unsatisfiableExclusions"> =>
+  exclusions.length > 0
+    ? { unsatisfiable: true, unsatisfiableExclusions: [...exclusions] }
+    : { unsatisfiable: false, unsatisfiableExclusions: [] };
 
 /**
  * Vibe's display names for every (server, tool) identity, computed exactly as
@@ -381,15 +396,18 @@ export function vibeMcpExclusionPlan(
   const notes: string[] = [];
   const patterns = new Set<string>();
   if (servers.length === 0 || disabled.length === 0) {
-    return { dropServers, patterns: [...patterns], notes };
+    return { dropServers, patterns: [...patterns], notes, ...UNSATISFIABLE_PLAN([]) };
   }
 
   const prefixExclusions = new Map<string, string[]>();
+  const matchedExclusionNames: string[] = [];
   for (const name of disabled) {
     const matched = servers.filter((server) => {
       const prefix = `mcp__${server.name}__`;
       return name.startsWith(prefix) && name.slice(prefix.length).length > 0;
     });
+    if (matched.length === 0) continue;
+    matchedExclusionNames.push(name);
     if (matched.length > 1) {
       for (const server of matched) dropServers.add(server.name);
       notes.push(`MCP exclusion "${name}" matches more than one server (${matched.map((s) => s.name).join(", ")}); those servers are not offered to this session.`);
@@ -413,7 +431,12 @@ export function vibeMcpExclusionPlan(
       dropServers.add(serverName);
       notes.push(`MCP tool exclusions (${tools.join(", ")}) cannot be scoped within server "${serverName}" without its tool list; the server is not offered to this session.`);
     }
-    return { dropServers, patterns: [], notes };
+    // Withholding the last offered server would leave the override empty and
+    // the exclusions unenforced against a native copy.
+    if (servers.every((server) => dropServers.has(server.name))) {
+      return { dropServers, patterns: [], notes, ...UNSATISFIABLE_PLAN(matchedExclusionNames) };
+    }
+    return { dropServers, patterns: [], notes, ...UNSATISFIABLE_PLAN([]) };
   }
 
   // Every offered server is in-process: the tool identities are known, so
@@ -447,10 +470,14 @@ export function vibeMcpExclusionPlan(
       for (const tool of tools) excludedIdentities.add(`${alias}\u0000${tool}`);
     }
 
-    // Withhold at most one server per pass (its own internal conflict first):
-    // removing it can change which exclusions remain enforceable.
+    // Scan EVERY exclusion of EVERY retained server before dropping anything:
+    // a `.find()` that stops at the first bystander could otherwise pick a
+    // cross-server conflict and miss a mandatory internal one elsewhere, which
+    // made the plan order-dependent. Servers are visited in sorted order and
+    // the quoted bystander is the first of the sorted witness list, so the
+    // notes do not depend on the caller's input order either.
     const violations: Array<{ readonly serverName: string; readonly note: string; readonly internal: boolean }> = [];
-    for (const [serverName, tools] of prefixExclusions) {
+    for (const [serverName, tools] of [...prefixExclusions].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       if (!retainedNames.has(serverName)) continue;
       const alias = aliasByServer.get(serverName) ?? serverName;
       for (const tool of tools) {
@@ -467,24 +494,45 @@ export function vibeMcpExclusionPlan(
         // against every published display name: the pattern is only safe when
         // everything it matches is itself excluded.
         const matcher = new RegExp(`^(?:${display.replace(/[^A-Za-z0-9_]/g, "\\$&")})$`, "i");
-        const bystander = identities.find((identity) => {
-          const name = displays.get(`${identity.server}\u0000${identity.tool}`);
-          return name !== undefined && matcher.test(name) && !excludedIdentities.has(`${identity.server}\u0000${identity.tool}`);
-        });
-        if (!bystander) continue;
+        const bystanders = identities
+          .map((identity) => ({ identity, name: displays.get(`${identity.server}\u0000${identity.tool}`) }))
+          .filter((entry): entry is { identity: typeof identities[number]; name: string } =>
+            entry.name !== undefined && matcher.test(entry.name) && !excludedIdentities.has(`${entry.identity.server}\u0000${entry.identity.tool}`))
+          .sort((p, q) => (p.identity.server !== q.identity.server
+            ? (p.identity.server < q.identity.server ? -1 : 1)
+            : (p.identity.tool < q.identity.tool ? -1 : p.identity.tool > q.identity.tool ? 1 : 0)));
+        if (bystanders.length === 0) continue;
+        // Any bystander suffices to disprove the pattern; quoting the
+        // deterministic first witness keeps the note input-order independent.
+        const bystander = bystanders[0]!.identity;
         const holderName = retained.find((server) => (aliasByServer.get(server.name) ?? server.name) === bystander.server)?.name ?? bystander.server;
         violations.push({
           serverName,
+          internal: bystander.server === alias,
           note: bystander.server === alias
             ? `MCP server "${serverName}" is not offered to this session: its excluded tool "${tool}" cannot be separated from "${bystander.tool}" on the same server, and the filter matches case-insensitively.`
             : `MCP server "${serverName}" is not offered to this session: its excluded tool "${tool}" cannot be separated from "${bystander.tool}" of server "${holderName}", and the filter matches case-insensitively.`,
-          internal: bystander.server === alias,
         });
-        break;
       }
     }
-    const violation = violations.find((entry) => entry.internal) ?? violations[0];
-    if (!violation) {
+    // A server's own conflict (a case-fold bystander on the same server) is a
+    // mandatory drop and is resolved before any cross-server choice: withholding
+    // those servers first can unsuffix other tools and re-enable patterns.
+    const internalServers = [...new Set(violations.filter((entry) => entry.internal).map((entry) => entry.serverName))].sort();
+    if (internalServers.length > 0) {
+      for (const serverName of internalServers) {
+        dropServers.add(serverName);
+        notes.push(violations.find((entry) => entry.internal && entry.serverName === serverName)!.note);
+      }
+      retained = retained.filter((server) => !internalServers.includes(server.name));
+    } else if (violations.length > 0) {
+      // Cross-server drop, one per pass, deterministic: the smallest server
+      // name wins instead of whichever conflict the input order produced.
+      const chosen = [...violations].sort((p, q) => (p.serverName !== q.serverName ? (p.serverName < q.serverName ? -1 : 1) : (p.note < q.note ? -1 : 1)))[0]!;
+      dropServers.add(chosen.serverName);
+      notes.push(chosen.note);
+      retained = retained.filter((server) => server.name !== chosen.serverName);
+    } else {
       // Nothing must be withheld any further: enforce every surviving
       // exclusion against the retained catalog's published names.
       for (const [serverName, tools] of prefixExclusions) {
@@ -497,14 +545,11 @@ export function vibeMcpExclusionPlan(
       }
       break;
     }
-    dropServers.add(violation.serverName);
-    notes.push(violation.note);
-    retained = retained.filter((server) => server.name !== violation.serverName);
     if (retained.length === 0) {
-      return { dropServers, patterns: [...patterns], notes };
+      return { dropServers, patterns: [...patterns], notes, ...UNSATISFIABLE_PLAN(matchedExclusionNames) };
     }
   }
-  return { dropServers, patterns: [...patterns], notes };
+  return { dropServers, patterns: [...patterns], notes, ...UNSATISFIABLE_PLAN([]) };
 }
 
 /** Build `TurnStartParams.message` / `TurnSteerParams.message` content blocks. */
