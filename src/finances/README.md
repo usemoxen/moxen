@@ -9,6 +9,7 @@ no other Moxen product.
 |---|---|
 | `core` | Pure domain logic (money in minor units, dates, recurrences, projections, statistics, exchange). No UI, no I/O. |
 | `store` | SQLite, the repository, CSV and JSON backup, the demo seed. |
+| `banking` | A read-only Enable Banking client: the user's own application and key, the key in the OS keychain, banks, balances and transactions. No payments, no store writes. |
 | `ui` | GPUI views and the Moxen design tokens, shared by the app and the desktop. |
 | `app` | The standalone app (`moxen-finances`). |
 | `mcp` | An optional read-only MCP server over the same data, for any harness. |

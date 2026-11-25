@@ -1,0 +1,52 @@
+# Moxen Finances banking: an account-information client for Enable Banking.
+# Read only (account details, balances, transactions), and always with the
+# USER'S OWN Enable Banking application: its id and its private key, never a
+# shared one. See README.md in this crate for the terms this respects.
+[package]
+name = "moxen-finances-banking"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The API's shapes and the JWT header/claims, both serde structs with the
+# unknown fields the API adds ignored.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Dates and instants: booking/value dates are calendar days and consent
+# expiry is an instant with an offset. `clock` because the crate stamps the
+# JWT with the current time, without chrono-tz (no local timezone needed).
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+# One typed error enum for the crate, with Display messages that never carry
+# a token, a session id, an IBAN or a balance.
+thiserror = "2"
+# The blocking HTTP client: small, no async runtime, and its default TLS is
+# rustls with compiled-in Mozilla roots, so neither macOS nor Windows needs
+# OpenSSL or a system trust store. gzip is on because the API compresses large
+# transaction pages.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+# RS256 is PKCS#1 v1.5 over SHA-256, which is all `rsa` needs to implement;
+# it is pure Rust (no ring, no C, no OpenSSL), and signing is deterministic so
+# there is no RNG in the token path. `sha2` supplies the digest type.
+rsa = "0.9"
+# `oid` gives SHA-256 the `AssociatedOid` impl `rsa`'s PKCS#1 v1.5 signer
+# requires to build the DigestInfo prefix of an RS256 signature.
+sha2 = { version = "0.10", features = ["oid"] }
+# base64url without padding for the three JWT segments.
+base64 = "0.22"
+# The unguessable `state` the callback server checks.
+rand = "0.9"
+# The OS keychain: macOS Keychain and Windows Credential Manager only, which
+# is exactly the two platforms this app ships on. Default features are off so
+# no dbus/secret-service or OpenSSL build is pulled in.
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native"] }
+
+[dev-dependencies]
+# A throwaway directory for the keychain-import test: no test may touch a real
+# data path.
+tempfile = "3"
+# The tests read the JWT the client signed and verify it, so they need the
+# same serde and RSA crates the library uses, as test-only dependencies.
+serde_json = "1"
+rsa = "0.9"
+sha2 = { version = "0.10", features = ["oid"] }

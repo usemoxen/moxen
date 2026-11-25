@@ -1,0 +1,23 @@
+{
+  "transactions": [
+    {
+      "entry_reference": "FICT-0004",
+      "transaction_amount": { "currency": "EUR", "amount": "50.00" },
+      "credit_debit_indicator": "CRDT",
+      "status": "BOOK",
+      "booking_date": "2026-01-12",
+      "debtor": { "name": "Amistad Imaginaria" },
+      "remittance_information": ["Regalo"]
+    },
+    {
+      "entry_reference": "FICT-0005",
+      "transaction_amount": { "currency": "EUR", "amount": "9.99" },
+      "credit_debit_indicator": "DBIT",
+      "status": "CNCL",
+      "booking_date": "2026-01-13",
+      "creditor": { "name": "Tienda Cancelada" },
+      "remittance_information": ["Pedido cancelado"]
+    }
+  ],
+  "continuation_key": null
+}

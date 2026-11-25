@@ -1,0 +1,25 @@
+{
+  "uid": "fictional-account-uid-0001",
+  "account_id": { "iban": "ES0021000418450200051332" },
+  "all_account_ids": [{ "identification": "0000000011", "scheme_name": "BBAN" }],
+  "account_servicer": {
+    "bic_fi": "FICTESMM",
+    "clearing_system_member_id": { "clearing_system_id": "ZZZ", "member_id": 1 },
+    "name": "Banco Ficticio"
+  },
+  "name": "Cuenta de pruebas",
+  "details": "Cuenta corriente ficticia",
+  "usage": "PRIV",
+  "cash_account_type": "CACC",
+  "product": "Cuenta Ficticia",
+  "currency": "EUR",
+  "credit_limit": { "currency": "EUR", "amount": "500.00" },
+  "legal_age": true,
+  "postal_address": {
+    "address_line": ["Calle Inventada 1", "28000 Madrid"],
+    "country": "ES",
+    "town_name": "Madrid"
+  },
+  "identification_hash": "fictional-identification-hash-0001",
+  "identification_hashes": ["fictional-identification-hash-0001"]
+}

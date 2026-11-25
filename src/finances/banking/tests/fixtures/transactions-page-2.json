@@ -1,0 +1,17 @@
+{
+  "transactions": [
+    {
+      "entry_reference": "FICT-0003",
+      "transaction_amount": { "currency": "EUR", "amount": "1500.00" },
+      "credit_debit_indicator": "CRDT",
+      "status": "BOOK",
+      "booking_date": "2026-01-10",
+      "value_date": "2026-01-10",
+      "debtor": { "name": "Empresa Ficticia, S.L." },
+      "remittance_information": ["Nómina ficticia", "Enero"],
+      "reference_number": "RF00123456789012345678901",
+      "transaction_id": "fictional-transaction-0003"
+    }
+  ],
+  "continuation_key": "fictional-page-3"
+}

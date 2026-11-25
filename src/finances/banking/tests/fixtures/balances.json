@@ -1,0 +1,18 @@
+{
+  "balances": [
+    {
+      "name": "Saldo contable",
+      "balance_amount": { "currency": "EUR", "amount": "1234.56" },
+      "balance_type": "CLAV",
+      "reference_date": "2026-01-31",
+      "last_change_date_time": "2026-01-31T23:00:00Z",
+      "last_committed_transaction": "fictional-transaction-0001"
+    },
+    {
+      "name": "Saldo disponible",
+      "balance_amount": { "currency": "EUR", "amount": "-25.00" },
+      "balance_type": "ITBD",
+      "reference_date": "2026-01-31"
+    }
+  ]
+}

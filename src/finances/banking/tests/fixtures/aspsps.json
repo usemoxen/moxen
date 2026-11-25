@@ -1,0 +1,33 @@
+{
+  "aspsps": [
+    {
+      "name": "Banco Ficticio",
+      "country": "ES",
+      "logo": "https://example.invalid/banks/banco-ficticio/",
+      "psu_types": ["private"],
+      "auth_methods": [
+        {
+          "approach": "REDIRECT",
+          "name": "FICTICIO",
+          "psu_type": "private",
+          "hidden_method": false,
+          "credentials": []
+        }
+      ],
+      "maximum_consent_validity": 15552000,
+      "beta": false,
+      "bic": "FICTESMM",
+      "sandbox": { "description": "Fictional bank, invented for tests" },
+      "services": ["AIS"]
+    },
+    {
+      "name": "Caja de Pruebas",
+      "country": "ES",
+      "logo": "https://example.invalid/banks/caja-de-pruebas/",
+      "psu_types": ["private", "business"],
+      "maximum_consent_validity": 7776000,
+      "beta": true,
+      "required_psu_headers": ["Psu-Ip-Address"]
+    }
+  ]
+}
