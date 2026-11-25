@@ -1,13 +1,19 @@
-//! The root view: window chrome (title bar), left navigation and the current
-//! page, all reading data through [`FinancesData`].
+//! The root view: window chrome (title bar), left navigation (with the
+//! account selector) and the current page, all reading data through
+//! [`FinancesData`] and writing through [`FinancesMutations`] when the data
+//! source offers it (the store does; the demo does not).
 
-use crate::data::FinancesData;
+use crate::commands::{CsvSheet, DataError, FinancesMutations, SubscriptionAction};
+use crate::data::{AccountSelection, FinancesData, MovementKind};
+use crate::dialog::{self, Dialog, FormState};
+use crate::kit;
 use crate::language::{self, Language};
 use crate::model::{self, EventKind, GroupBy, KindFilter, SortOrder, StatusFilter};
 use crate::theme::{self, ThemeMode, color};
-use crate::{sidebar, title_bar, views};
+use crate::{format, sidebar, title_bar, views};
 use chrono::{Datelike, Duration, NaiveDate};
 use gpui::{prelude::*, *};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +171,22 @@ pub struct FinancesApp {
     pub page: Page,
     pub theme: ThemeMode,
     pub data: Rc<dyn FinancesData>,
+    /// The write side of the boundary, when the data source has one: the
+    /// store-backed `StoreData` does, the demo does not (its actions stay
+    /// disabled).
+    pub mutations: Option<Rc<dyn FinancesMutations>>,
+    /// The account the pages are currently looking at.
+    pub account: AccountSelection,
+    /// The last failed command's message, shown in a banner until dismissed.
+    pub error: Option<String>,
+    /// A transient info line (e.g. where a file was written), until dismissed.
+    pub notice: Option<String>,
+    /// The open form dialog, if any.
+    pub dialog: Option<Dialog>,
+    /// The open dialog's fields.
+    pub form: FormState,
+    /// The CSV sheet the Settings page exports.
+    pub csv_sheet: usize,
     /// The selected subscription in the detail pane, if any.
     selected_subscription: Option<String>,
     language_setting: Option<String>,
@@ -176,12 +198,23 @@ pub struct FinancesApp {
 }
 
 impl FinancesApp {
-    pub fn new(data: Rc<dyn FinancesData>, language_setting: Option<&str>) -> Self {
+    pub fn new(
+        data: Rc<dyn FinancesData>,
+        language_setting: Option<&str>,
+        mutations: Option<Rc<dyn FinancesMutations>>,
+    ) -> Self {
         let today = data.today();
         Self {
             page: Page::Dashboard,
             theme: ThemeMode::Dark,
             data,
+            mutations,
+            account: AccountSelection::All,
+            error: None,
+            notice: None,
+            dialog: None,
+            form: FormState::default(),
+            csv_sheet: 4, // the movements report
             selected_subscription: None,
             language_setting: language_setting.map(str::to_string),
             on_language: None,
@@ -204,6 +237,226 @@ impl FinancesApp {
             },
             analysis: AnalysisState { months: 12 },
         }
+    }
+
+    // -- the write side (LOCAL-030) -------------------------------------------
+
+    /// Whether the data source accepts commands right now.
+    pub fn can_mutate(&self) -> bool {
+        self.mutations.is_some()
+    }
+
+    /// Runs one command against the data source. On success the data is
+    /// refreshed and the views repaint immediately; on failure the error is
+    /// localized and shown in the banner. Never panics.
+    pub fn run_mutation(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&dyn FinancesMutations) -> Result<(), DataError>,
+    ) -> bool {
+        let Some(mutations) = self.mutations.clone() else {
+            return false;
+        };
+        let result = f(mutations.as_ref()).and_then(|()| mutations.refresh());
+        match result {
+            Ok(()) => {
+                self.error = None;
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                self.error = Some(error.localized());
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    /// Switches the account every page looks at, live.
+    pub fn select_account(&mut self, selection: AccountSelection, cx: &mut Context<Self>) {
+        self.account = selection.clone();
+        if let Some(mutations) = self.mutations.clone() {
+            let result = mutations
+                .select_account(selection)
+                .and_then(|()| mutations.refresh());
+            if let Err(error) = result {
+                self.error = Some(error.localized());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sets the banner from outside (e.g. the database failing to open at
+    /// startup, when the app fell back to the demo data).
+    pub fn set_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.error = Some(message);
+        cx.notify();
+    }
+
+    pub fn dismiss_feedback(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+    }
+
+    pub fn subscription_action(
+        &mut self,
+        id: &str,
+        action: SubscriptionAction,
+        cx: &mut Context<Self>,
+    ) {
+        let id = id.to_string();
+        self.run_mutation(cx, move |m| m.apply_subscription_action(&id, action));
+    }
+
+    pub fn confirm_movement(&mut self, id: &str, kind: MovementKind, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        self.run_mutation(cx, move |m| m.confirm_movement(&id, kind));
+    }
+
+    pub fn delete_movement(&mut self, id: &str, kind: MovementKind, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        self.run_mutation(cx, move |m| m.delete_movement(&id, kind));
+    }
+
+    /// The folder the JSON backups go to: `<db folder>/backups`.
+    fn backups_dir(&self) -> Option<PathBuf> {
+        let parent = PathBuf::from(self.data.database_path()?)
+            .parent()?
+            .to_path_buf();
+        Some(parent.join("backups"))
+    }
+
+    /// The folder the CSV exports go to: `<db folder>/exports`.
+    fn exports_dir(&self) -> Option<PathBuf> {
+        let parent = PathBuf::from(self.data.database_path()?)
+            .parent()?
+            .to_path_buf();
+        Some(parent.join("exports"))
+    }
+
+    /// A fresh file name in `dir` for `stem` and `ext`, dated today.
+    fn fresh_path(&self, dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
+        let today = format::iso_date(self.data.today());
+        let mut path = dir.join(format!("{stem}-{today}.{ext}"));
+        let mut n = 2;
+        while path.exists() {
+            path = dir.join(format!("{stem}-{today}-{n}.{ext}"));
+            n += 1;
+        }
+        path
+    }
+
+    /// Exports the JSON backup next to the database and says where it went.
+    pub fn export_backup(&mut self, cx: &mut Context<Self>) {
+        let (Some(dir), Some(mutations)) = (self.backups_dir(), self.mutations.clone()) else {
+            return;
+        };
+        match mutations.export_backup_json() {
+            Ok(json) => {
+                let path = self.fresh_path(&dir, "finances-backup", "json");
+                match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, json)) {
+                    Ok(()) => {
+                        self.notice = Some(language::fill(
+                            "settings.saved",
+                            &[("{path}", &path.display().to_string())],
+                        ));
+                    }
+                    Err(source) => {
+                        self.error = Some(
+                            DataError::new(crate::commands::DataErrorKind::Io, source.to_string())
+                                .localized(),
+                        );
+                    }
+                }
+            }
+            Err(error) => self.error = Some(error.localized()),
+        }
+        cx.notify();
+    }
+
+    /// Restores the JSON backup at `path` (the newest one in the backups
+    /// folder when `path` is empty).
+    pub fn restore_backup(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.mutations.is_none() {
+            return;
+        }
+        let path = path.trim();
+        let resolved = if path.is_empty() {
+            self.newest_backup()
+        } else {
+            Some(PathBuf::from(path))
+        };
+        let Some(path) = resolved else {
+            self.error = Some(
+                DataError::new(
+                    crate::commands::DataErrorKind::Io,
+                    language::message("dialog.error.path"),
+                )
+                .localized(),
+            );
+            cx.notify();
+            return;
+        };
+        let text = std::fs::read_to_string(&path).map_err(|source| {
+            DataError::new(
+                crate::commands::DataErrorKind::Io,
+                format!("{}: {source}", path.display()),
+            )
+        });
+        let ok = match text {
+            Ok(text) => self.run_mutation(cx, move |m| m.restore_backup_json(&text)),
+            Err(error) => {
+                self.error = Some(error.localized());
+                cx.notify();
+                false
+            }
+        };
+        if ok {
+            self.notice = Some(language::fill(
+                "settings.restored",
+                &[("{path}", &path.display().to_string())],
+            ));
+        }
+    }
+
+    /// The newest `*.json` in the backups folder, if any.
+    fn newest_backup(&self) -> Option<PathBuf> {
+        let dir = self.backups_dir()?;
+        std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .max()
+    }
+
+    /// Exports the chosen CSV sheet next to the database.
+    pub fn export_csv(&mut self, cx: &mut Context<Self>) {
+        let (Some(dir), Some(mutations)) = (self.exports_dir(), self.mutations.clone()) else {
+            return;
+        };
+        let sheet = CsvSheet::ALL[self.csv_sheet.min(CsvSheet::ALL.len() - 1)];
+        match mutations.export_csv(sheet) {
+            Ok(csv) => {
+                let path = self.fresh_path(&dir, sheet.name(), "csv");
+                match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, csv)) {
+                    Ok(()) => {
+                        self.notice = Some(language::fill(
+                            "settings.saved",
+                            &[("{path}", &path.display().to_string())],
+                        ));
+                    }
+                    Err(source) => {
+                        self.error = Some(
+                            DataError::new(crate::commands::DataErrorKind::Io, source.to_string())
+                                .localized(),
+                        );
+                    }
+                }
+            }
+            Err(error) => self.error = Some(error.localized()),
+        }
+        cx.notify();
     }
 
     /// Called when the user picks a language, so the app can persist it.
@@ -389,14 +642,23 @@ impl Render for FinancesApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::apply(self.theme);
         language::apply(self.language_setting.as_deref());
+        let feedback = if let Some(error) = &self.error {
+            Some(feedback_bar("alert", "held", error.clone(), cx))
+        } else {
+            self.notice
+                .as_ref()
+                .map(|notice| feedback_bar("action-check", "added", notice.clone(), cx))
+        };
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(color("ground"))
             .font_family(theme::FONT)
             .text_color(color("ink"))
             .child(title_bar::render(self, cx))
+            .when_some(feedback, |s, bar| s.child(bar))
             .child(
                 div()
                     .flex()
@@ -406,7 +668,57 @@ impl Render for FinancesApp {
                     .child(sidebar::render(self, cx))
                     .child(views::render(self, window, cx)),
             )
+            .when_some(self.dialog.clone(), |s, dialog| {
+                s.child(dialog::render(self, dialog, window, cx))
+            })
     }
+}
+
+/// The banner a failed command or a saved file leaves at the top of the
+/// window, until dismissed.
+fn feedback_bar(
+    icon_name: &'static str,
+    token: &'static str,
+    text: String,
+    cx: &mut Context<FinancesApp>,
+) -> Stateful<Div> {
+    div()
+        .id("feedback")
+        .debug_selector(|| "feedback".into())
+        .flex_shrink_0()
+        .px(px(16.))
+        .py(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .border_b_1()
+        .border_color(color("rule"))
+        .bg(color("sunk"))
+        .child(kit::icon(icon_name, token, 14.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.5))
+                .line_height(px(16.))
+                .text_color(color("ink"))
+                .child(text),
+        )
+        .child(
+            div()
+                .id("feedback-dismiss")
+                .size(px(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme::radius("radius-sm")))
+                .cursor_pointer()
+                .text_color(color("ink-2"))
+                .hover(|s| s.bg(color("rule")))
+                .child(kit::icon("action-x", "ink-2", 11.))
+                .on_click(cx.listener(|this, _, _, cx| this.dismiss_feedback(cx))),
+        )
 }
 
 #[cfg(all(test, feature = "render-harness"))]
@@ -414,21 +726,28 @@ mod tests {
     // Not a glob of `super`: with `test-support`, `gpui::test` would shadow
     // the built-in `#[test]` the macro emits.
     use super::{FinancesApp, Page};
+    use crate::commands::{
+        AccountDraft, CsvSheet, DataError, DataErrorKind, FinancesMutations, MovementDraft,
+        SubscriptionAction, SubscriptionDraft, TransferDraft,
+    };
     use crate::data::{
-        BalancePoint, Currency, FinancesData, Money, MonthSummary, Movement, Subscription,
-        UpcomingCharge,
+        AccountSelection, BalancePoint, Currency, FinancesData, Money, MonthSummary, Movement,
+        MovementKind, Subscription, UpcomingCharge,
     };
     use crate::demo::DemoData;
     use crate::language::Language;
     use chrono::NaiveDate;
     use gpui::{Entity, TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     fn app<'a>(
         cx: &'a mut TestAppContext,
         language: Option<&str>,
     ) -> (Entity<FinancesApp>, &'a mut VisualTestContext) {
-        cx.add_window_view(|_window, _cx| FinancesApp::new(Rc::new(DemoData::new()), language))
+        cx.add_window_view(|_window, _cx| {
+            FinancesApp::new(Rc::new(DemoData::new()), language, None)
+        })
     }
 
     /// Draws a frame, so `debug_bounds` sees the rendered elements.
@@ -449,6 +768,8 @@ mod tests {
             assert!(cx.debug_bounds("nav").is_some());
             assert!(cx.debug_bounds("dashboard").is_some());
             assert!(cx.debug_bounds("content").is_some());
+            // The account selector is part of the sidebar.
+            assert!(cx.debug_bounds("account-selector").is_some());
         }
         cx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -529,19 +850,19 @@ mod tests {
         fn month_summary(&self) -> MonthSummary {
             self.0.month_summary()
         }
-        fn upcoming_charges(&self) -> &[UpcomingCharge] {
+        fn upcoming_charges(&self) -> Rc<[UpcomingCharge]> {
             self.0.upcoming_charges()
         }
-        fn subscriptions(&self) -> &[Subscription] {
+        fn subscriptions(&self) -> Rc<[Subscription]> {
             self.0.subscriptions()
         }
-        fn balance_history(&self) -> &[BalancePoint] {
+        fn balance_history(&self) -> Rc<[BalancePoint]> {
             self.0.balance_history()
         }
         fn exchange_rate(&self, from: Currency, to: Currency) -> f64 {
             self.0.exchange_rate(from, to)
         }
-        fn movements(&self) -> &[Movement] {
+        fn movements(&self) -> Rc<[Movement]> {
             self.0.movements()
         }
         fn is_ready(&self) -> bool {
@@ -552,7 +873,7 @@ mod tests {
     #[gpui::test]
     fn pages_show_a_loading_state_until_the_data_is_ready(cx: &mut TestAppContext) {
         let (app, cx) = cx.add_window_view(|_window, _cx| {
-            FinancesApp::new(Rc::new(NotReady(DemoData::new())), Some("en"))
+            FinancesApp::new(Rc::new(NotReady(DemoData::new())), Some("en"), None)
         });
         cx.run_until_parked();
         for page in [
@@ -574,5 +895,189 @@ mod tests {
                 page.id()
             );
         }
+    }
+
+    // -- mutations behind the trait (LOCAL-030) --------------------------------
+
+    /// A mutations stub that records what the shell asked for and can be told
+    /// to fail, so the shell's success/error paths are both exercised.
+    struct StubMutations {
+        calls: RefCell<Vec<String>>,
+        fail: bool,
+    }
+
+    impl StubMutations {
+        fn recording(fail: bool) -> Rc<Self> {
+            Rc::new(Self {
+                calls: RefCell::new(Vec::new()),
+                fail,
+            })
+        }
+
+        fn record(&self, call: String) -> Result<(), DataError> {
+            self.calls.borrow_mut().push(call);
+            if self.fail {
+                Err(DataError::new(DataErrorKind::Database, "stub failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl FinancesMutations for StubMutations {
+        fn refresh(&self) -> Result<(), DataError> {
+            self.record("refresh".into())
+        }
+        fn select_account(&self, selection: AccountSelection) -> Result<(), DataError> {
+            self.record(format!("select_account:{selection:?}"))
+        }
+        fn create_account(&self, _draft: &AccountDraft) -> Result<(), DataError> {
+            self.record("create_account".into())
+        }
+        fn rename_account(&self, id: &str, _name: &str) -> Result<(), DataError> {
+            self.record(format!("rename_account:{id}"))
+        }
+        fn set_account_archived(&self, id: &str, archived: bool) -> Result<(), DataError> {
+            self.record(format!("archive:{id}:{archived}"))
+        }
+        fn delete_account(&self, id: &str) -> Result<(), DataError> {
+            self.record(format!("delete_account:{id}"))
+        }
+        fn create_transfer(&self, _draft: &TransferDraft) -> Result<(), DataError> {
+            self.record("create_transfer".into())
+        }
+        fn create_subscription(&self, _draft: &SubscriptionDraft) -> Result<(), DataError> {
+            self.record("create_subscription".into())
+        }
+        fn update_subscription(
+            &self,
+            id: &str,
+            _draft: &SubscriptionDraft,
+        ) -> Result<(), DataError> {
+            self.record(format!("update_subscription:{id}"))
+        }
+        fn apply_subscription_action(
+            &self,
+            id: &str,
+            action: SubscriptionAction,
+        ) -> Result<(), DataError> {
+            self.record(format!("sub_action:{id}:{action:?}"))
+        }
+        fn create_movement(&self, _draft: &MovementDraft) -> Result<(), DataError> {
+            self.record("create_movement".into())
+        }
+        fn update_movement(&self, _draft: &MovementDraft) -> Result<(), DataError> {
+            self.record("update_movement".into())
+        }
+        fn confirm_movement(&self, id: &str, kind: MovementKind) -> Result<(), DataError> {
+            self.record(format!("confirm:{id}:{kind:?}"))
+        }
+        fn delete_movement(&self, id: &str, kind: MovementKind) -> Result<(), DataError> {
+            self.record(format!("delete_movement:{id}:{kind:?}"))
+        }
+        fn export_backup_json(&self) -> Result<String, DataError> {
+            self.record("export_backup".into())?;
+            Ok("{}".to_string())
+        }
+        fn restore_backup_json(&self, _json: &str) -> Result<(), DataError> {
+            self.record("restore_backup".into())
+        }
+        fn export_csv(&self, sheet: CsvSheet) -> Result<String, DataError> {
+            self.record(format!("export_csv:{sheet:?}"))?;
+            Ok("id\n".to_string())
+        }
+    }
+
+    #[gpui::test]
+    fn a_successful_mutation_runs_and_refreshes_without_error(cx: &mut TestAppContext) {
+        let stub = StubMutations::recording(false);
+        let (app, cx) = cx.add_window_view(|_window, _cx| {
+            FinancesApp::new(Rc::new(DemoData::new()), Some("en"), Some(stub.clone()))
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.subscription_action("sub-1", SubscriptionAction::Pause, cx);
+            });
+        });
+        cx.run_until_parked();
+        let calls = stub.calls.borrow().clone();
+        assert_eq!(
+            calls,
+            vec!["sub_action:sub-1:Pause".to_string(), "refresh".to_string()]
+        );
+        cx.update(|_, cx| {
+            assert!(app.read(cx).error.is_none());
+            // Account switching goes through the same path.
+            app.update(cx, |app, cx| {
+                app.select_account(AccountSelection::One("demo-account".into()), cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            stub.calls
+                .borrow()
+                .iter()
+                .any(|c| c.starts_with("select_account"))
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx).account,
+                AccountSelection::One("demo-account".into())
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn a_failed_mutation_surfaces_a_localized_error_and_does_not_panic(cx: &mut TestAppContext) {
+        let stub = StubMutations::recording(true);
+        let (app, cx) = cx.add_window_view(|_window, _cx| {
+            FinancesApp::new(Rc::new(DemoData::new()), Some("en"), Some(stub.clone()))
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.delete_movement("m-1", MovementKind::Expense, cx);
+            });
+        });
+        cx.run_until_parked();
+        // The error banner rendered and holds the localized message.
+        draw(cx);
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(
+                app.error.as_deref(),
+                Some("Could not reach the database: stub failure")
+            );
+        });
+        #[cfg(debug_assertions)]
+        assert!(cx.debug_bounds("feedback").is_some());
+        // Dismissing clears it; the app keeps rendering.
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| app.dismiss_feedback(cx));
+        });
+        cx.run_until_parked();
+        draw(cx);
+        cx.update(|_, cx| assert!(app.read(cx).error.is_none()));
+    }
+
+    #[gpui::test]
+    fn without_mutations_the_actions_stay_disabled(cx: &mut TestAppContext) {
+        let (app, cx) = app(cx, Some("en"));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| app.set_page(Page::Subscriptions, cx));
+        });
+        cx.run_until_parked();
+        draw(cx);
+        cx.update(|_, cx| assert!(!app.read(cx).can_mutate()));
+        // run_mutation is a no-op that reports failure, never a panic.
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let ran = app.run_mutation(cx, |_| Ok(()));
+                assert!(!ran);
+            });
+        });
+        cx.run_until_parked();
     }
 }

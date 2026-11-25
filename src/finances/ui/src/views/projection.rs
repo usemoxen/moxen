@@ -140,8 +140,8 @@ pub fn render(app: &FinancesApp, window: &mut Window, cx: &mut Context<FinancesA
     // window includes everything that happened before it.
     let anchor_date = data.balance_date();
     let events = model::collect_events(
-        data.subscriptions(),
-        data.movements(),
+        &data.subscriptions(),
+        &data.movements(),
         account,
         &rate,
         anchor_date.min(from),

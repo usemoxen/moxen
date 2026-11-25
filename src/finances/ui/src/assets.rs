@@ -161,6 +161,24 @@ const ICONS: &[(&str, &str)] = &[
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2.5l3.5 3.5L17 9.5"/><path d="M20.5 6H8a4.5 4.5 0 0 0-4.5 4.5V11"/><path d="M7 21.5 3.5 18 7 14.5"/><path d="M3.5 18H16a4.5 4.5 0 0 0 4.5-4.5V13"/></svg>"#,
         ),
     ),
+    (
+        "action-edit",
+        icon(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>"#,
+        ),
+    ),
+    (
+        "action-check",
+        icon(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>"#,
+        ),
+    ),
+    (
+        "layers",
+        icon(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="M3 12.5l9 5 9-5"/><path d="M3 17l9 5 9-5"/></svg>"#,
+        ),
+    ),
 ];
 
 impl AssetSource for FinancesAssets {

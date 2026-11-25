@@ -2975,9 +2975,12 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
+ "moxen-finances-core",
+ "moxen-finances-store",
  "moxen-finances-ui",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
