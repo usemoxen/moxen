@@ -684,10 +684,15 @@ pub fn connection_info(
     }
 }
 
-/// The calendar day of a stored `YYYY-MM-DD…` instant.
+/// The calendar day a stored instant fell on in Madrid, the calendar `today`
+/// counts in; a bare `YYYY-MM-DD` is already a day.
 fn parse_day(instant: Option<&str>) -> Option<NaiveDate> {
-    instant
-        .and_then(|instant| instant.get(..10))
+    let instant = instant?;
+    let day = match DateTime::parse_from_rfc3339(instant) {
+        Ok(at) => moxen_finances_core::dates::today_madrid(at.with_timezone(&Utc)),
+        Err(_) => instant.to_string(),
+    };
+    day.get(..10)
         .and_then(|day| NaiveDate::parse_from_str(day, "%Y-%m-%d").ok())
 }
 
@@ -1006,3 +1011,22 @@ pub fn state(store: &Store, runtime: &BankRuntime) -> BankSyncState {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod day_tests {
+    use super::parse_day;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn a_stored_instant_reads_as_the_day_it_was_in_madrid() {
+        // `today` is the Madrid calendar day, so a sync just after midnight
+        // there must not read as the day before because its UTC date is.
+        let day = |text: &str| NaiveDate::parse_from_str(text, "%Y-%m-%d").ok();
+        assert_eq!(parse_day(Some("2026-11-25T23:05:00Z")), day("2026-11-26")); // winter, UTC+1
+        assert_eq!(parse_day(Some("2026-07-14T22:30:00Z")), day("2026-07-15")); // summer, UTC+2
+        assert_eq!(parse_day(Some("2026-11-25T12:00:00Z")), day("2026-11-25"));
+        assert_eq!(parse_day(Some("2026-11-25")), day("2026-11-25")); // a bare date stays itself
+        assert_eq!(parse_day(Some("not a date")), None);
+        assert_eq!(parse_day(None), None);
+    }
+}
