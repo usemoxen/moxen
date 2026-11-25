@@ -188,6 +188,8 @@ interface CodexSession {
    * runtime without the method is asked once, not on every turn.
    */
   notices: "unknown" | "developer" | "text";
+  /** The notices this session's history already holds, by text: never appended twice. */
+  readonly injected: Set<string>;
   transcript: TranscriptTurn[];
   waiters: TurnWaiters<CodexTurnOutcome>;
   parked: Map<string, ParkedCodex>;
@@ -427,6 +429,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         model: resolveCodexModel(input.modelSelection?.model),
         runtimeMode: input.runtimeMode ?? "full-access",
         notices: "unknown",
+        injected: new Set(),
         transcript: [],
         waiters: new Map(),
         parked: new Map(),
@@ -775,23 +778,37 @@ export class CodexDriver implements ProviderAdapter<CliError> {
    * starts no turn and shows in no item list: the next turn's request reads
    * it, which is why the caller sends the user's prompt unchanged beside it.
    *
-   * True when the items are in. False when they are not, so the caller puts
-   * the same text ahead of the prompt instead — once, in one channel. A
-   * runtime without the method (a pre-0.169 app-server answers `-32601`, or
-   * "not supported yet") is remembered as text for the rest of the session,
-   * so later turns do not ask again.
+   * True when the items are in (or were already appended in this session), so
+   * the caller never also puts the same text ahead of the prompt. False only
+   * when the runtime said it has no such method: an app-server older than
+   * 0.169 answers `-32601`, or "not supported yet", and is remembered as text
+   * for the rest of the session. Any other failure is thrown — a timeout or a
+   * transport error may have appended the items, and folding them into the
+   * prompt as well would say them twice; the turn fails instead, and a retry
+   * finds the acknowledged item recorded.
+   *
+   * Two calls, because the protocol offers no atomic one: a turn's only
+   * developer-instruction field is `collaborationMode.settings`, which selects
+   * a collaboration mode and replaces its settings rather than adding an item
+   * to the history, so Moxen does not use it to talk to the model.
    */
   private async injectNotices(session: CodexSession, codexThreadId: string, notices: readonly string[]): Promise<boolean> {
+    // A notice already appended is not appended again: a turn that failed to
+    // start after the item landed must not say it twice on the retry.
+    const fresh = notices.filter((notice) => !session.injected.has(notice));
+    if (fresh.length === 0) return true;
     if (session.notices === "text") return false;
     try {
       await session.peer.request(CODEX_METHODS.threadInjectItems, {
         threadId: codexThreadId,
-        items: notices.map((notice) => ({ type: "message", role: "developer", content: [{ type: "input_text", text: notice }] })),
+        items: fresh.map((notice) => ({ type: "message", role: "developer", content: [{ type: "input_text", text: notice }] })),
       });
       session.notices = "developer";
+      for (const notice of fresh) session.injected.add(notice);
       return true;
     } catch (cause) {
-      if (codexMethodUnavailable(cause)) session.notices = "text";
+      if (!codexMethodUnavailable(cause)) throw cause;
+      session.notices = "text";
       return false;
     }
   }
@@ -824,7 +841,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       };
       const effort = optionValue(["reasoningEffort", "effort"]) ?? "medium";
       const serviceTier = optionValue(["serviceTier", "tier"]);
-      const notices = input.notices ?? [];
+      const notices = (input.notices ?? []).filter((notice) => notice.trim().length > 0);
       const turn: TranscriptTurn = {
         id: randomUUID(),
         serverTurnId: null,

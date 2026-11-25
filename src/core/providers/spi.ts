@@ -168,13 +168,16 @@ export interface ProviderSendTurnInput {
   /** What the user said. A driver with `developerNotices` sends it unchanged, however this turn's notices read. */
   readonly prompt: string;
   /**
-   * Moxen's own text for the model rather than the user's: a task notice, a
-   * usage continue, an instruction update, a mode procedure. A driver with
-   * `developerNotices` delivers each one on its developer-role channel and
-   * sends `prompt` as it is; every other driver folds them ahead of the
-   * prompt (`promptWithNotices`), the tagged-block convention. Empty
-   * `prompt` with notices is a notice-only turn: Moxen starts the turn and
-   * the user said nothing in it.
+   * Moxen's own instruction for the model rather than the user's: a runtime
+   * instruction update, a mode procedure, a rule-file patch, the continue
+   * after a usage limit. Report data — a settled task's notice, captured
+   * background output, a model's wrap-up notes — is not one of these: it stays
+   * in `prompt`, tagged as the user text it is. A driver with
+   * `developerNotices` delivers each notice on its developer-role channel and
+   * sends `prompt` as it is; every other driver folds them ahead of the prompt
+   * (`promptWithNotices`), the tagged-block convention. Empty `prompt` with
+   * notices is a notice-only turn: Moxen starts the turn and the user said
+   * nothing in it.
    */
   readonly notices?: readonly string[];
   /**
@@ -191,14 +194,15 @@ export interface ProviderSendTurnInput {
 /**
  * What a driver without a developer channel sends: Moxen's notices ahead of
  * the prompt, the tagged-block convention (`<moxen-mode>`,
- * `<moxen-instructions-update>`, `<moxen-context-update>`,
- * `<task-notification>`). A notice-only turn has no prompt, so its text is
- * the notices themselves.
+ * `<moxen-instructions-update>`, `<moxen-context-update>`). A notice-only turn
+ * has no prompt, so its text is the notices themselves. A blank notice carries
+ * nothing to say and is dropped rather than adding an empty paragraph.
  */
 export function promptWithNotices(prompt: string, notices: readonly string[] | undefined): string {
-  if (!notices || notices.length === 0) return prompt;
-  if (prompt.length === 0) return notices.join("\n\n");
-  return `${notices.map((notice) => `${notice}\n\n`).join("")}${prompt}`;
+  const kept = (notices ?? []).filter((notice) => notice.trim().length > 0);
+  if (kept.length === 0) return prompt;
+  if (prompt.length === 0) return kept.join("\n\n");
+  return `${kept.map((notice) => `${notice}\n\n`).join("")}${prompt}`;
 }
 
 export interface ProviderTurnStartResult {

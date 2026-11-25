@@ -35,6 +35,7 @@ import type {
   TurnDelivery,
   TurnUsage,
 } from "./types.js";
+import { USAGE_CONTINUE_PROMPT } from "./views.js";
 
 const READ_VIEWS: readonly ReadView[] = [
   "messages",
@@ -1298,6 +1299,38 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
     text: own.map((message) => message.text.trim()).join("\n\n"),
     attachments: own.flatMap((message) => message.attachments ?? []),
   };
+}
+
+/**
+ * A turn's own text, split by who wrote it. Moxen's own instruction rides as
+ * `ProviderSendTurnInput.notices` — the automatic continue's nudge, and
+ * nothing else a message can be; everything else stays the user's, riders the
+ * user queued after a held nudge included, so report data never gains a
+ * developer's voice. Null exactly when `turnPrompt` is.
+ */
+export function turnPromptParts(
+  messages: readonly StoredMessage[],
+  turn: StoredTurn,
+): { readonly prompt: string; readonly notices: readonly string[] } | null {
+  const own = messages.filter((message) => message.turnId === turn.id && message.role === "user" && message.text.trim().length > 0);
+  if (own.length === 0) {
+    const first = messages.find((message) => message.id === turn.messageId);
+    return first?.text ? { prompt: first.text, notices: [] } : null;
+  }
+  const moxen = own.filter((message) => moxenWroteMessage(message, turn)).map((message) => message.text.trim());
+  const user = own.filter((message) => !moxenWroteMessage(message, turn)).map((message) => message.text.trim());
+  return { prompt: user.join("\n\n"), notices: moxen };
+}
+
+/**
+ * Whether one of a turn's messages is Moxen speaking rather than the user.
+ * The usage continue is the only one: it says so by its origin, or — for a
+ * turn written before that origin existed — by its schedule reason and its
+ * exact text. A message that merely rides the same turn is never Moxen's.
+ */
+function moxenWroteMessage(message: StoredMessage, turn: StoredTurn): boolean {
+  if (message.origin === "usage-continue") return true;
+  return turn.scheduleReason === "usage-reset" && message.id === turn.messageId && message.text.trim() === USAGE_CONTINUE_PROMPT.trim();
 }
 
 /**

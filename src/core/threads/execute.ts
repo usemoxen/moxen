@@ -62,7 +62,7 @@ import {
   pinCheckpointRef,
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
-import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
+import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, turnPromptParts, updateThreadMeta } from "./threads.js";
 import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, ruleUpdateBlock } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
@@ -72,21 +72,6 @@ import { ThreadStore } from "./store.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "./toolactivity.js";
 import { permissionActivityRow, userInputActivityRow, type UserInputRuntimeEvent } from "./requestactivity.js";
 import type { MessageOrigin, StoredAttachment, StoredThread, StoredTurn, TurnUsage } from "./types.js";
-
-/**
- * A turn whose whole text Moxen wrote for the model rather than the user: a
- * settled task's notice, a background wake-up, the automatic continue after a
- * usage limit. The user typed none of it, so a driver with a developer
- * channel delivers it as a notice and the turn's own prompt stays empty.
- */
-export function noticeOnlyTurn(turn: { readonly origin?: MessageOrigin; readonly scheduleReason?: StoredTurn["scheduleReason"] }): boolean {
-  return (
-    turn.origin === "task-notification" ||
-    turn.origin === "background-notification" ||
-    turn.origin === "usage-continue" ||
-    turn.scheduleReason === "usage-reset"
-  );
-}
 
 /** Structural driver surface the runner needs. All four drivers satisfy it. */
 export interface TurnDriver extends ProviderSessionTitles {
@@ -571,10 +556,11 @@ export interface ExecuteTurnArgs {
   /** What the user said; empty on a notice-only turn (`notices`). */
   readonly prompt: string;
   /**
-   * Moxen's own text for this turn (`ProviderSendTurnInput.notices`): a mode
-   * procedure, an instruction update, a rule-file patch, a task notice. A
-   * developer-channel driver sends them as developer items; every other
-   * driver gets them ahead of the prompt.
+   * Moxen's own instruction for this turn (`ProviderSendTurnInput.notices`): a
+   * mode procedure, an instruction update, a rule-file patch, a usage
+   * continue. A developer-channel driver sends them as developer items; every
+   * other driver gets them ahead of the prompt. Report data is never one of
+   * these — it stays the tagged user text it always was.
    */
   readonly notices?: readonly string[];
   /** Images sent with the prompt. */
@@ -702,8 +688,12 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       return;
     }
     // One message, or several queued ones batched into this turn at promotion.
-    const prompt = turnPrompt(await store.readMessages(threadId), next);
+    const messages = await store.readMessages(threadId);
+    const prompt = turnPrompt(messages, next);
     if (prompt === null) return;
+    // Moxen's own instruction and the user's text are told apart per message:
+    // a rider queued after a held nudge is the user's, and stays their text.
+    const parts = turnPromptParts(messages, next) ?? { prompt: prompt.text, notices: [] };
     // Its images were saved when it was queued; the bytes come off disk.
     const images = await imagesOf(prompt.attachments);
     // Rule files edited while the session ran the turn before: a patch ahead
@@ -719,18 +709,14 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // so only an edit landing mid-turn waits one extra turn. Rule files need
     // no setup, so they do refresh above.
     const rules = await pendingRuleUpdate(driver, threadId, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), thread.env.path).catch(() => null);
-    // A turn Moxen wrote for the model (a task notice, a usage continue) has
-    // no user half: its whole text is a notice, so the prompt the driver gets
-    // is empty and the text arrives the way that driver takes notices.
-    const noticeOnly = noticeOnlyTurn(next);
-    const notices = [...(noticeOnly ? [prompt.text] : []), ...(rules === null ? [] : [ruleUpdateBlock(rules.text)])];
+    const notices = [...parts.notices, ...(rules === null ? [] : [ruleUpdateBlock(rules.text)])];
     claimed = null;
     void executeTurn({
       store,
       driver,
       threadId,
       storeTurnId: next.id,
-      prompt: noticeOnly ? "" : prompt.text,
+      prompt: parts.prompt,
       ...(notices.length > 0 ? { notices } : {}),
       ...(rules ? { afterAnswer: async () => rules.commit() } : {}),
       ...(images.length > 0 ? { images } : {}),
