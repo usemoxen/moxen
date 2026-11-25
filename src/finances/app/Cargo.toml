@@ -1,0 +1,9 @@
+[package]
+name = "moxen-finances"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "moxen-finances"
+path = "src/main.rs"

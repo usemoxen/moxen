@@ -1,0 +1,11 @@
+# Moxen Finances: a Rust workspace, built once and shipped two ways (a
+# standalone app, and later a module bundled into src/desktop). Nothing in the
+# TypeScript tree imports it. See README.md.
+[workspace]
+resolver = "3"
+members = ["core", "store", "ui", "app", "mcp"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
