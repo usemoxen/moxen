@@ -460,16 +460,82 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
   // run after it; with nothing promoted the first copy is run here, or the
   // copies would sit running with no runner and never heal in-process.
   const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id, ctx.config).catch(() => [] as string[]);
-  if (result.promoted && ctx.store.claimRun(result.promoted.id)) {
-    await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+  if (result.promoted) {
+    // The orphan is interrupted either way; running what it promoted is not.
+    if (await holdGatedPromotion(ctx, threadId, result.promoted)) return true;
+    if (ctx.store.claimRun(result.promoted.id)) {
+      await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+    }
     return true;
   }
-  if (!result.promoted && copies.length > 0) {
+  if (copies.length > 0) {
     for (const id of copies) await requeueUnownedTurn(ctx.store, threadId, id).catch(() => false);
     const next = await promoteQueuedTurn(ctx.store, threadId).catch(() => null);
-    if (next && ctx.store.claimRun(next.id)) await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
+    if (next && !(await holdGatedPromotion(ctx, threadId, next)) && ctx.store.claimRun(next.id)) {
+      await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
+    }
   }
   return true;
+}
+
+/**
+ * Whether a recovered turn would send an automatic prompt — a task message, a
+ * notice, a continue — rather than a message the user wrote. Admission reads
+ * the same provenance, and a turn row written before it kept an origin is read
+ * from its message ledger.
+ */
+async function isAutomaticPromptTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
+  if (turn.queue?.automatic === true || turn.queue?.wakeUp === true) return true;
+  if (turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return true;
+  if (turn.origin !== undefined) return turn.origin !== "task-notification";
+  const thread = await ctx.store.readThreadRecord(threadId).catch(() => null);
+  if (!thread) return true;
+  const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
+  const origins = await loadTurnOrigins(ctx.store, [{ thread, turns }], ctx.config).catch(() => null);
+  const origin = origins?.get(turnOriginKey(threadId, turn.id));
+  return origin !== undefined && origin !== "task-notification";
+}
+
+/**
+ * Recovery must not become the one path that sends an automatic prompt to
+ * Antigravity while automatic prompts are off. A promoted turn the gate would
+ * hold goes back to queued for admission, which holds it — with its reason —
+ * until the setting turns on or a later user turn releases it. Nothing is
+ * sent, and the setting is never turned on here. Returns whether it was held.
+ *
+ * Admission's own gate is the authority for turns it starts: it reads fresh
+ * user consent from the ledger, so this only covers turns recovery promotes
+ * and runs itself.
+ */
+async function holdGatedPromotion(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
+  const thread = await ctx.store.readThreadRecord(threadId).catch(() => null);
+  if (!thread) return false;
+  const selection = turn.modelSelection ?? thread.modelSelection;
+  if (!antigravityAutoPromptsHeld(ctx.config, selection.instanceId)) return false;
+  if (!(await isAutomaticPromptTurn(ctx, threadId, turn))) return false;
+  ctx.store.untrackRunning(turn.id);
+  await ctx.store.withThreadLock(threadId, async () => {
+    const fresh = (await ctx.store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
+    if (fresh && fresh.status === "running") {
+      // Marked as a promotion no runner took, so admission takes it back.
+      await ctx.store.updateTurn(threadId, turn.id, { status: "queued", heldAtSettle: true, owner: null, updatedAt: ctx.store.nowIso() });
+    }
+  }).catch(() => undefined);
+  return true;
+}
+
+/**
+ * The parent this task's settle notice is already held for, if any: a batch
+ * entry kept back while the task still had work, inherited across the restart
+ * that recovered this run. That entry owns the notice, so the run wakes it
+ * instead of filing a second one for the same settle. Null when no entry is on
+ * file, and the run files its own.
+ */
+async function heldNoticeParent(ctx: OperationContext, childThreadId: string): Promise<string | null> {
+  const parentThreadId = await notifyDelegationParent(ctx, childThreadId);
+  if (parentThreadId === null) return null;
+  const held = (await readTaskNotificationBatches(ctx.storeRoot))[parentThreadId] ?? [];
+  return held.some((entry) => entry.child === childThreadId && pendingEntryKind(entry) === "settle") ? parentThreadId : null;
 }
 
 /** The caller has claimed `turn` (`claimRun`); every way out here settles or frees it. */
@@ -533,6 +599,9 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
     const images = await imagesOf(message.attachments);
     const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
+    // Decided now, before the run: a notice the batch already holds for this
+    // task owns its settle, and the completion callback below only wakes it.
+    const coveredParent = await heldNoticeParent(ctx, threadId);
     void executeTurn({
       store,
       driver,
@@ -553,7 +622,11 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // still owes its parent the report when it finally ends.
       .then(async () => {
         await syncResearchRun(ctx, threadId).catch(() => undefined);
-        await notifyParentOfResumedTask(ctx, threadId).catch(() => undefined);
+        // One owner for the settle notice: a durable entry kept back for this
+        // task is woken, never filed twice — a flush that took the parent's
+        // lock on the terminal event may already have delivered and removed it.
+        if (coveredParent !== null) await wakeHeldNotification(ctx, coveredParent).catch(() => undefined);
+        else await notifyParentOfResumedTask(ctx, threadId).catch(() => undefined);
         // This thread's own recovery may have released task notices queued
         // while it could not receive them: they go out now, together.
         await flushTaskNotifications(ctx, threadId).catch(() => undefined);

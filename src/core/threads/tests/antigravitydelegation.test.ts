@@ -5,7 +5,9 @@
  * held in the existing queue/notice machinery and delivered with the user's
  * next message or when the setting turns on. The user's own sends always run.
  */
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { Effect, Queue, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
@@ -540,4 +542,54 @@ describe("queued Antigravity model handoffs while off", () => {
     const destination = await w.store.readThreadRecord(prepared?.handoff?.destinationThreadId ?? "none");
     expect(destination?.modelSelection.instanceId).toBe("codex");
   });
+});
+describe("Antigravity orphan recovery held while off", () => {
+  /** The pid of a process that has already exited, as a crash leaves behind. */
+  async function deadPid(): Promise<number> {
+    const child = spawn(process.execPath, ["-e", "0"]);
+    await new Promise((resolve) => child.once("exit", resolve));
+    return child.pid!;
+  }
+
+  it("interrupts the orphan but never dispatches the follow-up queued behind it", async () => {
+    const w = await world();
+    // Queued while the setting was on, which is how task_send reaches an
+    // Antigravity task at all; the restart below comes back with it off.
+    w.allow(true);
+    const parent = await w.make("codex");
+    const child = await w.make("antigravity", "gemini-4-neon");
+    const now = w.store.nowIso();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parent.id, childThreadId: child.id, prompt: "Do it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    // The child is compacting, and the follow-up queues behind that turn.
+    const compact = (await sendTurn(w.store, child.id, { prompt: "/compact" })).turn;
+    const follow = await sendTaskMessage(w.ctx, parent.id, child.id, "Now the follow-up", false);
+    expect(follow.outcome).toBe("queued");
+    // The process running the compaction then dies mid-turn.
+    await w.store.updateTurn(child.id, compact.id, { owner: { pid: await deadPid(), host: os.hostname() } });
+    // A durable notice for the pair is what makes the startup recovery look at
+    // this child; the flush keeps it back while the task still has work.
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await readBatches(w.root)).toEqual({ [parent.id]: [{ child: child.id }] });
+
+    // The restart comes back with automatic prompts off, and recovers the
+    // orphan. Interrupting it is right; running the queued follow-up is not.
+    w.allow(false);
+    await recoverTaskNotifications(w.ctx);
+    await settleRuns();
+    const statusOf = async (id: string) => (await w.store.readTurns(child.id)).find((turn) => turn.id === id)?.status;
+    expect(await statusOf(compact.id)).toBe("interrupted");
+    expect(await statusOf(follow.turnId)).toBe("queued");
+    // Nor did admission start it on its own.
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect(await statusOf(follow.turnId)).toBe("queued");
+    expect((await w.store.readMessages(child.id)).some((message) => message.text.includes("Now the follow-up") && message.role === "assistant")).toBe(false);
+
+    // The setting turning on releases it, and only then does it run.
+    w.allow(true);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect(await statusOf(follow.turnId)).toBe("completed");
+  }, 30_000);
 });

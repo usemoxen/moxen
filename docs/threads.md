@@ -71,7 +71,9 @@ A due held turn starts after the running turn settles, oldest first, with
 later held messages batched into it as one turn. A `/compact` turn is never
 batched, in either direction: folded into an ordinary follow-up it would send
 the command as text no provider runs, and would carry the maintenance marker
-over a turn that did real work. It keeps its own turn instead. It never starts
+over a turn that did real work. It is also a batching boundary — only messages
+queued on the same side of it travel together, so nothing queued after a
+`/compact` overtakes it — and it keeps its own turn. It never starts
 while the
 limit still stands, while usage protection holds the thread, or while the
 thread is snoozed or settled: those wait for the reset, the release, or the
@@ -91,7 +93,10 @@ stopped for a compaction whose follow-up could not start, and a hand-off you
 queued yourself that wants a model summary completes on its stored summary
 rather than waiting on a summary the gate would hold. The
 entry shows why it waits, and runs with your next message or when you turn the
-setting on. Delegating a new task to Antigravity is refused outright while off
+setting on. Recovering a turn whose process died interrupts it either way, but
+the follow-up it had queued is never dispatched past the gate: it goes back to
+queued for the admission path, which holds it like any other automatic prompt.
+Delegating a new task to Antigravity is refused outright while off
 (`ANTIGRAVITY_DELEGATION_OFF`), before a thread or worktree is created; an
 agent's `task_send`/wake and `thread_continue` onto Antigravity are refused the
 same way. What you type, queue, schedule or click always runs, and a turn the
@@ -955,7 +960,9 @@ still compacting waits for it and then goes out once, instead of being
 dropped. The wait is durable: the entry stays in the batch file, so a restart
 reconciles the task's turn first (a compaction the dead process left `running`
 is interrupted like any orphan), then reads what it has left to run and sends
-once. Waking a batch that was already delivered sends nothing. When the
+once. Waking a batch that was already delivered sends nothing: a run recovered
+while its task's notice is held wakes that entry instead of filing a second
+one, and a run covered by no entry files its own. When the
 task's turn ends with background work still running, the notification names
 that work and for how long (for example "turn ended, 1 background process
 still running: bun run check, 4m"), and reads as not finished: the parent must

@@ -174,6 +174,36 @@ describe("scheduled messages", () => {
     expect(turnPrompt(await store.readMessages(thread.id), next!)?.text).toBe("then the actual follow-up");
   });
 
+  it("stops batching at a queued /compact, so a later message never runs ahead of it", async () => {
+    const { store, thread } = await setup();
+    const running = await sendTurn(store, thread.id, { prompt: "work" });
+    await sendTurn(store, thread.id, { prompt: "before", delivery: "queue" });
+    await sendTurn(store, thread.id, { prompt: "/compact", delivery: "queue" });
+    await sendTurn(store, thread.id, { prompt: "after", delivery: "queue" });
+    await completeTurn(store, thread.id, running.turn.id, { text: "done" });
+
+    const messages = await store.readMessages(thread.id);
+    const turns = await store.readTurns(thread.id);
+    const next = turns.find((turn) => turn.status === "running")!;
+    // "after" sits on the far side of the compaction: folded into "before" it
+    // would run ahead of the `/compact`, reordering what the user queued.
+    expect(turnPrompt(messages, next)?.text).toBe("before");
+    expect(turns.filter((turn) => turn.status === "queued").map((turn) => turnPrompt(messages, turn)?.text)).toEqual(["/compact", "after"]);
+
+    // Messages queued before the compaction are on one side of it and still
+    // travel together: the boundary narrows batching, it does not disable it.
+    const other = await setup();
+    const runningOther = await sendTurn(other.store, other.thread.id, { prompt: "work" });
+    await sendTurn(other.store, other.thread.id, { prompt: "before", delivery: "queue" });
+    await sendTurn(other.store, other.thread.id, { prompt: "after", delivery: "queue" });
+    await sendTurn(other.store, other.thread.id, { prompt: "/compact", delivery: "queue" });
+    await completeTurn(other.store, other.thread.id, runningOther.turn.id, { text: "done" });
+    const otherMessages = await other.store.readMessages(other.thread.id);
+    const otherTurns = await other.store.readTurns(other.thread.id);
+    expect(turnPrompt(otherMessages, otherTurns.find((turn) => turn.status === "running")!)?.text).toBe("before\n\nafter");
+    expect(otherTurns.filter((turn) => turn.status === "queued").map((turn) => turnPrompt(otherMessages, turn)?.text)).toEqual(["/compact"]);
+  });
+
   it("run at once when the time has already passed, and never steer or restart", async () => {
     const now = Date.parse("2026-09-25T10:00:00.000Z");
     const { store, thread } = await setup(() => now);

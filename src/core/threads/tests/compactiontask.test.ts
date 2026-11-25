@@ -27,7 +27,11 @@ afterEach(() => vi.useRealTimers());
 const WORKER_REPORT = "THE WORKER'S REPORT";
 
 /** A driver whose compaction turn waits for the test, as a real one still summarising does. */
-function scriptedDriver(reports: ReadonlyMap<string, string>, holdCompaction: () => Promise<void>): TurnDriver {
+function scriptedDriver(
+  reports: ReadonlyMap<string, string>,
+  holdCompaction: () => Promise<void>,
+  holdPrompt: (prompt: string) => Promise<void> = async () => undefined,
+): TurnDriver {
   const sessions = new Set<string>();
   const prompts = new Map<string, string>();
   let turns = 0;
@@ -46,6 +50,7 @@ function scriptedDriver(reports: ReadonlyMap<string, string>, holdCompaction: ()
     interruptTurn: () => Effect.void,
     awaitTurn: async (_threadId: string, turnId: string) => {
       const prompt = prompts.get(turnId) ?? "";
+      await holdPrompt(prompt);
       if (prompt === "/compact") await holdCompaction();
       return { status: "completed" as const, text: reports.get(prompt) ?? `Completed: ${prompt}`, usage: null, error: null };
     },
@@ -55,10 +60,10 @@ function scriptedDriver(reports: ReadonlyMap<string, string>, holdCompaction: ()
 }
 
 /** A delegated task on a thread long enough that its settle compacts it. */
-async function world(holdCompaction: () => Promise<void>) {
+async function world(holdCompaction: () => Promise<void>, holdPrompt?: (prompt: string) => Promise<void>) {
   const harness = await testHarness();
   const reports = new Map([["Build it", WORKER_REPORT]]);
-  const scripted = scriptedDriver(reports, holdCompaction);
+  const scripted = scriptedDriver(reports, holdCompaction, holdPrompt);
   const drivers = new Map<string, TurnDriver>();
   const ctx: OperationContext = {
     store: harness.store,
@@ -177,6 +182,16 @@ async function batchReappears(w: Awaited<ReturnType<typeof world>>, parentId: st
   return false;
 }
 
+/** Wait for the sidecar to settle to empty: a delivery appends the notice before it clears the batch entry. */
+async function waitForBatchesCleared(w: Awaited<ReturnType<typeof world>>, ms = 2_000): Promise<Record<string, unknown>> {
+  let batches = await batchesOnDisk(w);
+  for (let waited = 0; waited < ms && Object.keys(batches).length > 0; waited += 25) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    batches = await batchesOnDisk(w);
+  }
+  return batches;
+}
+
 describe("a delegated task that compacts after its turn settles", () => {
   it("reports once, with the worker's report, after the compaction ends instead of dropping the notice (MXN-351)", async () => {
     let release!: () => void;
@@ -275,7 +290,7 @@ describe("a delegated task that compacts after its turn settles", () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toContain(WORKER_REPORT);
     expect(delivered[0]).not.toContain("Completed: /compact");
-    expect(await batchesOnDisk(w)).toEqual({});
+    expect(await waitForBatchesCleared(w)).toEqual({});
 
     // Replaying the recovery of a batch already delivered finds nothing left.
     await recoverTaskNotifications(restartedCtx);
@@ -330,6 +345,51 @@ describe("a delegated task that compacts after its turn settles", () => {
     w.store.emit(child.id, "turn-completed");
     expect(await batchReappears(w, parent.id, 1_000)).toBe(false);
     await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+  }, 30_000);
+
+  it("reports once when a flush on the terminal event beats the recovered runner's own filing (MXN-351)", async () => {
+    let releaseFollow!: () => void;
+    const followHeld = new Promise<void>((resolve) => { releaseFollow = resolve; });
+    const w = await world(async () => undefined, (prompt) => (prompt.includes("follow-up") ? followHeld : Promise.resolve()));
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegated(w.store, parent.id, child.id);
+    const work = await sendTurn(w.store, child.id, { prompt: "Build it" });
+    await completeTurn(w.store, child.id, work.turn.id, { text: WORKER_REPORT });
+    const compact = await sendTurn(w.store, child.id, { prompt: "/compact" });
+    await w.store.updateTurn(child.id, compact.turn.id, { status: "running", owner: { pid: await deadPid(), host: os.hostname() } });
+    // A follow-up queued behind the orphan: recovery promotes and runs it.
+    await sendTurn(w.store, child.id, { prompt: "Now the follow-up", origin: "task-message", delivery: "queue" });
+
+    // The notice the dying process kept back.
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await batchesOnDisk(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+
+    // A parent flush wins the notification lock on the child's terminal event,
+    // as a server subscriber would: it delivers the durable notice and removes
+    // it, before the recovered runner's completion callback files anything.
+    const flushes: Promise<void>[] = [];
+    const restarted = await openThreadStore(w.root);
+    const restartedCtx: OperationContext = { ...w.ctx, store: restarted };
+    const unsubscribe = restarted.subscribe((event) => {
+      if (event.type === "backend.thread.changed" && event.threadId === child.id && event.reason === "turn-completed") {
+        flushes.push(flushTaskNotifications(restartedCtx, parent.id).catch(() => undefined));
+      }
+    });
+    await recoverTaskNotifications(restartedCtx);
+    releaseFollow();
+    await flushTurnRunners();
+    await Promise.all(flushes);
+    unsubscribe();
+
+    // One owner for the settle: the durable entry, delivered once. The callback
+    // must not file a second one behind the flush that consumed it.
+    const delivered = await waitForNotifications(w, parent.id, 1);
+    expect(delivered).toHaveLength(1);
+    expect(await batchReappears(w, parent.id, 1_000)).toBe(false);
+    await flushTaskNotifications(restartedCtx, parent.id);
     expect(await notificationsIn(w, parent.id)).toHaveLength(1);
   }, 30_000);
 });
