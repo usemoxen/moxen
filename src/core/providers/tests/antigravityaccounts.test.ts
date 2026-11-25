@@ -237,8 +237,7 @@ describe("Antigravity accounts while allowUnsupportedUse is off", () => {
     expect(on.env.SSH_CONNECTION).toBe(ANTIGRAVITY_FILE_STORAGE_SSH_MARKER);
   });
 
-  it("refuses --gemini-dir launch args while off — on the account and on the base config — and keeps them once on", () => {
-    for (const launchArgs of ["--gemini-dir /ag/alt/.gemini", "--gemini-dir=/ag/alt/.gemini", "--verbose --gemini-dir /ag/alt/.gemini"]) {
+  it("refuses --gemini-dir launch args while off — on the account and on the base config — and keeps them once on", () => {    for (const launchArgs of ["--gemini-dir /ag/alt/.gemini", "--gemini-dir=/ag/alt/.gemini", "--verbose --gemini-dir /ag/alt/.gemini"]) {
       const config: AntigravityProviderConfig = { accounts: [{ id: "default", label: "Default" }, { id: "alt", label: "Alt", launchArgs }] };
       const refused = gated(() => resolveAntigravityAccount(config, "antigravity/alt", baseEnv));
       expect(refused.code).toBe("ANTIGRAVITY_ACCOUNT_OFF");
@@ -257,6 +256,34 @@ describe("Antigravity accounts while allowUnsupportedUse is off", () => {
     );
     expect(on.spec.args).toContain("--gemini-dir");
     expect(on.spec.args).toContain("/ag/alt/.gemini");
+  });
+
+  it("refuses provider-level --gemini-dir launch args a configured account inherits, quoted or not, while off", () => {
+    // The catalog's account launch spec merges `account.launchArgs ?? config.launchArgs`,
+    // so the gate answers for the merged value: a provider-level
+    // `--gemini-dir` reaches a configured account that sets none of its own.
+    for (const launchArgs of ["--gemini-dir /other/.gemini", '--verbose "--gemini-dir" /other/.gemini', "other --gemini-dir=/other/.gemini"]) {
+      const config: AntigravityProviderConfig = { launchArgs, accounts: [{ id: "default", label: "Default" }] };
+      const refused = gated(() => resolveAntigravityAccount(config, "antigravity/default", baseEnv));
+      expect(refused.code).toBe("ANTIGRAVITY_ACCOUNT_OFF");
+      expect(refused.message).toContain("--gemini-dir");
+      // The account summary reports the same reason.
+      const summary = summarizeProviderAccounts({ antigravity: config } as unknown as ProvidersConfig);
+      expect(summary.find((row) => row.instanceId === "antigravity/default")?.disabledReason ?? "").toContain(SETTING);
+    }
+  });
+
+  it("counts only a fully off-mode-eligible account as the one that stays: an env-overridden first account does not hold the slot", () => {
+    // The first account overrides HOME, so it is not the account the off gate
+    // keeps: the first account without a homePath or non-host env/args
+    // override is the second, clean one.
+    const config: AntigravityProviderConfig = {
+      accounts: [{ id: "noisy", label: "Noisy", env: { HOME: "/ag/noisy" } }, { id: "clean", label: "Clean" }],
+    };
+    expect(gated(() => resolveAntigravityAccount(config, "antigravity/noisy", baseEnv)).code).toBe("ANTIGRAVITY_ACCOUNT_OFF");
+    const clean = resolveAntigravityAccount(config, "antigravity/clean", baseEnv);
+    expect(clean.instanceId).toBe("antigravity/clean");
+    expect(clean.env).toBe(baseEnv);
   });
 
   it("checks the gate before the gated home's filesystem: the reason stands even when the configured binary does not exist", async () => {

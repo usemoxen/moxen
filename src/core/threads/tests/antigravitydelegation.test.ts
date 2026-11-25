@@ -413,5 +413,40 @@ describe("queued Antigravity model handoffs while off", () => {
     expect(held?.status).toBe("queued");
     expect(held?.handoff).toBeUndefined();
     expect((await w.store.readTurns(other.id)).some((t) => t.origin === "handoff-summary")).toBe(false);
+
+    // An automatic stored handoff into Antigravity is held before any
+    // preparation too, model summary or not.
+    const storedThread = await w.make("antigravity", "gemini-4-neon");
+    const storedHandoff = await sendTurn(w.store, storedThread.id, {
+      prompt: "Keep going",
+      origin: "agent-message",
+      queue: { ...parseQueuePolicy({ conditions: [], continuation: "stored", automatic: true }), requestId: "auto-stored" },
+    }, w.config);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const storedHeld = (await w.store.readTurns(storedThread.id)).find((t) => t.id === storedHandoff.turn.id);
+    expect(storedHeld?.status).toBe("queued");
+    expect(storedHeld?.handoff).toBeUndefined();
+  });
+
+  it("completes a user-queued model handoff from an Antigravity source to another provider on the stored summary", async () => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    // The user queued a model-summary handoff onto another provider: the
+    // summary prompt would run on the Antigravity source, where the gate
+    // holds it, so the handoff must complete on its stored summary.
+    const crossProvider = await sendTurn(w.store, thread.id, {
+      prompt: "Do the work",
+      modelSelection: { instanceId: "codex", model: "test-model" },
+      queue: { ...parseQueuePolicy({ conditions: [], continuation: "model" }), requestId: "cross-provider" },
+    }, w.config);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const prepared = (await w.store.readTurns(thread.id)).find((t) => t.id === crossProvider.turn.id);
+    expect(prepared?.status).toBe("completed");
+    expect(prepared?.handoff?.fallback).toBe(true);
+    expect((await w.store.readTurns(thread.id)).some((t) => t.origin === "handoff-summary")).toBe(false);
+    const destination = await w.store.readThreadRecord(prepared?.handoff?.destinationThreadId ?? "none");
+    expect(destination?.modelSelection.instanceId).toBe("codex");
   });
 });

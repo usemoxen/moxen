@@ -109,7 +109,7 @@ import {
 } from "./threads.js";
 import { armScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { QUEUE_ADMISSION_LOCK, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { QUEUE_ADMISSION_LOCK, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, turnOriginKey, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
@@ -868,19 +868,29 @@ const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
 export async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, turnId: string, now: number): Promise<void> {
   const store = ctx.store;
   const source = await store.readThreadRecord(threadId);
-  let turn = (await store.readTurns(threadId)).find((t) => t.id === turnId);
+  const turns = await store.readTurns(threadId);
+  let turn = turns.find((t) => t.id === turnId);
   if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || source.snoozedUntil) return;
-  // Antigravity with automatic prompts off would only ever hold the model
-  // summary a model handoff waits on. A handoff the user queued themselves
-  // takes the stored summary instead, so it completes cleanly; an automatic
-  // one is held here — before preparation creates the handoff request,
-  // starts a summary, or touches a destination thread.
-  const handoffHeldOff = turn.queue.continuation === "model"
-    && antigravityAutoPromptsHeld(ctx.config, (turn.modelSelection ?? source.modelSelection).instanceId);
-  if (handoffHeldOff
-    && !(turn.origin === undefined && turn.queue.automatic !== true && turn.queue.wakeUp !== true && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold")) {
-    return;
-  }
+  // The entry's provenance, made whole with the message ledger for turns
+  // written before the turn row carried an origin: an automatic handoff is
+  // one even when its turn predates the origin column.
+  const origins = await loadTurnOrigins(store, [{ thread: source, turns }], ctx.config);
+  const origin = turn.origin ?? origins.get(turnOriginKey(threadId, turn.id));
+  const userAuthorized = origin === undefined && turn.queue.automatic !== true && turn.queue.wakeUp !== true
+    && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold";
+  // A handoff into a held Antigravity is one of the automatic prompts off
+  // forbids: an automatic entry of any continuation (model or stored) is
+  // held here — before preparation creates the handoff request, starts a
+  // summary, or touches a destination thread.
+  const destinationHeld = antigravityAutoPromptsHeld(ctx.config, (turn.modelSelection ?? source.modelSelection).instanceId);
+  if (destinationHeld && !userAuthorized) return;
+  // A model summary is a prompt on the source thread, so the source's gate
+  // holds it as surely as the destination's: while the source runs on a
+  // held Antigravity the summary could only ever sit queued. A handoff the
+  // user queued themselves completes on its stored summary instead; an
+  // automatic one is held before any mutation.
+  const handoffHeldOff = turn.queue.continuation === "model" && antigravityAutoPromptsHeld(ctx.config, source.modelSelection.instanceId);
+  if (handoffHeldOff && !userAuthorized) return;
   if (!turn.handoff) {
     const handoff = { requestId: store.newId(), destinationThreadId: store.newId() };
     await store.withThreadLock(threadId, () => store.updateTurn(threadId, turnId, { handoff }));

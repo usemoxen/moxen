@@ -975,11 +975,70 @@ export function antigravityLoginEnvOverrides(env: Readonly<Record<string, string
   return Object.keys(env ?? {}).filter((key) => ANTIGRAVITY_LOGIN_ENV_KEYS.has(key.trim().toLowerCase()));
 }
 
-/** Whether a launch-args string asks `agy` to keep its state somewhere other than the login's own home (`--gemini-dir`/`--gemini-dir=...`). */
+/**
+ * Tokenize one launch-args string the way a launch does — the mirror of
+ * `tokenizeLaunchArgs` (`providers/codex/config.js`): single/double quotes,
+ * backslash escapes, whitespace-separated. This module is the root of the
+ * graph that tokenizer lives in, so it cannot import it; the mirror is
+ * pinned by the Antigravity account tests against it. Null when the string
+ * is malformed (an unterminated quote).
+ */
+function tokenizeLaunchArgsForGate(raw: string): string[] | null {
+  const args: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  let escaped = false;
+  let pushed = false;
+  const flush = (): void => {
+    if (current.length > 0 || pushed) args.push(current);
+    current = "";
+    pushed = false;
+  };
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index]!;
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'" && /[\s"\\]/.test(raw[index + 1] ?? "")) {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      quote = char;
+      pushed = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      flush();
+      continue;
+    }
+    current += char;
+  }
+  if (quote) return null;
+  flush();
+  return args;
+}
+
+/**
+ * Whether a launch-args string asks `agy` to keep its state somewhere other
+ * than the login's own home (`--gemini-dir`/`--gemini-dir=...`). Tokens are
+ * compared unquoted, exactly as the launch would read them, so a quoted
+ * `"--gemini-dir"` is caught too; a malformed string is refused while the
+ * gate is on if it could contain the flag at all.
+ */
 function antigravityLaunchArgsSelectDirectory(launchArgs: string | undefined): boolean {
   const trimmed = launchArgs?.trim();
-  if (trimmed) return trimmed.split(/\s+/).some((token) => token === "--gemini-dir" || token.startsWith("--gemini-dir="));
-  return false;
+  if (!trimmed) return false;
+  const tokens = tokenizeLaunchArgsForGate(trimmed);
+  if (tokens === null) return trimmed.includes("--gemini-dir");
+  return tokens.some((token) => token === "--gemini-dir" || token.startsWith("--gemini-dir="));
 }
 
 /**
@@ -1047,9 +1106,13 @@ export function antigravityAccountBlockedReason(
   if (account.homePath?.trim()) {
     return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the one that shares the host agy login with no homePath. Google does not support multiple consumer accounts and may suspend them. Remove account "${parsed.accountId}" homePath so it uses the host agy login, or turn providers.antigravity.allowUnsupportedUse on.`;
   }
-  const launch = antigravityOffUseLaunchBlockedReason(config, { env: account.env, launchArgs: account.launchArgs });
+  const launch = antigravityOffUseLaunchBlockedReason(config, { env: account.env, launchArgs: account.launchArgs ?? config?.launchArgs });
   if (launch !== null) return launch;
-  const survivor = accounts.find((entry) => !entry.homePath?.trim());
+  // The account that stays while the gate is off: the first configured
+  // without a `homePath` or any non-host env/launch-args override of its
+  // own — env overrides keep an account out even without a folder, and a
+  // second clean account never displaces the first.
+  const survivor = accounts.find((entry) => antigravityOffUseLaunchBlockedReason(config, { homePath: entry.homePath, env: entry.env, launchArgs: entry.launchArgs ?? config?.launchArgs }) === null);
   if (survivor && survivor.id.trim().toLowerCase() === parsed.accountId) return null;
   return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the first without a homePath. Google does not support multiple consumer accounts and may suspend them. Keep only that account, or turn providers.antigravity.allowUnsupportedUse on.`;
 }

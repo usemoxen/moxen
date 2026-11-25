@@ -418,6 +418,45 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
     }
   });
 
+  it("refuses a login that inherits provider-level --gemini-dir launch args while off, quoted or not", async () => {
+    const dir = makeTempDir("moxen-agy-login-args-gate-");
+    const configPath = path.join(dir, "config.json");
+    // The launch args live at the provider level; the account sets none of its own.
+    const writeConfig = (launchArgs?: string): void => {
+      fs.writeFileSync(configPath, JSON.stringify({
+        providers: { antigravity: {
+          ...(launchArgs ? { launchArgs } : {}),
+          accounts: [{ id: "default", label: "Default" }],
+        } },
+      }));
+    };
+    // A plain accounts file: the one-time profile migration has run against it,
+    // so a provider-level edit made while the server runs is read as-is.
+    writeConfig();
+    const conn = new DirectConnection({
+      storeRoot: path.join(dir, "store"),
+      configPath,
+      builtinMcpServers: null,
+      providerAccountLoginDeps: {
+        urlWaitMs: 0,
+        ensureDir: () => {},
+        spawnChild: (() => {
+          throw new Error("the login must be refused before anything is spawned");
+        }) as never,
+      },
+    });
+    try {
+      await conn.query({ type: "providers.accounts" });
+      for (const launchArgs of ["--gemini-dir /other/.gemini", '--verbose "--gemini-dir" /other/.gemini']) {
+        writeConfig(launchArgs);
+        await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" }))
+          .rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF", message: expect.stringContaining("--gemini-dir") });
+      }
+    } finally {
+      await conn.close();
+    }
+  });
+
   it("turning the setting off without a restart revokes the isolated driver, its probes, and its stored usage", async () => {
     const dir = makeTempDir("moxen-agy-usage-revoke-");
     const configPath = path.join(dir, "config.json");

@@ -151,7 +151,7 @@ function entryPending(rows: readonly QueueRow[], threadId: string, turnId: strin
 /**
  * The ledger key one recovered turn origin lives under (`threadId`, `turnId`).
  */
-function turnOriginKey(threadId: string, turnId: string): string {
+export function turnOriginKey(threadId: string, turnId: string): string {
   return `${threadId}\0${turnId}`;
 }
 

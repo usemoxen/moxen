@@ -2297,10 +2297,11 @@ export class DirectConnection implements ClientApi {
           const reason = antigravityOffUseLaunchBlockedReason(config.providers?.antigravity, {
             homePath: effectiveHome,
             env: existingAgy?.env,
-            launchArgs: existingAgy?.launchArgs,
+            // Account-level launch args, with the provider-level ones the
+            // login inherits when the account sets none of its own.
+            launchArgs: existingAgy?.launchArgs ?? config.providers?.antigravity?.launchArgs,
           });
-          if (reason !== null) {
-            throw new CliError("ANTIGRAVITY_ACCOUNT_OFF", reason, {
+          if (reason !== null) {            throw new CliError("ANTIGRAVITY_ACCOUNT_OFF", reason, {
               exitCode: 4,
               details: { instanceId: `antigravity/${normalizedId}`, setting: "providers.antigravity.allowUnsupportedUse" },
             });
