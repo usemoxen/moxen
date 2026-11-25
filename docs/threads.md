@@ -484,7 +484,12 @@ handoff. Summary generation uses current allowance before the destination's star
 conditions are met, and is stopped after two minutes of running or a reported
 hard limit. It does not silently retry summary generation. Both paths keep original
 image paths outside transcript trimming and carry the selected entry's unsent
-request. Other queued/scheduled requests stay on the source thread. Destination
+request. Other queued/scheduled requests stay on the source thread. The
+hand-off that opened a continued thread is never retold as history in the next
+hand-off: a chain of continuations carries only the opening record's bounded
+facts (the goal, the last request, the checklist, the files and the images)
+forward, so one hand-off document stays the same size however long the chain
+behind it is. Destination
 identity is persisted before creation to avoid duplicate handoffs after restart.
 A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the
