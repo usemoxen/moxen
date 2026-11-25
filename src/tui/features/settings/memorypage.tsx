@@ -95,6 +95,7 @@ export function MemoryPage({
       footer={footer}
       memorySwitch={memorySwitch}
       tabLeavesList
+      escClearsFilter
     />
   );
 }

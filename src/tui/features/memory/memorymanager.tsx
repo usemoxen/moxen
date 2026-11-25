@@ -50,6 +50,9 @@ type Screen =
   | { readonly kind: "replaceConfirm" }
   | { readonly kind: "conflict"; readonly fresh: StoredMemory; readonly forTarget: boolean };
 
+/** The list's one selected row: a memory by its place among them, a runtime row by id. */
+type Focus = { readonly kind: "row"; readonly at: number } | { readonly kind: "extra"; readonly id: string } | null;
+
 /** The memory types a form offers, in the order the server documents them. */
 const MEMORY_TYPES: readonly MemoryType[] = ["user", "feedback", "project", "reference"];
 const MEMORY_SCOPES: readonly MemoryScope[] = ["project", "global"];
@@ -126,6 +129,7 @@ export function MemoryManager({
   footer,
   memorySwitch,
   tabLeavesList,
+  escClearsFilter,
 }: {
   client: ClientApi;
   /** The open thread: its project is "this project". Null shows the global scope alone. */
@@ -148,13 +152,28 @@ export function MemoryManager({
    * settings sidebar). The standalone modal keeps the key: it has nowhere to go.
    */
   readonly tabLeavesList?: boolean | undefined;
+  /**
+   * Whether escape drops what was typed before it leaves the list. The Settings
+   * page sets it; the standalone modal closes on the first press, as it always
+   * did.
+   */
+  readonly escClearsFilter?: boolean | undefined;
 }) {
   const inner = Math.max(20, width);
   const rowWidth = Math.max(10, inner - 2);
 
   const [screen, setScreen] = useState<Screen>({ kind: "list" });
   const [query, setQuery] = useState("");
-  const [index, setIndex] = useState(0);
+  /**
+   * The list's selected row. A memory row by its place, a runtime row by its
+   * id: what the arrows put on and Enter acts on is exactly what the user put
+   * it on, and when that row goes away the selection goes with it — a change
+   * in the rows never moves it onto another (an action that just finished
+   * never leaves Enter pointing at the next one). Null until something is
+   * navigated or hovered onto, so a fresh or still-loading page keeps Enter
+   * inert rather than armed at the first thing below the memories.
+   */
+  const [focus, setFocus] = useState<Focus>(null);
   const [listed, setListed] = useState<readonly Listed[] | null>(null);
   const [searched, setSearched] = useState<readonly Searched[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -258,7 +277,7 @@ export function MemoryManager({
           setSearched(result.memories);
           setSemanticNote(result.semantic?.state === "unavailable" ? (result.semantic.message ?? null) : null);
           setSearching(false);
-          setIndex(0);
+          setFocus(null);
         })
         .catch((cause: unknown) => {
           setSearched([]);
@@ -286,13 +305,22 @@ export function MemoryManager({
   // Grouped order is the navigation order, so ↑/↓ walks rows as drawn; the page's
   // section follows the memories, so its rows are reachable on the same walk.
   const ordered = searchingView ? rows : [...globalRows, ...projectRows];
-  // A search is about its own results: the section stays drawn below them but
-  // stays out of the walk, so a search that matches nothing leaves Enter with
-  // nothing to hit — never a setting hidden under the "no match" message.
-  const extraRows = footer === undefined || searchingView ? [] : footer.rows;
+  // The section is reachable only once the page is about something of its own:
+  // a search is about its results, and until the list answers, the memories it
+  // is loading may yet fill the walk — its actions never take the step over.
+  const extraRows = footer === undefined || searchingView || listed === null ? [] : footer.rows;
   const focusCount = ordered.length + extraRows.length;
-  const safe = focusCount === 0 ? -1 : Math.min(index, focusCount - 1);
-  const activeExtra = safe >= ordered.length ? extraRows[safe - ordered.length] : undefined;
+  /** Where the selection sits now: -1 when what it names is gone, or was never set. Never falls onto another row. */
+  const focusAt = focus === null
+    ? -1
+    : focus.kind === "row"
+      ? focus.at >= 0 && focus.at < ordered.length
+        ? focus.at
+        : -1
+      : (() => {
+          const at = extraRows.findIndex((row) => row.id === focus.id);
+          return at === -1 ? -1 : ordered.length + at;
+        })();
 
   const openDetail = (key: MemoryKey) => {
     setNotice(null);
@@ -427,9 +455,10 @@ export function MemoryManager({
         return;
       }
       if (screen.kind === "list") {
-        // What was typed is what esc leaves first: a filter gone, then the
-        // screen under it, and only on the second press.
-        if (query !== "") {
+        // The Settings page leaves what was typed first: a filter gone, then
+        // the screen under it. The standalone modal has nothing under it, so
+        // esc closes on the first press, filter or not.
+        if (query !== "" && escClearsFilter === true) {
           setQuery("");
           setNotice(null);
           return;
@@ -463,18 +492,24 @@ export function MemoryManager({
     // A text box owns every other key while it is open.
     if (editingField !== null) return;
     if (screen.kind === "list") {
-      if (key.name === "up") {
-        setIndex((current) => (focusCount === 0 ? 0 : (current - 1 + focusCount) % focusCount));
-        return;
-      }
-      if (key.name === "down") {
-        setIndex((current) => (focusCount === 0 ? 0 : (current + 1) % focusCount));
+      if (key.name === "up" || key.name === "down") {
+        if (focusCount === 0) return;
+        // Nothing selected is where down starts; a selection the rows no longer
+        // hold starts over rather than landing wherever the count now reaches.
+        const next = focusAt < 0 ? 0 : key.name === "down" ? (focusAt + 1) % focusCount : (focusAt - 1 + focusCount) % focusCount;
+        setFocus(next < ordered.length ? { kind: "row", at: next } : { kind: "extra", id: extraRows[next - ordered.length]!.id });
         return;
       }
       if (key.name === "return" || key.name === "kpenter") {
-        const row = safe < ordered.length ? ordered[safe] : undefined;
-        if (row !== undefined) openDetail({ name: row.name, scope: row.scope });
-        else activeExtra?.onActivate?.();
+        // Enter acts on exactly what is selected, never on what sits where a
+        // gone selection used to: an unselected list answers with nothing.
+        if (focusAt < 0) return;
+        if (focusAt < ordered.length) {
+          const row = ordered[focusAt];
+          if (row !== undefined) openDetail({ name: row.name, scope: row.scope });
+        } else {
+          extraRows[focusAt - ordered.length]?.onActivate?.();
+        }
         return;
       }
       if (key.name === "n" && key.ctrl === true && key.meta !== true) {
@@ -484,7 +519,7 @@ export function MemoryManager({
       if (key.name === "backspace") {
         setNotice(null);
         setQuery((text) => text.slice(0, -1));
-        setIndex(0);
+        setFocus(null);
         return;
       }
       if (key.ctrl === true || key.meta === true) return;
@@ -492,7 +527,7 @@ export function MemoryManager({
       if (typeof sequence === "string" && sequence.length === 1 && sequence >= " ") {
         setNotice(null);
         setQuery((text) => `${text}${sequence}`);
-        setIndex(0);
+        setFocus(null);
       }
       return;
     }
@@ -593,12 +628,11 @@ export function MemoryManager({
   // Keep the highlighted row in view: the list can hold hundreds of memories.
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   useEffect(() => {
-    if (screen.kind !== "list" || safe < 0) return;
-    const id = safe < ordered.length ? `memory-row-${safe}` : activeExtra?.id;
-    if (id === undefined) return;
+    if (screen.kind !== "list" || focus === null || focusAt < 0) return;
+    const id = focus.kind === "row" ? `memory-row-${focus.at}` : focus.id;
     const timer = setTimeout(() => scrollRef.current?.scrollChildIntoView(id), 0);
     return () => clearTimeout(timer);
-  }, [screen.kind, safe, focusCount]);
+  }, [screen.kind, focus, focusCount]);
 
   const hint =
     screen.kind === "list"
@@ -636,7 +670,7 @@ export function MemoryManager({
               </box>
             ) : searchingView ? (
               ordered.map((row, rowIndex) => (
-                <MemoryRow key={`${row.scope}:${row.name}`} id={`memory-row-${rowIndex}`} row={row} active={rowIndex === safe} rowWidth={rowWidth} onHover={() => setIndex(rowIndex)} onOpen={() => openDetail({ name: row.name, scope: row.scope })} />
+                <MemoryRow key={`${row.scope}:${row.name}`} id={`memory-row-${rowIndex}`} row={row} active={rowIndex === focusAt} rowWidth={rowWidth} onHover={() => setFocus({ kind: "row", at: rowIndex })} onOpen={() => openDetail({ name: row.name, scope: row.scope })} />
               ))
             ) : (
               <Fragment>
@@ -645,7 +679,7 @@ export function MemoryManager({
                     <SectionHeader label={t("mem.global")} count={scopeCount("global")} width={rowWidth} />
                     {globalRows.map((row) => {
                       const rowIndex = ordered.indexOf(row);
-                      return <MemoryRow key={`global:${row.name}`} id={`memory-row-${rowIndex}`} row={row} active={rowIndex === safe} rowWidth={rowWidth} onHover={() => setIndex(rowIndex)} onOpen={() => openDetail({ name: row.name, scope: row.scope })} />;
+                      return <MemoryRow key={`global:${row.name}`} id={`memory-row-${rowIndex}`} row={row} active={rowIndex === focusAt} rowWidth={rowWidth} onHover={() => setFocus({ kind: "row", at: rowIndex })} onOpen={() => openDetail({ name: row.name, scope: row.scope })} />;
                     })}
                   </Fragment>
                 )}
@@ -654,7 +688,7 @@ export function MemoryManager({
                     <SectionHeader label={t("mem.project")} count={scopeCount("project")} width={rowWidth} />
                     {projectRows.map((row) => {
                       const rowIndex = ordered.indexOf(row);
-                      return <MemoryRow key={`project:${row.name}`} id={`memory-row-${rowIndex}`} row={row} active={rowIndex === safe} rowWidth={rowWidth} onHover={() => setIndex(rowIndex)} onOpen={() => openDetail({ name: row.name, scope: row.scope })} />;
+                      return <MemoryRow key={`project:${row.name}`} id={`memory-row-${rowIndex}`} row={row} active={rowIndex === focusAt} rowWidth={rowWidth} onHover={() => setFocus({ kind: "row", at: rowIndex })} onOpen={() => openDetail({ name: row.name, scope: row.scope })} />;
                     })}
                   </Fragment>
                 )}
@@ -670,12 +704,12 @@ export function MemoryManager({
                     key={row.id}
                     id={row.id}
                     row={row}
-                    active={!searchingView && safe === ordered.length + extraIndex}
+                    active={!searchingView && focus?.kind === "extra" && focus.id === row.id}
                     rowWidth={rowWidth}
                     onHover={() => {
-                      // Hovering a row the search has out of the walk must not
-                      // drag the highlight onto a result behind the mouse.
-                      if (!searchingView) setIndex(ordered.length + extraIndex);
+                      // A row the search or the still-loading list has out of
+                      // the walk must not take the highlight from a result.
+                      if (!searchingView) setFocus({ kind: "extra", id: row.id });
                     }}
                   />
                 ))}

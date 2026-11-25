@@ -310,6 +310,16 @@ export async function runMemoryManager(): Promise<void> {
 
     await act(async () => setup.mockInput.pressEscape());
     await setup.flush();
+    await waitFor(setup, "Memories", "the list under the overwritten memory");
+
+    // The filter-first escape belongs to the Settings page, not the modal: with
+    // something typed, the standalone memory manager closes on the first press.
+    await typeFilter(setup, "canary", "the modal's search before escape");
+    await settle(setup);
+    await act(async () => setup.mockInput.pressEscape());
+    await setup.flush();
+    const closed = await waitFor(setup, "Message delay and scheduling", "the thread view after the modal closed on the first escape");
+    if (closed.includes("Memories")) fail("escape on the standalone modal dropped the filter instead of closing it");
   } finally {
     await act(async () => setup.renderer.destroy());
   }
@@ -338,6 +348,27 @@ export async function runMemoryManager(): Promise<void> {
   // snapshot is a live one: every `onSet` changes the config the rows are
   // described from, exactly how the real screen resyncs after a write.
   const settingsClient = memoryClient();
+  /**
+   * Traps for the pins: the list answers late (then empty, then the real
+   * store), and the runtime's embedding status turns busy and back under it.
+   */
+  const list: { sealed: boolean; answered: boolean; memories: Seed[]; open?: () => void } = { sealed: true, answered: false, memories: [] };
+  const embeddingsBusy = { current: false };
+  const settingsApi = {
+    ...settingsClient.api,
+    query: (async (query: { type: string }) => {
+      if (query.type === "memory.embeddings.status") {
+        return { state: "idle", phase: "idle", device: null, message: null, file: null, percent: null, validation: null, busy: embeddingsBusy.current, indexed: 0 };
+      }
+      if (query.type === "memory.list") {
+        // Sealed: the answer waits, as it does on a slow store. Once answered,
+        // the pass-through store serves the list (the walkthrough's seeds).
+        if (list.sealed) await new Promise<void>((resolve) => { list.open = resolve; });
+        if (!list.answered) return { projectId: "p-cli", memories: [...list.memories], index: null, cap: 200 };
+      }
+      return (settingsClient.api.query as (query: unknown) => Promise<unknown>)(query);
+    }) as ClientApi["query"],
+  };
   const setCalls: string[] = [];
   const closes: string[] = [];
   const closeCount = (): number => closes.length;
@@ -345,7 +376,7 @@ export async function runMemoryManager(): Promise<void> {
     const [config, setConfig] = useState(DEFAULTS_FOR_RENDER_CHECK);
     return (
       <SettingsModal
-        client={settingsClient.api}
+        client={settingsApi}
         threadId={null}
         initialSection="memory"
         snapshot={{ path: "config.json", exists: true, settings: describeSettings(config) }}
@@ -386,6 +417,43 @@ export async function runMemoryManager(): Promise<void> {
     await settingsSetup.flush();
     await act(async () => new Promise((resolve) => setTimeout(resolve, 200)));
     await settingsSetup.flush();
+
+    // While the list is still on its way, the runtime rows are drawn but keep
+    // the selection: nothing stands armed for a first Enter, and nothing jumps
+    // to a runtime action below them just because the memories are absent.
+    const pending = settingsSetup.captureCharFrame();
+    console.log("--- memory page: list pending ---");
+    console.log(pending);
+    if (!pending.includes("Runtime")) fail("the page's runtime section never drew while the list was pending");
+    if (pending.includes("❯")) fail("a runtime row took the initial focus while the list was pending");
+    await act(async () => settingsSetup.mockInput.pressEnter());
+    await settingsSetup.flush();
+    await settle(settingsSetup);
+    if (setCalls.length > 0) fail(`Enter while the list was pending wrote ${JSON.stringify(setCalls)}, before anything was selected`);
+
+    // The empty list keeps the same rule: what is drawn is not what is armed.
+    list.sealed = false;
+    list.open?.();
+    await waitFor(settingsSetup, "No memories yet.", "the empty list");
+    await settle(settingsSetup);
+    const empty = settingsSetup.captureCharFrame();
+    console.log("--- memory page: empty list ---");
+    console.log(empty);
+    if (empty.includes("❯")) fail("a runtime row took the initial focus on an empty list");
+    await act(async () => settingsSetup.mockInput.pressEnter());
+    await settingsSetup.flush();
+    await settle(settingsSetup);
+    if (setCalls.length > 0) fail(`Enter on an unselected empty list wrote ${JSON.stringify(setCalls)}`);
+
+    // The store answers from here; leave the tab and come back, and the page
+    // its walkthrough describes is the one on screen.
+    list.answered = true;
+    await act(async () => settingsSetup.mockInput.pressTab());
+    await settingsSetup.flush();
+    await waitFor(settingsSetup, "▌ Interface", "the next settings page after tab");
+    await act(async () => settingsSetup.mockInput.pressTab({ shift: true }));
+    await settingsSetup.flush();
+    await waitFor(settingsSetup, "▌ Memory", "the Memory page after shift+tab");
     // The tab lists the memories itself: no Manage memories button, the grouped
     // rows show what each scope holds against the server's cap, and the runtime
     // section shows both its actions and its settings as rows.
@@ -398,6 +466,32 @@ export async function runMemoryManager(): Promise<void> {
     for (const expected of ["Memories", "Global", "This project", "editor-font", "deploy-notes", "canary-watch", "Runtime", "Set up:", "Use keywords:", "Memory (next session):", "Memory embeddings:", "Model loading:", "1/200", "2/200"]) {
       if (!settingsList.includes(expected)) fail(`the Memory page is missing "${expected}"`);
     }
+
+    // A row selected by id stays as what it is. The setup action is selected
+    // (busy), it finishes (the rows swap), and the selection goes with the row
+    // that finished: the highlight never slides onto the next action, so Enter
+    // after the change writes nothing until something is selected again.
+    embeddingsBusy.current = true;
+    const cancelFrame = await waitFor(settingsSetup, "Cancel setup:", "the busy runtime's cancel row");
+    if (cancelFrame.includes("❯")) fail("a runtime row was selected before any navigation");
+    for (let step = 0; step < 12; step += 1) {
+      await act(async () => settingsSetup.mockInput.pressArrow("down"));
+      await settingsSetup.flush();
+      await settle(settingsSetup);
+      if (settingsSetup.captureCharFrame().includes("❯ Cancel setup:")) break;
+      if (step === 11) fail("the arrow walk never reached the Cancel row");
+    }
+    embeddingsBusy.current = false;
+    await waitFor(settingsSetup, "Set up:", "the setup row back after the busy passes");
+    await settle(settingsSetup);
+    const afterBusy = settingsSetup.captureCharFrame();
+    console.log("--- memory page: an action finished under the selection ---");
+    console.log(afterBusy);
+    if (afterBusy.includes("❯")) fail("an action that finished left the selection on another row");
+    await act(async () => settingsSetup.mockInput.pressEnter());
+    await settingsSetup.flush();
+    await settle(settingsSetup);
+    if (setCalls.length > 0) fail(`Enter after the selected action was gone wrote ${JSON.stringify(setCalls)}`);
 
     // A search that matches nothing is about its own results: the runtime rows
     // stay drawn but stay out of the walk, so Enter writes nothing.
