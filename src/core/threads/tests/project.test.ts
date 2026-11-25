@@ -160,6 +160,26 @@ describe("toThreadEnvelope", () => {
       },
     );
     expect(older.maintenanceTurns).toEqual(["compact"]);
+    // A turn of several messages is a compaction only when the lot of them is
+    // the bare command: a ledger that folded a real follow-up in after the
+    // command carries work, and reading only its first message would hide the
+    // reply the user is waiting for.
+    const mixed = (marker: boolean) =>
+      toThreadEnvelope(
+        thread(),
+        [turn({ id: "work", messageId: "m-work" }), turn({ id: "mixed", messageId: "m-compact", ...(marker ? { maintenance: true as const } : {}) })],
+        {
+          messages: [
+            { id: "m-work", threadId: "thread-1", turnId: "work", role: "user", text: "Build it", createdAt: "2026-01-01T00:00:00.000Z" },
+            { id: "m-compact", threadId: "thread-1", turnId: "mixed", role: "user", text: "/compact", createdAt: "2026-01-01T00:00:00.000Z" },
+            { id: "m-follow", threadId: "thread-1", turnId: "mixed", role: "user", text: "and then the follow-up", createdAt: "2026-01-01T00:00:01.000Z" },
+          ],
+        },
+      );
+    // The marker is the turn's own word on what it was, so it stands.
+    expect(mixed(true).maintenanceTurns).toEqual(["mixed"]);
+    // Without one, the whole prompt is read: this turn did the follow-up.
+    expect(mixed(false)).not.toHaveProperty("maintenanceTurns");
     // Omitted when a thread has none, so older envelopes stay byte-for-byte as they were.
     expect(toThreadEnvelope(thread(), [turn()])).not.toHaveProperty("maintenanceTurns");
   });

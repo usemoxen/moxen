@@ -1,5 +1,7 @@
 import * as Effect from "effect/Effect";
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import * as Stream from "effect/Stream";
@@ -18,7 +20,7 @@ import {
   type OperationContext,
 } from "../operations.js";
 import { openThreadStore } from "../store.js";
-import { createThread } from "../threads.js";
+import { completeTurn, createThread, sendTurn } from "../threads.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -139,6 +141,42 @@ async function batchesOnDisk(w: Awaited<ReturnType<typeof world>>): Promise<Reco
   return JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, unknown>;
 }
 
+/** The pid of a process that has already exited, as a crash leaves behind. */
+async function deadPid(): Promise<number> {
+  const child = spawn(process.execPath, ["-e", "0"]);
+  await new Promise((resolve) => child.once("exit", resolve));
+  return child.pid!;
+}
+
+/**
+ * A delegated task whose work turn settled and reported, and whose `/compact`
+ * turn is still `running` — the state a process death mid-compaction leaves.
+ * No runner exists for either turn, so the child is never touched again: only
+ * a recovery can settle it.
+ */
+async function taskMidCompaction(w: Awaited<ReturnType<typeof world>>, owner: "dead" | "live") {
+  const parent = await w.make("orchestrator");
+  const child = await w.make("task");
+  await delegated(w.store, parent.id, child.id);
+  const work = await sendTurn(w.store, child.id, { prompt: "Build it" });
+  await completeTurn(w.store, child.id, work.turn.id, { text: WORKER_REPORT });
+  const compact = await sendTurn(w.store, child.id, { prompt: "/compact" });
+  await w.store.updateTurn(child.id, compact.turn.id, {
+    status: "running",
+    owner: { pid: owner === "dead" ? await deadPid() : process.pid, host: os.hostname() },
+  });
+  return { parent, child, compactTurnId: compact.turn.id };
+}
+
+/** Poll for the parent's durable batch to come back, as a re-filed entry would. */
+async function batchReappears(w: Awaited<ReturnType<typeof world>>, parentId: string, ms: number): Promise<boolean> {
+  for (let waited = 0; waited < ms; waited += 25) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    if ((await batchesOnDisk(w))[parentId] !== undefined) return true;
+  }
+  return false;
+}
+
 describe("a delegated task that compacts after its turn settles", () => {
   it("reports once, with the worker's report, after the compaction ends instead of dropping the notice (MXN-351)", async () => {
     let release!: () => void;
@@ -242,6 +280,56 @@ describe("a delegated task that compacts after its turn settles", () => {
     // Replaying the recovery of a batch already delivered finds nothing left.
     await recoverTaskNotifications(restartedCtx);
     await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+  }, 30_000);
+
+  it("reconciles a task left mid-compaction by a dead process, so the restart still reports (MXN-351)", async () => {
+    const w = await world(async () => undefined);
+    const { parent, child, compactTurnId } = await taskMidCompaction(w, "dead");
+
+    // The flush that came due before the process died kept the entry durable.
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await batchesOnDisk(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await notificationsIn(w, parent.id)).toHaveLength(0);
+
+    // The restart replays that batch on its own store — no shared event bus,
+    // and no runner will ever settle the orphan — so the recovery itself must
+    // reconcile the child before deciding it still has work.
+    const restarted = await openThreadStore(w.root);
+    await recoverTaskNotifications({ ...w.ctx, store: restarted });
+
+    const delivered = await notificationsIn(w, parent.id);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain(WORKER_REPORT);
+    expect((await w.store.readTurns(child.id)).find((turn) => turn.id === compactTurnId)?.status).toBe("interrupted");
+    expect((await w.store.readActivities(child.id)).some((row) => row.kind === "turn.orphaned")).toBe(true);
+    expect(await batchesOnDisk(w)).toEqual({});
+  }, 30_000);
+
+  it("does not refile a kept-back notice a flush already delivered, so the parent hears once (MXN-351)", async () => {
+    const w = await world(async () => undefined);
+    const { parent, child, compactTurnId } = await taskMidCompaction(w, "live");
+
+    // Deferred while the compaction runs: the entry is durable and the watcher
+    // is waiting on the child's next terminal event.
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await batchesOnDisk(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+
+    // The compaction settles in the ledger, and the flush wins: it delivers the
+    // notice and deletes the entry, before the settle's event has been heard.
+    await w.store.updateTurn(child.id, compactTurnId, { status: "completed", completedAt: w.store.nowIso() });
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+    expect(await batchesOnDisk(w)).toEqual({});
+
+    // The watcher now hears the settle it was waiting for. Its entry is gone,
+    // so its wake must be a no-op: filing a fresh one would report the same
+    // settle a second time.
+    w.store.emit(child.id, "turn-completed");
+    expect(await batchReappears(w, parent.id, 1_000)).toBe(false);
+    await flushTaskNotifications(w.ctx, parent.id);
     expect(await notificationsIn(w, parent.id)).toHaveLength(1);
   }, 30_000);
 });

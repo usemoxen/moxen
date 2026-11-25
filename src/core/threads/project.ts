@@ -26,7 +26,7 @@ import type {
   ActivityEnvelope,
   TurnInteractionMode,
 } from "../types.js";
-import { isCompactCommand } from "../providers/spi.js";
+import { maintenanceTurnIds } from "./maintenance.js";
 import { isKnownTurnStatus } from "./problems.js";
 import type {
   StoredActivity,
@@ -176,12 +176,8 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     }));
   const turnModes: Record<string, TurnInteractionMode> = {};
   const turnUsagePauses = Object.fromEntries(turns.flatMap((turn) => turn.usagePause ? [[turn.id, turn.usagePause]] : []));
-  // Maintenance turns are not work (see `StoredTurn.maintenance`). Older
-  // ledgers carry no marker, so the prompt is read as the fallback.
-  const messageText = new Map((input.messages ?? []).map((message) => [message.id, message.text] as const));
-  const maintenanceTurns = turns
-    .filter((turn) => turn.maintenance === true || isCompactCommand(messageText.get(turn.messageId) ?? ""))
-    .map((turn) => turn.id);
+  // Maintenance turns are not work (see `maintenanceTurnIds`).
+  const maintenanceTurns = maintenanceTurnIds(turns, input.messages ?? []);
   for (const turn of turns) {
     // A queued message that follows the thread takes its mode when it starts (MXN-223): until then it has none to show.
     if (turn.interactionMode === "default" || (turn.status === "queued" && turn.interactionModeExplicit !== true)) continue;

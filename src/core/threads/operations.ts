@@ -112,6 +112,7 @@ import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
 import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
+import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
@@ -4278,17 +4279,29 @@ const deferredNotificationWatches = new Set<string>();
 
 /**
  * Queue a task's kept-back notification again once its work ends. The entry
- * already sits in the durable batch; queueing unions with it (one entry per
- * task), so this watcher and any watcher the settle also wakes cannot deliver
- * it twice. Watching from the start (`onlyFutureSettles` false) closes the gap
- * between the flush looking and this subscription: the check runs after it, so
- * a settle in between is either seen as already done or heard as an event.
+ * already sits in the durable batch, so the wake arms that batch's window
+ * instead of filing a new entry: a flush that won the parent's notification
+ * lock while this watcher waited has already delivered it and deleted it, and
+ * filing again would report the same settle twice. A wake with nothing left to
+ * deliver is a no-op.
+ *
+ * Watching from the start (`onlyFutureSettles` false) closes the gap between
+ * the flush looking and this subscription: the check runs after it, so a
+ * settle in between is either seen as already done or heard as an event.
  */
 function watchDeferredNotification(ctx: OperationContext, parentThreadId: string, entry: PendingTaskNotification): void {
   const key = `${parentThreadId}\0${entry.child}`;
   if (deferredNotificationWatches.has(key)) return;
   deferredNotificationWatches.add(key);
-  notifyWhenTaskSettles(ctx, parentThreadId, entry.child, false, null, () => deferredNotificationWatches.delete(key));
+  notifyWhenTaskSettles(
+    ctx,
+    parentThreadId,
+    entry.child,
+    false,
+    null,
+    () => deferredNotificationWatches.delete(key),
+    wakeHeldNotification,
+  );
 }
 
 /**
@@ -4301,9 +4314,18 @@ function watchDeferredNotification(ctx: OperationContext, parentThreadId: string
  * windows — an early snapshot yields "not exhausted" only when no data
  * says spent, in which case delivering is correct. A spent parent keeps its
  * batch for the recovery or the next message instead.
+ *
+ * A task still listed in a batch was mid-turn when the previous process died,
+ * so its turn is `running` with a dead owner and nothing will ever settle it:
+ * the watcher armed below would wait for an event that never comes, and the
+ * parent would never hear. Each such child is reconciled first — outside the
+ * parent's notification lock, which is the child's own thread lock — so the
+ * flush reads whether it has live or queued work left, and not a corpse.
  */
 export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
   const batches = await readTaskNotificationBatches(ctx.storeRoot);
+  const children = new Set(Object.values(batches).flatMap((entries) => entries.map((entry) => entry.child)));
+  for (const child of children) await recoverOrphanedTurn(ctx, child).catch(() => undefined);
   for (const parentThreadId of Object.keys(batches)) {
     await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
   }
@@ -4362,9 +4384,36 @@ async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: st
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
       batches[parentThreadId] = unionTaskEntries(batches[parentThreadId] ?? [], entries);
     });
-    const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
-    timer.unref?.();
-    pendingNotifications.set(parentThreadId, { timer, entries });
+    armBatchWindow(ctx, parentThreadId, entries);
+  });
+}
+
+/**
+ * Arm the batch window for a parent, keeping notices already waiting on it: a
+ * second arming is still one flush, and the union above keeps one entry per
+ * task, so two reports of the same settle cannot go out twice.
+ */
+function armBatchWindow(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): void {
+  const pending = pendingNotifications.get(parentThreadId);
+  if (pending) clearTimeout(pending.timer);
+  const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
+  timer.unref?.();
+  pendingNotifications.set(parentThreadId, { timer, entries: unionTaskEntries(pending?.entries ?? [], entries) });
+}
+
+/**
+ * Wake the batch window for a notice the parent already holds. The entry is
+ * durable, so filing a fresh one would report the same settle twice — most
+ * sharply when a flush that won the parent's lock while this watcher waited
+ * has already delivered it and deleted it. A wake with nothing left to deliver
+ * is a no-op.
+ */
+async function wakeHeldNotification(ctx: OperationContext, parentThreadId: string): Promise<void> {
+  await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
+    const batches = await readTaskNotificationBatches(ctx.storeRoot);
+    const held = batches[parentThreadId] ?? [];
+    if (held.length === 0) return;
+    armBatchWindow(ctx, parentThreadId, held);
   });
 }
 
@@ -4402,8 +4451,7 @@ async function settledWorkTurnCount(ctx: OperationContext, childThreadId: string
     ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]),
     ctx.store.readMessages(childThreadId).catch(() => [] as StoredMessage[]),
   ]);
-  const messageText = new Map(messages.map((message) => [message.id, message.text]));
-  return turns.filter((turn) => turn.completedAt !== null && turn.maintenance !== true && !isCompactCommand(messageText.get(turn.messageId) ?? "")).length;
+  return turns.filter((turn) => turn.completedAt !== null && !isMaintenanceTurn(turn, messages)).length;
 }
 
 /** Past this age, background work a task left running is flagged as probably forgotten. Moxen never stops it. */
@@ -6096,7 +6144,9 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
  * at: when set, a settle that landed between the snapshot and this arming
  * reports at once instead of being lost. A task that has not settled since
  * keeps waiting for a future one. `onDone` runs once the notice is queued, so
- * a caller watching on a task's behalf can forget its watch.
+ * a caller watching on a task's behalf can forget its watch. `wake` is how the
+ * settle is reported: filing a fresh entry by default, or flushing one already
+ * held when the caller kept it durable for this moment.
  */
 function notifyWhenTaskSettles(
   ctx: OperationContext,
@@ -6105,6 +6155,7 @@ function notifyWhenTaskSettles(
   onlyFutureSettles = false,
   sinceGeneration: number | null = null,
   onDone: () => void = () => undefined,
+  wake: (ctx: OperationContext, parentThreadId: string, childThreadId: string) => Promise<void> = queueTaskNotification,
 ): void {
   let done = false;
   let checking = false;
@@ -6130,7 +6181,7 @@ function notifyWhenTaskSettles(
         done = true;
         stop();
         onDone();
-        await queueTaskNotification(ctx, parentThreadId, childThreadId);
+        await wake(ctx, parentThreadId, childThreadId);
       } while (again);
     } finally {
       checking = false;

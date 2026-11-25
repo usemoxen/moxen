@@ -68,7 +68,11 @@ first — the new message rides along in the older turn when model and mode
 match, or runs next once it settles.
 
 A due held turn starts after the running turn settles, oldest first, with
-later held messages batched into it as one turn. It never starts while the
+later held messages batched into it as one turn. A `/compact` turn is never
+batched, in either direction: folded into an ordinary follow-up it would send
+the command as text no provider runs, and would carry the maintenance marker
+over a turn that did real work. It keeps its own turn instead. It never starts
+while the
 limit still stands, while usage protection holds the thread, or while the
 thread is snoozed or settled: those wait for the reset, the release, or the
 thread becoming active again. An automatic continue whose time came while
@@ -948,7 +952,10 @@ A turn-end notification always fires on time and nothing can hold it. A bare
 `/compact` turn is maintenance, not a report: the notification reads the task's
 last turn that did real work, and a batch that comes due while the task is
 still compacting waits for it and then goes out once, instead of being
-dropped. When the
+dropped. The wait is durable: the entry stays in the batch file, so a restart
+reconciles the task's turn first (a compaction the dead process left `running`
+is interrupted like any orphan), then reads what it has left to run and sends
+once. Waking a batch that was already delivered sends nothing. When the
 task's turn ends with background work still running, the notification names
 that work and for how long (for example "turn ended, 1 background process
 still running: bun run check, 4m"), and reads as not finished: the parent must

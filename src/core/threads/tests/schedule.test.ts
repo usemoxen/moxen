@@ -152,6 +152,28 @@ describe("scheduled messages", () => {
     expect(turns.filter((turn) => turn.status === "queued")).toHaveLength(1);
   });
 
+  it("keeps a /compact turn out of a batched follow-up, so the real request is not swallowed", async () => {
+    const { store, thread } = await setup();
+    const running = await sendTurn(store, thread.id, { prompt: "work" });
+    await sendTurn(store, thread.id, { prompt: "/compact", delivery: "queue" });
+    await sendTurn(store, thread.id, { prompt: "then the actual follow-up", delivery: "queue" });
+    await completeTurn(store, thread.id, running.turn.id, { text: "done" });
+
+    // Folded together they would send "/compact\n\nthen the actual follow-up" —
+    // no compaction at all — and the turn would keep the maintenance marker,
+    // hiding the real reply from every reader.
+    const waiting = (await store.readTurns(thread.id)).filter((turn) => turn.status !== "completed");
+    const messages = await store.readMessages(thread.id);
+    expect(waiting.map((turn) => turnPrompt(messages, turn)?.text)).toEqual(["/compact", "then the actual follow-up"]);
+    expect(waiting.map((turn) => turn.maintenance === true)).toEqual([true, false]);
+    expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.batched")).toBe(false);
+
+    // The follow-up then runs on its own, never behind the compaction command.
+    await completeTurn(store, thread.id, waiting[0]!.id, { text: "compacted" });
+    const next = (await store.readTurns(thread.id)).find((turn) => turn.status === "running" && turn.id === waiting[1]!.id);
+    expect(turnPrompt(await store.readMessages(thread.id), next!)?.text).toBe("then the actual follow-up");
+  });
+
   it("run at once when the time has already passed, and never steer or restart", async () => {
     const now = Date.parse("2026-09-25T10:00:00.000Z");
     const { store, thread } = await setup(() => now);

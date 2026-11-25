@@ -15,6 +15,7 @@ import { CliError } from "../errors.js";
 import { isCompactCommand } from "../providers/spi.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
+import { isMaintenanceTurn } from "./maintenance.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
@@ -1256,10 +1257,15 @@ function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): 
  * carries its automatic wait: that queue holds no conditions of its own, so
  * the folded messages ride the same reset. Any other queue-carrying turn (a
  * wake-up, a handoff, a held entry) keeps its own turn, as before.
+ *
+ * A maintenance turn (`/compact`) never folds either way: folded into an
+ * ordinary follow-up it keeps the marker and hides the real reply, and an
+ * ordinary message folded into it would send `/compact` as text no provider
+ * runs as a compaction. Each keeps its own turn.
  */
 async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode): Promise<void> {
   if (next.queue && next.scheduleReason !== "usage-reset") return;
-  const batch = turns.filter(
+  const candidates = turns.filter(
     (turn) =>
       turn.id !== next.id &&
       turn.status === "queued" &&
@@ -1270,9 +1276,12 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
       waitingInteractionMode(turn, threadMode) === waitingInteractionMode(next, threadMode) &&
       sameModel(turn, next),
   );
+  if (candidates.length === 0) return;
+  const messages = await store.readMessages(threadId);
+  if (isMaintenanceTurn(next, messages)) return;
+  const batch = candidates.filter((turn) => !isMaintenanceTurn(turn, messages));
   if (batch.length === 0) return;
   const folded = new Set(batch.map((turn) => turn.id));
-  const messages = await store.readMessages(threadId);
   await store.rewriteLedger(threadId, "messages", messages.map((message) => (folded.has(message.turnId) ? { ...message, turnId: next.id } : message)));
   await store.rewriteLedger(threadId, "turns", turns.filter((turn) => !folded.has(turn.id)));
   await store.appendLedger(threadId, "activity", {

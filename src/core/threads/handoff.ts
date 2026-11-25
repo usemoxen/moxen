@@ -15,7 +15,7 @@
  * for recent turns, where the detail is; older turns shrink to a line each
  * so a long thread still fits a context window.
  */
-import { isCompactCommand } from "../providers/spi.js";
+import { maintenanceTurnIds } from "./maintenance.js";
 import type { ThreadStore } from "./store.js";
 import { isTransferLanded } from "./queue.js";
 import type { StoredActivity, StoredMessage, StoredThread, StoredTurn } from "./types.js";
@@ -180,12 +180,8 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
   }));
   // A compaction is maintenance, not a request or a result: it says nothing
-  // about what the user wants or whether the work is done. Turns written
-  // before the marker existed are recognised by their prompt.
-  const textOfMessage = new Map(messages.map((message) => [message.id, message.text]));
-  const maintenance = new Set(
-    turns.filter((turn) => turn.maintenance === true || isCompactCommand(textOfMessage.get(turn.messageId) ?? "")).map((turn) => turn.id),
-  );
+  // about what the user wants or whether the work is done.
+  const maintenance = new Set(maintenanceTurnIds(turns, messages));
   const unsent = turns
     .filter((turn) => !reached(turn) && !movedIds.has(turn.id) && !maintenance.has(turn.id) && !(options.preferModelSummary && turn.scheduledFor) && (!options.queuedTurnIds || options.queuedTurnIds.includes(turn.id)))
     .flatMap((turn) => messages.filter((message) => message.id === turn.messageId && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary"));
