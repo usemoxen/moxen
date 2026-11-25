@@ -1489,9 +1489,18 @@ function TurnBlock({  group,
   // trailing tools — the newest calls stay visible until the turn ends.
   const segments = workExpanded ? segmentWork(work, inFlow ? null : closing) : [];
 
-  // `/compact` alone: one line, not a prompt card over a fold of work.
+  // `/compact` alone: one line, not a prompt card over a fold of work. An
+  // acknowledged instruction update on that turn still gets its card below
+  // the line — the compaction branch must not swallow it.
   if (group.prompts.length > 0 && group.prompts.every((entry) => isCompactPrompt(entry.message))) {
-    return <CompactBlock group={group} open={open} now={now} width={width} />;
+    return (
+      <box style={{ flexDirection: "column", flexShrink: 0 }}>
+        <CompactBlock group={group} open={open} now={now} width={width} />
+        {group.instructionsUpdate === null ? null : (
+          <InstructionsUpdateCard entry={group.instructionsUpdate} now={now} />
+        )}
+      </box>
+    );
   }
 
   const renderToolRow = (entry: TimelineEntry) => (

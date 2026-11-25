@@ -8,10 +8,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { runProcess } from "../../core/infra/process.js";
 import { testHarness } from "../../core/testing/harness.js";
+import { ThreadStore } from "../../core/threads/store.js";
 import { driverForInstance, type TurnDriver, type TurnOutcome } from "../../core/threads/execute.js";
 import { settleRuns } from "../../core/testing/turns.js";
 import { runDueScheduledTurn } from "../../core/threads/operations.js";
@@ -1066,6 +1067,46 @@ describe("the acknowledgement of a runtime instructions update", () => {
       expect(prompts[3]).toBe("four");
       expect(await markers(harness, id)).toHaveLength(1);
     } finally {
+      await connection.close();
+    }
+  });
+
+  it("never fails the turn or drops the answer when the marker append fails; the next answered turn lands it", async () => {
+    const { harness, prompts, open, setInstructions } = await world([ANSWER, ANSWER, ANSWER]);
+    // Inject one ledger failure, only for the marker row: every other write
+    // (turns, messages, the instruction state) goes through untouched.
+    const original = ThreadStore.prototype.appendLedger;
+    let failNextMarker = true;
+    const spy = vi.spyOn(ThreadStore.prototype, "appendLedger").mockImplementation(function (this: ThreadStore, threadId, name, row) {
+      if (failNextMarker && name === "activity" && (row as { kind?: unknown }).kind === "instructions.updated") {
+        failNextMarker = false;
+        return Promise.reject(new Error("injected marker-append failure"));
+      }
+      return original.call(this, threadId, name, row);
+    });
+    const connection = open();
+    try {
+      const created = await connection.dispatch({ type: "thread.handover", cwd: harness.work, prompt: "one", wait: true, threadEnvMode: "local", provider: "claudeAgent", model: "claude-opus-5" });
+      const id = created.threadId;
+      setInstructions("Rule B.");
+
+      // The provider answers, but the marker append fails: the turn still
+      // completes and its answer is persisted.
+      const sent = await send(connection, id, "two");
+      expect(sent.status).toBe("completed");
+      expect((await harness.store.readTurns(id))[1]!.status).toBe("completed");
+      expect((await harness.store.readMessages(id)).some((message) => message.role === "assistant" && message.text === ANSWER.text)).toBe(true);
+      expect(await markers(harness, id)).toHaveLength(0);
+
+      // The update is still pending, so the next turn carries it again and its
+      // answer retries the marker, landing it exactly once.
+      await send(connection, id, "three");
+      expect(prompts[2]).toContain("<moxen-instructions-update>");
+      const landed = await markers(harness, id);
+      expect(landed).toHaveLength(1);
+      expect(landed[0]).toMatchObject({ turnId: (await harness.store.readTurns(id))[2]!.id, payload: { provider: "claude" } });
+    } finally {
+      spy.mockRestore();
       await connection.close();
     }
   });

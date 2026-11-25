@@ -420,16 +420,30 @@ async function sessionSetup(
   // update, so the conversation has it. The marker is appended first and the
   // delivered state second, both under the thread lock: a retry after a crash
   // between them finds the marker, skips it, and still records the state.
+  // The marker is a courtesy card, never the outcome: this must not reject,
+  // or the turn that just answered would be marked failed and its reply lost.
+  // A failed marker append leaves the delivered state unrecorded, so the next
+  // turn carries the update again and its answer retries the marker.
   const acknowledge = async (state: InstructionState): Promise<void> => {
-    await ctx.store.withThreadLock(thread.id, async () => {
-      const fresh = await ctx.store.readThreadRecord(thread.id);
-      if (!fresh) return;
-      if (turnId !== null) {
-        const marked = (await ctx.store.readActivities(thread.id)).some((activity) => activity.kind === "instructions.updated" && activity.turnId === turnId);
-        if (!marked) await ctx.store.appendLedger(thread.id, "activity", instructionsUpdateRow(ctx.store, thread.id, turnId, key));
-      }
-      await ctx.store.writeThreadRecord({ ...fresh, instructionState: { ...fresh.instructionState, [key]: state } });
-    });
+    try {
+      await ctx.store.withThreadLock(thread.id, async () => {
+        const fresh = await ctx.store.readThreadRecord(thread.id);
+        if (!fresh) return;
+        if (turnId !== null) {
+          const marked = (await ctx.store.readActivities(thread.id)).some((activity) => activity.kind === "instructions.updated" && activity.turnId === turnId);
+          if (!marked) {
+            try {
+              await ctx.store.appendLedger(thread.id, "activity", instructionsUpdateRow(ctx.store, thread.id, turnId, key));
+            } catch {
+              return;
+            }
+          }
+        }
+        await ctx.store.writeThreadRecord({ ...fresh, instructionState: { ...fresh.instructionState, [key]: state } });
+      });
+    } catch {
+      // Best-effort: the acknowledgement never changes the provider outcome.
+    }
   };
   const recorded = thread.instructionState?.[key];
   if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered) await record(next);

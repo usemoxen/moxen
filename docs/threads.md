@@ -770,7 +770,9 @@ delegated review task (`delegate` with `mode: "review"`), or one prompt
   system card. It names the provider only: the instructions' text is neither
   stored there nor shown, a fresh conversation's baseline and a mode change
   leave no such marker, and an unanswered turn leaves none until a retry is
-  answered.
+  answered. The marker's write is best-effort: if it fails after the provider
+  answered, the turn still completes with its reply, and the next turn that
+  carries the update lands the marker when its answer arrives.
 - A new thread starts in Build unless a mode is picked while drafting it,
   and a delegated task runs in Build unless the model that delegates asks for
   Research or Review (`delegate`'s `mode`); a task is never in Orchestrate. A thread
