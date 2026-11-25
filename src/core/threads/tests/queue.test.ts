@@ -605,7 +605,7 @@ describe("setup failures behind a recovery", () => {
     expect((await w.store.readActivities(thread.id)).filter((activity) => activity.kind === "steer.redelivered")).toHaveLength(1);
   });
 
-  it("leaves an orphaned turn's task notice alone instead of sending it a second time (MXN-410)", async () => {
+  it("sends an orphaned turn's task notice again, so a dropped one is never lost (MXN-410)", async () => {
     const w = await world();
     const thread = await w.make();
     const running = await sendTurn(w.store, thread.id, { prompt: "work" });
@@ -616,14 +616,20 @@ describe("setup failures behind a recovery", () => {
       notification: { tasks: [] },
     });
     expect(steered.delivery).toBe("steered");
-    // A restart finds the turn orphaned. The notice reached the conversation
-    // as the run's steer, so redelivery must not report that settle again.
+    // A restart finds the turn orphaned. No echo ever confirmed the notice, so
+    // it goes out again as its own turn — the parent must hear it.
     await w.store.updateTurn(thread.id, running.turn.id, { owner: { pid: 2_147_483_647, host: os.hostname() } });
     expect(await recoverOrphanedTurn(w.ctx, thread.id)).toBe(true);
     const notices = (await w.store.readMessages(thread.id)).filter((message) => message.origin === "task-notification");
-    expect(notices).toHaveLength(1);
-    expect(notices[0]!.id).toBe(steered.messageId);
-    expect((await w.store.readActivities(thread.id)).filter((activity) => activity.kind === "steer.redelivered")).toEqual([]);
+    expect(notices).toHaveLength(2);
+    // The copy keeps the notice's origin and facts, so it still reads as one.
+    expect(notices.find((message) => message.id !== steered.messageId)).toMatchObject({
+      origin: "task-notification",
+      notification: { tasks: [] },
+    });
+    // A repeated recovery sends nothing twice.
+    expect(await recoverOrphanedTurn(w.ctx, thread.id)).toBe(false);
+    expect((await w.store.readMessages(thread.id)).filter((message) => message.origin === "task-notification")).toHaveLength(2);
   });
 
   it("runs the redelivered copy when an orphaned steer has nothing queued behind it (MXN-312)", async () => {

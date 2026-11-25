@@ -18,6 +18,13 @@ export interface TaskNotification {
   readonly taskId: string;
   readonly title: string;
   readonly status: DelegatedTaskStatus;
+  /**
+   * The task turn this report is about: the last one of its that settled. With
+   * the kind of report it identifies the notice — stable across a restart and
+   * a re-file, and different for the task's next settle, so a report is never
+   * mistaken for a repeat of the one before it.
+   */
+  readonly settleTurnId?: string | null;
   /** How long the task's turn ran; null when it never recorded both ends. */
   readonly durationMs: number | null;
   /** `instance/model` it ran on. */

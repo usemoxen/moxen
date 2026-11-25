@@ -918,10 +918,10 @@ twice. A provider with no arrival signal keeps push-means-delivered on
 turns that end any other way, and a steer on a session that dies with its
 process goes out again when the orphaned turn is recovered.
 
-A task notice is the one exception: it is never sent again by this path,
-however it was delivered. The notification queue reports a settle exactly once,
-mid-turn included (see below), and a second copy would read as the same
-finished task reporting again.
+A task notice steers by the same rules, and one the provider never confirms
+goes out again the same way, so a notice a running turn never received is
+redelivered rather than lost. The notice already in the parent's conversation
+is what keeps that from reporting the settle twice (see below).
 
 ### Messaging a delegated task (`task_send`)
 
@@ -972,13 +972,16 @@ notification shows is the task's last turn, not the wall clock since it was
 delegated, so the idle hours between rounds are not reported as time spent
 finishing.
 
-A settle reaches its parent once. The report is acknowledged in
-`task-notification-delivered.json` beside the batches, and that marker is what
-every delivery path reads before reporting: the batch window, the mid-turn copy
-a running turn already took, a watcher, the startup replay after a restart, and
-a second reporter of the same settle all find the task's current settle already
-told. A later turn of the same task, and a pause or a cancellation of it, are
-reports of their own and still go out.
+A settle reaches its parent once. Nothing is acknowledged in a second file: the
+notice in the parent's conversation is the record, read back as the task, the
+kind of report and the turn it is about, which survives a restart and stays the
+same when a watcher or a second reporter files that settle again. A later turn
+of the same task, and a pause or a cancellation of it, are reports of their own
+and still go out. Because a mid-turn copy is handed over rather than confirmed,
+a notice only steers a provider that reports what reached the turn; every other
+provider gets a queued turn of its own, which always runs. A push the provider
+refuses leaves the notice pending and out of that record, and the parent's next
+idle moment files it.
 
 ### A delegated task that runs out of usage
 

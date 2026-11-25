@@ -1,14 +1,25 @@
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { testHarness } from "../../testing/harness.js";
 import { driverKindOfInstance } from "../../types.js";
 import { openThreadStore } from "../store.js";
-import { completeTurn, createThread, interruptTurn, redeliverUnconfirmedSteers, sendTurn } from "../threads.js";
+import {
+  completeTurn,
+  createThread,
+  interruptTurn,
+  redeliverUnconfirmedSteers,
+  sendTurn,
+} from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
 import {
   flushTaskNotifications,
   queueTaskNotification,
   recoverTaskNotifications,
+  revertThread,
+  sendTaskMessage,
   startTurn,
   taskNotificationOf,
   type OperationContext,
@@ -65,7 +76,7 @@ async function noticesIn(w: World, threadId: string) {
 }
 
 describe("a task's settle is reported once", () => {
-  it("reports once when the parent's running turn took it and the unconfirmed steer is redelivered", async () => {
+  it("reports once when the parent's running turn takes it mid-turn", async () => {
     const steered: string[] = [];
     const w = await world({
       leaveTurnsRunning: true,
@@ -77,29 +88,23 @@ describe("a task's settle is reported once", () => {
     await delegate(w, parent.id, child.id);
     await settleChild(w, child.id);
 
-    // Mid-turn delivery: the parent's turn runs here, so the notice steers into it.
     const orchestrating = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
     expect(orchestrating.turn.status).toBe("running");
     await queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTaskNotifications(w.ctx, parent.id);
+    // The notice keeps its own framing, in the text the turn receives...
     expect(steered).toHaveLength(1);
-    // The runtime notice keeps its own framing, in the text the turn receives...
     expect(steered[0]).toContain("<task-notification>");
     // ...and in the ledger, as a notice rather than a user message.
     const [notice] = await noticesIn(w, parent.id);
     expect(notice?.turnId).toBe(orchestrating.turn.id);
     expect(notice?.notification?.tasks[0]).toMatchObject({ taskId: child.id });
 
-    // The provider never confirmed the steer. Redelivery leaves a notice alone:
-    // the parent already read it, and a copy would report the same settle twice.
-    const copies = await redeliverUnconfirmedSteers(w.store, parent.id, orchestrating.turn.id, [
-      { messageId: notice!.id, text: notice!.text, images: [] },
-    ]);
-    expect(copies).toEqual([]);
-
-    // The parent's turn ends and the same settle reaches the queue again (a
-    // watcher, an orphan recovery, a client re-filing it). Now the parent is
-    // idle, so the old code filed a turn of its own for the notice it had.
+    // The provider confirmed the push: the settle is not sent again, and the
+    // same settle filed again (a watcher, a client) is not reported twice.
+    expect(w.driverFor("codex").takeUnconfirmedSteers?.(parent.id)).toEqual([]);
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
     await interruptTurn(w.store, parent.id, orchestrating.turn.id);
     await flushTurnRunners();
     await queueTaskNotification(w.ctx, parent.id, child.id);
@@ -107,6 +112,150 @@ describe("a task's settle is reported once", () => {
     await flushTurnRunners();
     expect(await noticesIn(w, parent.id)).toHaveLength(1);
     expect(steered).toHaveLength(1);
+  }, 30_000);
+
+  it("reaches the parent when the provider takes the steer and never delivers it", async () => {
+    const steered: string[] = [];
+    const w = await world({
+      leaveTurnsRunning: true,
+      steering: { codex: "drops" },
+      onSteer: (_threadId, text) => void steered.push(text),
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+
+    const orchestrating = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(steered).toHaveLength(1);
+
+    // The turn ends without the provider ever confirming the push: the settle
+    // must still reach the parent, sent again as a turn of its own.
+    const [notice] = await noticesIn(w, parent.id);
+    const copies = await redeliverUnconfirmedSteers(w.store, parent.id, orchestrating.turn.id, [
+      { messageId: notice!.id, text: notice!.text, images: [] },
+    ]);
+    expect(copies).toHaveLength(1);
+    await flushTurnRunners();
+    const delivered = (await noticesIn(w, parent.id)).filter((message) => message.turnId !== orchestrating.turn.id);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.text).toContain(child.id);
+
+    // Once it has arrived, nothing files it again.
+    await interruptTurn(w.store, parent.id, orchestrating.turn.id);
+    await flushTurnRunners();
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect((await noticesIn(w, parent.id)).filter((message) => message.turnId !== orchestrating.turn.id)).toHaveLength(1);
+  }, 30_000);
+
+  it("files a durable turn instead of steering when the provider cannot say what arrived", async () => {
+    const steered: string[] = [];
+    const w = await world({
+      leaveTurnsRunning: true,
+      steering: { codex: "unreported" },
+      onSteer: (_threadId, text) => void steered.push(text),
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+
+    const orchestrating = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    // A push this driver never reports on cannot be a notice's delivery.
+    expect(steered).toEqual([]);
+    const [notice] = await noticesIn(w, parent.id);
+    expect(notice?.turnId).not.toBe(orchestrating.turn.id);
+    const queued = (await w.store.readTurns(parent.id)).find((turn) => turn.id === notice?.turnId);
+    expect(queued?.status).toBe("queued");
+
+    // Queued work runs, so the parent reads it: once.
+    await interruptTurn(w.store, parent.id, orchestrating.turn.id);
+    await flushTurnRunners();
+    const delivered = (await noticesIn(w, parent.id)).filter((message) => message.turnId !== orchestrating.turn.id);
+    expect(delivered).toHaveLength(1);
+  }, 30_000);
+
+  it("keeps a notice the running turn refused and files it once the turn ends", async () => {
+    const w = await world({ leaveTurnsRunning: true, steering: { codex: "fails" } });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+
+    const orchestrating = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    // The push was refused: the recorded steer never reached the turn, and the
+    // entry stays durable rather than being acknowledged and dropped.
+    expect((await noticesIn(w, parent.id)).map((message) => message.turnId)).toEqual([orchestrating.turn.id]);
+
+    // The turn ends: the held notice is filed as a turn of its own, with no
+    // further trigger from the test.
+    await interruptTurn(w.store, parent.id, orchestrating.turn.id);
+    await expect.poll(
+      async () => (await noticesIn(w, parent.id)).filter((message) => message.turnId !== orchestrating.turn.id).length,
+      { timeout: 10_000, interval: 50 },
+    ).toBe(1);
+    await flushTurnRunners();
+    expect((await noticesIn(w, parent.id)).filter((message) => message.turnId !== orchestrating.turn.id)).toHaveLength(1);
+  }, 30_000);
+
+  it("does not report a settle twice when the process died before forgetting the batch", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect(await noticesIn(w, parent.id)).toHaveLength(1);
+
+    // The window between the notice landing in the ledger and the batch entry
+    // being forgotten: the entry is still on disk, as a crash leaves it.
+    await writeFile(path.join(w.root, "task-notification-batches.json"), JSON.stringify({ [parent.id]: [{ child: child.id }] }), "utf8");
+
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect(await noticesIn(w, parent.id)).toHaveLength(1);
+    // The ledger, not the marker, is what recovery reconciles against.
+    const reopened = await openThreadStore(w.root);
+    const restarted: OperationContext = { ...w.ctx, store: reopened, driverFor: w.driverFor };
+    await recoverTaskNotifications(restarted);
+    await flushTurnRunners();
+    expect((await reopened.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(1);
+  }, 30_000);
+
+  it("reports a task's next settle after its turns were reverted and it was woken", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect(await noticesIn(w, parent.id)).toHaveLength(1);
+
+    // Back to no turns at all, then fresh work settles: a new settle, not a
+    // repeat of the one already reported.
+    await revertThread(w.ctx, child.id, 0);
+    const sent = await sendTaskMessage(w.ctx, parent.id, child.id, "Try again.", true);
+    expect(sent.outcome).toBe("started");
+    await flushTurnRunners();
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    const both = await noticesIn(w, parent.id);
+    expect(both).toHaveLength(2);
+    expect(both[1]!.notification?.tasks[0]).toMatchObject({ taskId: child.id, status: "completed" });
   }, 30_000);
 
   it("reports once through its own turn, a failed background check and a restart", async () => {
@@ -127,14 +276,13 @@ describe("a task's settle is reported once", () => {
     // The failed check is reported in that one notice, not by announcing again.
     expect(first[0]!.text).toContain("could not verify");
 
-    // Filed again while the app is running: acknowledged, so nothing goes out.
     await queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTaskNotifications(w.ctx, parent.id);
     await flushTurnRunners();
     expect(await noticesIn(w, parent.id)).toHaveLength(1);
 
     // A restart: a fresh store over the same root, and the settle filed again —
-    // via the queue and via the startup recovery. Both find the marker.
+    // via the queue and via the startup recovery. Both leave the one report.
     const reopened = await openThreadStore(w.root);
     const restarted: OperationContext = { ...w.ctx, store: reopened, driverFor: w.driverFor };
     await queueTaskNotification(restarted, parent.id, child.id);
@@ -142,33 +290,6 @@ describe("a task's settle is reported once", () => {
     await flushTaskNotifications(restarted, parent.id);
     await flushTurnRunners();
     expect((await reopened.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(1);
-  }, 30_000);
-
-  it("keeps a notice the running turn refused and files it as its own turn once", async () => {
-    const w = await world({ leaveTurnsRunning: true, steering: { codex: "fails" } });
-    const parent = await w.make("orchestrator");
-    const child = await w.make("task");
-    await delegate(w, parent.id, child.id);
-    await settleChild(w, child.id);
-
-    const orchestrating = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
-    expect(orchestrating.turn.status).toBe("running");
-    await queueTaskNotification(w.ctx, parent.id, child.id);
-    await flushTaskNotifications(w.ctx, parent.id);
-    // The push was refused: the steer is recorded on the running turn, which
-    // never read it. The entry stays durable rather than being acknowledged.
-    expect((await noticesIn(w, parent.id)).map((message) => message.turnId)).toEqual([orchestrating.turn.id]);
-
-    // The parent's next flush files it as a turn of its own, once.
-    await interruptTurn(w.store, parent.id, orchestrating.turn.id);
-    await flushTurnRunners();
-    await flushTaskNotifications(w.ctx, parent.id);
-    await flushTurnRunners();
-    const delivered = (await noticesIn(w, parent.id)).filter((message) => message.turnId !== orchestrating.turn.id);
-    expect(delivered).toHaveLength(1);
-    await flushTaskNotifications(w.ctx, parent.id);
-    await flushTurnRunners();
-    expect((await noticesIn(w, parent.id)).filter((message) => message.turnId !== orchestrating.turn.id)).toHaveLength(1);
   }, 30_000);
 
   it("reports a task's last turn, not the idle hours since it was created", async () => {

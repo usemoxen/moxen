@@ -1312,3 +1312,74 @@ describe("claude driver native session titles", () => {
     await expect(failing.regenerateSessionTitle("session-1", "/work")).rejects.toThrow("could not retitle");
   });
 });
+
+describe("claude runtime notices mid-turn (MXN-410)", () => {
+  it("stamps a task notice with its provenance instead of passing it off as the user's own words", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "orchestrate" }));
+    await Effect.runPromise(driver.steerTurn("thread-1", "<task-notification>settled</task-notification>", [], undefined, { notice: true }));
+    await sleep(20);
+    const pushed = transport.created[0]!.messages[1]!;
+    // The SDK's origin for a task delivery: the CLI frames it as the session's
+    // task, not as a message the user typed mid-turn.
+    expect(pushed.origin).toEqual({ kind: "task-notification" });
+    expect(pushed.priority).toBe("next");
+    // A user steer stays unattributed, as before.
+    await Effect.runPromise(driver.steerTurn("thread-1", "also this"));
+    await sleep(20);
+    expect(transport.created[0]!.messages[2]!.origin).toBeUndefined();
+  });
+
+  it("says when it can report that a steer arrived, and only after the provider proved it", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "go" }));
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    // Nothing has been echoed yet: a notice must not be trusted to a push here.
+    expect(driver.reportsSteerArrival("thread-1")).toBe(false);
+    await Effect.runPromise(driver.steerTurn("thread-1", "also this"));
+    await sleep(20);
+    const [opening, steer] = transport.created[0]!.messages.map((message) => message.uuid as string);
+    transport.created[0]!.push(assistantText("on it", { input_tokens: 10, output_tokens: 5 }, { user_message_uuids: [opening!, steer!] }));
+    transport.created[0]!.push(successResult("kept it", 0.02, { user_message_uuids: [opening!, steer!], queued_turn_count: 0 }));
+    await outcome;
+    expect(driver.reportsSteerArrival("thread-1")).toBe(true);
+    // Past that settle, the next turn's notices can be steered, so the proof
+    // outlives the turn that showed it.
+    expect(driver.reportsSteerArrival("thread-1")).toBe(true);
+  });
+
+  it("does not re-ingest its own notice when the CLI replays it as a delivery", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (event) => Effect.sync(() => void events.push(event))));
+    await Effect.runPromise(driver.startSession(START));
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "orchestrate" }));
+    const outcome = driver.awaitTurn("thread-1", sent.turnId);
+    await Effect.runPromise(driver.steerTurn("thread-1", "<task-notification>settled</task-notification>", [], undefined, { notice: true }));
+    await sleep(20);
+    const query = transport.created[0]!;
+    const noticeUuid = query.messages[1]!.uuid as string;
+    // The CLI replays what it consumed: our own notice, stamped as a task
+    // delivery. That is arrival evidence, never a new wake-up for the parent.
+    query.push({
+      type: "user",
+      uuid: noticeUuid,
+      session_id: "session-1",
+      parent_tool_use_id: null,
+      origin: { kind: "task-notification" },
+      message: { role: "user", content: "<task-notification>settled</task-notification>" },
+    } as unknown as SDKMessage);
+    query.push(successResult("done", 0.01, { user_message_uuids: [noticeUuid], queued_turn_count: 0 }));
+    await outcome;
+    await sleep(20);
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    expect(events.filter((event) => event.type === "background.wake-up")).toEqual([]);
+    // The replay confirmed the push, so the parent is not told twice.
+    expect(driver.takeUnconfirmedSteers("thread-1")).toEqual([]);
+  });
+});

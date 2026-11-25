@@ -63,7 +63,7 @@ import type {
   WorkspaceMode,
   WorkspaceResolution,
 } from "../types.js";
-import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
+import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent, type SteerOrigin } from "../providers/spi.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
@@ -3080,7 +3080,10 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
     const text = imageMention(input.driverPrompt ?? input.prompt.trim(), uploads.map((upload) => upload.name));
-    return { ...sent, run: null, steerDelivered: await deliverSteer(driver, thread.id, text, providerImages(uploads), sent.messageId) };
+    // A runtime notice keeps its provenance mid-turn, so the turn reads it as
+    // a task delivery rather than as words the user typed (MXN-410).
+    const origin: SteerOrigin | undefined = input.origin === "task-notification" ? { notice: true } : undefined;
+    return { ...sent, run: null, steerDelivered: await deliverSteer(driver, thread.id, text, providerImages(uploads), sent.messageId, origin) };
   }
   if (sent.turn.status === "queued" && typeof sent.turn.scheduledFor === "string") {
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
@@ -3234,11 +3237,11 @@ function providerImages(uploads: readonly ImageAttachmentUpload[]): ProviderImag
  * (`takeUnconfirmedSteers`); whatever settles unconfirmed goes out again
  * as a queued turn of its own.
  */
-async function deliverSteer(driver: TurnDriver, threadId: string, text: string, images: readonly ProviderImage[], steerId: string): Promise<boolean> {
+async function deliverSteer(driver: TurnDriver, threadId: string, text: string, images: readonly ProviderImage[], steerId: string, origin?: SteerOrigin): Promise<boolean> {
   if (!driver.steerTurn) return false;
   const live = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
   if (!live) return false;
-  return await Effect.runPromise(driver.steerTurn(threadId, text, images, steerId)).then(
+  return await Effect.runPromise(driver.steerTurn(threadId, text, images, steerId, origin)).then(
     () => true,
     () => false,
   );
@@ -4077,6 +4080,12 @@ export interface PendingTaskNotification {
   readonly child: string;
   readonly resumesAt?: string | null;
   readonly cancelled?: true;
+  /**
+   * The message a refused mid-turn push recorded. Only handed over to a running
+   * turn, never read by it: the entry stays pending, and the notice this
+   * message carries must not be read back off the ledger as delivered.
+   */
+  readonly refusedMessageId?: string;
 }
 
 /** Settle entries report; pause entries carry `resumesAt` (possibly null), cancel entries `cancelled`. */
@@ -4090,7 +4099,18 @@ function unionTaskEntries(
   right: readonly PendingTaskNotification[],
 ): PendingTaskNotification[] {
   const merged = new Map<string, PendingTaskNotification>();
-  for (const entry of [...left, ...right]) merged.set(`${pendingEntryKind(entry)}:${entry.child}`, entry);
+  for (const entry of [...left, ...right]) {
+    const key = `${pendingEntryKind(entry)}:${entry.child}`;
+    const known = merged.get(key);
+    // A refusal is a fact about a message already recorded: a later report of
+    // the same notice must not forget it and read its own message back as
+    // delivered.
+    if (known?.refusedMessageId !== undefined && entry.refusedMessageId === undefined) {
+      merged.set(key, { ...entry, refusedMessageId: known.refusedMessageId });
+      continue;
+    }
+    merged.set(key, entry);
+  }
   return [...merged.values()];
 }
 
@@ -4105,7 +4125,9 @@ function normalizeTaskEntries(value: unknown): PendingTaskNotification[] | null 
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
     const record = raw as Record<string, unknown>;
     if (typeof record.child !== "string" || record.child.length === 0) return null;
-    const entry: PendingTaskNotification = { child: record.child };
+    const refused = record.refusedMessageId;
+    if (refused !== undefined && (typeof refused !== "string" || refused.length === 0)) return null;
+    const entry: PendingTaskNotification = { child: record.child, ...(refused !== undefined ? { refusedMessageId: refused } : {}) };
     if (record.resumesAt !== undefined) {
       if (record.resumesAt !== null && (typeof record.resumesAt !== "string" || !Number.isFinite(Date.parse(record.resumesAt)))) return null;
       entries.push({ ...entry, resumesAt: record.resumesAt });
@@ -4176,77 +4198,51 @@ async function updateTaskNotificationBatches(storeRoot: string, update: (batches
 }
 
 /**
- * What a parent was already told about a task, so the same settle is reported
- * once however many paths report it. Beside the batch file, so the marker
- * survives a restart: a batch entry replayed after a crash between the
- * delivery and its removal, a notice the parent's turn already took by steer,
- * and a watcher queuing the settle again all find it acknowledged here.
- *
- * Keyed by parent, kind and child — one report per task and kind — with the
- * settle generation it covered, so a later settle of the same task is a new
- * notice rather than a repeat.
+ * The notice one pending entry stands for: the task, the kind of report, and
+ * the task turn it is about. Stable across a restart and a re-file, and
+ * different for the task's next settle — so a report filed twice is recognised
+ * as the same notice, while the settle after a revert and a wake is a new one.
  */
-const TASK_NOTIFICATION_DELIVERED_FILE = "task-notification-delivered.json";
-/** Markers kept; the oldest fall away first. Enough for any batch window plus a restart. */
-const TASK_NOTIFICATION_DELIVERED_KEEP = 500;
-
-function taskNotificationDeliveredFile(storeRoot: string): string {
-  return path.join(storeRoot, TASK_NOTIFICATION_DELIVERED_FILE);
+function noticeOf(kind: "settle" | "pause" | "cancel", childThreadId: string, settleTurnId: string | null): string {
+  return `${kind}\0${childThreadId}\0${settleTurnId ?? ""}`;
 }
 
-/** One acknowledged report: the settle generation it covered, and when it went out. */
-interface DeliveredNotice {
-  readonly generation: number;
-  readonly at: string;
+/** The kind a notice was written as, read back off the facts it carried. */
+function noticeKindOf(task: TaskNotification): "settle" | "pause" | "cancel" {
+  if (task.cancelled === true) return "cancel";
+  return task.resumesAt !== undefined ? "pause" : "settle";
 }
 
-function taskNotificationKey(parentThreadId: string, kind: "settle" | "pause" | "cancel", childThreadId: string): string {
-  return `${parentThreadId}\0${kind}\0${childThreadId}`;
-}
+/** How many of a parent's most recent notices recovery reconciles against; far more than a batch window or a restart needs. */
+const DELIVERED_NOTICE_SCAN = 200;
 
-/** A corrupt or missing marker file reads as nothing delivered: the cost is one repeat, never a lost notice. */
-async function readDeliveredNotices(storeRoot: string): Promise<Map<string, DeliveredNotice>> {
-  const delivered = new Map<string, DeliveredNotice>();
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await readFile(taskNotificationDeliveredFile(storeRoot), "utf8")) as unknown;
-  } catch {
-    return delivered;
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return delivered;
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const record = value as Record<string, unknown>;
-    if (typeof record.generation !== "number" || !Number.isFinite(record.generation)) continue;
-    delivered.set(key, { generation: record.generation, at: typeof record.at === "string" ? record.at : new Date(0).toISOString() });
+/**
+ * The notices the parent's own ledger already holds, by `noticeOf`: one entry
+ * per task, kind and settle turn, read back off the parent's messages instead
+ * of a marker file, so nothing has to be acknowledged in a second write. A
+ * crash between the message and the batch entry it forgets repeats no report,
+ * and a watcher or a client filing the same settle is dropped.
+ *
+ * A mid-turn steer counts too, and must: the batch entry is gone once the push
+ * is handed over, and the turn's own `takeUnconfirmedSteers` is what reports a
+ * push the provider never delivered, as a turn of the notice's own. The one
+ * exception is a push the provider *refused*: the message is already recorded
+ * but no turn ever read it, so the entry that produced it names it in
+ * `refusedMessageId` and it is skipped here.
+ */
+async function deliveredNoticeKeys(ctx: OperationContext, parentThreadId: string, refused: ReadonlySet<string>): Promise<Set<string>> {
+  const messages = await ctx.store.readMessages(parentThreadId).catch(() => [] as StoredMessage[]);
+  const delivered = new Set<string>();
+  let seen = 0;
+  for (let at = messages.length - 1; at >= 0 && seen < DELIVERED_NOTICE_SCAN; at -= 1) {
+    const notice = messages[at]!;
+    if (notice.origin !== "task-notification" || refused.has(notice.id)) continue;
+    seen += 1;
+    for (const task of notice.notification?.tasks ?? []) {
+      delivered.add(noticeOf(noticeKindOf(task), task.taskId, task.settleTurnId ?? null));
+    }
   }
   return delivered;
-}
-
-/** Whether this notice already reached the parent for the settle the task is at now. */
-function noticeAlreadyDelivered(
-  delivered: ReadonlyMap<string, DeliveredNotice>,
-  key: string,
-  generation: number,
-): boolean {
-  const seen = delivered.get(key);
-  return seen !== undefined && seen.generation >= generation;
-}
-
-/** Acknowledge reports that reached the parent's conversation; the batch entry is forgotten after them. */
-async function markNoticesDelivered(storeRoot: string, notices: readonly { readonly key: string; readonly generation: number }[]): Promise<void> {
-  if (notices.length === 0) return;
-  const run = batchFileChain.then(async () => {
-    const delivered = await readDeliveredNotices(storeRoot);
-    const at = new Date().toISOString();
-    for (const notice of notices) delivered.set(notice.key, { generation: notice.generation, at });
-    const kept = [...delivered.entries()]
-      .sort((left, right) => Date.parse(left[1].at) - Date.parse(right[1].at))
-      .slice(-TASK_NOTIFICATION_DELIVERED_KEEP);
-    await writeAtomic(taskNotificationDeliveredFile(storeRoot), `${JSON.stringify(Object.fromEntries(kept))}\n`);
-  });
-  batchFileChain = run.catch(() => undefined);
-  await run.catch(() => undefined);
 }
 
 /** A parent held by usage protection cannot receive a notification yet: it waits with the batch instead. */
@@ -4343,6 +4339,31 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
       if (kept.length > 0) batches[parentThreadId] = [...kept];
       else delete batches[parentThreadId];
     });
+    // Kept back for a turn that is still running: nothing would flush it again
+    // once the batch window's timer is gone, so its end is what files it.
+    if (kept.length > 0) retryTaskNotificationsWhenIdle(ctx, parentThreadId);
+  });
+}
+
+/** One retry watch per parent: a notice refused twice must not stack watchers. */
+const idleRetries = new Set<string>();
+
+/**
+ * Flush a parent's held notices once its running turn ends — the moment the
+ * notice can go out as a turn of its own. A steer the provider refused leaves
+ * the batch entry with no timer armed (`flushTaskNotifications` cleared it), so
+ * without this the notice would sit until an unrelated user message. A walk
+ * with nothing left to deliver is a no-op.
+ */
+function retryTaskNotificationsWhenIdle(ctx: OperationContext, parentThreadId: string): void {
+  if (idleRetries.has(parentThreadId)) return;
+  idleRetries.add(parentThreadId);
+  const stop = ctx.store.subscribe((event) => {
+    if (event.type !== "backend.thread.changed" || event.threadId !== parentThreadId) return;
+    if (event.reason !== "turn-completed" && event.reason !== "turn-failed" && event.reason !== "turn-interrupted") return;
+    idleRetries.delete(parentThreadId);
+    stop();
+    void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
   });
 }
 
@@ -4630,6 +4651,7 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
     taskId: childThreadId,
     title: child.title,
     status,
+    settleTurnId: last?.id ?? null,
     durationMs,
     model: child.modelSelection ? `${child.modelSelection.instanceId}/${child.modelSelection.model}` : null,
     branch: record?.env.mode === "worktree" ? record.env.branch : null,
@@ -4659,22 +4681,21 @@ export function isStoppedBySettle(child: StoredThread | null, status: TaskNotifi
 }
 
 /**
- * Send the parent its settled tasks: into its running turn when the
- * provider takes input mid-turn (Claude, OpenCode) and this process
- * holds that session; otherwise as a turn of its own, queued behind any
- * running one. It wakes a settled parent — the work is the parent's own.
+ * Send the parent its settled tasks: into its running turn when the provider
+ * takes input mid-turn and reports what it consumed, so a push can be trusted
+ * and recovered if it is lost; otherwise as a turn of its own, queued behind
+ * any running one. It wakes a settled parent — the work is the parent's own.
  * Pause and cancellation notices ride along in the same message: a pause a
  * settle covers is stale and dropped, and a settle a cancellation covers
  * wins over it, so each child reads once.
  *
- * Once is the contract, not "at least": every report this leaves out was
- * already delivered for the settle the task is at (see
- * `noticeAlreadyDelivered`), so a replayed batch entry, a watcher and a
- * mid-turn copy that already landed all report the same settle once.
+ * Once is the contract, and never lost: every report this leaves out is
+ * already in the parent's ledger for the very settle it covers (see
+ * `deliveredNoticeKeys`), and a steer this process cannot trust to arrive (a
+ * refused push, or a provider that cannot say what arrived) is filed as a
+ * durable turn instead.
  *
- * Returns the entries it could not deliver. A notice the provider refused to
- * take mid-turn is in the ledger but not in the turn, so the caller keeps it
- * durable for the next flush rather than dropping a settle the parent waits on.
+ * Returns the entries it could not deliver, for the caller to keep durable.
  */
 async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<readonly PendingTaskNotification[]> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
@@ -4685,8 +4706,8 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     if (parent !== undefined && parent !== parentThreadId) await enqueueTaskNotification(ctx, parent, entry);
   }
   const addressed = entries.filter((entry) => (liveParent(entry.child) ?? parentThreadId) === parentThreadId);
-  // The settle generation each child is at, read once: what a report covers,
-  // what the watcher below waits past, and what the marker records.
+  // The settle generation each child is at, read once: what the watcher below
+  // waits past.
   const generations = new Map<string, number>();
   const generationOf = async (id: string): Promise<number> => {
     const known = generations.get(id);
@@ -4695,11 +4716,19 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     generations.set(id, count);
     return count;
   };
-  const delivered = await readDeliveredNotices(ctx.storeRoot);
+  // What the parent already holds, per notice: filing a report it has read
+  // again would tell it the same thing twice. A notice whose own push was
+  // refused is not among them — the turn never read it.
+  const refused = new Set(entries.flatMap((entry) => (entry.refusedMessageId === undefined ? [] : [entry.refusedMessageId])));
+  const delivered = await deliveredNoticeKeys(ctx, parentThreadId, refused);
+  const settleTurnIdOf = async (id: string): Promise<string | null> => {
+    const turns = await ctx.store.readTurns(id).catch(() => [] as StoredTurn[]);
+    return [...turns].reverse().find((turn) => turn.completedAt !== null)?.id ?? null;
+  };
   const mine: PendingTaskNotification[] = [];
   for (const entry of addressed) {
-    const key = taskNotificationKey(parentThreadId, pendingEntryKind(entry), entry.child);
-    if (!noticeAlreadyDelivered(delivered, key, await generationOf(entry.child))) mine.push(entry);
+    const notice = noticeOf(pendingEntryKind(entry), entry.child, await settleTurnIdOf(entry.child));
+    if (!delivered.has(notice)) mine.push(entry);
   }
   // A task paused by a usage limit has not finished: its parent hears when the resumed run ends instead.
   // One that handed off to a new thread has not finished either: its parent hears from the continuation.
@@ -4759,13 +4788,8 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   );
   const all = [...tasks, ...pauseTasks, ...cancelTasks];
   if (all.length === 0) return [];
-  // What this message reports, as the markers to write once it has landed:
-  // only what the parent actually reads is acknowledged.
-  const reported: { readonly child: string; readonly kind: "settle" | "pause" | "cancel" }[] = [
-    ...tasks.map((task) => ({ child: task.taskId, kind: "settle" as const })),
-    ...pauseTasks.map((task) => ({ child: task.taskId, kind: "pause" as const })),
-    ...cancelTasks.map((task) => ({ child: task.taskId, kind: "cancel" as const })),
-  ];
+  // Which tasks this message reports, so a refused push knows what to keep.
+  const reported = new Set([...tasks, ...pauseTasks, ...cancelTasks].map((task) => task.taskId));
   // A task that ended its turn with background work still running is not
   // done: when that work ends, the provider wakes the task where it can, and
   // the parent hears again once the task next has nothing left to run. Work
@@ -4800,7 +4824,11 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     return [];
   }
   const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
-  const steerable = running && (await canSteer(ctx, parent));
+  // A notice is only steered to a driver that reports what reached the turn:
+  // the push alone is not delivery, and the turn's own recovery is what makes
+  // an unconfirmed notice safe. Every other driver gets a durable turn, which
+  // queued work always runs.
+  const steerable = running && (await canSteer(ctx, parent)) && ctx.driverFor(parent.modelSelection.instanceId).reportsSteerArrival?.(parentThreadId) === true;
   const started = await startTurn(ctx, {
     threadId: parentThreadId,
     prompt: taskNotificationText(all),
@@ -4811,19 +4839,14 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   });
   if (steerable && started.steerDelivered === false) {
     // The provider refused the mid-turn push: the notice is recorded but the
-    // running turn never read it. Reported to nobody yet, so it is not
-    // acknowledged — the caller keeps it durable and the next flush files it
-    // as a turn of its own.
-    return mine.filter((entry) => reported.some((notice) => notice.child === entry.child));
+    // running turn never read it. Nothing has been delivered, so the caller
+    // keeps it durable — naming the message that must not count as delivered —
+    // and it is filed once the parent is idle.
+    return mine.filter((entry) => reported.has(entry.child)).map((entry) => ({ ...entry, refusedMessageId: started.messageId }));
   }
-  // Acknowledged only now: the notice is in the parent's conversation, so the
-  // marker written here is what a restart (or a second path reporting the same
-  // settle) reads before reporting it again. Written before the batch entry is
-  // forgotten, so a crash in between repeats nothing.
-  await markNoticesDelivered(ctx.storeRoot, await Promise.all(reported.map(async (notice) => ({
-    key: taskNotificationKey(parentThreadId, notice.kind, notice.child),
-    generation: await generationOf(notice.child),
-  }))));
+  // Nothing else to record: the message just filed is the durable delivery
+  // record (`deliveredNoticeKeys`), and a steered notice whose push is dropped
+  // is recovered by the turn's own `takeUnconfirmedSteers` redelivery.
   return [];
 }
 

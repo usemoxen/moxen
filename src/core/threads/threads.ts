@@ -970,21 +970,6 @@ export interface RedeliverSteer {
   readonly images: ReadonlyArray<{ readonly name: string; readonly mimeType: string; readonly data: string }>;
 }
 
-/** How a task notice opens: the text a notice with no recorded message is recognised by. */
-const TASK_NOTIFICATION_OPENER = "<task-notification>";
-
-/**
- * Whether this steer carried a task notice rather than something the user or
- * another agent wrote. The notification queue reports a settle exactly once,
- * mid-turn included, so the at-least-once redelivery above must leave a notice
- * alone — sending one again is the duplicate the parent read as a second
- * report of the same finished task (MXN-410).
- */
-function isTaskNotice(message: StoredMessage | null, text: string): boolean {
-  if (message !== null) return message.origin === "task-notification";
-  return text.trimStart().startsWith(TASK_NOTIFICATION_OPENER);
-}
-
 /**
  * Send unconfirmed steers again, each as a queued turn of its own — the
  * at-least-once half of steer delivery. The provider confirmed whatever is
@@ -996,9 +981,9 @@ function isTaskNotice(message: StoredMessage | null, text: string): boolean {
  * recovery never queues one twice. Never throws: a thread gone, settled
  * without a wake, or held simply keeps nothing. Returns the new turn ids.
  *
- * A task notice is the exception: the notification queue reports a settle
- * exactly once, mid-turn included (see `isTaskNotice`), so it is never sent
- * again here.
+ * A runtime notice goes out again like anything else: a notice must never be
+ * lost, and the report a duplicate leaves behind is cheaper than a parent kept
+ * waiting on a task it never hears about.
  */
 export async function redeliverUnconfirmedSteers(
   store: ThreadStore,
@@ -1024,7 +1009,6 @@ export async function redeliverUnconfirmedSteers(
     const original = steer.messageId !== null
       ? (messages.find((message) => message.id === steer.messageId && message.role === "user") ?? null)
       : (messages.find((message) => message.turnId === turnId && message.role === "user" && message.text === steer.text) ?? null);
-    if (isTaskNotice(original, steer.text)) continue;
     if (original && redelivered.has(original.id)) continue;
     if (!original && redelivered.has(`text:${steer.text}`)) continue;
     const text = original?.text ?? steer.text;
@@ -1034,12 +1018,16 @@ export async function redeliverUnconfirmedSteers(
     // so on its marker, rather than looking complete.
     const dropped = (original?.attachments ?? []).filter((attachment) => !kept.some((upload) => upload.name === attachment.name)).map((attachment) => attachment.name);
     const uploads = kept;
+    // A system message meant to wake (a task notification) keeps its wake;
+    // anything else redelivers only onto a live thread, never waking one put away.
+    const wakeSettled = original?.origin === "task-notification" || original?.origin === "background-notification";
     const sent = await sendTurn(store, threadId, {
       prompt: text,
       delivery: "queue",
       ...(original?.origin ? { origin: original.origin } : {}),
       ...(original?.notification ? { notification: original.notification } : {}),
       ...(uploads.length > 0 ? { attachments: uploads } : {}),
+      ...(wakeSettled ? { wakeSettled: true } : {}),
     }, config).catch(() => null);
     if (!sent) continue;
     copies.push(sent.turn.id);

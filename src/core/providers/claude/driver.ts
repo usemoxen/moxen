@@ -58,6 +58,7 @@ import type {
   TurnId,
   SideAnswer,
   SideQuestionInput,
+  SteerOrigin,
   UnconfirmedSteer,
 } from "../spi.js";
 import {
@@ -211,6 +212,13 @@ interface ClaudeSession {
    * `TaskUpdate` patches or deletes one, a `TaskList` result resyncs all.
    */
   checklist: Array<{ id: string; subject: string; status: ChecklistStatus }>;
+  /**
+   * The client uuids of the messages this session streamed in, including
+   * Moxen's own runtime notices. The CLI replays a delivery it consumed with
+   * its origin stamped; seeing our own uuid there is arrival evidence, and it
+   * must never be re-ingested as a wake-up for the parent to read again.
+   */
+  readonly ownUuids: Set<string>;
   query: ClaudeQuery;
   input: PromptQueue;
   closed: boolean;
@@ -311,8 +319,8 @@ function refusalCategoryLabel(raw: unknown): string | null {
 /** The model `/rename` retitles on: a short summary, so the cheapest one. */
 const TITLE_MODEL = "claude-haiku-4-5";
 
-/** A user message: the text, then each image as a base64 content block. `uuid` is our own client id, echoed back on the reply frames and result of whichever turn consumes the message — the arrival signal steers are confirmed by. */
-function userMessage(text: string, images: readonly ProviderImage[] = [], uuid?: string): SDKUserMessage {
+/** A user message: the text, then each image as a base64 content block. `uuid` is our own client id, echoed back on the reply frames and result of whichever turn consumes the message — the arrival signal steers are confirmed by. `origin` marks Moxen's own runtime notice, which the CLI frames as a task delivery instead of as a message the user sent mid-turn. */
+function userMessage(text: string, images: readonly ProviderImage[] = [], uuid?: string, origin?: SteerOrigin): SDKUserMessage {
   const message: SDKUserMessage = {
     type: "user",
     message: {
@@ -328,6 +336,7 @@ function userMessage(text: string, images: readonly ProviderImage[] = [], uuid?:
     parent_tool_use_id: null,
   };
   if (uuid !== undefined) message.uuid = uuid as NonNullable<SDKUserMessage["uuid"]>;
+  if (origin?.notice === true) message.origin = { kind: "task-notification" } as NonNullable<SDKUserMessage["origin"]>;
   return message;
 }
 
@@ -337,8 +346,8 @@ class PromptQueue {
   closed = false;
 
   /** `priority: "next"` folds the message into the running turn at its next step (a steer). `uuid` is the client id the CLI echoes on whatever consumes the message. */
-  push(text: string, images: readonly ProviderImage[] = [], priority?: "next", uuid?: string): void {
-    const message: SDKUserMessage = priority ? { ...userMessage(text, images, uuid), priority } : userMessage(text, images, uuid);
+  push(text: string, images: readonly ProviderImage[] = [], priority?: "next", uuid?: string, origin?: SteerOrigin): void {
+    const message: SDKUserMessage = priority ? { ...userMessage(text, images, uuid, origin), priority } : userMessage(text, images, uuid, origin);
     const taker = this.takers.shift();
     if (taker) taker({ value: message, done: false });
     else this.pending.push(message);
@@ -553,6 +562,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         threadId: input.threadId,
         workingDirectory: input.workingDirectory,
         moxenMemory: input.moxenMemory === true,
+        ownUuids: new Set(),
         query: undefined as unknown as ClaudeQuery,
         input: new PromptQueue(),
         closed: false,
@@ -627,7 +637,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
    * results echo, and `takeUnconfirmedSteers` reports the rest at settle for
    * the runner to send again.
    */
-  readonly steerTurn = (threadId: ThreadId, text: string, images: readonly ProviderImage[] = [], steerId?: string): Effect.Effect<void, CliError> =>
+  readonly steerTurn = (threadId: ThreadId, text: string, images: readonly ProviderImage[] = [], steerId?: string, origin?: SteerOrigin): Effect.Effect<void, CliError> =>
     this.attempt("CLAUDE_STEER_FAILED", `Could not steer the turn on thread ${threadId}`, async () => {
       const session = this.requireSession(threadId);
       const open = session.transcript.find((turn) => turn.status === "running");
@@ -643,9 +653,24 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       const uuid = steerId ?? randomUUID();
       this.trackSteerSent(threadId, uuid, { text, images: [...images] });
       // Said outright rather than left to the default: a steer is read at
-      // the running turn's next step, never held until it ends.
-      session.input.push(text, images, "next", uuid);
+      // the running turn's next step, never held until it ends. A notice keeps
+      // its provenance, so the turn reads it as a task delivery rather than as
+      // something the user typed.
+      session.ownUuids.add(uuid);
+      session.input.push(text, images, "next", uuid, origin);
     });
+
+  /**
+   * Whether this driver can say that a steer reached the conversation: the
+   * CLI has echoed one of our client uuids on a reply frame, result or
+   * replayed delivery, proving it reports what it consumed. Core delivers a
+   * runtime notice as a durable turn until then — a push to a CLI that never
+   * echoes could be dropped with nothing to tell.
+   */
+  readonly reportsSteerArrival = (threadId: ThreadId): boolean => this.arrivalProven.has(threadId);
+
+  /** Threads whose CLI proved it echoes what it consumed (kept past a settle, which clears `steerTracking`). */
+  private readonly arrivalProven = new Set<ThreadId>();
 
   /**
    * Steers pushed to the running turn that no reply frame or result ever
@@ -691,6 +716,7 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     ];
     if (!echoed.some((uuid) => tracking.sent.has(uuid))) return [];
     tracking.echoCapable = true;
+    this.arrivalProven.add(threadId);
     const confirmed: Array<{ uuid: string; text: string; images: ProviderImage[] }> = [];
     for (const uuid of echoed) {
       const steer = tracking.pending.get(uuid);
@@ -1521,6 +1547,14 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         this.handleAssistant(session, message);
         return;
       case "user":
+        if (message.parent_tool_use_id === null && message.uuid !== undefined && session.ownUuids.has(message.uuid)) {
+          // The CLI replaying a delivery it consumed: our own notice, stamped
+          // with its origin. That is the steer arriving, never a wake-up — the
+          // parent would otherwise read its own notice as a new task delivery
+          // (MXN-410).
+          this.arrivalProven.add(session.threadId);
+          return;
+        }
         if (message.parent_tool_use_id === null && message.origin && message.origin.kind !== "human") {
           const content = message.message.content;
           const text = typeof content === "string" ? content : content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
