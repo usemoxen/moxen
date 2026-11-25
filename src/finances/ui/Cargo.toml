@@ -3,3 +3,13 @@ name = "moxen-finances-ui"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[features]
+# The render harness (offscreen frames, scripted input) needs GPUI's
+# test-support, exactly like the desktop's `render-harness` feature.
+render-harness = ["gpui/test-support"]
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14" }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
