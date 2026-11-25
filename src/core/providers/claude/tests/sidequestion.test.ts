@@ -11,6 +11,7 @@ import {
   assistantThinking,
   errorResult,
   FakeTransport,
+  initMessage,
   permissionCallbackOptions,
   successResult,
   thinkingTokens,
@@ -185,9 +186,45 @@ describe("Claude side questions", () => {
     ).resolves.toEqual({ text: "It is using JWTs.", withContext: true });
   });
 
+  /**
+   * A note on the way is not the answer: when the run's result carries text
+   * that is not the final message's own last block, the result is the answer.
+   */
+  it("takes the result over an interim note before it", async () => {
+    const transport = new FakeTransport([[assistantText("Let me check."), successResult("It is using JWTs.")]]);
+    const driver = new ClaudeDriver({ transport });
+    await expect(
+      driver.sideQuestion({ cursor: "s", workingDirectory: "/w", question: "q" }),
+    ).resolves.toEqual({ text: "It is using JWTs.", withContext: true });
+  });
+
+  /**
+   * Only the session's own `init` names the session: a frame that arrives
+   * before it must not claim the run and hide the real reply.
+   */
+  it("ignores a foreign frame that arrives before the session's init", async () => {
+    const transport = new FakeTransport([
+      [
+        assistantTextBlock("msg-foreign", "Another thread's answer.", { session_id: "session-foreign" }),
+        initMessage({ session_id: "session-1" }),
+        assistantTextBlock("msg-1", "It is using JWTs in auth.ts, ", { session_id: "session-1" }),
+        assistantTextBlock("msg-1", "and the refresh token rotates every hour.", { session_id: "session-1" }),
+        successResult("and the refresh token rotates every hour."),
+      ],
+    ]);
+    const driver = new ClaudeDriver({ transport });
+    await expect(
+      driver.sideQuestion({ cursor: "s", workingDirectory: "/w", question: "q" }),
+    ).resolves.toEqual({
+      text: "It is using JWTs in auth.ts, \n\nand the refresh token rotates every hour.",
+      withContext: true,
+    });
+  });
+
   it("leaves out a child tool's frames and another session's", async () => {
     const transport = new FakeTransport([
       [
+        initMessage({ session_id: "session-1" }),
         assistantTextBlock("msg-child", "Subagent chatter.", { parent_tool_use_id: "tu-1" }),
         assistantTextBlock("msg-other", "Another thread's answer.", { session_id: "session-9" }),
         assistantTextBlock("msg-1", "It is using JWTs."),

@@ -947,13 +947,11 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     let turns = 0;
     try {
       for await (const message of query) {
-        // A forked run's own session only: another stream's frames are no answer.
         const frameSession = (message as { session_id?: unknown }).session_id;
-        if (typeof frameSession === "string" && frameSession.length > 0) {
-          if (session === null) session = frameSession;
-          else if (session !== frameSession) continue;
-        }
         if (message.type === "assistant") {
+          // A forked run's own session only, and never a child tool's transcript:
+          // the session is the one the run's `init` named.
+          if (session !== null && typeof frameSession === "string" && frameSession.length > 0 && frameSession !== session) continue;
           if (message.parent_tool_use_id !== null) continue;
           // A synthetic frame carrying the CLI's own API error is not an answer.
           const failed = message.error !== undefined;
@@ -971,7 +969,9 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
             else blocks.push(text);
           }
         } else if (message.type === "system") {
-          if (message.subtype === "thinking_tokens") thought = true;
+          if (message.subtype === "init") {
+            if (session === null && typeof frameSession === "string" && frameSession.length > 0) session = frameSession;
+          } else if (message.subtype === "thinking_tokens") thought = true;
         } else if (message.type === "result") {
           if (typeof message.num_turns === "number") turns = message.num_turns;
           if (message.subtype !== "success") {
@@ -993,11 +993,19 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
       input.signal?.removeEventListener("abort", abort);
       query.close?.();
     }
-    // The final message is the answer, whole; `result` holds only its last text
-    // block, so it stands in only when that message carried no text.
-    const assembled = finalMessage === null ? "" : (answers.get(finalMessage) ?? []).join("\n\n");
+    // A reply's blocks all belong to its final message; `result` repeats that
+    // message's last block, so a match means the whole message is the answer and
+    // anything else means the text before it was only a note on the way.
+    const blocks = finalMessage === null ? [] : (answers.get(finalMessage) ?? []);
+    const assembled = blocks.join("\n\n");
+    const last = blocks.at(-1) ?? null;
     const earlier = [...answers.values()].at(-1)?.join("\n\n") ?? "";
-    const text = assembled.trim() ? assembled : (result?.trim() ? result : earlier);
+    let text: string;
+    if (result !== null && result.trim()) {
+      text = last !== null && result.trim() === last.trim() ? assembled : result;
+    } else {
+      text = assembled.trim() ? assembled : earlier;
+    }
     if (!text.trim()) {
       // A reply that only thought ends as a `success` result with no text at
       // all: say which it was, instead of an empty answer nobody can act on.
