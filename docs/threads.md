@@ -808,7 +808,12 @@ delegated review task (`delegate` with `mode: "review"`), or one prompt
 - **Delivery, cache-safe:** never in the system prompt. On Claude and the
   Moxen Harness the procedure goes ahead of the next prompt as a
   `<moxen-mode>` block, once; going back to Build sends a short "mode is
-  off" note the same way. Which mode each provider's conversation was told
+  off" note the same way. On Codex it is a developer-role item
+  (`thread/inject_items`), so the model reads it as Moxen's and the user's
+  prompt arrives exactly as they typed it; an older Codex app-server that
+  has no such method gets the `<moxen-mode>` block ahead of the prompt
+  instead (see [Live updates](#live-updates)).
+  Which mode each provider's conversation was told
   is kept on the thread (`modeState`), and forgotten after a compaction or
   a revert so the procedure is sent again. On OpenCode it is an instruction
   entry (`moxen-research`, `moxen-orchestrate`, `moxen-review`), removed in Build.
@@ -1388,9 +1393,35 @@ the held thread. Background turns are refused while protection holds it.
 
 The instructions a conversation began with are kept, not rewritten. What
 changes since — edited rule files (sent as a patch, never the whole file),
-MCP server sets, skills — rides ahead of the next prompt. A runtime
-instructions update that the provider answers leaves a structured marker on
-that turn (never the text), which the transcript shows as a system card.
+MCP server sets, skills — rides ahead of the next prompt. So do the items only
+Moxen can speak: a runtime instruction update, the mode's procedure, the
+continue after a usage limit. A runtime instructions update that the provider
+answers leaves a structured marker on that turn (never the text), which the
+transcript shows as a system card.
+
+Only Moxen's own instruction is told apart from the user's text. Report data
+is not: a settled task's notice (with its child's headline), what usage
+protection stopped with the captured output, the model's wrap-up notes and a
+background wake-up all reach the model as the tagged user text they always
+were (`<task-notification>`, `## Usage-protection wrap-up notes`), so nothing
+another process wrote arrives with a developer's voice. A message the user
+queues behind a held nudge is likewise theirs, however the two are batched
+into one turn.
+
+Codex has a channel for Moxen's instruction: those items go in as
+developer-role messages (`thread/inject_items`, codex-cli 0.169 and later),
+which start no turn and read as Moxen's. The user's own prompt is then sent
+unchanged, and a turn that carries nothing but a nudge (a usage continue)
+starts with an empty user input. The fallback is only for a runtime that says
+it has no such method — an app-server answering "method not found" or "not
+supported yet"; the session remembers that and sends the same text ahead of
+the prompt as the tagged block (`<moxen-mode>`,
+`<moxen-instructions-update>`, `<moxen-context-update>`), once, in one
+channel. Any other failure fails the turn rather than risking the text twice,
+and an item the app-server has acknowledged is not appended again in that
+session. Claude, the Moxen Harness and OpenCode always take the tagged block.
+A notice pushed into a turn already running is a steer, and that is typed
+text in every provider.
 
 ## Long threads: compaction and hand-off
 

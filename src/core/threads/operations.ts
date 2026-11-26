@@ -68,9 +68,9 @@ import { antigravityUnsupportedUseAllowed, driverKindOfInstance } from "../types
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
-import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
-import { modeChange, withModeChange } from "./modes.js";
+import { pendingRuleUpdate, ruleUpdateBlock, type PendingRuleUpdate } from "./rulefiles.js";
+import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, instructionsUpdateBlock, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, type InstructionState } from "./instructions.js";
+import { modeChange, modeChangeBlock } from "./modes.js";
 import { ranTurns, toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
 import { readThread, threadStatus } from "./threads.js";
@@ -103,6 +103,7 @@ import {
   threadFamily,
   trackContinuation,
   turnPrompt,
+  turnPromptParts,
   untrackContinuation,
   unreadableTurnsError,
   updateThreadMeta,
@@ -234,12 +235,30 @@ interface PendingUpdates {
   readonly modeUpdate: ModeUpdate | null;
 }
 
-/** The prompt a turn sends the provider: what was typed, with any instruction update and mode change ahead of it. */
-function promptWithUpdate(prompt: string, setup: PendingUpdates): string {
-  const withMode = setup.modeUpdate ? withModeChange(prompt, setup.modeUpdate.text, setup.modeUpdate.mode) : prompt;
-  return withInstructionsUpdate(withMode, setup.instructionsUpdate?.text ?? null);
+/**
+ * The provider-only text a turn carries ahead of what the user said, in the
+ * order it rides: edited rule files, then an instruction update, then the
+ * mode. A driver with a developer channel takes them as developer items; the
+ * rest get them ahead of the prompt (`promptWithNotices`). The rule-file patch
+ * is instruction too: those files are the project's own rules, and a provider
+ * that reads their siblings into its system prompt (Claude Code does) has
+ * already given them that weight. None of it reports what another process did;
+ * that stays user text.
+ */
+function pendingNoticeBlocks(setup: PendingUpdates, rules: string | null): string[] {
+  return [
+    ...(rules === null ? [] : [ruleUpdateBlock(rules)]),
+    ...(setup.instructionsUpdate === null ? [] : [instructionsUpdateBlock(setup.instructionsUpdate.text)]),
+    ...(setup.modeUpdate === null ? [] : [modeChangeBlock(setup.modeUpdate.text, setup.modeUpdate.mode)]),
+  ];
 }
 
+/**
+ * What a thread protected for usage owes the recovery turn: the wrap-up's own
+ * notes, and what became of the background work protection stopped. Report
+ * data — model-written notes and captured shell output — so it stays in the
+ * prompt, after what the user said, never in a developer item.
+ */
 async function withUsageProtectionContext(ctx: OperationContext, thread: StoredThread, prompt: string): Promise<string> {
   if (!thread.usagePause) return prompt;
   const tasks = (await ctx.store.readActivities(thread.id)).filter((row) => row.kind === "usage.background" && row.payload?.order === thread.usagePause!.order);
@@ -253,7 +272,24 @@ async function withUsageProtectionContext(ctx: OperationContext, thread: StoredT
   return `${prompt}\n\nUsage protection stopped or detached background work. Check it again before relying on its result or restarting it. Detached means the stop was not confirmed; it may still be running. The last 40 output lines follow; the thread keeps the full captured output:\n${notes.map((note) => JSON.stringify(note)).join("\n")}`;
 }
 
-/** What to record once the provider answered a prompt `promptWithUpdate` built. */
+/**
+ * The user's half of a turn: what they typed — nothing at all on a turn Moxen
+ * leads with its own instruction — with whatever an unanswered turn still owes
+ * ahead of it.
+ */
+async function userPromptOf(
+  ctx: OperationContext,
+  thread: StoredThread,
+  turnId: string,
+  setup: { fresh: boolean; key: string },
+  typed: string,
+): Promise<string> {
+  const owed = await withUnansweredPrompts(ctx, thread, turnId, setup, typed);
+  // A blank prompt leaves the separator `withUnansweredPrompts` adds behind it.
+  return typed.length === 0 ? owed.trimEnd() : owed;
+}
+
+/** What to record once the provider answered a prompt the notice blocks were sent with. */
 function deliveredSteps(setup: PendingUpdates): Array<() => Promise<void>> {
   return [setup.instructionsUpdate?.delivered, setup.modeUpdate?.delivered].filter((step): step is () => Promise<void> => step !== undefined);
 }
@@ -631,7 +667,8 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       return;
     }
     // One message, or several queued ones batched into this turn at promotion.
-    const message = turnPrompt(await store.readMessages(threadId), turn);
+    const messages = await store.readMessages(threadId);
+    const message = turnPrompt(messages, turn);
     if (message === null) {
       // A moved entry still being repaired (a crash between its turn and
       // message writes) must wait for the repair, not fail and not run: put
@@ -685,12 +722,16 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // Decided now, before the run: a notice the batch already holds for this
     // task owns its settle, and the completion callback below only wakes it.
     const coveredParent = await heldNoticeParent(ctx, threadId);
+    // What the user wrote and what Moxen did: only the latter leaves the user channel.
+    const parts = turnPromptParts(messages, turn) ?? { prompt: message.text, notices: [] };
+    const notices = [...parts.notices, ...pendingNoticeBlocks(setup, rules?.text ?? null)];
     void executeTurn({
       store,
       driver,
       threadId,
       storeTurnId: turn.id,
-      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, turn.id, setup, message.text)), setup), rules?.text ?? null),
+      prompt: await withUsageProtectionContext(ctx, thread, await userPromptOf(ctx, thread, turn.id, setup, parts.prompt)),
+      ...(notices.length > 0 ? { notices } : {}),
       ...(steps.length > 0 ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
       ...(setup.fresh ? { freshConversation: true } : {}),
       interactionMode: turn.interactionMode,
@@ -3487,14 +3528,24 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   // Rule files edited while the session lived: a patch ahead of the prompt (Claude; see `rulefiles.ts`).
   const rules: PendingRuleUpdate | null = await pendingRuleUpdate(driver, sent.thread.id, driverKey(turnModel.instanceId), sent.thread.env.path).catch(() => null);
   const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
+  // What the user typed, and — when this send is Moxen's own instruction (the
+  // continue after a usage limit) — that text as a notice instead, so it never
+  // reads as something the user said.
+  const typed = driverPrompt ?? input.prompt.trim();
+  const moxenLed = input.origin === "usage-continue";
   let run: Promise<void>;
   try {
+    // Composed inside the try: every ledger read a prompt needs runs while the
+    // claim is held, so a failure frees it instead of leaking a runner nobody owns.
+    const notices = [...(moxenLed ? [typed] : []), ...pendingNoticeBlocks(setup, rules?.text ?? null)];
+    const prompt = await withUsageProtectionContext(ctx, thread, await userPromptOf(ctx, thread, sent.turn.id, setup, moxenLed ? "" : typed));
     run = executeTurn({
       store,
       driver,
       threadId: thread.id,
       storeTurnId: sent.turn.id,
-      prompt: withRuleUpdate(promptWithUpdate(await withUsageProtectionContext(ctx, thread, await withUnansweredPrompts(ctx, thread, sent.turn.id, setup, driverPrompt ?? input.prompt.trim())), setup), rules?.text ?? null),
+      prompt,
+      ...(notices.length > 0 ? { notices } : {}),
       ...(delivered.length > 0 ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
       ...(setup.fresh ? { freshConversation: true } : {}),
       ...(images.length > 0 ? { images } : {}),

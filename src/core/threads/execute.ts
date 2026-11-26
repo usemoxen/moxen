@@ -19,7 +19,7 @@ import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 
 import type { SkillInventory } from "../catalog/summary.js";
-import { isCompactCommand, type BackgroundTaskSummary, type RateLimitWindow } from "../providers/spi.js";
+import { isCompactCommand, promptWithNotices, type BackgroundTaskSummary, type RateLimitWindow } from "../providers/spi.js";
 import { buildHandoff } from "./handoff.js";
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { chatgptHarnessConfigFor } from "./longthreads.js";
@@ -63,8 +63,8 @@ import {
   pinCheckpointRef,
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
-import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueGatedDispatch, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta, type GateProviders } from "./threads.js";
-import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, withRuleUpdate } from "./rulefiles.js";
+import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueGatedDispatch, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, turnPromptParts, updateThreadMeta, type GateProviders } from "./threads.js";
+import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, ruleUpdateBlock } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
 import { forgetSession, touchSession, trackSession } from "./idle.js";
@@ -555,7 +555,16 @@ export interface ExecuteTurnArgs {
   readonly driver: TurnDriver;
   readonly threadId: string;
   readonly storeTurnId: string;
+  /** What the user said; empty on a notice-only turn (`notices`). */
   readonly prompt: string;
+  /**
+   * Moxen's own instruction for this turn (`ProviderSendTurnInput.notices`): a
+   * mode procedure, an instruction update, a rule-file patch, a usage
+   * continue. A developer-channel driver sends them as developer items; every
+   * other driver gets them ahead of the prompt. Report data is never one of
+   * these — it stays the tagged user text it always was.
+   */
+  readonly notices?: readonly string[];
   /** Images sent with the prompt. */
   readonly images?: readonly ProviderImage[];
   readonly modelSelection?: ModelSelection;
@@ -700,8 +709,28 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       return;
     }
     // One message, or several queued ones batched into this turn at promotion.
-    const prompt = turnPrompt(await store.readMessages(threadId), next);
+    const messages = await store.readMessages(threadId);
+    const prompt = turnPrompt(messages, next);
     if (prompt === null) return;
+    // Moxen's own instruction and the user's text are told apart per message:
+    // a rider queued after a held nudge is the user's, and stays their text.
+    const parts = turnPromptParts(messages, next) ?? { prompt: prompt.text, notices: [] };
+    // Its images were saved when it was queued; the bytes come off disk.
+    const images = await imagesOf(prompt.attachments);
+    // Rule files edited while the session ran the turn before: a patch ahead
+    // of the prompt, like a fresh send. Without a baseline this captures one
+    // and stays quiet.
+    //
+    // No MCP/native-tool refresh here, unlike a fresh send (`startTurn`) or
+    // an admission resume (`runRecoveredTurn`): those recompute the session
+    // setup from config, and this runner cannot — it runs without an
+    // operation context, on whatever the settling runner handed it. The
+    // promotion runs seconds after a turn whose own send applied that
+    // moment's registrations, and the next send or admission refreshes again,
+    // so only an edit landing mid-turn waits one extra turn. Rule files need
+    // no setup, so they do refresh above.
+    const rules = await pendingRuleUpdate(driver, threadId, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), thread.env.path).catch(() => null);
+    const notices = [...parts.notices, ...(rules === null ? [] : [ruleUpdateBlock(rules.text)])];
     // The dispatch gate, split facts from decision like the send boundary
     // (LOCAL-034): the reads resolve, then the setting in force at this
     // promotion is read synchronously. A promoted turn carrying one of
@@ -721,28 +750,14 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       await runPromotedTurn(args);
       return;
     }
-    // Its images were saved when it was queued; the bytes come off disk.
-    const images = await imagesOf(prompt.attachments);
-    // Rule files edited while the session ran the turn before: a patch ahead
-    // of the prompt, like a fresh send. Without a baseline this captures one
-    // and stays quiet.
-    //
-    // No MCP/native-tool refresh here, unlike a fresh send (`startTurn`) or
-    // an admission resume (`runRecoveredTurn`): those recompute the session
-    // setup from config, and this runner cannot — it runs without an
-    // operation context, on whatever the settling runner handed it. The
-    // promotion runs seconds after a turn whose own send applied that
-    // moment's registrations, and the next send or admission refreshes again,
-    // so only an edit landing mid-turn waits one extra turn. Rule files need
-    // no setup, so they do refresh above.
-    const rules = await pendingRuleUpdate(driver, threadId, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), thread.env.path).catch(() => null);
     claimed = null;
     void executeTurn({
       store,
       driver,
       threadId,
       storeTurnId: next.id,
-      prompt: withRuleUpdate(prompt.text, rules?.text ?? null),
+      prompt: parts.prompt,
+      ...(notices.length > 0 ? { notices } : {}),
       ...(rules ? { afterAnswer: async () => rules.commit() } : {}),
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
@@ -1576,16 +1591,16 @@ function recordTurnActivity(
  * again, and later turns carry no handoff. A bare `/compact` still gets
  * the notice but no handoff: it must reach the driver as the command.
  */
-async function withResumeHandoff(args: ExecuteTurnArgs): Promise<string> {
+async function withResumeHandoff(args: ExecuteTurnArgs, prompt: string): Promise<string> {
   const { store, driver, threadId } = args;
   const thread = await store.readThreadRecord(threadId).catch(() => null);
-  if (thread === null) return args.prompt;
+  if (thread === null) return prompt;
   const selection = args.modelSelection ?? thread.modelSelection;
-  if (driverKindOfInstance(selection.instanceId) !== "claude") return args.prompt;
+  if (driverKindOfInstance(selection.instanceId) !== "claude") return prompt;
   const saved = thread.providerSessions?.[driverKey(selection.instanceId)];
-  if (saved === undefined) return args.prompt;
-  if ((driver.resumeCursor?.(threadId) ?? null) === saved) return args.prompt;
-  const handoff = isCompactCommand(args.prompt) ? null : await buildHandoff(store, threadId).catch(() => null);
+  if (saved === undefined) return prompt;
+  if ((driver.resumeCursor?.(threadId) ?? null) === saved) return prompt;
+  const handoff = isCompactCommand(prompt) ? null : await buildHandoff(store, threadId).catch(() => null);
   await store
     .appendLedger(threadId, "activity", {
       id: store.newId(),
@@ -1605,7 +1620,7 @@ async function withResumeHandoff(args: ExecuteTurnArgs): Promise<string> {
     })
     .catch(() => undefined);
   store.emit(threadId, "activity");
-  return handoff === null ? args.prompt : `${handoff}\n\n${args.prompt}`;
+  return handoff === null ? prompt : `${handoff}\n\n${prompt}`;
 }
 
 async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -1707,6 +1722,9 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       }
       return;
     }
+    const developerNotices = !!args.notices?.length && driver.capabilities?.developerNotices === true;
+    const renderedPrompt = developerNotices || isCompactCommand(args.prompt) ? args.prompt : promptWithNotices(args.prompt, args.notices);
+    const dispatchPrompt = args.driverTurnId ? renderedPrompt : await withResumeHandoff(args, renderedPrompt);
     // Rechecked as late as one read allows, immediately before the prompt
     // leaves: a session start can take the time the user needs to turn the
     // setting off, and no earlier check may stand in for this one. Every
@@ -1738,7 +1756,8 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       : await Effect.runPromise(
           driver.sendTurn({
             threadId,
-            prompt: await withResumeHandoff(args),
+            prompt: dispatchPrompt,
+            ...(developerNotices ? { notices: args.notices } : {}),
             ...(args.images?.length ? { images: args.images } : {}),
             ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
             ...(args.runtimeMode ? { runtimeMode: args.runtimeMode } : {}),

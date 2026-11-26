@@ -106,6 +106,7 @@ export class FakeCodexServer {
       case "turn/start":
       case "turn/interrupt":
       case "thread/compact/start":
+      case "thread/inject_items":
       case "config/mcpServer/reload":
         return {};
       case "model/list": {

@@ -26,6 +26,7 @@ import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalo
 import { excludedSkills } from "../../skills/discovery.js";
 import type { CodexProviderConfig, InteractionMode, ModelSelection, RuntimeMode } from "../../types.js";
 import { JsonRpcPeer } from "../stdio.js";
+import { promptWithNotices } from "../spi.js";
 import type {
   SideQuestionInput,
   SideAnswer,
@@ -179,6 +180,16 @@ interface CodexSession {
   tools: Map<string, Record<string, unknown>>;
   model: string | null;
   runtimeMode: RuntimeMode;
+  /**
+   * How this app-server takes Moxen's own text (see
+   * `ProviderSendTurnInput.notices`): `developer` once a developer item went
+   * in, `text` once the runtime said it has no `thread/inject_items`, and
+   * `unknown` until the first turn carries one. Cached per session, so a
+   * runtime without the method is asked once, not on every turn.
+   */
+  notices: "unknown" | "developer" | "text";
+  /** The notices this session's history already holds, by text: never appended twice. */
+  readonly injected: Set<string>;
   transcript: TranscriptTurn[];
   waiters: TurnWaiters<CodexTurnOutcome>;
   parked: Map<string, ParkedCodex>;
@@ -282,6 +293,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly capabilities: ProviderAdapterCapabilities = {
     sessionModelSwitch: "in-session",
     supportsConversationRollback: true,
+    // `thread/inject_items` (codex-cli 0.169+); an app-server that predates
+    // it is detected on the first send and read as text from then on.
+    developerNotices: true,
   };
 
   private readonly settings: CodexSettings;
@@ -414,6 +428,8 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         }),
         model: resolveCodexModel(input.modelSelection?.model),
         runtimeMode: input.runtimeMode ?? "full-access",
+        notices: "unknown",
+        injected: new Set(),
         transcript: [],
         waiters: new Map(),
         parked: new Map(),
@@ -756,6 +772,47 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly hasSession = (threadId: ThreadId): Effect.Effect<boolean> =>
     Effect.succeed(this.sessions.has(threadId));
 
+  /**
+   * Append Moxen's own text to the thread's model-visible history as
+   * developer-role messages (`thread/inject_items`, codex-cli 0.169+). It
+   * starts no turn and shows in no item list: the next turn's request reads
+   * it, which is why the caller sends the user's prompt unchanged beside it.
+   *
+   * True when the items are in (or were already appended in this session), so
+   * the caller never also puts the same text ahead of the prompt. False only
+   * when the runtime said it has no such method: an app-server older than
+   * 0.169 answers `-32601`, or "not supported yet", and is remembered as text
+   * for the rest of the session. Any other failure is thrown — a timeout or a
+   * transport error may have appended the items, and folding them into the
+   * prompt as well would say them twice; the turn fails instead, and a retry
+   * finds the acknowledged item recorded.
+   *
+   * Two calls, because the protocol offers no atomic one: a turn's only
+   * developer-instruction field is `collaborationMode.settings`, which selects
+   * a collaboration mode and replaces its settings rather than adding an item
+   * to the history, so Moxen does not use it to talk to the model.
+   */
+  private async injectNotices(session: CodexSession, codexThreadId: string, notices: readonly string[]): Promise<boolean> {
+    // A notice already appended is not appended again: a turn that failed to
+    // start after the item landed must not say it twice on the retry.
+    const fresh = notices.filter((notice) => !session.injected.has(notice));
+    if (fresh.length === 0) return true;
+    if (session.notices === "text") return false;
+    try {
+      await session.peer.request(CODEX_METHODS.threadInjectItems, {
+        threadId: codexThreadId,
+        items: fresh.map((notice) => ({ type: "message", role: "developer", content: [{ type: "input_text", text: notice }] })),
+      });
+      session.notices = "developer";
+      for (const notice of fresh) session.injected.add(notice);
+      return true;
+    } catch (cause) {
+      if (!codexMethodUnavailable(cause)) throw cause;
+      session.notices = "text";
+      return false;
+    }
+  }
+
   // -- turns ---------------------------------------------------------------
 
   readonly sendTurn = (input: ProviderSendTurnInput): Effect.Effect<ProviderTurnStartResult, CliError> =>
@@ -784,6 +841,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       };
       const effort = optionValue(["reasoningEffort", "effort"]) ?? "medium";
       const serviceTier = optionValue(["serviceTier", "tier"]);
+      const notices = (input.notices ?? []).filter((notice) => notice.trim().length > 0);
       const turn: TranscriptTurn = {
         id: randomUUID(),
         serverTurnId: null,
@@ -800,9 +858,15 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       try {
         const compact = isCompactCommand(input.prompt);
         const notes = session.harness.takeNotes();
+        // Moxen's own text goes in as developer items, so the model can tell
+        // it from what the user typed; a turn of it alone carries an empty
+        // user input. A runtime that does not know the method gets it ahead
+        // of the prompt instead, exactly as before.
+        const injected = !compact && notices.length > 0 ? await this.injectNotices(session, codexThreadId, notices) : false;
+        const prompt = injected ? input.prompt : promptWithNotices(input.prompt, notices);
         const result = asRecord(await session.peer.request(compact ? CODEX_METHODS.threadCompactStart : CODEX_METHODS.turnStart, compact ? { threadId: codexThreadId } : {
           threadId: codexThreadId,
-          input: [...await codexUserInput(session.peer, session.workingDirectory, input.prompt, input.images), ...(notes ? userInputBlocks(notes) : [])],
+          input: [...await codexUserInput(session.peer, session.workingDirectory, prompt, input.images), ...(notes ? userInputBlocks(notes) : [])],
           ...(effort ? { effort } : {}),
           summary: this.providerConfig.reasoningSummary ?? "detailed",
           ...(model ? { model } : {}),

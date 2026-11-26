@@ -10,6 +10,7 @@
  *
  * | Provider | Switching on | Switching off |
  * |---|---|---|
+ * | Codex | `<moxen-mode>` block as a developer item (`thread/inject_items`), else ahead of the next prompt | a short note the same way |
  * | Claude, Harness | `<moxen-mode>` block ahead of the next prompt | a short note the same way |
  * | OpenCode | instruction entry `moxen-research` / `moxen-orchestrate` | the entry is removed |
  *
@@ -18,6 +19,7 @@
  * thread (`StoredThread.modeState`) which mode each provider's conversation
  * was last told, so a note goes once.
  */
+import { promptWithNotices } from "../providers/spi.js";
 import type { InteractionMode } from "../types.js";
 
 /** What every mode shares: what can be spent, what to remember, a model per task, isolation. */
@@ -187,9 +189,8 @@ export function modeChange(from: InteractionMode, to: InteractionMode): string |
   return `${previous.name} mode is off: the user switched back to Build. The ${previous.name} procedure no longer applies; work on requests directly.`;
 }
 
-/** A prompt with the mode change ahead of it, for the provider only — the transcript keeps what was typed. */
-export function withModeChange(prompt: string, change: string | null, to: InteractionMode): string {
-  if (change === null) return prompt;
+/** The `<moxen-mode>` block a mode change rides as, for the provider only — the transcript keeps what was typed. */
+export function modeChangeBlock(change: string, to: InteractionMode): string {
   const key = modeInstructionKey(to);
   return [
     key === null ? "<moxen-mode>" : `<moxen-mode key="${key}">`,
@@ -198,7 +199,10 @@ export function withModeChange(prompt: string, change: string | null, to: Intera
     "",
     change,
     "</moxen-mode>",
-    "",
-    prompt,
   ].join("\n");
+}
+
+/** A prompt with the mode change ahead of it, for the provider only — the transcript keeps what was typed. */
+export function withModeChange(prompt: string, change: string | null, to: InteractionMode): string {
+  return change === null ? prompt : promptWithNotices(prompt, [modeChangeBlock(change, to)]);
 }
