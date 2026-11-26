@@ -68,6 +68,7 @@ function group(overrides: Partial<TurnGroup> & { id: string }): TurnGroup {
     waits: [],
     limited: false,
     usageWrapUp: false,
+    instructionsUpdate: null,
     startedAt: "2026-09-16T02:00:00.000Z",
     ...overrides,
   };

@@ -133,6 +133,12 @@ pub enum Message {
         /// When it landed, as the header shows it.
         at: String,
     },
+    /// A turn carried updated runtime instructions. The card names the fact
+    /// only: the instructions themselves are never stored or shown.
+    InstructionsUpdated {
+        /// When it landed, as the header shows it.
+        at: String,
+    },
     /// Shared usage is nearly exhausted: the wrap-up notice, never the
     /// maintenance prompt itself.
     UsageProtection {

@@ -402,6 +402,32 @@ describe("groupTurns", () => {
     expect(groups[0]?.nudges.map((row) => row.id)).toEqual(["u2"]);
   });
 
+  it("keeps an acknowledged instruction update as a visible system card, never as work", () => {
+    const groups = groupTurns([
+      entry({ id: "u1", kind: "user", text: "go", at: "2026-09-16T02:00:00.000Z" }),
+      entry({ id: "a1", kind: "assistant", text: "done.", at: "2026-09-16T02:00:05.000Z" }),
+      entry({
+        id: "iu",
+        kind: "activity",
+        activityKind: "instructions.updated",
+        text: "Runtime instructions updated",
+        at: "2026-09-16T02:00:06.000Z",
+        activity: {
+          id: "iu",
+          tone: "info",
+          kind: "instructions.updated",
+          summary: "Runtime instructions updated",
+          turnId: "turn-1",
+          createdAt: "2026-09-16T02:00:06.000Z",
+          payload: { provider: "claude" },
+        } as unknown as TimelineEntry["activity"],
+      }),
+    ]);
+    expect(groups[0]?.instructionsUpdate?.id).toBe("iu");
+    expect(groups[0]?.work).toEqual([]);
+    expect(groups[0]?.reply?.id).toBe("a1");
+  });
+
   it("only counts a prompt as a nudge once the turn has started working", () => {
     const groups = groupTurns([
       entry({ id: "u1", kind: "user", text: "go", at: "2026-09-16T02:00:00.000Z" }),

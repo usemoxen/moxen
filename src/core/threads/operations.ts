@@ -180,6 +180,24 @@ interface InstructionsUpdate {
   readonly delivered: () => Promise<void>;
 }
 
+/**
+ * The activity row saying a turn carried the runtime instructions the model
+ * had not seen yet. It is recorded only once the provider answered the prompt
+ * (`instructionsUpdate.delivered`) and never carries the instructions
+ * themselves — only the provider whose conversation received them.
+ */
+function instructionsUpdateRow(store: ThreadStore, threadId: string, turnId: string, provider: string) {
+  return {
+    id: store.newId(),
+    threadId,
+    turnId,
+    kind: "instructions.updated",
+    summary: "Runtime instructions updated",
+    payload: { provider },
+    createdAt: store.nowIso(),
+  };
+}
+
 /** The part of a session setup `ensureDriverSession` takes. */
 function sessionStart(setup: { mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }) {
   return {
@@ -318,6 +336,8 @@ async function sessionSetup(
   ctx: OperationContext,
   thread: StoredThread,
   instanceId: string = thread.modelSelection.instanceId,
+  /** The turn whose prompt will carry a pending update: the one its acknowledgement is recorded on. */
+  turnId: string | null = null,
 ): Promise<{ mcpServers: McpServerSpec[]; disabledMcpTools: string[]; disabledNativeTools: string[]; moxenPrompt: boolean; checklist: boolean; instructions: string; store: ThreadStore; instructionsUpdate: InstructionsUpdate | null; modeUpdate: ModeUpdate | null; fresh: boolean; key: string; delegated: boolean; idleTtlMs: number | null; moxenMemory: boolean }> {
   const project = await projectById(ctx.storeRoot, thread.projectId);
   const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() || null);
@@ -396,6 +416,35 @@ async function sessionSetup(
       await ctx.store.writeThreadRecord({ ...fresh, instructionState: { ...fresh.instructionState, [key]: state } });
     });
   };
+  // The acknowledgement: the provider answered the prompt that carried the
+  // update, so the conversation has it. The marker is appended first and the
+  // delivered state second, both under the thread lock: a retry after a crash
+  // between them finds the marker, skips it, and still records the state.
+  // The marker is a courtesy card, never the outcome: this must not reject,
+  // or the turn that just answered would be marked failed and its reply lost.
+  // A failed marker append leaves the delivered state unrecorded, so the next
+  // turn carries the update again and its answer retries the marker.
+  const acknowledge = async (state: InstructionState): Promise<void> => {
+    try {
+      await ctx.store.withThreadLock(thread.id, async () => {
+        const fresh = await ctx.store.readThreadRecord(thread.id);
+        if (!fresh) return;
+        if (turnId !== null) {
+          const marked = (await ctx.store.readActivities(thread.id)).some((activity) => activity.kind === "instructions.updated" && activity.turnId === turnId);
+          if (!marked) {
+            try {
+              await ctx.store.appendLedger(thread.id, "activity", instructionsUpdateRow(ctx.store, thread.id, turnId, key));
+            } catch {
+              return;
+            }
+          }
+        }
+        await ctx.store.writeThreadRecord({ ...fresh, instructionState: { ...fresh.instructionState, [key]: state } });
+      });
+    } catch {
+      // Best-effort: the acknowledgement never changes the provider outcome.
+    }
+  };
   const recorded = thread.instructionState?.[key];
   if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered) await record(next);
   const baseDisabledTools =
@@ -422,7 +471,7 @@ async function sessionSetup(
     instructionsUpdate:
       plan.update === null
         ? null
-        : { text: plan.update, delivered: () => record({ ...next, delivered: plan.update! }) },
+        : { text: plan.update, delivered: () => acknowledge({ ...next, delivered: plan.update! }) },
     modeUpdate: pendingModeUpdate(ctx, thread, key, history),
     fresh: !history,
     key,
@@ -513,7 +562,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // Codex and Harness fix MCP definitions at session creation. Resume the
       // same provider conversation with the request-scoped submission tool.
       if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
-      setup = await sessionSetup(ctx, turnThread, selection.instanceId);
+      setup = await sessionSetup(ctx, turnThread, selection.instanceId, turn.id);
       await ensureDriverSession(driver, turnThread, { modelSelection: selection, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, threadId), ...usageLimitHook(ctx, threadId, selection.instanceId) });
       await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
       // Config or rule files changed while the session sat idle: a live session
@@ -3265,7 +3314,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   let setup: Awaited<ReturnType<typeof sessionSetup>> | null = null;
   let startFailure: unknown = null;
   try {
-    setup = await sessionSetup(ctx, turnThread, turnModel.instanceId);
+    setup = await sessionSetup(ctx, turnThread, turnModel.instanceId, sent.turn.id);
     await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id), ...usageLimitHook(ctx, sent.thread.id, turnModel.instanceId) });
   } catch (cause) {
     startFailure = cause;

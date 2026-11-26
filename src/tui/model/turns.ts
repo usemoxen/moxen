@@ -43,6 +43,12 @@ export interface TurnGroup {
   limited: boolean;
   /** A native usage-protection wrap-up, whose notice may be inside folded work. */
   usageWrapUp: boolean;
+  /**
+   * The structured record that this turn carried an updated runtime
+   * instructions text (Moxen's own card; the text itself is never stored).
+   * It stays visible outside the Worked fold.
+   */
+  instructionsUpdate: TimelineEntry | null;
 }
 
 function elapsed(entries: readonly TimelineEntry[], waits: readonly WaitSpan[]): { durationMs: number; startedAt: string } {
@@ -122,6 +128,7 @@ export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits =
       waits: [],
       limited: false,
       usageWrapUp: false,
+      instructionsUpdate: null,
     };
     if (pendingPrompts.length > 0) {
       group.prompts.unshift(...pendingPrompts);
@@ -202,6 +209,12 @@ export function groupTurns(entries: readonly TimelineEntry[], waits: TurnWaits =
     if (entry.kind === "proposed-plan") {
       if (current === null) current = open(entry);
       current.proposedPlan = entry;
+      continue;
+    }
+    // Moxen's acknowledgement that this turn carried new runtime
+    // instructions is a system card of its own, never part of the work.
+    if (entry.kind === "activity" && entry.activityKind === "instructions.updated") {
+      current.instructionsUpdate = entry;
       continue;
     }
     if (entry.kind === "assistant") {

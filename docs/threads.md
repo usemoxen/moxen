@@ -775,6 +775,14 @@ delegated review task (`delegate` with `mode: "review"`), or one prompt
   is recorded as told, and the next turn starts clean with that turn's prompt
   (a handoff document, say) ahead of it, up to the last turn the provider
   answered, along with the mode block.
+  The acknowledged instruction update is recorded on the turn that carried it
+  as an `instructions.updated` activity, and both clients draw it as a compact
+  system card. It names the provider only: the instructions' text is neither
+  stored there nor shown, a fresh conversation's baseline and a mode change
+  leave no such marker, and an unanswered turn leaves none until a retry is
+  answered. The marker's write is best-effort: if it fails after the provider
+  answered, the turn still completes with its reply, and the next turn that
+  carries the update lands the marker when its answer arrives.
 - A new thread starts in Build unless a mode is picked while drafting it,
   and a delegated task runs in Build unless the model that delegates asks for
   Research or Review (`delegate`'s `mode`); a task is never in Orchestrate. A thread
@@ -1326,7 +1334,9 @@ the held thread. Background turns are refused while protection holds it.
 
 The instructions a conversation began with are kept, not rewritten. What
 changes since — edited rule files (sent as a patch, never the whole file),
-MCP server sets, skills — rides ahead of the next prompt.
+MCP server sets, skills — rides ahead of the next prompt. A runtime
+instructions update that the provider answers leaves a structured marker on
+that turn (never the text), which the transcript shows as a system card.
 
 ## Long threads: compaction and hand-off
 

@@ -113,8 +113,8 @@ export async function runTurnModels(): Promise<void> {
     console.log("--- per-turn model labels ---");
     console.log(frame);
     const lines = frame.split("\n");
-    const oldReply = lines.findIndex((line) => /Claude Old\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line));
-    const newReply = lines.findIndex((line) => /Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line));
+    const oldReply = lines.findIndex((line) => /Claude Old\s+·\s+(?:\w{3}, )?\d\d:\d/.test(line));
+    const newReply = lines.findIndex((line) => /Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d/.test(line));
     if (oldReply === -1) fail("the first turn's reply is not labelled with the model that ran it (Claude Old)");
     if (newReply === -1) fail("the second turn's reply is not labelled with the current model (Claude Opus 5)");
     if (oldReply > newReply) fail("per-turn model labels are attached to the wrong turns");

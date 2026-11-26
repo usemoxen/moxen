@@ -1351,6 +1351,8 @@ export const en = {
   "timeline.resetAt": "  ·  reset at ",
   "timeline.resetsAt": "  ·  resets ",
   "timeline.finishingStep": "  Finishing the current step on a small allowance from the weekly limit, instead of stopping mid-edit.",
+  "timeline.instructionsUpdated": "Runtime instructions updated",
+  "timeline.instructionsUpdatedDetail": "This turn ran with Moxen's updated runtime instructions.",
   "timeline.subagentsSettled": "{count} subagents settled",
   "timeline.tasksSettled": "{count} delegated tasks settled",
   "timeline.tasksUpdated": "{count} delegated task updates",

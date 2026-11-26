@@ -992,6 +992,26 @@ function CompactionLine({
 }
 
 /**
+ * Moxen's own record that this turn ran with updated runtime instructions:
+ * a compact system card, like a task notice, and never the instructions
+ * themselves (which the store does not keep).
+ */
+function InstructionsUpdateCard({ entry, now }: { entry: TimelineEntry; now: number }) {
+  return (
+    <box
+      border={["left"]}
+      borderStyle="heavy"
+      borderColor={COLOR.diff}
+      style={{ flexDirection: "column", flexGrow: 1, marginTop: 1, flexShrink: 0, paddingLeft: 2, paddingRight: 2, paddingTop: 1, paddingBottom: 1 }}
+      backgroundColor={SURFACE.panel}
+    >
+      <SpeakerHeader label={tr("timeline.instructionsUpdated")} time={clockTime(entry.at, now)} color={COLOR.diff} background={SURFACE.panel} />
+      <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word">{tr("timeline.instructionsUpdatedDetail")}</text>
+    </box>
+  );
+}
+
+/**
  * A `/compact` turn as that one boundary line, not a "you" card, a "Worked
  * for…" fold and the whole summary dumped under them: "Compacting…" while the
  * provider works, then "Conversation compacted" with how long it took. Said
@@ -1470,9 +1490,18 @@ function TurnBlock({  group,
   // trailing tools — the newest calls stay visible until the turn ends.
   const segments = workExpanded ? segmentWork(work, inFlow ? null : closing) : [];
 
-  // `/compact` alone: one line, not a prompt card over a fold of work.
+  // `/compact` alone: one line, not a prompt card over a fold of work. An
+  // acknowledged instruction update on that turn still gets its card below
+  // the line — the compaction branch must not swallow it.
   if (group.prompts.length > 0 && group.prompts.every((entry) => isCompactPrompt(entry.message))) {
-    return <CompactBlock group={group} open={open} now={now} width={width} />;
+    return (
+      <box style={{ flexDirection: "column", flexShrink: 0 }}>
+        <CompactBlock group={group} open={open} now={now} width={width} />
+        {group.instructionsUpdate === null ? null : (
+          <InstructionsUpdateCard entry={group.instructionsUpdate} now={now} />
+        )}
+      </box>
+    );
   }
 
   const renderToolRow = (entry: TimelineEntry) => (
@@ -1555,6 +1584,10 @@ function TurnBlock({  group,
           now={now}
           onOpenActions={() => onOpenMessageActions(closing)}
         />
+      )}
+
+      {group.instructionsUpdate === null ? null : (
+        <InstructionsUpdateCard entry={group.instructionsUpdate} now={now} />
       )}
 
       {group.diff === null ? null : (

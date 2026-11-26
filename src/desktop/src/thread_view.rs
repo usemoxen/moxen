@@ -687,6 +687,45 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                     }))
                                     .into_any_element()
                             }
+                            Message::InstructionsUpdated { at } => div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .border_l_2()
+                                .border_color(color("rule"))
+                                .pl(px(14.))
+                                .py(px(4.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_baseline()
+                                        .gap(px(8.))
+                                        .text_size(px(13.5))
+                                        .child(div().text_color(color("ink-2")).child("↻"))
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(crate::language::message(
+                                                    "timeline.instructionsUpdated",
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(theme::MONO)
+                                                .text_size(px(12.))
+                                                .text_color(color("ink-2"))
+                                                .child(at.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .text_color(color("ink-2"))
+                                        .child(crate::language::message(
+                                            "timeline.instructionsUpdatedDetail",
+                                        )),
+                                )
+                                .into_any_element(),
                             Message::UsageProtection { at } => div()
                                 .flex()
                                 .flex_col()

@@ -30,7 +30,7 @@ function emptyGroup(id: string, diff: TimelineEntry | null = null): TurnGroup {
   return {
     id, turnId: id, prompts: [], nudges: [], work: [], reply: null, live: null, diff,
     proposedPlan: null, durationMs: 0, tokensPerSecond: null, startedAt: "", waits: [],
-    limited: false, usageWrapUp: false,
+    limited: false, usageWrapUp: false, instructionsUpdate: null,
   };
 }
 
