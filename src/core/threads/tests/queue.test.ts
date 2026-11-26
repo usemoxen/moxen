@@ -777,6 +777,31 @@ describe("admission of held plain queued turns", () => {
     expect((await applySnoozeCheck(w.store, thread.id, { ...stale, key: snoozeKey(second) }))?.snoozeConditions).toBeNull();
   });
 
+  it("keeps a latch one overlapping pass learned when a stale pass reaches the lock late", async () => {
+    // Two wake passes read the same snooze while a condition still holds:
+    // pass A sees the `provider … after` event and stores its latch, then
+    // pass B — which read before A stored — applies its empty verdict. The
+    // latch is a fact about the snooze, not a pass's own state, so B must
+    // not erase it.
+    const w = await world(); const thread = await w.make(); const dependency = await w.make();
+    const running = await sendTurn(w.store, dependency.id, { prompt: "prerequisite" });
+    const snoozed = await snoozeThread(w.store, thread.id, null, [
+      { type: "provider", provider: "codex", state: "exhausted", mode: "after" },
+      { type: "thread", threadId: dependency.id },
+    ]);
+    const conditions = snoozed.snoozeConditions ?? [];
+    const passA = { key: snoozeKey(snoozed), conditions, latched: [0], due: false };
+    expect((await applySnoozeCheck(w.store, thread.id, passA))?.snoozeLatched).toEqual([0]);
+    const passB = { key: snoozeKey(snoozed), conditions, latched: [], due: false };
+    await applySnoozeCheck(w.store, thread.id, passB);
+    expect((await w.store.readThreadRecord(thread.id))!.snoozeLatched).toEqual([0]);
+    // The latch is what wakes the snooze once the other condition clears —
+    // no fresh provider event is needed.
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 0, exhausted: false, resetsAt: new Date(Date.now() + 3_600_000).toISOString() }]);
+    await completeTurn(w.store, dependency.id, running.turn.id, { text: "done" });
+    expect(await wakeDueSnoozes(w.ctx)).toEqual([thread.id]);
+  });
+
   it("records the reset a snooze waits for and the provider signal it saw, so the next pass does not start over", async () => {
     const w = await world(); const thread = await w.make();
     const dependency = await w.make();

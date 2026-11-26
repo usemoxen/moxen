@@ -804,9 +804,9 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
   for (const candidate of [...row.turns].sort((a, b) => (a.queue?.order ?? Date.parse(a.createdAt)) - (b.queue?.order ?? Date.parse(b.createdAt)))) {
     if (candidate.status !== "queued") continue;
     // A plain turn still waits for the running turn's settle unless settle
-    // held it for admission (a snoozed or settled thread, or an exhausted
-    // provider) and the thread is idle now.
-    if (!candidate.queue && !candidate.scheduledFor && (!candidate.heldAtSettle || !idle)) continue;
+    // held it for admission (a settled thread, or an exhausted provider) or a
+    // snooze holds it, and the thread is idle now.
+    if (!candidate.queue && !candidate.scheduledFor && (!(candidate.heldAtSettle || candidate.heldBySnooze) || !idle)) continue;
     // A stale automatic continue never fires as a pointless turn: the
     // thread's work already resumed, so it is taken back before it runs and
     // the loop moves on to whatever waits behind it.

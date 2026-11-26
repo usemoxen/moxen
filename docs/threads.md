@@ -58,10 +58,14 @@ A send on an idle thread never jumps ahead of an older held turn: the new
 message queues behind it, held for admission in turn, and the send reports
 it queued (it waits in the Work queue, it is not lost). The older turn goes
 first once nothing blocks it. A held turn that genuinely cannot run yet — a
-snoozed thread, a provider with no room — still holds its place, so the new
-message waits behind it rather than running first; unsnoozing, or the limit
-lapsing, releases both in order. Sending an immediate user message to end
-usage protection is the exception: it releases that hold and runs first.
+provider with no room — still holds its place, so the new message waits
+behind it rather than running first; the limit lapsing releases both in
+order. A snooze's hold is the exception beside it: it holds the automatic
+work an agent queued (`message_queue` on a snoozed task) and never a direct
+send, which runs past the held message and leaves it waiting for the snooze
+to end, admitted once the task is active again. Sending an immediate user
+message to end usage protection is the other exception: it releases that
+hold and runs first.
 "Older held turn" includes a due one: a continue set for a usage-limit
 reset, or a message held behind one, whose time has come. The rule is oldest
 first — the new message rides along in the older turn when model and mode

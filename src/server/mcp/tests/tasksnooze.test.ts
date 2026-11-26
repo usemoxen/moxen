@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import { testHarness, type TestHarnessOptions } from "../../../core/testing/harness.js";
 import type { TurnDriver } from "../../../core/threads/execute.js";
-import { wakeDueSnoozes, type OperationContext } from "../../../core/threads/operations.js";
+import { wakeDueSnoozes, runWorkQueue, type OperationContext } from "../../../core/threads/operations.js";
 import { threadStatus } from "../../../core/threads/threads.js";
 import { openThreadStore, type ThreadStore } from "../../../core/threads/store.js";
 import { parseScheduledTime } from "../../../core/threads/scheduledtime.js";
@@ -167,6 +167,41 @@ describe("task_snooze", () => {
       await expect.poll(async () => (await t.store.readTurns(taskId)).filter((turn) => turn.status === "running").length, WAIT).toBe(1);
       // The snooze is untouched by it and still ends on its own time.
       expect((await t.store.readThreadRecord(taskId))!.snoozedUntil).not.toBeNull();
+    } finally {
+      await t.connection.close();
+    }
+  }, 30_000);
+
+  it("runs a direct task_send at once past a message the snooze holds, and leaves that message held", async () => {
+    // The snooze hold is its own hold, not the oldest-first hold a plain
+    // settle leaves: a direct send must not queue behind the snoozed
+    // message_queue entry, run it, or fold it into its own turn.
+    const t = await setup();
+    try {
+      const taskId = await t.delegate();
+      await waitForTurnDone(t.store, taskId);
+      await t.snooze(t.orchestrator, { taskId, at: new Date(Date.now() + 3_600_000).toISOString() });
+      const queued = JSON.parse((await callMoxenTool(t.connection, t.orchestrator, "message_queue", { threadId: taskId, message: "Pick this up after the snooze" })).text) as Record<string, unknown>;
+      expect(queued).toMatchObject({ threadId: taskId, status: "queued" });
+      const sent = await callMoxenTool(t.connection, t.orchestrator, "task_send", { taskId, message: "One more thing", wake: true });
+      expect(JSON.parse(sent.text)).toMatchObject({ taskId, outcome: "started", woke: true });
+      await waitForTurnDone(t.store, taskId);
+      // The snoozed message waited through that whole turn, held for the
+      // snooze — not batched into it, not released by it.
+      const held = (await t.store.readTurns(taskId)).find((turn) => turn.id === queued.turnId)!;
+      expect(held).toMatchObject({ status: "queued", heldBySnooze: true });
+      expect(held.heldAtSettle).toBeUndefined();
+      // Exactly the snoozed message stayed on the held turn: the direct
+      // send's turn neither folded it in nor left it a copy of its own.
+      const messages = await t.store.readMessages(taskId);
+      const heldMessages = messages.filter((message) => message.turnId === held.id);
+      expect(heldMessages).toHaveLength(1);
+      expect(heldMessages[0]!.text).toContain("Pick this up after the snooze");
+      // Nothing was lost by running past it: once the snooze ends, the
+      // admission pass starts the held message on its own.
+      await t.connection.dispatch({ type: "thread.unsnooze", threadId: taskId });
+      await runWorkQueue(t.ctx);
+      expect(await t.store.readTurns(taskId)).not.toContainEqual(expect.objectContaining({ id: held.id, status: "queued" }));
     } finally {
       await t.connection.close();
     }

@@ -131,6 +131,15 @@ export interface StoredThread {
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
   /**
+   * Identifies the one snooze a wake pass judged: set when the snooze is
+   * (`snoozeThread`), never changed by a pass — only cleared with the rest of
+   * the mark. So a check can tell the snooze it read from a replacement or a
+   * stale sibling pass no matter what the passes learned into `snoozeConditions`
+   * and `snoozeLatched` since. Absent on every thread stored before it: those
+   * fall back to the snooze's own fields for identity (`snoozeKey`).
+   */
+  readonly snoozeGeneration?: string | null;
+  /**
    * The queue conditions a snooze waits for (`task_snooze` with `conditions`):
    * while they are present the thread reads snoozed, and `wakeDueSnoozes`
    * unsnoozes it as soon as they are met. Absent for a snooze that ends on the
@@ -214,15 +223,23 @@ export interface StoredTurn {
   readonly usagePause?: TurnUsagePause;
   readonly queue?: QueuePolicy;
   /**
-   * Settle left this plain turn queued because the thread was snoozed or
-   * settled, or its provider was exhausted — states the admission path
-   * reports as blocked — or a settling runner on another provider's driver
-   * handed it back because it could not take it. The admission path may
-   * start it once nothing blocks it; cleared when it is promoted. Absent
-   * otherwise: an ordinary queued turn still waits for the running turn's
-   * settle.
+   * Settle left this plain turn queued because the thread was settled or its
+   * provider was exhausted — states the admission path reports as blocked —
+   * or a settling runner on another provider's driver handed it back because
+   * it could not take it. The admission path may start it once nothing blocks
+   * it; cleared when it is promoted. Absent otherwise: an ordinary queued
+   * turn still waits for the running turn's settle.
    */
   readonly heldAtSettle?: boolean | undefined;
+  /**
+   * The thread's snooze left this plain turn queued (an agent's
+   * `message_queue` on a snoozed task): it waits for the snooze to end, and
+   * the admission path starts it once the thread is active again. Kept apart
+   * from `heldAtSettle` on purpose: a snooze holds automatic work only, so it
+   * never makes a later direct send queue behind it — the oldest-first hold
+   * does. Cleared when the turn is promoted.
+   */
+  readonly heldBySnooze?: boolean | undefined;
   readonly handoff?: {
     readonly requestId: string;
     readonly destinationThreadId: string;

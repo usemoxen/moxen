@@ -639,10 +639,12 @@ export async function sendTurn(
     const heldBehind = scheduledFor === null && !running && !input.queue && !usageHeld && !autoHeld && !manualContinuation && (delivery === "auto" || delivery === "queue")
       && turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
     // A snooze takes the task out of the active set, so the automatic work an
-    // agent queues for it waits: the message queues held for admission, the
-    // same way one waits behind a held turn, instead of starting the work the
-    // snooze was set to keep from running. A direct send is the owning
-    // thread's own act and keeps its own rule (it reaches the task).
+    // agent queues for it waits: the message queues held for the snooze, under
+    // its own hold (`heldBySnooze`) rather than the oldest-first one, instead
+    // of starting the work the snooze was set to keep from running. The two
+    // holds differ in one thing: a direct send is the owning thread's own act,
+    // and it keeps its own rule (it reaches the task, past the held message,
+    // without releasing or batching it in).
     const snoozeHeld = scheduledFor === null && !running && origin === "agent-message" && snoozeActive(thread, Date.parse(now));
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
     let heldQueue = (usageHeld || autoHeld) && !input.queue && origin !== undefined ? {
@@ -668,7 +670,8 @@ export async function sendTurn(
       threadId,
       status,
       ...(heldQueue ? { queue: heldQueue } : {}),
-      ...(heldBehind || snoozeHeld ? { heldAtSettle: true } : {}),
+      ...(heldBehind ? { heldAtSettle: true } : {}),
+      ...(snoozeHeld ? { heldBySnooze: true } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
       delivery:
         delivery === "queue" || waitingOut !== null || heldBehind || snoozeHeld ? (status === "queued" ? "queued" : "started")
@@ -1533,7 +1536,7 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // in the Work queue instead of leaving it waiting for a settle that may
     // never come.
     for (const turn of turns) {
-      if (turn.status === "queued" && !turn.queue && gated.has(turn.id) && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold" && !isHeldTurn(turn, instant) && !turn.heldAtSettle) {
+      if (turn.status === "queued" && !turn.queue && gated.has(turn.id) && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold" && !isHeldTurn(turn, instant) && !turn.heldAtSettle && !turn.heldBySnooze) {
         await store.updateTurn(threadId, turn.id, { heldAtSettle: true });
       }
     }
@@ -1543,7 +1546,7 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
   }
   await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode, gated, driverKindOfInstance((next.modelSelection ?? thread.modelSelection).instanceId) === "antigravity");
-  await store.updateTurn(threadId, next.id, { status: "running", interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now, ...(next.heldAtSettle ? { heldAtSettle: undefined } : {}) });
+  await store.updateTurn(threadId, next.id, { status: "running", interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now, ...(next.heldAtSettle || next.heldBySnooze ? { heldAtSettle: undefined, heldBySnooze: undefined } : {}) });
   await store.appendLedger(threadId, "activity", {
     id: store.newId(),
     threadId,
@@ -1586,14 +1589,16 @@ export async function requeueGatedDispatch(store: ThreadStore, threadId: string,
  * Hold every plain turn still queued for the admission path, so it can start
  * them once nothing blocks them. The admission path only takes plain turns
  * settle marked this way; without the mark an idle thread's queued plain
- * turn would wait for a send or settle that never comes.
+ * turn would wait for a send or settle that never comes. A snooze-held turn
+ * keeps its own mark: its hold ends with the snooze, not with the next
+ * admissible moment.
  *
  * Caller must hold the thread lock.
  */
 async function holdQueuedForAdmission(store: ThreadStore, threadId: string, instant: number): Promise<void> {
   for (const turn of await store.readTurns(threadId)) {
     if (turn.status === "queued" && !turn.queue && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold"
-      && !isHeldTurn(turn, instant) && !turn.heldAtSettle) {
+      && !isHeldTurn(turn, instant) && !turn.heldAtSettle && !turn.heldBySnooze) {
       await store.updateTurn(threadId, turn.id, { heldAtSettle: true });
     }
   }
@@ -1917,7 +1922,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
       // forever. Settling ends it. An automatic hold stays: its recovery entry
       // is managed through the Work queue, and automatic input never unsettles
       // a settled thread while held.
-      const next: StoredThread = { ...thread, settledAt: now, settledOverride: null, snoozedUntil: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now, ...(thread.usagePause?.forced ? { usagePause: null } : {}) };
+      const next: StoredThread = { ...thread, settledAt: now, settledOverride: null, snoozedUntil: null, snoozeGeneration: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now, ...(thread.usagePause?.forced ? { usagePause: null } : {}) };
       await store.writeThreadRecord(next);
       store.emit(thread.id, "settled");
       if (thread.id === threadId) result = next;
@@ -1968,7 +1973,7 @@ export async function snoozeThread(
     requireNotArchived(thread, "be snoozed");
     // A snooze replaces the one before it whole: a latch its conditions earned
     // says nothing about these.
-    const next: StoredThread = { ...thread, snoozedUntil, snoozedAt: now, snoozeConditions: conditions.length === 0 ? null : conditions, snoozeLatched: null, updatedAt: now };
+    const next: StoredThread = { ...thread, snoozedUntil, snoozedAt: now, snoozeGeneration: store.newId(), snoozeConditions: conditions.length === 0 ? null : conditions, snoozeLatched: null, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, "snoozed");
     return next;
@@ -1981,7 +1986,7 @@ export async function unsnoozeThread(store: ThreadStore, rawThreadId: string): P
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotArchived(thread, "be unsnoozed");
-    const next: StoredThread = { ...thread, snoozedUntil: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now };
+    const next: StoredThread = { ...thread, snoozedUntil: null, snoozeGeneration: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, "unsnoozed");
     return next;
@@ -1992,9 +1997,13 @@ export async function unsnoozeThread(store: ThreadStore, rawThreadId: string): P
  * Identifies one snooze, so a pass that judged it can tell it from a newer one
  * set since: a wake that lands after a second `task_snooze` must not clear the
  * snooze it never looked at, nor write back what it learned about the old one.
+ * The identity is the snooze's own generation, immutable while the snooze
+ * lives — what passes learn into it (a latched provider event, a resolved
+ * reset time) never changes whose snooze it is. A snooze stored before the
+ * generation exists falls back to the fields it was set with.
  */
 export function snoozeKey(thread: StoredThread): string {
-  return JSON.stringify([thread.snoozedAt ?? null, thread.snoozedUntil ?? null, thread.snoozeConditions ?? null]);
+  return thread.snoozeGeneration ?? JSON.stringify([thread.snoozedAt ?? null, thread.snoozedUntil ?? null, thread.snoozeConditions ?? null]);
 }
 
 /** What one wake pass learned about a thread's snooze. */
@@ -2016,7 +2025,14 @@ export interface SnoozeCheck {
  * active again, no turn started); not due keeps what the pass learned — the
  * reset time it resolved, the provider event it saw — so the next pass does not
  * start over, the same way queue admission stores a turn's latched conditions.
- * Returns the record it wrote, or null when a newer snooze took its place.
+ *
+ * Two passes can judge the same snooze at once (the watch and an admission
+ * pass, or a pass that lost a race to the lock), so a pass that read before
+ * another stored must not unlearn what that other pass saw: what a check
+ * carries is merged into the stored state under the lock — latched indices as
+ * a union, and a reset the stored conditions already resolved keeps its time —
+ * never replaced whole. Returns the record it wrote, or null when a newer
+ * snooze took its place or there was nothing new to store.
  */
 export async function applySnoozeCheck(store: ThreadStore, rawThreadId: string, check: SnoozeCheck): Promise<StoredThread | null> {
   const threadId = requireThreadId(rawThreadId);
@@ -2025,15 +2041,25 @@ export async function applySnoozeCheck(store: ThreadStore, rawThreadId: string, 
     if (snoozeKey(thread) !== check.key) return null;
     const now = store.nowIso();
     if (check.due) {
-      const next: StoredThread = { ...thread, snoozedUntil: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now };
+      const next: StoredThread = { ...thread, snoozedUntil: null, snoozeGeneration: null, snoozeConditions: null, snoozeLatched: null, updatedAt: now };
       await store.writeThreadRecord(next);
       store.emit(threadId, "unsnoozed");
       return next;
     }
-    const unchanged = JSON.stringify(thread.snoozeConditions ?? null) === JSON.stringify(check.conditions)
-      && JSON.stringify(thread.snoozeLatched ?? null) === JSON.stringify(check.latched.length === 0 ? null : check.latched);
+    // Merge under the lock: a sibling pass on the same snooze may have
+    // learned a latch or a reset this pass did not see, and neither is ever
+    // unlearned by the other's verdict.
+    const storedConditions = thread.snoozeConditions ?? [];
+    const conditions = check.conditions.map((condition, index) => {
+      if (condition.type !== "reset" || condition.resetsAt != null) return condition;
+      const stored = storedConditions[index];
+      return stored?.type === "reset" && stored.resetsAt != null ? stored : condition;
+    });
+    const latched = [...new Set([...(thread.snoozeLatched ?? []), ...check.latched])].sort((left, right) => left - right);
+    const unchanged = JSON.stringify(thread.snoozeConditions ?? null) === JSON.stringify(conditions)
+      && JSON.stringify(thread.snoozeLatched ?? null) === JSON.stringify(latched.length === 0 ? null : latched);
     if (unchanged) return null;
-    const next: StoredThread = { ...thread, snoozeConditions: check.conditions, snoozeLatched: check.latched.length === 0 ? null : check.latched, updatedAt: now };
+    const next: StoredThread = { ...thread, snoozeConditions: conditions, snoozeLatched: latched.length === 0 ? null : latched, updatedAt: now };
     await store.writeThreadRecord(next);
     return next;
   });
