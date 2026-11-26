@@ -96,7 +96,7 @@ import {
   promoteDueScheduledTurn,
   promoteQueuedTurn,
   redeliverOrphanedSteers,
-  requeueGatedDispatch,
+  requeueHeldDispatch,
   requeueUnownedTurn,
   sendTurn,
   settleThread,
@@ -110,6 +110,7 @@ import {
   type SendTurnResult,
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
+import { isDraining, RESTART_HELD_SUMMARY, serverDrainingError } from "./drain.js";
 import { parseScheduledTime } from "./scheduledtime.js";
 import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchGate, antigravitySteerGate, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
@@ -518,6 +519,15 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
   // run after it; with nothing promoted the first copy is run here, or the
   // copies would sit running with no runner and never heal in-process.
   const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id, ctx.config).catch(() => [] as string[]);
+  // A drain that started under the recovery dispatches nothing: the orphan is
+  // settled and the steers are durable queued rows, but whatever the recovery
+  // promoted goes back to the queue for the next server's admission, exactly
+  // as a settle's promotion does. Running it here would take a start around
+  // the drain every other path honours.
+  if (isDraining()) {
+    if (result.promoted) await requeueHeldDispatch(ctx.store, threadId, result.promoted.id, RESTART_HELD_SUMMARY).catch(() => undefined);
+    return true;
+  }
   if (result.promoted) {
     // The orphan is interrupted either way; running what it promoted is not.
     if (await holdGatedPromotion(ctx, threadId, result.promoted)) return true;
@@ -589,7 +599,7 @@ async function handBackDeniedDispatch(ctx: OperationContext, threadId: string): 
 async function holdGatedPromotion(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
   if (!(await antigravityGateHoldsTurn(ctx, threadId, turn))) return false;
   // Marked as a promotion no runner took, so admission takes it back.
-  await requeueGatedDispatch(ctx.store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
+  await requeueHeldDispatch(ctx.store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
   await handBackDeniedDispatch(ctx, threadId);
   return true;
 }
@@ -614,6 +624,13 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
   try {
     const thread = await store.readThreadRecord(threadId);
     if (!thread) { store.untrackRunning(turn.id); return; }
+    // A drain that started while this recovery was preparing the run: the
+    // turn goes back to the queue, held for the next server's admission,
+    // rather than dispatched on a server that is going away.
+    if (isDraining()) {
+      await requeueHeldDispatch(store, threadId, turn.id, RESTART_HELD_SUMMARY).catch(() => undefined);
+      return;
+    }
     // Turns queued behind this one if it settles below with no runner to take
     // a promotion: settled without promoting, held for admission instead.
     const queuedBefore = new Set((await store.readTurns(threadId)).filter((candidate) => candidate.status === "queued").map((candidate) => candidate.id));
@@ -623,7 +640,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // setting releases it, exactly as admission would. The config is the
     // operation's, the setting in force at dispatch.
     if (await antigravityGateHoldsTurn(ctx, threadId, turn)) {
-      await requeueGatedDispatch(store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
+      await requeueHeldDispatch(store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
       await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
       // The turns queued behind the denied dispatch are handed back to
       // promotion, so a message the user wrote runs on its own (LOCAL-034).
@@ -685,6 +702,13 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // Decided now, before the run: a notice the batch already holds for this
     // task owns its settle, and the completion callback below only wakes it.
     const coveredParent = await heldNoticeParent(ctx, threadId);
+    // Checked again once the session start and the reads above are done: they
+    // take real time, and a drain can begin inside it. Nothing is sent; the
+    // turn waits as queued work for the next server.
+    if (isDraining()) {
+      await requeueHeldDispatch(store, threadId, turn.id, RESTART_HELD_SUMMARY).catch(() => undefined);
+      return;
+    }
     void executeTurn({
       store,
       driver,
@@ -747,6 +771,9 @@ export async function runDueScheduledTurn(ctx: OperationContext, threadId: strin
 }
 
 async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: QueueRow[], now: number): Promise<boolean> {
+  // A restart's drain admits nothing: queued and scheduled entries keep
+  // their place — and their times — and run once the next server is up.
+  if (isDraining()) return false;
   await recoverOrphanedTurn(ctx, threadId);
   const thread = await ctx.store.readThreadRecord(threadId);
   let index = rows.findIndex((r) => r.thread.id === threadId);
@@ -1567,8 +1594,18 @@ function longThreadHook(
  * is the loop's guard.
  */
 export async function compactMidTurn(ctx: OperationContext, threadId: string, usage: ContextWindowUsage): Promise<boolean> {
-  if ((await ctx.store.readThreadRecord(threadId))?.usagePause) return false;
+  // A restart's drain may be waiting for this very turn to finish: stopping
+  // it for a compaction would both end work the drain is trying to save and
+  // refuse the turn that carries the task on. The line is still crossed;
+  // the settle after the drain (or the next reading) compacts.
+  if (isDraining()) return false;
   if (compactingMidTurn.has(threadId)) return false;
+  // The turn this reading belongs to, named before anything else is read: a
+  // turn that replaces it while the reads below take their time is never what
+  // the stop takes, and a turn that settled meanwhile ends it here.
+  const intended = (await ctx.store.readTurns(threadId)).find((turn) => turn.status === "running") ?? null;
+  if (intended === null) return false;
+  if ((await ctx.store.readThreadRecord(threadId))?.usagePause) return false;
   const snapshot = await readLongThreadSnapshot(ctx.store, threadId);
   if (snapshot === null || !snapshot.turnRunning) return false;
   // Compacting mid-turn stops the running turn so the `/compact` and its
@@ -1579,7 +1616,10 @@ export async function compactMidTurn(ctx: OperationContext, threadId: string, us
   const action = planLongThreadAction(ctx.config, { ...snapshot, turnRunning: false, usedTokens: usage.usedTokens, maxTokens: usage.maxTokens });
   if (action?.kind !== "compact") return false;
   compactingMidTurn.add(threadId);
-  const interrupted = await interruptTurn(ctx.store, threadId).catch(() => null);
+  // The drain is checked again under the thread lock, where the stop commits:
+  // a drain that begins while the reads above are pending is exactly the case
+  // the check at the top cannot see, and it may be waiting on this very turn.
+  const interrupted = await interruptTurn(ctx.store, threadId, intended.id, undefined, { holdIf: isDraining }).catch(() => null);
   if (interrupted === null || !interrupted.interrupted) {
     compactingMidTurn.delete(threadId);
     return false;
@@ -2851,6 +2891,12 @@ async function continueThreadReserved(
     const started = await startTurn(ctx, {
       threadId: created.id,
       prompt: handoff + runningTasksNote(adopted) + firstMessageNote(request.firstMessage),
+      // While a drain stops the server, the first turn must not run now:
+      // with a `queue` delivery the drain holds it as queued work, so the
+      // continuation lands complete and starts once the next server is up
+      // — a start refused here would leave an empty destination that no
+      // retry repairs (the source records the move as done).
+      ...(isDraining() ? { delivery: "queue" as const } : {}),
       ...(request.queue ? { queue: request.queue } : {}),
       ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
       // Noop subscriber: the driver's shared pump exists before any client subscribes.
@@ -4136,6 +4182,9 @@ export interface Handover {
 export async function handover(ctx: OperationContext, request: HandoverRequest): Promise<Handover> {
   const prompt = request.prompt.trim();
   if (!prompt) throw new CliError("PROMPT_REQUIRED", "A non-empty handover prompt is required.");
+  // A drain stops the server: refuse before the thread is created, so a
+  // new thread is never left behind by the turn it would refuse next.
+  if (!request.dryRun && isDraining()) throw serverDrainingError();
   const { config } = ctx;
   const dryRun = request.dryRun === true;
   const scratch = request.scratch === true;
@@ -5253,6 +5302,10 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     ...(request.research.models ? { researchModels: request.research.models } : {}),
   };
   const parentThreadId = requireThreadId(request.parentThreadId);
+  // A drain stops the server: refuse before anything is created, so no
+  // child thread or delegation row is left behind by a start it would
+  // refuse a moment later. The caller can delegate again once it is back.
+  if (isDraining()) throw serverDrainingError();
   if (options.researchRole !== undefined) await requireResearchLead(ctx, parentThreadId);
   else {
     await syncResearchRun(ctx, parentThreadId);

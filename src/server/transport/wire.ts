@@ -35,7 +35,12 @@ export type ClientMessage =
       readonly params: { readonly threadId: string; readonly afterSequence?: number };
     }
   | { readonly id: number; readonly method: "unsubscribe"; readonly params: { readonly subscription: number } }
-  | { readonly id: number; readonly method: "shutdown" }
+  /**
+   * Stop the server, letting running turns finish first (the restart drain,
+   * up to the server's `restartDrainTimeout`). `force` interrupts them at
+   * once. The reply comes after the drain, and says what it waited on.
+   */
+  | { readonly id: number; readonly method: "shutdown"; readonly params?: { readonly force?: boolean } }
   /**
    * The client's heartbeat (`./remote.ts`): answered with `null`. Any reply
    * proves the server alive — an older server's "unknown method" included.
@@ -74,6 +79,8 @@ export interface HelloResult {
   readonly buildDisplay: string;
   /** True once an update or rollback has landed: the running server is stale. */
   readonly restartRequired: boolean;
+  /** A restart drain in progress (how many running turns it waits on, and until when): absent on servers that never drain. */
+  readonly draining?: DrainingStatus | null;
   /** Remote sockets: the server's name (its host), for the client's list of servers. */
   readonly serverName?: string;
   /** Desktop stdio bridge only: the saved name of a paired server. */
@@ -86,6 +93,22 @@ export interface HelloResult {
   readonly deviceId?: string;
   /** After `pair` only: the device's token, which the client keeps in its keychain and never shows. */
   readonly token?: string;
+}
+
+/** A restart's drain in progress: how many running turns it waits on, and until when (null when nothing waits). */
+export interface DrainingStatus {
+  readonly running: number;
+  readonly deadline: string | null;
+}
+
+/** What a draining shutdown result carries back to the client that asked for it. */
+export interface ShutdownDrainResult {
+  /** Running turns that finished inside the drain window. */
+  readonly finished: number;
+  /** Running turns the drain stopped (the grace ran out, or the stop was forced). */
+  readonly interrupted: number;
+  /** How long the drain held the stop. */
+  readonly waitedMs: number;
 }
 
 /** A `CliError` as it crosses the wire; code, exit code and details survive. */

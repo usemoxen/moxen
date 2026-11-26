@@ -341,6 +341,9 @@ const choice = (value: string, label: string, description?: string): SettingChoi
 /** Idle lifetimes a page offers. */
 const DURATION_PRESETS = ["2m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "8h", "24h"] as const;
 
+/** What a restart's drain window can be offered as: from interrupting at once to waiting out long turns. */
+const DRAIN_TIMEOUT_PRESETS = ["0s", "30s", "1m", "2m", "5m", "15m"] as const;
+
 /** Where a line can be put: shares of the window (they follow any model), then sizes from a small local model up. */
 const LINE_PRESETS = ["40%", "50%", "60%", "70%", "80%", "90%", "8K", "16K", "24K", "32K", "64K", "128K", "256K", "512K", "1M"] as const;
 
@@ -744,6 +747,15 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     },
     defaultValue: "auto",
     envOverride: "MOXEN_OPEN_MODE",
+  },
+  {
+    key: "restartDrainTimeout",
+    label: "Restart drain timeout",
+    description: "How long a restart waits for running turns to finish before stopping those still going. Nothing waiting is lost: queued and scheduled work keeps its place and its times, and runs once the server is back. 0s stops running turns at once, like a forced stop.",
+    section: "general",
+    kind: { type: "duration", presets: DRAIN_TIMEOUT_PRESETS, ends: { low: "Interrupt sooner", high: "Wait longer" } },
+    defaultValue: "2m",
+    envOverride: "MOXEN_RESTART_DRAIN_TIMEOUT",
   },
   {
     key: "threadEnvMode",

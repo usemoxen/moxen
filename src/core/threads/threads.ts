@@ -17,6 +17,7 @@ import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOve
 import { providerExhausted } from "./queue.js";
 import { antigravityHoldsAutomaticDispatch, automaticDispatchPrompt, loadTurnOrigins, turnOriginKey, type TurnOrigins } from "./queue.js";
 import { isMaintenanceTurn } from "./maintenance.js";
+import { isDraining, serverDrainingError } from "./drain.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
@@ -473,7 +474,21 @@ export async function sendTurn(
       turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
     const joinsWaitingReset = input.scheduleReason === "usage-reset" && turns.some((turn) => turn.status === "queued" && turn.scheduleReason === "usage-reset");
     const gateQueued =
-      gateHeldQueue || usageHeld || autoHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && openTurn(turns) !== null);
+      gateHeldQueue || usageHeld || autoHeld || gateHoldUntil !== null || gateHeldBehind || joinsWaitingReset || (delivery === "queue" && (openTurn(turns) !== null || isDraining()));
+    // A restart's drain ends every turn eventually, so nothing new may start
+    // while it waits: a send that would run now is refused before the ledger
+    // is touched, from the same prediction the manual-continuation gate
+    // below is cut from. What still goes through reaches work that is
+    // already running — a steer, an injected message — or keeps as durable
+    // rows that wait (queued, scheduled, including a queued send on an idle
+    // thread, so no caller has to lose a copy to the drain) and run once
+    // the server is back.
+    if (
+      isDraining() && !joinsExisting
+      && (manualContinuation || (!gateQueued && !(openTurn(turns) !== null && (delivery === "auto" || delivery === "steer"))))
+    ) {
+      throw serverDrainingError();
+    }
     if (joinsExisting ? false : live !== null || manualContinuation || !gateQueued) {
       const admission = await continuationInFlight(store, thread);
       thread = admission.thread;
@@ -643,7 +658,13 @@ export async function sendTurn(
     } : input.queue;
     if ((usageHeld || autoHeld) && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
-    const status = heldQueue || usageHeld || autoHeld || holdUntil !== null || heldBehind || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    // A queued send during a drain never starts, however idle the thread:
+    // it is held for the admission path like any settle-held turn.
+    const drainHeld = isDraining() && delivery === "queue";
+    const status = heldQueue || usageHeld || autoHeld || holdUntil !== null || heldBehind || drainHeld || (delivery === "queue" && openTurn(await store.readTurns(threadId))) ? "queued" : "running";
+    // The hard net behind the pre-flight gate above: the prediction can
+    // drift, and a turn written `running` during the drain would start nowhere.
+    if (status === "running" && isDraining()) throw serverDrainingError();
     // A manual continuation in flight owns the checkout now: no turn may
     // start beside its destination while it prepares. Queued and scheduled
     // turns are not starting, so they pass; the handoff clears the claim
@@ -660,7 +681,7 @@ export async function sendTurn(
       threadId,
       status,
       ...(heldQueue ? { queue: heldQueue } : {}),
-      ...(heldBehind ? { heldAtSettle: true } : {}),
+      ...(heldBehind || drainHeld ? { heldAtSettle: true } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
       delivery:
         delivery === "queue" || waitingOut !== null || heldBehind ? (status === "queued" ? "queued" : "started")
@@ -956,7 +977,13 @@ export async function reconcileOrphanedTurn(
       summary: `Turn ${running.id} was interrupted: its process (pid ${pid}) exited mid-turn.`,
       createdAt: now,
     });
-    await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
+    // A drain reconciles the orphan but starts nothing: a promotion taken
+    // here would leave the lock already `running`, so the caller's runner
+    // would dispatch it — around every start path's drain check. The queued
+    // work is held for the admission path instead, and the next server runs
+    // it, the same way a settle or an interrupt holds it.
+    if (isDraining()) await holdQueuedForAdmission(store, threadId, Date.parse(now));
+    else await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     const promoted = (await store.readTurns(threadId)).find(
       (turn) => turn.status === "running" && turn.id !== running.id && !store.isTracked(turn.id),
     ) ?? null;
@@ -1548,14 +1575,16 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
 }
 
 /**
- * Requeue a dispatch the Antigravity gate denied, durably: back to queued,
- * marked for admission — which holds it with the gate's reason until the
- * setting turns on or a genuine fresh user turn releases it — with the held
- * activity recorded beside it. The caller releases its claim first, so the
- * lock below never fights another runner; a turn that meanwhile settled or
- * was claimed elsewhere keeps whatever happened to it.
+ * Requeue a dispatch this process will not run, durably: back to queued,
+ * marked for admission — which holds it with `reason` until the setting
+ * turns on, a genuine fresh user turn releases it, or the next server admits
+ * it — with the held activity recorded beside it. Used for a turn the
+ * Antigravity gate denied and for a promotion or recovery a restart's drain
+ * came under. The caller releases its claim first, so the lock below never
+ * fights another runner; a turn that meanwhile settled or was claimed
+ * elsewhere keeps whatever happened to it.
  */
-export async function requeueGatedDispatch(store: ThreadStore, threadId: string, turnId: string, reason: string): Promise<void> {
+export async function requeueHeldDispatch(store: ThreadStore, threadId: string, turnId: string, reason: string): Promise<void> {
   store.untrackRunning(turnId);
   await store.withThreadLock(threadId, async () => {
     const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
@@ -1718,7 +1747,11 @@ async function finishTurn(
       summary: status === "failed" ? (input.error ?? turnId) : turnId,
       createdAt: now,
     });
-    await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
+    // A settle during a drain promotes nothing: a promoted turn would start on
+    // a server that is going away. Held for the admission path, it runs once
+    // the next server is up.
+    if (isDraining()) await holdQueuedForAdmission(store, threadId, Date.parse(now));
+    else await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     const next = { ...thread, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, status === "completed" ? "turn-completed" : "turn-failed");
@@ -1759,7 +1792,18 @@ export async function interruptTurn(
   rawThreadId: string,
   rawTurnId?: string,
   usagePause?: StoredTurn["usagePause"],
-  options: { readonly reason?: string; readonly usage?: StoredTurn["usage"] } = {},
+  options: {
+    readonly reason?: string;
+    readonly usage?: StoredTurn["usage"];
+    /**
+     * A reason to leave the turn alone, read under the thread lock at the
+     * moment of the write. A caller that decided to stop the turn outside
+     * the lock — a mid-turn compaction, whose reads take time — rechecks
+     * here, so nothing that changed while it waited commits a stop it would
+     * no longer make.
+     */
+    readonly holdIf?: () => boolean;
+  } = {},
   gateProviders?: GateProviders,
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
@@ -1786,18 +1830,26 @@ export async function interruptTurn(
     if (isKnownTurnStatus(target.status) && target.status !== "running" && target.status !== "queued") {
       return { thread, turn: target, interrupted: false };
     }
+    // The last word before the write, read under the lock: a caller that
+    // decided outside it takes back a stop whose reason no longer holds
+    // (see `holdIf`). Nothing is mutated and nothing is promoted.
+    if (options.holdIf?.() === true) {
+      return { thread, turn: target, interrupted: false };
+    }
     // Whether a run in this process will take the turn this promotes: the
     // stopped turn's own runner, when it settles, or the send still starting
     // it (which claims the turn below before its session starts). Read before
     // the interrupt releases the claim.
     const hasRunner = store.isTracked(target.id);
     const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason, options.usage);
-    if (hasRunner) {
+    if (hasRunner && !isDraining()) {
       await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     } else {
       // No runner is alive to take a promotion (a dead runner, or a stop
-      // from another process): hold the queued turns for the admission path
-      // instead of stranding one of them `running` with an owner but no run.
+      // from another process) — or a drain is stopping the server: a
+      // promotion it took would start on the way out. Either way the queued
+      // turns are held for the admission path instead of stranding one of
+      // them `running` with an owner but no run.
       await holdQueuedForAdmission(store, threadId, Date.parse(now));
     }
     const next = { ...thread, updatedAt: now };

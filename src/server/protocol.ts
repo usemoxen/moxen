@@ -993,6 +993,17 @@ export type ShellFrame =
   | {
       readonly kind: "event";
       readonly event: { readonly type: "app.server-restart-required"; readonly payload: { readonly version: string; readonly from: string | null } };
+    }
+  /**
+   * A restart is draining: the server was asked to stop and is letting
+   * running turns finish first. `running` is how many it is still waiting
+   * on, `deadline` when its grace runs out and the rest are interrupted
+   * (null when nothing is left to wait for). Broadcast while the drain
+   * runs; the shutdown that caused it ends it.
+   */
+  | {
+      readonly kind: "event";
+      readonly event: { readonly type: "app.server-draining"; readonly payload: { readonly running: number; readonly deadline: string | null } };
     };
 
 export type ThreadDetail = ThreadEnvelope & {

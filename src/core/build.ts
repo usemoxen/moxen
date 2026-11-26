@@ -168,7 +168,7 @@ export function describeBuildMismatch(options: {
 }): string {
   const { server, client } = options;
   const next = options.remote
-    ? "Restart the moxen server on its own machine from this same build (moxen server stop, then start Moxen again there); that interrupts its running threads, so do it when you are ready."
-    : "Stop the server (moxen server stop) and start Moxen again from this build so both match; that interrupts running threads, so do it when you are ready.";
+    ? "Restart the moxen server on its own machine from this same build (moxen server stop, then start Moxen again there); the stop first lets running turns finish and then stops the rest for the restart."
+    : "Stop the server (moxen server stop) and start Moxen again from this build so both match; the stop first lets running turns finish and then stops the rest for the restart.";
   return `This moxen server runs ${server.display}, but the client runs ${client.display}. ${next}`;
 }

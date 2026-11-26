@@ -5,6 +5,7 @@ import type { ProviderRuntimeEvent, TokenUsageDelta } from "../providers/spi.js"
 import { driverKindOfInstance } from "../types.js";
 import { startTurn, editWorkQueue, flushTaskNotifications, noteAutoContinueCancelled, queueTaskPauseNotification, recoverOrphanedTurn, runWorkQueue, type OperationContext } from "../threads/operations.js";
 import { interruptTurn, openTurn, sendTurn, isContinuationBusy } from "../threads/threads.js";
+import { isDraining } from "../threads/drain.js";
 import { QUEUE_RESET_GRACE_MS, nextReset, parseQueuePolicy } from "../threads/queue.js";
 import type { StoredThread, StoredTurn, UsagePause } from "../threads/types.js";
 import { recordUsageProtection, usageKeyForInstance, usageLimitsSnapshot, usageProtectionOverrideActive, usageWindowMatchesModel, usageWindowsForModel } from "./limits.js";
@@ -533,7 +534,10 @@ export class UsageProtection {
       if (pause.phase === "resuming") {
         if (running) busy.add(pause.provider);
         else if (!row.thread.settledAt && !row.thread.snoozedUntil && pause.turnId && row.turns.at(-1)?.id === pause.turnId) {
-          // Restart between persisting recovery admission and recording its turn.
+          // Restart between persisting recovery admission and recording its
+          // turn. A drain stops new turns: resuming waits it out — no error
+          // recorded — and the next tick (or the next server) takes it.
+          if (isDraining()) continue;
           await startTurn(ctx, { threadId: row.thread.id, prompt: RESUME_PROMPT, usageControl: true, origin: "usage-continue" });
           busy.add(pause.provider);
         }
@@ -566,6 +570,10 @@ export class UsageProtection {
           await this.pause(ctx, row.thread.id, { ...pause, phase: "waiting" });
           continue;
         }
+        // A drain stops new turns, so the wrap-up cannot go out and is not a
+        // failure: leave the pause pending — nothing persisted — and the next
+        // tick (this one after the restart, most likely) takes it.
+        if (isDraining()) continue;
         // Persist before admission: a crash never repeats a partially delivered wrap-up.
         await this.pause(ctx, row.thread.id, { ...pause, phase: "wrapping" });
         try {
@@ -577,10 +585,11 @@ export class UsageProtection {
           // A live manual handoff owns the checkout, so its claim refuses the
           // wrap-up turn. That is transient — retry on the next tick — not a
           // broken thread, so restore the pending pause instead of parking it
-          // behind an error the later ticks then skip forever. Only a handoff
-          // contention retries: any other failure keeps the visible recovery
-          // error.
-          if (isContinuationBusy(cause)) {
+          // behind an error the later ticks then skip forever. A drain is the
+          // same kind of passing condition. Only those retry: any other
+          // failure keeps the visible recovery error.
+          const draining = cause instanceof CliError && cause.code === "SERVER_DRAINING";
+          if (isContinuationBusy(cause) || draining) {
             const { error: _dropped, ...retry } = pause;
             await this.pause(ctx, row.thread.id, { ...retry, phase: "pending" });
           } else {
