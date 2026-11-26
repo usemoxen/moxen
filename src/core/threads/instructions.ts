@@ -24,6 +24,7 @@
  */
 import { createHash } from "node:crypto";
 import { driverKindOfInstance, type ModelSelection } from "../types.js";
+import { promptWithNotices } from "../providers/spi.js";
 import { UNTRUSTED_NOTE } from "../untrusted.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -788,16 +789,18 @@ export function planInstructions(
   };
 }
 
-/** A prompt with the instruction update ahead of it, for the provider only — the transcript keeps what was typed. */
-export function withInstructionsUpdate(prompt: string, update: string | null): string {
-  if (update === null) return prompt;
+/** The `<moxen-instructions-update>` block an update rides as, for the provider only — the transcript keeps what was typed. */
+export function instructionsUpdateBlock(update: string): string {
   return [
     "<moxen-instructions-update>",
     "Moxen's runtime instructions changed since this conversation began. From here on they read as follows, replacing the earlier version:",
     "",
     update,
     "</moxen-instructions-update>",
-    "",
-    prompt,
   ].join("\n");
+}
+
+/** A prompt with the instruction update ahead of it, for the provider only — the transcript keeps what was typed. */
+export function withInstructionsUpdate(prompt: string, update: string | null): string {
+  return update === null ? prompt : promptWithNotices(prompt, [instructionsUpdateBlock(update)]);
 }

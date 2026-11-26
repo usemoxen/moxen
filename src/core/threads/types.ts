@@ -409,6 +409,8 @@ export interface StoredTurn {
    * it existed.
    */
   readonly origin?: MessageOrigin;
+  /** The primary prompt came from the internal usage-recovery producer, not scheduling metadata. */
+  readonly usageRecoveryNotice?: true;
   readonly error: string | null;
   /**
    * The turn was the first the provider's conversation was given and it ended with no output (a usage limit).

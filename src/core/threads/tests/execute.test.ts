@@ -954,10 +954,13 @@ describe("provider-side interruptions", () => {
       await vi.waitFor(async () => {
         expect((await store.readMessages(thread.id)).some((message) => message.turnId === wake.id && message.text.includes("native news"))).toBe(true);
       }, { timeout: 10_000 });
-      // The winner was never touched: still running, session never interrupted or closed.
-      expect(openTurn(await store.readTurns(thread.id))?.id).toBe(user.id);
-      expect(watching.interrupt).not.toHaveBeenCalled();
-      expect(watching.close).not.toHaveBeenCalled();
+      // The watcher can still be writing activity and thread metadata after
+      // the message appears. Let it release the lock before removing the store.
+      await store.withThreadLock(thread.id, async () => {
+        expect(openTurn(await store.readTurns(thread.id))?.id).toBe(user.id);
+        expect(watching.interrupt).not.toHaveBeenCalled();
+        expect(watching.close).not.toHaveBeenCalled();
+      });
     }, 60_000);
 
     it("lets a queued turn promoted at settle run, with no interrupt or stop", async () => {
@@ -1721,6 +1724,8 @@ describe("driver event pump", () => {
     const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
     const usageThis = { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 };
     const usageOther = { input: 900, cacheRead: 0, cacheCreate: 0, output: 90, thinking: 0, costUsd: 0.99 };
+    let markAwaiting!: () => void;
+    const awaiting = new Promise<void>((resolve) => { markAwaiting = resolve; });
     const driver: TurnDriver = {
       hasSession: () => Effect.succeed(true),
       startSession: () => Effect.succeed({}),
@@ -1729,6 +1734,7 @@ describe("driver event pump", () => {
       awaitTurn: (_threadId, _turnId, signal) =>
         new Promise((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(new CliError("TURN_ABORTED", "Interrupted before result")), { once: true });
+          markAwaiting();
         }),
       // Only a lookup by THIS run's driver turn id may return the turn's own
       // usage; a thread-scoped sample would hand back another turn's.
@@ -1736,6 +1742,7 @@ describe("driver event pump", () => {
       streamEvents: Stream.never,
     };
     const running = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    await awaiting;
     await interruptTurn(store, thread.id, turn.id);
     await running;
     const stored = (await store.readTurns(thread.id)).find((t) => t.id === turn.id);

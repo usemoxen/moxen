@@ -419,9 +419,8 @@ export async function sendTurn(
     ? await Promise.all(input.attachments.map((upload) => store.saveAttachment(upload)))
     : [];
   const withAttachments = attachments.length > 0 ? { attachments } : {};
-  // A continue after a usage limit is moxen's message, not the user's,
-  // whoever scheduled it: clients draw it as a notice, not a "you" prompt.
-  const origin = input.origin ?? (input.scheduleReason === "usage-reset" ? ("usage-continue" as const) : undefined);
+  const origin = input.origin;
+  const automaticPrompt = origin !== undefined || input.scheduleReason === "usage-reset";
   const withOrigin = origin !== undefined ? { origin, ...(input.notification ? { notification: input.notification } : {}) } : {};
 
   return await store.withThreadLock(threadId, async () => {
@@ -432,7 +431,7 @@ export async function sendTurn(
     if ((origin === "usage-protection" || origin === "usage-continue" && input.queue?.requestId?.startsWith("usage:")) && thread.usageProtectionOverride && usageProtectionOverrideActive(thread.usageProtectionOverride, thread.usageProtectionOverride.provider, Date.parse(now))) {
       throw new CliError("USAGE_PROTECTION_OVERRIDDEN", "Usage protection is paused for this thread until the next allowance reset.");
     }
-    const manualContinuation = thread.usagePause != null && thread.usagePause.phase !== "resuming" && origin === undefined && input.usageControl !== true && scheduledFor === null && !input.queue && delivery !== "queue";
+    const manualContinuation = thread.usagePause != null && thread.usagePause.phase !== "resuming" && !automaticPrompt && input.usageControl !== true && scheduledFor === null && !input.queue && delivery !== "queue";
     const usageHeld = thread.usagePause != null && thread.usagePause.phase !== "resuming" && input.usageControl !== true && !manualContinuation;
     // Antigravity with delegation off holds an automatic prompt the same way
     // a usage hold does: queued as a wake-up for the user's next message (or
@@ -441,7 +440,7 @@ export async function sendTurn(
     // pass here. Usage-control maintenance (wrap-up, recovery) is Moxen's own
     // prompt too, so it holds for Antigravity like any other: the usage
     // exemption it keeps elsewhere skips usage pauses, not this gate.
-    const autoHeld = config !== undefined && origin !== undefined && origin !== "task-notification"
+    const autoHeld = config !== undefined && automaticPrompt && origin !== "task-notification"
       && driverKindOfInstance((input.modelSelection ?? thread.modelSelection).instanceId) === "antigravity"
       && !antigravityUnsupportedUseAllowed(config);
     if (usageHeld || autoHeld) delivery = "queue";
@@ -471,7 +470,7 @@ export async function sendTurn(
     const joinsExisting = duplicate !== undefined && duplicate.status !== "running";
     const gateWaitingOut = scheduledFor === null && !openTurn(turns) && delivery !== "restart" ? usageHoldUntil(turns, Date.parse(now)) : null;
     const gateHoldUntil = gateWaitingOut ?? (scheduledFor !== null && Date.parse(scheduledFor) > Date.parse(now) ? scheduledFor : null);
-    const gateHeldQueue = ((usageHeld || autoHeld) && !input.queue && origin !== undefined) || input.queue !== undefined;
+    const gateHeldQueue = ((usageHeld || autoHeld) && !input.queue && automaticPrompt) || input.queue !== undefined;
     const gateHeldBehind =
       scheduledFor === null && !openTurn(turns) && !input.queue && !usageHeld && !autoHeld && !manualContinuation && (delivery === "auto" || delivery === "queue") &&
       turns.some((turn) => turn.status === "queued" && ((turn.heldAtSettle === true && !turn.queue) || (input.usageControl !== true && isDueHeldTurn(turn, Date.parse(now)))));
@@ -663,11 +662,11 @@ export async function sendTurn(
     // without releasing or batching it in).
     const snoozeHeld = scheduledFor === null && !running && origin === "agent-message" && snoozeActive(thread, Date.parse(now));
     const scheduleReason = waitingOut !== null ? ("usage-hold" as const) : (input.scheduleReason ?? "user");
-    let heldQueue = (usageHeld || autoHeld) && !input.queue && origin !== undefined ? {
+    let heldQueue = (usageHeld || autoHeld) && !input.queue && automaticPrompt ? {
       conditions: [], held: false, order: Math.max(Date.parse(now), ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)),
       sequential: true, continuation: "same-thread" as const, automatic: true, wakeUp: true,
     } : input.queue;
-    if ((usageHeld || autoHeld) && heldQueue && origin !== undefined && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
+    if ((usageHeld || autoHeld) && heldQueue && automaticPrompt && !heldQueue.requestId?.startsWith("usage:")) heldQueue = { ...heldQueue, automatic: true, wakeUp: true };
     if (heldQueue?.wakeUp) heldQueue = { ...heldQueue, order: Math.max(heldQueue.order, ...turns.filter((turn) => turn.queue?.wakeUp).map((turn) => turn.queue!.order + 1)) };
     // A queued send during a drain never starts, however idle the thread:
     // it is held for the admission path like any settle-held turn.
@@ -707,6 +706,7 @@ export async function sendTurn(
       ...(origin !== undefined ? { origin } : {}),
       ...(input.handoffOpen ? { handoffOpen: true as const } : {}),
       ...(input.handoffPending && input.handoffPending.length > 0 ? { handoffPending: input.handoffPending } : {}),
+      ...(origin === "usage-continue" ? { usageRecoveryNotice: true as const } : {}),
       modelSelection,
       parentTurnId: delivery === "restart" && running ? running.id : null,
       ...(holdUntil !== null
@@ -1335,6 +1335,7 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
       (turn.scheduleReason !== "usage-hold" || next.scheduleReason === "usage-reset" || next.scheduleReason === "usage-hold") &&
       !isHeldTurn(turn, Date.parse(now)) &&
       turn.scheduleReason !== "usage-reset" &&
+      turn.usageRecoveryNotice !== true &&
       waitingInteractionMode(turn, threadMode) === waitingInteractionMode(next, threadMode) &&
       sameModel(turn, next),
   );
@@ -1383,6 +1384,20 @@ export function turnPrompt(messages: readonly StoredMessage[], turn: StoredTurn)
     text: own.map((message) => message.text.trim()).join("\n\n"),
     attachments: own.flatMap((message) => message.attachments ?? []),
   };
+}
+
+/** Split only the primary prompt marked by the internal usage-recovery producer. */
+export function usageNoticeParts(
+  messages: readonly StoredMessage[],
+  turn: StoredTurn,
+): { readonly prompt: string; readonly notices: readonly string[] } | undefined {
+  // Old `usage-continue` origins could be inferred from client scheduling metadata.
+  if (turn.usageRecoveryNotice !== true) return undefined;
+  const notice = messages.find((message) => message.id === turn.messageId && message.turnId === turn.id && message.role === "user")?.text.trim();
+  if (!notice) return undefined;
+  const prompt = messages.filter((message) => message.turnId === turn.id && message.role === "user" && message.id !== turn.messageId)
+    .map((message) => message.text.trim()).filter(Boolean).join("\n\n");
+  return { prompt, notices: [notice] };
 }
 
 /**

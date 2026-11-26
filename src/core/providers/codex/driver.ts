@@ -11,7 +11,7 @@
  * through the paginated API and uses `thread/revert`. Codex owns its login
  * under `CODEX_HOME`; Moxen never reads credential files. See docs/providers.md.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 
 import * as Effect from "effect/Effect";
@@ -26,6 +26,7 @@ import { plainSkill, type SkillInventory, type SkillSummary } from "../../catalo
 import { excludedSkills } from "../../skills/discovery.js";
 import type { CodexProviderConfig, InteractionMode, ModelSelection, RuntimeMode } from "../../types.js";
 import { JsonRpcPeer } from "../stdio.js";
+import { promptWithNotices } from "../spi.js";
 import type {
   SideQuestionInput,
   SideAnswer,
@@ -161,6 +162,13 @@ interface ParkedCodex {
   readonly resolve: (result: unknown) => void;
 }
 
+/** Unlike history reads, an append may only fall back on a known pre-write refusal. */
+function injectMethodUnavailable(cause: unknown): boolean {
+  return cause instanceof CliError && cause.code === "PEER_REQUEST_FAILED" && (
+    asRecord(cause.details)?.["code"] === -32601 || cause.message === "Request failed: thread/inject_items is not supported yet"
+  );
+}
+
 interface CodexSession {
   readonly threadId: ThreadId;
   /** Latest `thread/tokenUsage/updated` reading of the context window. */
@@ -179,6 +187,8 @@ interface CodexSession {
   tools: Map<string, Record<string, unknown>>;
   model: string | null;
   runtimeMode: RuntimeMode;
+  /** A runtime without `thread/inject_items` is asked only once per session. */
+  noticesUnavailable: boolean;
   transcript: TranscriptTurn[];
   waiters: TurnWaiters<CodexTurnOutcome>;
   parked: Map<string, ParkedCodex>;
@@ -282,6 +292,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly capabilities: ProviderAdapterCapabilities = {
     sessionModelSwitch: "in-session",
     supportsConversationRollback: true,
+    // `thread/inject_items` (codex-cli 0.169+); an app-server that predates
+    // it is detected on the first send and read as text from then on.
+    developerNotices: true,
   };
 
   private readonly settings: CodexSettings;
@@ -310,6 +323,10 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   private readonly rateLimitInstanceId: string | undefined;
   private secretEnv: readonly string[] = [];
   private readonly sessions = new Map<ThreadId, CodexSession>();
+  /** Acknowledged batches keyed by Codex history and logical Moxen turn. */
+  private readonly injectedNotices = new Map<string, Map<string, string>>();
+  // Keep uncertain writes against the Codex history, even if its session is reopened.
+  private readonly pendingInjections = new Map<string, "in-flight" | "unconfirmed">();
   /** Codex thread id per thread, kept past session teardown (see `resumeCursor`). */
   private readonly titleJobs = new Map<string, Promise<string | null>>();
   private readonly titleVersions = new Map<string, number>();
@@ -414,6 +431,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         }),
         model: resolveCodexModel(input.modelSelection?.model),
         runtimeMode: input.runtimeMode ?? "full-access",
+        noticesUnavailable: false,
         transcript: [],
         waiters: new Map(),
         parked: new Map(),
@@ -756,6 +774,46 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   readonly hasSession = (threadId: ThreadId): Effect.Effect<boolean> =>
     Effect.succeed(this.sessions.has(threadId));
 
+  /** Append notices without starting a turn. Return false only for a refusal before any write. */
+  private async injectNotices(session: CodexSession, codexThreadId: string, notices: readonly string[], storeTurnId?: string): Promise<boolean> {
+    const pending = this.pendingInjections.get(codexThreadId);
+    if (pending !== undefined) {
+      throw new CliError("CODEX_NOTICE_UNCONFIRMED", pending === "in-flight"
+        ? "Codex is still appending an instruction to this conversation."
+        : "Codex did not confirm its previous instruction update. Continue in a new conversation to avoid appending it twice.");
+    }
+    const delivered = this.injectedNotices.get(codexThreadId);
+    const signature = createHash("sha256").update(JSON.stringify(notices)).digest("hex");
+    const previous = storeTurnId === undefined ? undefined : delivered?.get(storeTurnId);
+    if (previous !== undefined) {
+      if (previous !== signature) throw new CliError("CODEX_NOTICE_CHANGED", "The instructions changed after Codex accepted them for this turn. Send a new turn to apply the change.");
+      return true;
+    }
+    if (session.noticesUnavailable) return false;
+    this.pendingInjections.set(codexThreadId, "in-flight");
+    try {
+      await session.peer.request(CODEX_METHODS.threadInjectItems, {
+        threadId: codexThreadId,
+        items: notices.map((notice) => ({ type: "message", role: "developer", content: [{ type: "input_text", text: notice }] })),
+      });
+    } catch (cause) {
+      if (!injectMethodUnavailable(cause)) {
+        this.pendingInjections.set(codexThreadId, "unconfirmed");
+        throw cause;
+      }
+      this.pendingInjections.delete(codexThreadId);
+      session.noticesUnavailable = true;
+      return false;
+    }
+    this.pendingInjections.delete(codexThreadId);
+    if (storeTurnId !== undefined) {
+      const deliveries = delivered ?? new Map<string, string>();
+      deliveries.set(storeTurnId, signature);
+      this.injectedNotices.set(codexThreadId, deliveries);
+    }
+    return true;
+  }
+
   // -- turns ---------------------------------------------------------------
 
   readonly sendTurn = (input: ProviderSendTurnInput): Effect.Effect<ProviderTurnStartResult, CliError> =>
@@ -784,6 +842,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       };
       const effort = optionValue(["reasoningEffort", "effort"]) ?? "medium";
       const serviceTier = optionValue(["serviceTier", "tier"]);
+      const notices = (input.notices ?? []).filter((notice) => notice.trim().length > 0);
       const turn: TranscriptTurn = {
         id: randomUUID(),
         serverTurnId: null,
@@ -798,11 +857,17 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       session.harness.beginTurn(turn.id);
       session.lastActiveAt = Date.now();
       try {
-        const compact = isCompactCommand(input.prompt);
+        const compact = isCompactCommand(input.fallbackPrompt ?? input.prompt);
         const notes = session.harness.takeNotes();
+        // Moxen's own text goes in as developer items, so the model can tell
+        // it from what the user typed; a turn of it alone carries an empty
+        // user input. A runtime that does not know the method gets it ahead
+        // of the prompt instead, exactly as before.
+        const injected = !compact && notices.length > 0 ? await this.injectNotices(session, codexThreadId, notices, input.storeTurnId) : false;
+        const prompt = injected ? input.prompt : input.fallbackPrompt ?? promptWithNotices(input.prompt, notices);
         const result = asRecord(await session.peer.request(compact ? CODEX_METHODS.threadCompactStart : CODEX_METHODS.turnStart, compact ? { threadId: codexThreadId } : {
           threadId: codexThreadId,
-          input: [...await codexUserInput(session.peer, session.workingDirectory, input.prompt, input.images), ...(notes ? userInputBlocks(notes) : [])],
+          input: [...await codexUserInput(session.peer, session.workingDirectory, prompt, input.images), ...(notes ? userInputBlocks(notes) : [])],
           ...(effort ? { effort } : {}),
           summary: this.providerConfig.reasoningSummary ?? "detailed",
           ...(model ? { model } : {}),

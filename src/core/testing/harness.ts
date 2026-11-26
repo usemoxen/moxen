@@ -22,7 +22,7 @@ import * as Stream from "effect/Stream";
 import { DEFAULT_CONFIG } from "../config.js";
 import { CliError } from "../errors.js";
 import type { McpServerSpec } from "../mcp.js";
-import type { ProviderRuntimeEvent, SideAnswer, SideQuestionInput } from "../providers/spi.js";
+import type { ProviderAdapterCapabilities, ProviderRuntimeEvent, SideAnswer, SideQuestionInput } from "../providers/spi.js";
 import { runProcess } from "../infra/process.js";
 import { rmTempAsync } from "./tmp.js";
 import { openThreadStore, type ThreadStore } from "../threads/store.js";
@@ -39,10 +39,12 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((run) => run()));
 });
 
-/** A turn as the provider receives it: the prompt, and the images sent with it. */
+/** A turn as the provider receives it: the prompt, the notices sent beside it and the images. */
 export interface SentTurn {
   readonly threadId: string;
   readonly prompt: string;
+  /** Moxen's own text, on a driver with `developerNotices`: never folded into the prompt there. */
+  readonly notices?: readonly string[];
   readonly images?: ReadonlyArray<{ name: string; mimeType: string; data: string }>;
 }
 
@@ -59,7 +61,10 @@ class HarnessDriver implements TurnDriver {
     steer?: { readonly mode: "delivers" | "fails"; readonly onSteer?: (threadId: string, text: string) => void },
     sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>,
     private readonly onStopSession?: (threadId: string) => void,
+    /** Stand in for a driver that takes Moxen's notices as developer items (Codex). */
+    capabilities?: ProviderAdapterCapabilities,
   ) {
+    if (capabilities) this.capabilities = capabilities;
     // Only a driver whose provider takes mid-turn input has the method, as with the real ones.
     if (steer) {
       this.steerTurn = (threadId, text) =>
@@ -71,6 +76,9 @@ class HarnessDriver implements TurnDriver {
   }
 
   steerTurn?: (threadId: string, text: string) => Effect.Effect<void, CliError>;
+
+  /** Only where the test gave the driver one, as the Codex driver does for Moxen's notices. */
+  readonly capabilities?: ProviderAdapterCapabilities;
 
   /** Only where the test gave the provider one, as with the real drivers that can copy a session. */
   sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>;
@@ -115,7 +123,7 @@ class HarnessDriver implements TurnDriver {
     return Effect.tryPromise({
       try: async () => {
         if (this.behavior === "failing") throw new Error("harness driver cannot start turns");
-        this.onSendTurn?.({ threadId: input.threadId, prompt: input.prompt, ...(input.images ? { images: input.images } : {}) });
+        this.onSendTurn?.({ threadId: input.threadId, prompt: input.prompt, ...(input.notices ? { notices: input.notices } : {}), ...(input.images ? { images: input.images } : {}) });
         this.turn += 1;
         const turnId = `driver-turn-${this.turn}`;
         this.prompts.set(turnId, input.prompt);
@@ -190,6 +198,12 @@ export interface TestHarnessOptions {
   readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivers" | "fails">>;
   /** Sees each steer a driver accepted. */
   readonly onSteer?: (threadId: string, text: string) => void;
+  /**
+   * The fake drivers take Moxen's own text as notices rather than folded into
+   * the prompt, as Codex does: `onSendTurn` then sees `prompt` without them.
+   * Off by default, so the prompt the other tests read stays one text.
+   */
+  readonly developerNotices?: boolean;
   /** Answers `/btw` for these providers; the others have no `sideQuestion`, so they are `SIDE_QUESTION_UNSUPPORTED`. */
   readonly sideQuestions?: Partial<Record<"claude" | "codex" | "opencode" | "harness", (input: SideQuestionInput) => Promise<SideAnswer>>>;
 }
@@ -199,7 +213,8 @@ function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
   const factory = (kind?: "claude" | "codex" | "opencode" | "harness") => (): TurnDriver => {
     const mode = kind === undefined ? undefined : options.steering?.[kind];
     const sideQuestion = kind === undefined ? undefined : options.sideQuestions?.[kind];
-    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion, options.onStopSession);
+    const capabilities = options.developerNotices ? { sessionModelSwitch: "in-session", developerNotices: true } as const : undefined;
+    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion, options.onStopSession, capabilities);
   };
   return {
     claude: factory("claude"), codex: factory("codex"), opencode: factory("opencode"),
