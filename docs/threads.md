@@ -557,7 +557,24 @@ hold clears, so in the same critical section that clears the hold the
 follow-ups the hold left queued move with it, through the same durable transfer
 and wait model a manual continue uses. They run on the new thread, after its
 hand-off turn, each exactly once; a send landing after the hold clears finds
-none and starts like any other. Destination
+none and starts like any other.
+
+The hand-off that opened a continued thread is never retold as history in the
+next hand-off: it is recognized by provenance recorded on its turn, and the next
+hand-off builds from the chain's structured record instead — bounded facts
+(the original goal, the last request, an unanswered first instruction, the
+latest authored wrap-up, the checklist, the files, the images) carried as data
+on the thread record, never parsed back out of a rendered document, so one
+hand-off document stays the same size however long the chain behind it is.
+Queued requests are durable work, not history excerpts: they travel untruncated
+with their origin thread, turn and message identity and the time they were
+scheduled for, until a thread of the chain owns them; a source entry is only
+consumed once the destination holds the whole request. Every section that is
+not pending work is capped, every cut or omission names the thread whose
+ledger holds the full text (for `thread_read`), and the rendered context on
+any path stays within a fixed budget. Older records without the carried facts
+read as they are, with nothing carried. Task resolution, live-thread lookup
+and handoff-key retries follow a continuation chain up to 128 hops. Destination
 identity is persisted before creation to avoid duplicate handoffs after restart.
 A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the

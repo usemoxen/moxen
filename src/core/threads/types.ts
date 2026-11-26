@@ -90,6 +90,72 @@ export interface ContinueClaim {
   readonly at: string;
 }
 
+/** Verbatim text a hand-off carries across continuations, cut at its cap with the ledger that holds the full text named. */
+export interface HandoffText {
+  /**
+   * The text, already cut at its cap when it was carried: whatever the cut
+   * replaced never returns, so the record stays bounded however many hops
+   * the text survives. The cut, when there was one, says so within.
+   */
+  readonly text: string;
+  /** The thread whose ledger holds the full text, for `thread_read`. */
+  readonly sourceThreadId: string;
+}
+
+/**
+ * One request the user queued that never ran: durable work, carried across
+ * continuations until a thread of the chain owns it. The text is never
+ * cut, and the identity and start condition survive every hop.
+ */
+export interface HandoffPendingRequest {
+  readonly sourceThreadId: string;
+  readonly turnId: string;
+  readonly messageId: string;
+  /** The request exactly as the user wrote it: untruncated work. */
+  readonly text: string;
+  /** The earliest instant the request may start, when it was scheduled. */
+  readonly scheduledFor?: string | null;
+  /**
+   * The queue admission conditions the request was queued under, so a later
+   * hop can keep it gated instead of dispatching it early. The internal
+   * transfer wait is never carried (each hop re-attaches its own); everything
+   * the user or the queue set travels with the request.
+   */
+  readonly conditions?: readonly QueueCondition[];
+}
+
+/**
+ * The bounded facts a continued thread carries forward from the hand-off
+ * that opened it, so a chain of continuations never nests whole hand-off
+ * documents. Every field is structured data on the thread record — none
+ * of it is parsed back out of a rendered document. Older records without
+ * the field read with nothing carried.
+ */
+export interface HandoffFacts {
+  /** The thread this hand-off document was built from: where anything cut or omitted still lives. */
+  readonly sourceThreadId: string;
+  /** The chain's original goal, as far as it was ever written down. */
+  readonly goal: HandoffText | null;
+  /** The latest user request that was already sent. */
+  readonly lastRequest: HandoffText | null;
+  /** The first thing to do, kept while no thread of the chain has answered. */
+  readonly firstAction: HandoffText | null;
+  /** The latest authored wrap-up of the chain's state. */
+  readonly wrapUp: HandoffText | null;
+  /** The checklist as the chain last recorded it, rows with omissions marked in-band. */
+  readonly plan: readonly string[];
+  /** Files the chain already changed, summed per path. */
+  readonly files: readonly { readonly path: string; readonly additions: number; readonly deletions: number }[];
+  /** Changed files omitted when the rows were capped. */
+  readonly filesOmitted?: number;
+  /** The chain's original image attachments, as saved attachment paths. */
+  readonly images: readonly { readonly name: string; readonly path: string }[];
+  /** Images omitted when the rows were capped. */
+  readonly imagesOmitted?: number;
+  /** The queued requests that never ran, oldest first. */
+  readonly pending: readonly HandoffPendingRequest[];
+}
+
 export interface StoredThread {
   readonly researchRun?: StoredResearchRun;
   readonly pastResearchRuns?: readonly StoredResearchRun[];
@@ -98,6 +164,15 @@ export interface StoredThread {
   readonly researchRole?: { readonly leadThreadId: string; readonly role: ResearchRole };
   /** The thread this one continued (`thread.continue`): its finished tasks are still this thread's to reach. */
   readonly continuedFrom?: string;
+  /**
+   * The bounded facts this thread carries forward from the hand-off that
+   * opened it (`HandoffFacts`): what a chain of continuations may keep of
+   * the threads behind it. Written by `continueThread` when it creates the
+   * destination; absent on threads no hand-off opened and on threads stored
+   * before the field existed — those read with nothing carried, and their
+   * conversation is told as ordinary history.
+   */
+  readonly handoffFacts?: HandoffFacts;
   /**
    * A manual continuation in flight on this thread (`reserveContinuation`):
    * while present, admission starts no turn here, so the new worker never
@@ -224,6 +299,22 @@ export type TurnDelivery = "started" | "queued" | "steered" | "restarted" | "inj
 
 export interface StoredTurn {
   readonly usagePause?: TurnUsagePause;
+  /**
+   * The prompt Moxen generated to open this thread with a hand-off record:
+   * provenance that a document was authored, not spoken by the user, so the
+   * next hand-off recognizes it by data rather than by its text and never
+   * retells it as history. Only the turn continueThread opens carries it.
+   * Absent on turns stored before the field existed.
+   */
+  readonly handoffOpen?: true;
+  /**
+   * The message ids of the pending requests this hand-off opener carried as
+   * part of its task (rendered into its prompt). Once the opener dispatches,
+   * those requests count as sent: the next hand-off reconciles them away
+   * instead of re-assigning them as never sent. Only a hand-off opener
+   * carries it; absent elsewhere and on rows written before the field existed.
+   */
+  readonly handoffPending?: readonly string[];
   readonly queue?: QueuePolicy;
   /**
    * Settle left this plain turn queued because the thread was settled or its
@@ -470,6 +561,8 @@ export interface CreateThreadInput {
   readonly researchRun?: StoredResearchRun;
   readonly researchRole?: StoredThread["researchRole"];
   readonly continuedFrom?: string;
+  /** The hand-off facts the new thread carries (see `HandoffFacts`); only the continue path passes them. */
+  readonly handoffFacts?: HandoffFacts;
 }
 
 export type SendIfBusy = "reject" | "inject";
@@ -501,6 +594,10 @@ export interface SendTurnInput {
   /** A message moxen writes itself (with its facts), rather than the user. */
   readonly origin?: MessageOrigin;
   readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  /** Internal: the prompt is the generated hand-off that opens a continued thread, recorded as its provenance. */
+  readonly handoffOpen?: true;
+  /** Internal: the pending request message ids this hand-off opener carries as its task (see `StoredTurn.handoffPending`). */
+  readonly handoffPending?: readonly string[];
 }
 
 export type ReadView = "messages" | "turn-items" | "plans" | "checkpoints" | "transfers";

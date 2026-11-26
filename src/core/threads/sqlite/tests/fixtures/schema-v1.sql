@@ -142,7 +142,7 @@ CREATE TABLE threads (
   usage_pause            TEXT,            -- JSON: read and rewritten on every send
   rest                   TEXT NOT NULL    -- JSON: researchRun, pastResearchRuns, researchRole, researchPicker,
                                          -- continueClaim, providerSessions, instructionState, modeState,
-                                         -- nativeSubagents, unsettledAt, usageProtectionOverride,
+                                         -- nativeSubagents, unsettledAt, usageProtectionOverride, handoffFacts,
                                          -- modelSelection.options
 ) STRICT
 
@@ -179,7 +179,7 @@ CREATE TABLE turns (
                                    -- handoff minus destinationThreadId, modelSelection, usagePause,
                                    -- usage, error, parentTurnId, runtimeMode, interactionMode,
                                    -- interactionModeExplicit, startedAt, unanswered, generation,
-                                   -- turnOutputTokens
+                                   -- turnOutputTokens, handoffOpen, handoffPending
 ) STRICT
 
 -- index turns_due

@@ -706,17 +706,22 @@ describe("a manual continue moves pending messages to the new thread's work queu
 
     // A stored handoff selected on the carried entry: every message of the
     // batch is part of the task the handoff names, in dispatch order
-    // (MXN-388).
+    // (MXN-388). The entry is still scheduled (a usage hold), so the opener
+    // inherits that schedule and the batch rides a gated opener, never a
+    // runnable one (MXN-413 r2 finding 1).
     await settleRuns();
     await editWorkQueue(w.ctx, continued.threadId, moved.id, "edit", parseQueuePolicy({ conditions: [], continuation: "stored" }));
     await runWorkQueue(w.ctx);
     const prepared = (await w.store.readTurns(continued.threadId)).find((turn) => turn.id === moved.id)!;
     expect(prepared.status).toBe("completed");
-    const doc = (await w.store.readMessages(prepared.handoff!.destinationThreadId)).find((message) => message.role === "user")!.text;
+    const destinationId = prepared.handoff!.destinationThreadId;
+    const doc = (await w.store.readMessages(destinationId)).find((message) => message.role === "user")!.text;
     expect(doc).toContain("never sent");
     expect(doc).toContain("1. Second of the pair");
     expect(doc).toContain("2. Third of the pair");
-    for (const threadId of [source.id, continued.threadId, prepared.handoff!.destinationThreadId]) {
+    const openerTurn = (await w.store.readTurns(destinationId)).find((turn) => turn.handoffOpen === true)!;
+    expect(typeof openerTurn.scheduledFor).toBe("string");
+    for (const threadId of [source.id, continued.threadId, destinationId]) {
       for (const turn of await w.store.readTurns(threadId)) {
         if (turn.status === "running") await interruptTurn(w.store, threadId, turn.id);
       }
