@@ -87,6 +87,8 @@ describe("moxen MCP server", () => {
         "web_fetch",
         "task_cancel",
         "task_settle",
+        "task_unsettle",
+        "task_snooze",
         "task_send",
         "task_ask",
         "message_queue",
@@ -128,7 +130,7 @@ describe("moxen MCP server", () => {
       // Both sessions carry Moxen's tools, but the subagent's has none that delegate (it does not delegate again).
       const moxen = (input: Record<string, unknown> | undefined) =>
         ((input?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }> | undefined) ?? []).find((server) => server.name === "moxen");
-      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_send", "task_ask", "message_queue", "thread_continue", "project_list", "project_resolve", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_unsettle", "task_snooze", "task_send", "task_ask", "message_queue", "thread_continue", "project_list", "project_resolve", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
       expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "usage_status", "web_fetch", "project_list", "project_resolve", "memory_read", "memory_search"]);
     } finally {
       await mcp.close();

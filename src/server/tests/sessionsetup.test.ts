@@ -71,9 +71,9 @@ describe("Moxen's own tools, switched per provider", () => {
     const knowledge = ["knowledge_read", "knowledge_search"];
     const memory = ["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"];
     const threads = ["thread_read", "thread_search"];
-    expect(await moxenTools({})).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "project_list", "project_resolve", "task_ask", "task_cancel", "task_send", "task_settle", "task_status", "thread_continue", ...threads, "usage_status", "web_fetch"]);
+    expect(await moxenTools({})).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "project_list", "project_resolve", "task_ask", "task_cancel", "task_send", "task_settle", "task_snooze", "task_status", "task_unsettle", "thread_continue", ...threads, "usage_status", "web_fetch"]);
     expect(await moxenTools({ orchestration: false })).toEqual(["context_usage", ...knowledge, ...memory, "project_list", "project_resolve", "usage_status", "web_fetch"]);
-    expect(await moxenTools({ webFetch: false })).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "project_list", "project_resolve", "task_ask", "task_cancel", "task_send", "task_settle", "task_status", "thread_continue", ...threads, "usage_status"]);
+    expect(await moxenTools({ webFetch: false })).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "models", "project_list", "project_resolve", "task_ask", "task_cancel", "task_send", "task_settle", "task_snooze", "task_status", "task_unsettle", "thread_continue", ...threads, "usage_status"]);
   });
 
   it("drops the server with both off and memory off, and reads the older all-at-once switch as both", async () => {

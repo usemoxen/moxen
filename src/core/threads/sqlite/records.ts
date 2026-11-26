@@ -258,6 +258,9 @@ export function encodeThread(thread: StoredThread): ThreadRow {
   if (thread.instructionState !== undefined) rest.instructionState = thread.instructionState;
   if (thread.modeState !== undefined) rest.modeState = thread.modeState;
   if (thread.nativeSubagents !== undefined) rest.nativeSubagents = thread.nativeSubagents;
+  if (thread.snoozeConditions !== undefined) rest.snoozeConditions = thread.snoozeConditions;
+  if (thread.snoozeLatched !== undefined) rest.snoozeLatched = thread.snoozeLatched;
+  if (thread.snoozeGeneration !== undefined) rest.snoozeGeneration = thread.snoozeGeneration;
   // Required on the record, but a thread written before versions may carry no
   // value: keep the key so the record reads back the way it was written.
   rest.unsettledAt = thread.unsettledAt ?? null;
@@ -331,6 +334,9 @@ export function decodeThread(row: ThreadRow): StoredThread {
     ...(rest.instructionState === undefined ? {} : { instructionState: rest.instructionState as NonNullable<StoredThread["instructionState"]> }),
     ...(rest.modeState === undefined ? {} : { modeState: rest.modeState as NonNullable<StoredThread["modeState"]> }),
     ...(rest.nativeSubagents === undefined ? {} : { nativeSubagents: rest.nativeSubagents as NonNullable<StoredThread["nativeSubagents"]> }),
+    ...(rest.snoozeConditions === undefined ? {} : { snoozeConditions: rest.snoozeConditions as NonNullable<StoredThread["snoozeConditions"]> }),
+    ...(rest.snoozeLatched === undefined ? {} : { snoozeLatched: rest.snoozeLatched as NonNullable<StoredThread["snoozeLatched"]> }),
+    ...(rest.snoozeGeneration === undefined ? {} : { snoozeGeneration: rest.snoozeGeneration as string }),
   };
 }
 
@@ -357,6 +363,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.generation !== undefined) rest.generation = turn.generation;
   if (turn.turnOutputTokens !== undefined) rest.turnOutputTokens = turn.turnOutputTokens;
   if (turn.startedAt !== undefined) rest.startedAt = turn.startedAt;
+  if (turn.heldBySnooze !== undefined) rest.heldBySnooze = turn.heldBySnooze;
 
   return {
     id: turn.id,
@@ -422,6 +429,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     runtimeMode: rest.runtimeMode as RuntimeMode,
     interactionMode: rest.interactionMode as InteractionMode,
     ...(rest.interactionModeExplicit === undefined ? {} : { interactionModeExplicit: true as const }),
+    ...(rest.heldBySnooze === undefined ? {} : { heldBySnooze: true }),
     modelSelection: (rest.modelSelection ?? null) as ModelSelection | null,
     parentTurnId: (rest.parentTurnId ?? null) as string | null,
     error: (rest.error ?? null) as string | null,

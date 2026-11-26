@@ -19,7 +19,7 @@ import { untrustedContext } from "../../core/untrusted.js";
 import { fetchPage } from "../../core/providers/harness/web/fetch.js";
 import { webPolicy, type WebPolicy } from "../../core/providers/harness/web/settings.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type HarnessProviderConfig, type WebConfig } from "../../core/types.js";
-import type { DelegatedTaskStatus } from "../../core/threads/views.js";
+import { isSnoozedThread, type DelegatedTaskStatus } from "../../core/threads/views.js";
 import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
 import { parseQueuePolicy } from "../../core/threads/queue.js";
@@ -81,6 +81,32 @@ export const IMAGE_GENERATION_TOOL: McpTool = {
     additionalProperties: false,
   },
 };
+
+/**
+ * When a message runs or a snooze ends: the one reader `--at`, `message_queue`
+ * and `task_snooze` share, so the three cannot drift.
+ */
+export const AT_DESCRIPTION = "When: an ISO date-time, or HH:MM on the machine's clock (today, or tomorrow once that has passed).";
+
+/**
+ * The queue's condition schema, said once: `message_queue` and `task_snooze`
+ * wait on exactly the same conditions, judged by the same rules, so they offer
+ * the same shapes. `lead` opens the sentence ("Hold it until…").
+ */
+export function conditionsSchema(lead: string): Record<string, unknown> {
+  return {
+    type: "array",
+    maxItems: 16,
+    description: `${lead} Each is an object with a type: ` +
+      "{type:\"reset\", provider, window:\"session\"|\"weekly\"|\"all\"} (after that allowance resets); " +
+      "{type:\"usage\", provider, window, minimum} (at least minimum percent of the allowance left); " +
+      "{type:\"thread\", threadId} (after that thread has nothing running or queued); " +
+      "{type:\"entry\", threadId, turnId} (after that queue entry has run); " +
+      "{type:\"at\", at} (an ISO time); " +
+      "{type:\"provider\", provider, state:\"exhausted\"|\"protected\", mode:\"after\"|\"while\"}.",
+    items: { type: "object" },
+  };
+}
 
 export const MOXEN_TOOLS: readonly McpTool[] = [
   {
@@ -293,7 +319,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
   {
     name: "task_settle",
     description:
-      "Mark a delegated task finished once its work is done and reviewed: use it (not task_cancel) when the report is in and nothing is left to run. " +
+      "Mark a delegated task finished once its work is done and reviewed: use it (not task_cancel) when the report is in and nothing is left to run, and not for work that only has to wait (task_snooze) or that you want to reopen later (task_unsettle). " +
       "A task that is still running is refused unless stop is true, which ends its work first, including work it delegated itself. " +
       "With removeWorktree, its worktree checkout goes too, but only once its branch is merged (squash-merges count) or it never committed: anything else keeps the checkout and says why, while the task still settles. " +
       "The task's thread and branch are always kept. Pass taskId for one task or taskIds for several: each outcome is reported separately, and one bad id does not stop the others.",
@@ -310,6 +336,41 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     },
   },
   {
+    name: "task_unsettle",
+    description:
+      "Reopen a delegated task you settled with task_settle: it goes back to active, and its own delegated tasks with it. No turn is started, so nothing is spent — the task is simply in the active set again, ready for task_send or message_queue. " +
+      "Use it when a settled task turns out to need more work and you want to decide what it does next; task_settle marks work finished, this reverses that mark. " +
+      "A task that is not settled is refused (an active or snoozed task has nothing to reopen). " +
+      "Only reaches your own tasks, and not a research run's roles or lead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "A task you delegated. One at a time, unlike task_settle." },
+      },
+      required: ["taskId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "task_snooze",
+    description:
+      "Take a delegated task out of the active set until a time (at) or until conditions are met: it starts no turn, and the task comes back to active on its own as soon as that time passes or those conditions are met. " +
+      "at holds it until a time, read exactly like message_queue's at; conditions are message_queue's conditions, all of which must be met; with both, it waits for both. " +
+      "Work queued on the task (message_queue) waits behind the snooze instead of running, and resumes when it ends; a message you send with task_send still reaches the task. " +
+      "Use it when the task's work is not finished but must wait (\"pick this up after the usage reset\", \"after the other task finishes\"): to mark it finished, task_settle; to wake a finished or settled task now, task_send with wake: true. A settled task is refused. " +
+      "Only reaches your own tasks, and not a research run's roles or lead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "A task you delegated." },
+        at: { type: "string", description: AT_DESCRIPTION },
+        conditions: conditionsSchema("Hold it out of the active set until all of these are met."),
+      },
+      required: ["taskId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "task_send",
     description:
       "Send a message to a task you delegated, to correct or redirect it without cancelling it. It arrives as a message from you, not from the user. " +
@@ -317,7 +378,7 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
       "queued (the task is busy and cannot take input mid-turn, so the message waits and runs as its next turn: it has NOT read it yet); " +
       "started (a new turn began on an idle task); not_delivered (recorded but it did not reach the running turn: send it again after the task settles). " +
       "Never assume the task read a message unless the outcome is steered or started. " +
-      "A task that has finished or been settled is refused unless you pass wake: true, which starts a new turn on it and spends usage; you then get a task notification when it settles again. " +
+      "A task that has finished or been settled is refused unless you pass wake: true, which starts a new turn on it and spends usage; you then get a task notification when it settles again. It also clears the settled mark: the task reads active again, and stays so after the turn ends. " +
       "Only reaches your own tasks, and not a research run's roles or lead.",
     inputSchema: {
       type: "object",
@@ -365,19 +426,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
         message: { type: "string", description: "What the thread should do or know when it runs. Say it in full." },
         threadId: { type: "string", description: "A task you delegated. Omit for your own thread." },
         delivery: { type: "string", enum: ["queue"], description: "Always queue: a queued message waits its turn. Steering and restarting are not offered." },
-        at: { type: "string", description: "When to run it: an ISO date-time, or HH:MM on the machine's clock (today, or tomorrow once that has passed)." },
-        conditions: {
-          type: "array",
-          maxItems: 16,
-          description: "Hold it until all of these are met. Each is an object with a type: " +
-            "{type:\"reset\", provider, window:\"session\"|\"weekly\"|\"all\"} (after that allowance resets); " +
-            "{type:\"usage\", provider, window, minimum} (at least minimum percent of the allowance left); " +
-            "{type:\"thread\", threadId} (after that thread has nothing running or queued); " +
-            "{type:\"entry\", threadId, turnId} (after that queue entry has run); " +
-            "{type:\"at\", at} (an ISO time); " +
-            "{type:\"provider\", provider, state:\"exhausted\"|\"protected\", mode:\"after\"|\"while\"}.",
-          items: { type: "object" },
-        },
+        at: { type: "string", description: AT_DESCRIPTION },
+        conditions: conditionsSchema("Hold it until all of these are met."),
       },
       required: ["message"],
       additionalProperties: false,
@@ -494,7 +544,7 @@ export const PROJECT_TOOLS: readonly McpTool[] = [
  * continues itself in a new thread (a full context there is compacted in
  * place, and its report decides what runs next).
  */
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_settle", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen", "thread_continue"]);
+export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "task_status", "models", "task_cancel", "task_settle", "task_unsettle", "task_snooze", "task_send", "task_ask", "message_queue", "thread_search", "thread_read", "image_gen", "thread_continue"]);
 
 const RESEARCH_ROLE_TOOLS: readonly McpTool[] = [
   {
@@ -1033,6 +1083,45 @@ export async function callMoxenTool(
           }
         }
         return ok({ tasks });
+      }
+      case "task_unsettle": {
+        const taskId = argString(args, "taskId", true)!;
+        const unsettled = await api.dispatch({ type: "thread.task.unsettle", parentThreadId, taskId });
+        return ok({
+          taskId,
+          unsettled: true,
+          status: unsettled.status,
+          workStatus: unsettled.workStatus,
+          startedTurn: unsettled.startedTurn,
+          ...(unsettled.worktreeRemoved ? { worktreeRemoved: true } : {}),
+          // A task whose checkout was cleared at settle cannot take a message
+          // (task_send refuses it), so the advice names the way that works.
+          next: unsettled.worktreeRemoved
+            ? "The task is active again but its worktree checkout was removed when it settled, so a message cannot start work in it: re-delegate the follow-up as a new task (task_send fails with TASK_WORKTREE_REMOVED). Its branch is kept."
+            : "The task is active again and no turn was started. Send it work with task_send, queue it with message_queue, or settle it again when the new work is done.",
+        });
+      }
+      case "task_snooze": {
+        if (args.conditions !== undefined && !Array.isArray(args.conditions)) throw new CliError("INVALID_TOOL_INPUT", "conditions must be an array of queue conditions.");
+        if (args.at === undefined && args.conditions === undefined) throw new CliError("INVALID_TOOL_INPUT", "Pass at, conditions, or both: a snooze needs something to wait for.");
+        const taskId = argString(args, "taskId", true)!;
+        const snoozed = await api.dispatch({
+          type: "thread.task.snooze",
+          parentThreadId,
+          taskId,
+          ...(argString(args, "at") === undefined ? {} : { at: argString(args, "at")! }),
+          ...(Array.isArray(args.conditions) ? { conditions: parseQueuePolicy({ conditions: args.conditions }).conditions } : {}),
+        });
+        return ok({
+          taskId,
+          snoozed: true,
+          status: snoozed.status,
+          workStatus: snoozed.workStatus,
+          snoozedUntil: snoozed.snoozedUntil,
+          conditions: snoozed.conditions,
+          wakes: snoozed.wakes,
+          note: snoozed.note,
+        });
       }
       case "task_send": {
         if (args.wake !== undefined && typeof args.wake !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "wake must be true or false.");
@@ -1643,11 +1732,26 @@ async function statusTool(
     described = await api.query({ type: "thread.task.status", parentThreadId, taskId });
   }
   const finished = TERMINAL.has(described.task.status);
+  // The thread's lifecycle beside the task's work status: a snoozed task can
+  // be finished (its last turn ended) and out of the active set at once, and
+  // the two say different things to the caller.
+  const snoozed = isSnoozedThread(described.child);
   return {
     taskId,
     status: described.task.status,
     finished,
     ...(described.child.worktreePath ? { worktree: described.child.worktreePath, branch: described.child.branch } : {}),
+    ...(snoozed
+      ? {
+        snoozed: {
+          until: described.child.snoozedUntil ?? null,
+          conditions: described.child.snoozeConditions ?? [],
+          wakes: described.child.snoozedUntil
+            ? `at ${described.child.snoozedUntil}${described.child.snoozeConditions?.length ? ", once its conditions are met too" : ""}`
+            : "when its conditions are met",
+        },
+      }
+      : {}),
     ...(finished ? { report: described.task.summary } : { next: "Still running. Do not call task_status in a loop: a task notification arrives when it settles." }),
     background: {
       unknown: described.background.unknown,

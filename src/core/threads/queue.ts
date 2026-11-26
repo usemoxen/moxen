@@ -187,13 +187,23 @@ export function providerExhausted(provider: string, now = Date.now(), model?: st
 }
 
 /**
- * Mirrors `isSnoozed` in threads.ts (settled wins there; settled is checked
- * beside this here): a past-due snooze reads as active, not held.
+ * Whether a thread is snoozed right now: its `snoozedUntil` still lies ahead,
+ * or its snooze waits on conditions (`task_snooze`) a pass has yet to clear.
+ * The one stored-thread rule, read by the store status, queue admission, usage
+ * protection and the wake pass; `isSnoozedThread` in `views.ts` is the same
+ * rule over a client's envelope. Settled is checked beside it, and settled
+ * wins there.
  */
-function snoozeActive(snoozedUntil: string | null, now: number): boolean {
-  if (snoozedUntil === null) return false;
-  const parsed = Date.parse(snoozedUntil);
+export function snoozeActive(thread: StoredThread, now: number = Date.now()): boolean {
+  if (hasSnoozeConditions(thread)) return true;
+  if (thread.snoozedUntil === null) return false;
+  const parsed = Date.parse(thread.snoozedUntil);
   return Number.isFinite(parsed) && parsed > now;
+}
+
+/** Whether this thread's snooze ends on conditions rather than only on the clock. */
+export function hasSnoozeConditions(thread: StoredThread): boolean {
+  return (thread.snoozeConditions?.length ?? 0) > 0;
 }
 
 function entryPending(rows: readonly QueueRow[], threadId: string, turnId: string): boolean {
@@ -445,12 +455,10 @@ export async function antigravitySteerGate(
 export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly QueueRow[], config: CliConfig, now = Date.now(), origins?: TurnOrigins): { blocked: string[]; latched: number[]; conditions: QueueCondition[] } {
   const policy = turn.queue;
   const blocked: string[] = [];
-  const latched = [...(policy?.latched ?? [])];
-  const conditions = [...(policy?.conditions ?? [])];
   if (row.thread.usagePause?.forced || row.thread.usagePause && row.thread.usagePause.phase !== "resuming" && row.thread.usagePause.recoveryTurnId !== turn.id && !policy?.summaryFor) blocked.push("Waiting for thread protection");
   if (policy?.wakeUp && row.turns.some((previous) => previous.id !== turn.id && previous.queue?.wakeUp && previous.status === "queued" && (previous.queue.order < policy.order || previous.queue.order === policy.order && row.turns.indexOf(previous) < row.turns.indexOf(turn)))) blocked.push("Waiting for preceding wake-up");
   if (policy?.held || policy?.removed) blocked.push(policy.removed ? "Removed from queue" : "Held by you");
-  if (row.thread.archivedAt || row.thread.deletedAt || row.thread.settledAt || snoozeActive(row.thread.snoozedUntil, now)) blocked.push("Thread is not active");
+  if (row.thread.archivedAt || row.thread.deletedAt || row.thread.settledAt || snoozeActive(row.thread, now)) blocked.push("Thread is not active");
   if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) blocked.push("Waiting for your answer or approval");
   if (turn.scheduledFor && Date.parse(turn.scheduledFor) > now) blocked.push(`Scheduled for ${turn.scheduledFor}`);
   const selection = turn.modelSelection ?? row.thread.modelSelection;
@@ -473,7 +481,53 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   if (automaticTurn && driverKindOfInstance(selection.instanceId) === "antigravity" && !antigravityUnsupportedUseAllowed(config)) {
     if (!freshUserConsentReleases(row.turns, turn, row.thread.id, origins)) blocked.push(ANTIGRAVITY_HELD_MESSAGE);
   }
-  for (const [index, condition] of (policy?.conditions ?? []).entries()) {
+  const pass = conditionBlockers({
+    conditions: policy?.conditions ?? [],
+    since: policy?.eventAfter ?? turn.createdAt,
+    provider,
+    model,
+    rows,
+    now,
+    latched: policy?.latched,
+  });
+  blocked.push(...pass.blocked);
+  if (rows.some((r) => r.thread.id === row.thread.id && r.turns.some((t) => t.status === "running" && t.id !== turn.id))) blocked.push("Thread is running");
+  if (rows.some((r) => r.turns.some((t) => t.status === "running" && t.queue && (policy?.sequential || t.queue.sequential) && t.id !== turn.id && usageKeyForInstance((t.modelSelection ?? r.thread.modelSelection).instanceId) === provider))) blocked.push(`${provider}: preceding queue entry is running`);
+  return { blocked, latched: pass.latched, conditions: pass.conditions };
+}
+
+/** What a set of queue conditions needs to be judged against. */
+export interface ConditionsPass {
+  readonly conditions: readonly QueueCondition[];
+  /**
+   * When the waiting thing was created: a `provider … after` signal must have
+   * come at or after this. A queued turn passes its own creation (or the
+   * policy's `eventAfter`); a snooze passes when the snooze was set.
+   */
+  readonly since: string;
+  /** The provider the waiting thread runs on (`usageKeyForInstance`), and its model. */
+  readonly provider: string;
+  readonly model?: string | null | undefined;
+  readonly rows: readonly QueueRow[];
+  readonly now: number;
+  /** Indices of `provider … after` conditions whose event was already seen. */
+  readonly latched?: readonly number[] | null | undefined;
+}
+
+/**
+ * What these conditions still wait for, and the pass's own state back: a
+ * `reset` condition learns the reset time it is waiting for (so the caller can
+ * store it), and a `provider … after` condition latches once its event was
+ * seen. Shared by queue admission and by a snooze that ends on conditions
+ * (`task_snooze`), so a snoozed task and a queued message wait for exactly the
+ * same things.
+ */
+export function conditionBlockers(pass: ConditionsPass): { blocked: string[]; latched: number[]; conditions: QueueCondition[] } {
+  const { provider, model, rows, now, since } = pass;
+  const blocked: string[] = [];
+  const latched = [...(pass.latched ?? [])];
+  const conditions = [...pass.conditions];
+  for (const [index, condition] of conditions.entries()) {
     if (condition.type === "at") { if (Date.parse(condition.at) > now) blocked.push(`Waiting until ${condition.at}`); }
     else if (condition.type === "usage") {
       const condModel = condition.provider === provider ? model : null;
@@ -498,16 +552,19 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
       const met = condition.state === "exhausted" ? providerExhausted(condition.provider, now, condModel)
         : rows.some((r) => r.thread.usagePause?.provider === condition.provider && r.thread.usagePause.phase !== "resuming");
       const signal = usageSignal(condition.provider, condition.state);
-      const happened = signal !== null && Date.parse(signal) >= Date.parse(policy?.eventAfter ?? turn.createdAt);
+      const happened = signal !== null && Date.parse(signal) >= Date.parse(since);
       if (condition.mode === "after" && (met || happened) && !latched.includes(index)) latched.push(index);
       if (!(condition.mode === "after" ? latched.includes(index) : met)) blocked.push(`${condition.mode} ${condition.provider} is ${condition.state}`);
     } else {
+      // A dependency condition a client wrote without the thread (or, for an
+      // entry, without the turn) can never be judged: it is skipped rather than
+      // waited on forever, which would wedge its queue entry and its snooze.
+      const named = condition.type === "entry" ? condition.threadId && condition.turnId : condition.threadId;
+      if (!named) continue;
       const dependency = rows.find((r) => r.thread.id === condition.threadId);
       if (!dependency) blocked.push("Dependency is unavailable");
       else if (condition.type === "entry" ? entryPending(rows, condition.threadId, condition.turnId) : dependency.turns.some((t) => t.status === "running" || t.status === "queued")) blocked.push(`Waiting for ${dependency.thread.title}`);
     }
   }
-  if (rows.some((r) => r.thread.id === row.thread.id && r.turns.some((t) => t.status === "running" && t.id !== turn.id))) blocked.push("Thread is running");
-  if (rows.some((r) => r.turns.some((t) => t.status === "running" && t.queue && (policy?.sequential || t.queue.sequential) && t.id !== turn.id && usageKeyForInstance((t.modelSelection ?? r.thread.modelSelection).instanceId) === provider))) blocked.push(`${provider}: preceding queue entry is running`);
   return { blocked, latched, conditions };
 }

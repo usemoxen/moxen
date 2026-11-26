@@ -41,6 +41,8 @@ import type {
   ContinuedOwnThread,
   SentTaskMessage,
   SettledTask,
+  SnoozedTask,
+  UnsettledTask,
   QueuedAgentMessage,
   ChecklistStep,
   DelegateRequest,
@@ -305,6 +307,19 @@ export type CommandBody =
   /** A message from the thread that delegated a task, into that task (moxen's `task_send`). */
   | { readonly type: "thread.task.send"; readonly parentThreadId: string; readonly taskId: string; readonly message: string; readonly wake?: boolean }
   /**
+   * Mark a task the caller delegated active again (moxen's `task_unsettle`),
+   * through the same path as `threads unsettle`. No turn is started; a task
+   * that is not settled is refused.
+   */
+  | { readonly type: "thread.task.unsettle"; readonly parentThreadId: string; readonly taskId: string }
+  /**
+   * Take a task the caller delegated out of the active set (moxen's
+   * `task_snooze`) until `at`, or until its `conditions` are met — the
+   * `thread.message.queue` condition shapes, judged by the admission pass's
+   * own rules. Without `at` it waits on the conditions alone.
+   */
+  | { readonly type: "thread.task.snooze"; readonly parentThreadId: string; readonly taskId: string; readonly at?: string; readonly conditions?: QueuePolicy["conditions"] }
+  /**
    * A side question to a task the caller delegated (moxen's `task_ask`): the
    * task's own provider answers on a copy of its thread, with no tools, and
    * nothing is recorded there. Owned like `task_send`; spends usage, so a
@@ -532,6 +547,8 @@ export interface CommandResults {
   "thread.task.cancel": CancelledTask;
   "thread.task.settle": SettledTask;
   "thread.task.send": SentTaskMessage;
+  "thread.task.unsettle": UnsettledTask;
+  "thread.task.snooze": SnoozedTask;
   "thread.task.ask": AskedTask;
   "thread.message.queue": QueuedAgentMessage;
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
@@ -1493,6 +1510,22 @@ export function decodeCommand(value: unknown): Command {
         taskId: requireField(record.taskId, type, "taskId"),
         message: requireField(record.message, type, "message"),
         ...optionalBoolean(record, "wake", type),
+      };
+    case "thread.task.unsettle":
+      return {
+        ...meta,
+        type,
+        parentThreadId: requireThreadId(record.parentThreadId),
+        taskId: requireField(record.taskId, type, "taskId"),
+      };
+    case "thread.task.snooze":
+      return {
+        ...meta,
+        type,
+        parentThreadId: requireThreadId(record.parentThreadId),
+        taskId: requireField(record.taskId, type, "taskId"),
+        ...(asString(record.at) ? { at: asString(record.at) as string } : {}),
+        ...(record.conditions === undefined ? {} : { conditions: parseQueuePolicy({ conditions: record.conditions }, { deferReset: true }).conditions }),
       };
     case "thread.task.ask":
       return {

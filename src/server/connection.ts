@@ -141,6 +141,8 @@ import {
   cancelTask,
   sendTaskMessage,
   settleTask,
+  snoozeTask,
+  unsettleTask,
   requireTaskControl,
   continueThread,
   continueOwnThread,
@@ -192,6 +194,7 @@ import type { AntigravityAccountConfig, CliConfig, ForgeConfig, ModelSelection, 
 import { antigravityAccountBlockedReason, antigravityOffUseLaunchBlockedReason, antigravityUnsupportedUseAllowed, driverKindOfInstance, parseAccountInstanceId } from "../core/types.js";
 import { persistUsageLimits, recordUsageWindows, usageKeyForInstance, usageLimitsSnapshot } from "../core/usage/limits.js";
 import { UsageProtection } from "../core/usage/protection.js";
+import { SnoozeWatch } from "../core/threads/snoozewatch.js";
 import { subscribeDriverUsage } from "../core/threads/execute.js";
 import { emptyThreadCost, resolveContextCostUsd, threadCostSplit, threadCostUsd, type ThreadCost } from "../core/usage/prices.js";
 import { readUsageCard, readUsageStats } from "../core/usage/statsstore.js";
@@ -391,6 +394,8 @@ export interface DirectConnectionOptions {
 
 export class DirectConnection implements ClientApi {
   private readonly usageProtection = new UsageProtection(() => this.context());
+  /** The periodic pass that ends a snooze waiting on conditions (task_snooze). */
+  private readonly snoozeWatch = new SnoozeWatch(() => this.context());
   private usageTimer: ReturnType<typeof setInterval> | null = null;
   private usageTickRunning = false;
   private readonly usageFailures = new Set<string>();
@@ -1060,6 +1065,14 @@ export class DirectConnection implements ClientApi {
       this.usageTickRunning = true;
       try {
         await this.usageProtection.tick();
+        // A snooze that waits on conditions (task_snooze) ends on the pass
+        // that sees them met: the thread goes back to active without a turn,
+        // and its queued work is admitted on the next poll. The watch keeps
+        // the candidates it needs, so the tick does not reread every record,
+        // and reads the same protection snapshot the work queue does.
+        await this.context()
+          .then(async (ctx) => this.snoozeWatch.tick(Date.now(), await this.usageProtection.snapshotRows(ctx)))
+          .catch(() => undefined);
         void this.refreshStaleChatGptUsage().catch(() => undefined);
       }
       catch (cause) {
@@ -1983,6 +1996,13 @@ export class DirectConnection implements ClientApi {
         });
       case "thread.task.send":
         return await sendTaskMessage(await this.context(), command.parentThreadId, command.taskId, command.message, command.wake === true);
+      case "thread.task.unsettle":
+        return await unsettleTask(await this.context(), command.parentThreadId, command.taskId);
+      case "thread.task.snooze":
+        return await snoozeTask(await this.context(), command.parentThreadId, command.taskId, {
+          ...(command.at === undefined ? {} : { at: command.at }),
+          ...(command.conditions === undefined ? {} : { conditions: command.conditions }),
+        });
       case "thread.task.ask":
         return await this.taskAsk(command);
       case "thread.message.queue": {
@@ -3487,6 +3507,7 @@ export class DirectConnection implements ClientApi {
     this.pollTimers.clear();
     if (this.usageTimer !== null) clearInterval(this.usageTimer);
     this.usageProtection.close();
+    this.snoozeWatch.close();
     for (const unsubscribe of this.usageSubscriptions) unsubscribe();
     this.embeddingGeneration++;
     this.semanticMemory.cancel();

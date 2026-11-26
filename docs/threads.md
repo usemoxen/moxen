@@ -58,10 +58,14 @@ A send on an idle thread never jumps ahead of an older held turn: the new
 message queues behind it, held for admission in turn, and the send reports
 it queued (it waits in the Work queue, it is not lost). The older turn goes
 first once nothing blocks it. A held turn that genuinely cannot run yet — a
-snoozed thread, a provider with no room — still holds its place, so the new
-message waits behind it rather than running first; unsnoozing, or the limit
-lapsing, releases both in order. Sending an immediate user message to end
-usage protection is the exception: it releases that hold and runs first.
+provider with no room — still holds its place, so the new message waits
+behind it rather than running first; the limit lapsing releases both in
+order. A snooze's hold is the exception beside it: it holds the automatic
+work an agent queued (`message_queue` on a snoozed task) and never a direct
+send, which runs past the held message and leaves it waiting for the snooze
+to end, admitted once the task is active again. Sending an immediate user
+message to end usage protection is the other exception: it releases that
+hold and runs first.
 "Older held turn" includes a due one: a continue set for a usage-limit
 reset, or a message held behind one, whose time has come. The rule is oldest
 first — the new message rides along in the older turn when model and mode
@@ -1222,6 +1226,99 @@ resolves against the new parent and reads as `TASK_NOT_FOUND` on the old one.
 A research run's lead and roles have no
 delegation rows, so they are refused with the same `TASK_NOT_FOUND` another
 thread's id gets.
+
+### Which one to reach for
+
+| The task's work is… | Use |
+| --- | --- |
+| done and reviewed | `task_settle`: it is finished, its thread and branch kept |
+| running, and must stop for good | `task_cancel` |
+| not done, and must wait for a time or a condition | `task_snooze` |
+| finished or settled, and needs one more thing now | `task_send` with `wake: true` |
+| settled, and you want to decide what it does next | `task_unsettle`, then `task_send` or `message_queue` |
+| to be corrected or redirected while it works | `task_send` (a wake, a steer or a queued next turn) |
+
+### Reopening a settled task (`task_unsettle`)
+
+`task_unsettle` is the mirror of `task_settle`, through the same path as
+`threads unsettle`: the task and the tasks it delegated go back to active, and
+no turn is started, so nothing is spent. Use it when a settled task turns out
+to need more work and you want to choose what it does next; the task is simply
+in the active set again, ready for `task_send`, `message_queue`, or a later
+`task_settle`. It takes one `taskId` (unlike `task_settle`'s `taskIds`), and it
+owns the task exactly as `task_settle` does: your own tasks, continuations
+included, never a research run's lead or role (a role has no delegation row at
+all, so it reads `TASK_NOT_FOUND` like any stranger's id; a lead is refused
+`TASK_UNSETTLE_RESEARCH`), and a deleted task reads `TASK_NOT_FOUND` too.
+
+A task that is not settled is refused with `TASK_NOT_SETTLED`, naming what it
+is: an active task has nothing to reopen, and a snoozed one ends its snooze on
+its own (`task_snooze`). `task_send` with `wake: true` already clears the
+settled mark when it wakes a settled task — the task reads active again, and
+stays so once the new turn ends — so `task_unsettle` is for a reopen with no
+message and no usage spent.
+
+### Taking a task out of the active set (`task_snooze`)
+
+`task_snooze` takes a delegated task out of the active set until it is due
+again, and starts no turn. It is `threads snooze` for a task:
+
+- `at` holds it until a time, read by the same code as `threads send --at` and
+  `message_queue`'s `at`: an ISO date-time, or `HH:MM` on the machine's clock
+  (today, or tomorrow once that has passed).
+- `conditions` are the queue's own conditions, the same schema and validation
+  as `message_queue`'s (reset, usage, thread, entry, at, provider), and all of
+  them must be met. With both `at` and `conditions` it waits for both.
+- With neither, the call is refused: a snooze needs something to wait for.
+
+A snooze that ends on the clock needs nothing written — a `snoozedUntil` in the
+past reads as active, which is what hides the task from no list. A snooze that
+waits on conditions is judged by the same pass that decides queue admission
+(`queueAdmission`), so a snoozed task and a queued message wait for exactly the
+same things: the server's periodic pass clears the mark as soon as they are
+met, the thread reads active again, and nothing was started in it. A task's own
+admission pass also clears it, so a task with queued work wakes on the pass that
+would run that work. Until then the task reads `snoozed` everywhere the list
+status is read (`threads list --status snoozed`, `inspect`, `status`).
+
+The conditions keep what a pass learns, exactly as a queued message's do: the
+reset time a `reset` condition resolves to (against the task's own model quota
+pool) and a `provider … after` signal are stored on the snooze, so a reset
+learned after snoozing is not looked up again. An `entry` condition follows the
+entry through every handoff it made, so a twice-moved entry does not wake the
+task while its copy still waits on the thread it landed on; one that names no
+turn cannot be judged and is skipped rather than waited on forever.
+`task_status` reports this life cycle beside the work: `status` stays `active`
+while the task waits, and a `snoozed` object (`until`, `conditions`, `wakes`)
+appears only while a snooze is set.
+
+Interactions to know:
+
+- **Queued messages wait behind it.** An entry queued on the task with
+  `message_queue` is held with "Thread is not active" instead of running, and
+  is admitted in order once the snooze ends — the same rule a snoozed thread
+  already follows. Auto-continues after a usage limit and usage-protection
+  recovery skip a snoozed task for the same reason.
+- **A message the orchestrator sends does not.** `task_send` (with
+  `wake: true` on a finished task) still starts a turn on a snoozed task, like a
+  message the user types: the snooze holds queued and automatic work, not an
+  explicit act of the thread that owns the task. The mark itself is untouched
+  and still ends on its own time or conditions.
+- **A usage hold stays put.** A deferred usage recovery is held while the task
+  is snoozed instead of being cleared or restarted: the pause stays as it was,
+  and it resumes once the snooze ends. A snooze whose time has passed is no hold
+  at all, so the recovery starts as it would on an unsnoozed task.
+- **Settling clears it.** A settle drops both the time and the conditions, so a
+  settled task is never left behind a stale snooze.
+- **The user can always end it.** `threads unsnooze --thread <id>` clears the
+  mark and its conditions, and the task reads active at once.
+
+It owns the task exactly as `task_settle` does — your own tasks, continuations
+included, never a research run's lead (`TASK_SNOOZE_RESEARCH`) or role
+(`TASK_NOT_FOUND`), and a deleted task reads `TASK_NOT_FOUND`. A settled task is
+refused with `TASK_SETTLED`: it is already out of the active set, so unsettle it
+or wake it with a message instead. A running task may be snoozed: its turn is
+not touched, and the mark applies to what comes after it.
 
 ### Queueing a message from an agent (`message_queue`)
 
