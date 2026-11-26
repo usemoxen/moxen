@@ -954,10 +954,13 @@ describe("provider-side interruptions", () => {
       await vi.waitFor(async () => {
         expect((await store.readMessages(thread.id)).some((message) => message.turnId === wake.id && message.text.includes("native news"))).toBe(true);
       }, { timeout: 10_000 });
-      // The winner was never touched: still running, session never interrupted or closed.
-      expect(openTurn(await store.readTurns(thread.id))?.id).toBe(user.id);
-      expect(watching.interrupt).not.toHaveBeenCalled();
-      expect(watching.close).not.toHaveBeenCalled();
+      // The watcher can still be writing activity and thread metadata after
+      // the message appears. Let it release the lock before removing the store.
+      await store.withThreadLock(thread.id, async () => {
+        expect(openTurn(await store.readTurns(thread.id))?.id).toBe(user.id);
+        expect(watching.interrupt).not.toHaveBeenCalled();
+        expect(watching.close).not.toHaveBeenCalled();
+      });
     }, 60_000);
 
     it("lets a queued turn promoted at settle run, with no interrupt or stop", async () => {
