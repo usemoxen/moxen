@@ -324,6 +324,7 @@ export async function createThread(
     ...(input.researchRun ? { researchRun: input.researchRun } : {}),
     ...(input.researchRole ? { researchRole: input.researchRole } : {}),
     ...(input.continuedFrom ? { continuedFrom: input.continuedFrom } : {}),
+    ...(input.handoffFacts ? { handoffFacts: input.handoffFacts } : {}),
   };
   await store.writeThreadRecord(thread);
   store.emit(thread.id, "created");
@@ -672,6 +673,8 @@ export async function sendTurn(
       interactionMode,
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
       ...(origin !== undefined ? { origin } : {}),
+      ...(input.handoffOpen ? { handoffOpen: true as const } : {}),
+      ...(input.handoffPending && input.handoffPending.length > 0 ? { handoffPending: input.handoffPending } : {}),
       modelSelection,
       parentTurnId: delivery === "restart" && running ? running.id : null,
       ...(holdUntil !== null

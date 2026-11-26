@@ -279,12 +279,15 @@ export function automaticDispatchPrompt(turn: StoredTurn, origin: MessageOrigin 
 
 /**
  * Whether a turn is one the user wrote: no origin, none of the queue's
- * automatic flags, none of the usage schedules. Moxen-written prompts never
- * count, whatever their kind — the one predicate every exception that needs
- * "the user's own turn" shares.
+ * automatic flags, none of the usage schedules, and not the generated
+ * hand-off opener. Moxen-written prompts never count, whatever their kind —
+ * the one predicate every exception that needs "the user's own turn" shares.
+ * A hand-off opener is a document Moxen authored, so it can never vouch for
+ * an automatic entry as the user's own turn (LOCAL-034).
  */
 export function userAuthoredTurn(turn: StoredTurn): boolean {
   return turn.origin === undefined
+    && turn.handoffOpen !== true
     && turn.queue?.automatic !== true && turn.queue?.wakeUp !== true
     && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold";
 }
@@ -326,6 +329,7 @@ export function freshUserConsentReleases(turns: readonly StoredTurn[], turn: Sto
   const queuedAt = turns.findIndex((candidate) => candidate.id === turn.id);
   return turns.some((other, index) => other.id !== turn.id
     && (other.origin ?? (threadId !== undefined && origins !== undefined ? origins.get(turnOriginKey(threadId, other.id)) : undefined)) === undefined
+    && other.handoffOpen !== true
     && other.queue?.automatic !== true && other.queue?.wakeUp !== true
     && !other.scheduledFor
     && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"

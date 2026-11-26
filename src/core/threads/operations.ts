@@ -112,7 +112,7 @@ import {
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
 import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchGate, antigravitySteerGate, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
-import { buildHandoff, continuedTitle } from "./handoff.js";
+import { prepareHandoff, continuedTitle } from "./handoff.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
@@ -120,7 +120,7 @@ import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, t
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
-import type { ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredMessage, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn, UsagePause } from "./types.js";
+import type { HandoffPendingRequest, ResearchMessage, ResearchPlan, ResearchModels, ResearchSize, ResearchRole, StoredMessage, StoredResearchRun, SendTurnInput, StoredActivity, StoredDelegation, StoredThread, StoredTurn, UsagePause } from "./types.js";
 import {
   delegatedStatusOf,
   delegatedWorkStateOf,
@@ -1187,6 +1187,15 @@ export async function submitHandoff(ctx: OperationContext, threadId: string, req
 
 const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
 
+/**
+ * How many continuations a walk follows through a chain — task resolution,
+ * live-thread lookup and handoff-key retries alike — before it stops and
+ * says the chain ends there. Bounded so a corrupt cycle cannot spin
+ * forever, generous enough that a real chain (a task continued dozens of
+ * times) still resolves to the thread doing the work.
+ */
+const CONTINUATION_FOLLOW_HOPS = 128;
+
 /** @internal Exported for tests: the queue pass prepares one entry's handoff. */
 export async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, turnId: string, now: number): Promise<void> {
   const store = ctx.store;
@@ -1306,10 +1315,10 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   }
   if (openTurn(await store.readTurns(threadId))) return;
   const policy: QueuePolicy = { ...turn.queue!, continuation: "same-thread", requestId: `handoff:${handoff.requestId}`, eventAfter: turn.queue!.eventAfter ?? turn.createdAt };
-  // A moved entry keeps its own schedule: wrapping it in a next destination
-  // before its due time would lose the move's time constraint. Ordinary
-  // handoffs pass no schedule here, as before.
-  const continued = await continueThread(ctx, { threadId, destinationThreadId: handoff.destinationThreadId, queue: policy, queuedTurnIds: [turnId], modelSelection: turn.modelSelection ?? source.modelSelection, runtimeMode: turn.runtimeMode, interactionMode: turn.interactionMode, ...(turn.queue!.continuation === "model" && handoff.summary ? { modelSummary: handoff.summary } : {}), ...(isTransferDestinationRequestId(turn.queue?.requestId) && typeof turn.scheduledFor === "string" ? { scheduledFor: turn.scheduledFor } : {}) });
+  // The opener inherits the entry's schedule so a scheduled request rides a
+  // gated opener, never a runnable one that would dispatch it before its time
+  // (MXN-413 r2 finding 1). A moved entry keeps its own schedule the same way.
+  const continued = await continueThread(ctx, { threadId, destinationThreadId: handoff.destinationThreadId, queue: policy, queuedTurnIds: [turnId], modelSelection: turn.modelSelection ?? source.modelSelection, runtimeMode: turn.runtimeMode, interactionMode: turn.interactionMode, ...(turn.queue!.continuation === "model" && handoff.summary ? { modelSummary: handoff.summary } : {}), ...(typeof turn.scheduledFor === "string" ? { scheduledFor: turn.scheduledFor } : {}) });
   if (continued.threadId !== handoff.destinationThreadId) {
     // The call joined another run's destination instead of preparing this
     // entry's own: leave the entry queued for a later pass rather than
@@ -2702,6 +2711,101 @@ async function migrateStagedMessages(ctx: OperationContext, sourceId: string, de
   });
 }
 
+/**
+ * Land carried requests whose start conditions are not due as gated Work
+ * queue entries on the destination, each waiting on its hand-off opener and
+ * keeping its own schedule and conditions. They are durable queue work, not
+ * runnable opener text, so admission holds them until their condition is met
+ * instead of a continuation dispatching them early (MXN-413 r2 finding 1).
+ * Idempotent by message id: a retry rejoining the destination never duplicates
+ * an entry that already landed.
+ */
+async function landGatedPending(ctx: OperationContext, destinationId: string, gated: readonly HandoffPendingRequest[]): Promise<void> {
+  const { store } = ctx;
+  await store.withThreadLock(destinationId, async () => {
+    const destination = await store.readThreadRecord(destinationId);
+    if (!destination) return;
+    const [turns, messages] = await Promise.all([store.readTurns(destinationId), store.readMessages(destinationId)]);
+    const order = (left: StoredTurn, right: StoredTurn): number => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+    const opener = [...turns].sort(order).find((turn) => !isTransferDestinationRequestId(turn.queue?.requestId)) ?? null;
+    if (!opener) return;
+    const landedIds = new Set(messages.map((message) => message.id));
+    const now = store.nowIso();
+    // A batched turn's messages stay one entry, in dispatch order: group the
+    // gated requests by the turn they came from so no rider is dropped or
+    // split off (MXN-388).
+    const groups = new Map<string, HandoffPendingRequest[]>();
+    for (const entry of gated) {
+      const key = `${entry.sourceThreadId}\u0000${entry.turnId}`;
+      const group = groups.get(key) ?? [];
+      group.push(entry);
+      groups.set(key, group);
+    }
+    let index = 0;
+    for (const group of groups.values()) {
+      const primary = group[0]!;
+      if (landedIds.has(primary.messageId)) continue;
+      index += 1;
+      const turnId = store.newId();
+      const conditions: QueueCondition[] = [
+        ...(primary.conditions ?? []),
+        { type: "entry", threadId: destinationId, turnId: opener.id, serverWait: true },
+      ];
+      const queue: QueuePolicy = {
+        conditions,
+        held: false,
+        order: Date.parse(now) + index,
+        sequential: false,
+        continuation: "same-thread",
+        requestId: `handoff:gated:${primary.messageId}`,
+        transferMessages: group.length,
+      };
+      const scheduled = typeof primary.scheduledFor === "string" && Date.parse(primary.scheduledFor) > Date.parse(now);
+      const turn: StoredTurn = {
+        id: turnId,
+        threadId: destinationId,
+        status: "queued",
+        delivery: "queued",
+        messageId: primary.messageId,
+        runtimeMode: destination.runtimeMode,
+        interactionMode: destination.interactionMode,
+        modelSelection: destination.modelSelection,
+        parentTurnId: null,
+        error: null,
+        usage: null,
+        queue,
+        ...(scheduled ? { scheduledFor: primary.scheduledFor!, scheduleReason: "user" as const } : {}),
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+      };
+      await store.appendLedger(destinationId, "turns", turn);
+      for (const entry of group) {
+        await store.appendLedger(destinationId, "messages", {
+          id: entry.messageId,
+          threadId: destinationId,
+          turnId,
+          role: "user",
+          text: entry.text,
+          createdAt: now,
+        });
+        landedIds.add(entry.messageId);
+      }
+      await store.appendLedger(destinationId, "activity", {
+        id: store.newId(),
+        threadId: destinationId,
+        turnId,
+        kind: scheduled ? "turn.scheduled" : "turn.queued",
+        summary: primary.text.slice(0, 120),
+        ...(scheduled ? { payload: { scheduledFor: primary.scheduledFor!, reason: "user" } } : {}),
+        createdAt: now,
+      });
+      if (scheduled) armScheduledTurn(destinationId, turnId, primary.scheduledFor!);
+    }
+    store.emit(destinationId, "turn-queued");
+  });
+}
+
 async function continueThreadInner(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
   const { store } = ctx;
   const source = await store.readThreadRecord(request.threadId);
@@ -2780,7 +2884,10 @@ async function continueThreadReserved(
   // handoff projects exactly the claim-time source, so work accepted after
   // the claim stays on the source and out of the destination snapshot.
   const claim = transfersQueuedMessages(request) ? await stageQueuedMessages(ctx, source.id, destinationId) : null;
-  const handoff = await buildHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}), ...(claim ? { knownTurnIds: claim.known, excludedTurnIds: [...claim.claimed, ...claim.restaged] } : {}) });
+  // The document and the facts its destination carries forward are built from
+  // the same read, so what the reader sees and what the chain keeps stay
+  // one view of the thread.
+  const handoff = await prepareHandoff(store, source.id, { projectTitle: project?.title ?? null, preferModelSummary: !request.destinationThreadId && source.usagePause?.handoff === true, ...(request.firstMessage !== undefined ? { firstAction: request.firstMessage } : {}), ...(request.modelSummary ? { modelSummary: request.modelSummary } : {}), ...(request.queuedTurnIds ? { queuedTurnIds: request.queuedTurnIds } : {}), ...(claim ? { knownTurnIds: claim.known, excludedTurnIds: [...claim.claimed, ...claim.restaged] } : {}) });
   const existing = await store.readThreadRecord(destinationId);
   const created = existing ?? await createThread(store, {
     id: destinationId,
@@ -2791,11 +2898,20 @@ async function continueThreadReserved(
     interactionMode,
     env: source.env,
     continuedFrom: source.id,
+    handoffFacts: handoff.facts,
   });
-  if (existing && existing.continuedFrom === undefined) {
+  if (existing) {
+    // A retry rejoining a reserved destination: its record predates this
+    // attempt's facts, so the attempt fills them in — and a reservation
+    // that never carried `continuedFrom` up to now takes it here too.
     await store.withThreadLock(existing.id, async () => {
       const current = await store.readThreadRecord(existing.id);
-      if (current) await store.writeThreadRecord({ ...current, continuedFrom: source.id });
+      if (current === null) return;
+      await store.writeThreadRecord({
+        ...current,
+        ...(current.continuedFrom === undefined ? { continuedFrom: source.id } : {}),
+        handoffFacts: handoff.facts,
+      });
     });
   }
   const live = await store.readThreadRecord(source.id);
@@ -2850,9 +2966,16 @@ async function continueThreadReserved(
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
-      prompt: handoff + runningTasksNote(adopted) + firstMessageNote(request.firstMessage),
+      prompt: handoff.document + runningTasksNote(adopted) + firstMessageNote(request.firstMessage),
       ...(request.queue ? { queue: request.queue } : {}),
       ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
+      // The opening prompt is a generated document, not the user speaking;
+      // the next hand-off recognizes it by this flag, never by its text.
+      handoffOpen: true,
+      // The pending requests rendered into this opener as its task: once it
+      // dispatches they count as sent, so the next hand-off reconciles them
+      // away instead of re-assigning them as never sent (MXN-413 r2).
+      ...(handoff.facts.pending.length > 0 ? { handoffPending: handoff.facts.pending.map((entry) => entry.messageId) } : {}),
       // Noop subscriber: the driver's shared pump exists before any client subscribes.
       onEvent: () => undefined,
     });
@@ -2874,6 +2997,10 @@ async function continueThreadReserved(
   // wait on it; it repairs and completes staged claims, including ones a
   // crashed earlier attempt left behind.
   if (transfersQueuedMessages(request)) await migrateQueuedMessages(ctx, source.id, created.id);
+  // Carried requests whose start conditions are not due land as gated Work
+  // queue entries waiting on the opener — never as runnable opener work, so a
+  // later hop cannot dispatch them before their condition is met (MXN-413 r2).
+  if (handoff.gated.length > 0) await landGatedPending(ctx, created.id, handoff.gated);
   if (scheduledHold) await linkScheduledContinuation(ctx, source.id, created.id);
   if (!(await store.readActivities(source.id)).some((activity) => activity.kind === "thread.continued" && activity.payload?.threadId === created.id)) {
     await store.appendLedger(source.id, "activity", {
@@ -3276,7 +3403,7 @@ async function delegationOf(
 async function continuedLiveThread(store: ThreadStore, threadId: string): Promise<string | null> {
   let current: string | undefined = threadId;
   let latest: string | null = null;
-  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+  for (let hops = 0; current !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
     const notes = await store.readActivities(current).catch(() => []);
     const next = notes.findLast((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string")?.payload?.threadId as string | undefined;
     if (next === undefined) break;
@@ -5395,7 +5522,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       // whose continuation row holds no key (MXN-290).
       let row = initial;
       let current = true;
-      for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+      for (let hops = 0; row.continuedIn !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
         const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
         if (!next) {
           current = false;
@@ -5923,7 +6050,7 @@ async function isTaskVisibleToParent(ctx: OperationContext, parentThreadId: stri
   const rows = await ctx.store.readDelegations();
   const lineage = await threadLineage(ctx, parentThreadId);
   let current: string | undefined = taskId;
-  for (let hops = 0; current !== undefined && hops < 16; hops += 1) {
+  for (let hops = 0; current !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
     if (rows.some((row) => row.childThreadId === current && lineage.has(row.parentThreadId))) return true;
     current = rows.find((row) => row.childThreadId === current)?.continuedIn;
   }
@@ -5957,7 +6084,7 @@ async function ownedDelegation(ctx: OperationContext, parentThreadId: string, ra
   }
   // A task that carried on in a new thread is that thread now.
   let row = owned;
-  for (let hops = 0; row.continuedIn !== undefined && hops < 16; hops += 1) {
+  for (let hops = 0; row.continuedIn !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
     const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
     if (!next) break;
     row = next;
