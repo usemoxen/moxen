@@ -441,20 +441,24 @@ server
         : "buildMismatch" in result && typeof result.buildMismatch === "string"
           // Names both builds and what to do next.
           ? result.buildMismatch
-          : `moxen server running at ${result.endpoint} (pid ${result.pid}).${result.restartRequired ? " An update is installed: restart it (moxen server stop, then start Moxen again) to use it." : ""}`;
+          : `moxen server running at ${result.endpoint} (pid ${result.pid}).${result.restartRequired ? " An update is installed: restart it (moxen server stop, then start Moxen again) to use it." : ""}${result.draining !== null ? ` A restart is draining on it: waiting for ${result.draining.running} running turn(s).` : ""}`;
       writeSuccess(result, context, text);
     }),
   );
 
 server
   .command("stop")
-  .description("Stop the running server; its provider sessions end with it.")
-  .action(() =>
+  .description("Stop the running server; running turns get the restart drain's grace to finish first, then they are stopped with it.")
+  .option("--force", "Stop the running turns at once rather than waiting out the drain for them.")
+  .action((options: { force?: boolean }) =>
     action(async () => {
       const context = await commandContext();
       thisMachineOnly("server stop");
-      const result = await serverStop();
-      writeSuccess(result, context, result.stopped ? `Stopped the moxen server at ${result.endpoint}.` : `No moxen server at ${result.endpoint}.`);
+      const result = await serverStop(options.force ? { force: true } : {});
+      const drained = result.stopped && result.drained !== null && result.drained.finished + result.drained.interrupted > 0
+        ? ` ${result.drained.finished} running turn(s) finished; ${result.drained.interrupted} stopped for the restart.`
+        : "";
+      writeSuccess(result, context, result.stopped ? `Stopped the moxen server at ${result.endpoint}.${drained}` : `No moxen server at ${result.endpoint}.`);
     }),
   );
 

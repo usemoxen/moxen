@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, configKeyCoversPath, defaultConfigPath, loadConfig, migrateLegacyConfig, normalizeConfig, normalizeConfigLenient, normalizeFileConfig, saveConfig, setConfigValue } from "../config.js";
 import type { CliConfig } from "../types.js";
 import { readSetting } from "../configschema.js";
+import { restartDrainTimeoutMs } from "../threads/drain.js";
 
 it.each(["claude", "codex", "opencode", "harness"] as const)("preserves the %s memory opt-out when normalizing config", (kind) => {
   const config = normalizeConfig({ providers: { [kind]: { memory: false } } });
@@ -381,6 +382,26 @@ describe("config keeps unknown keys", () => {
     } finally {
       if (previous === undefined) delete process.env.MOXEN_PROVIDER;
       else process.env.MOXEN_PROVIDER = previous;
+    }
+  });
+
+  it("MOXEN_RESTART_DRAIN_TIMEOUT overrides the drain window and never reaches the file", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "moxen-config-envdrain-"));
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ restartDrainTimeout: "30s", ui: { theme: "moxen" } }, null, 2));
+    const previous = process.env.MOXEN_RESTART_DRAIN_TIMEOUT;
+    process.env.MOXEN_RESTART_DRAIN_TIMEOUT = "0s";
+    try {
+      const loaded = await loadConfig(file);
+      expect(restartDrainTimeoutMs(loaded.config)).toBe(0);
+      const edited = setConfigValue(loaded.fileConfig, "ui.theme", "dracula");
+      await saveConfig(file, edited);
+      const reloaded = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+      expect(reloaded.restartDrainTimeout).toBe("30s");
+      expect((reloaded.ui as Record<string, unknown>).theme).toBe("dracula");
+    } finally {
+      if (previous === undefined) delete process.env.MOXEN_RESTART_DRAIN_TIMEOUT;
+      else process.env.MOXEN_RESTART_DRAIN_TIMEOUT = previous;
     }
   });
 

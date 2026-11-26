@@ -16,6 +16,7 @@ import { DirectConnection, storeLockGone } from "./connection.js";
 import { defaultEndpoint } from "./transport/endpoint.js";
 import { RemoteAccess } from "./transport/remoteaccess.js";
 import { serve, type ServerHandle } from "./transport/serve.js";
+import type { DrainingStatus } from "./transport/wire.js";
 
 export interface RunServerOptions {
   readonly endpoint?: string;
@@ -39,12 +40,13 @@ export async function runServer(options: RunServerOptions = {}): Promise<ServerH
   // The greeting is read per hello: an update lands while the server runs,
   // and clients connecting after it must hear that a restart is due.
   const own = buildIdentity();
-  const greeting = (): { configPath?: string; build: string; buildDisplay: string; restartRequired: boolean } => ({
+  const greeting = (): { configPath?: string; build: string; buildDisplay: string; restartRequired: boolean; draining: DrainingStatus | null } => ({
     // Re-read per operation from this file, unless the caller fixed the config itself.
     ...(options.config ? {} : { configPath: defaultConfigPath() }),
     build: own.id,
     buildDisplay: own.display,
     restartRequired: connection.serverRestartRequired,
+    draining: connection.draining,
   });
   let handle: ServerHandle;
   try {
@@ -70,6 +72,9 @@ export async function runServer(options: RunServerOptions = {}): Promise<ServerH
       api: connection,
       // Stops every driver: provider processes end with the server.
       onClose: () => connection.close(),
+      // A stop for a restart drains first: running turns get the grace
+      // window before the server goes (`SHUTDOWN` is the only caller).
+      drain: (force) => connection.drainForRestart(force ? { force: true } : {}),
       greeting,
     });
     // The server owns every session, so it runs scheduled turns too — with

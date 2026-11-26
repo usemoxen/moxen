@@ -43,6 +43,7 @@ import {
   type ClientMessage,
   type HelloParams,
   type HelloResult,
+  type ShutdownDrainResult,
   type WireError,
 } from "./wire.js";
 import { keyFingerprint } from "./certificate.js";
@@ -589,9 +590,14 @@ export class RemoteConnection implements ClientApi {
     return (await this.request("getConfig")) as ConfigPayload;
   }
 
-  /** Ask the server to stop. Resolves once it has acknowledged. */
-  async shutdownServer(): Promise<void> {
-    await this.request("shutdown");
+  /**
+   * Ask the server to stop, letting running turns finish first (the restart
+   * drain). Resolves once the drain is done and the stop is acknowledged;
+   * `force` interrupts running turns at once. The result says what the
+   * drain waited on (null from a server that drains nothing).
+   */
+  async shutdownServer(options: { readonly force?: boolean } = {}): Promise<ShutdownDrainResult | null> {
+    return (await this.request("shutdown", options.force === true ? { force: true } : {})) as ShutdownDrainResult | null;
   }
 
   async close(): Promise<void> {

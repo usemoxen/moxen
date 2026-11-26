@@ -46,6 +46,20 @@ another host is never judged. A running turn that a server shutdown stops
 is recorded interrupted with that reason, and so is one a settle ends, so a
 ledger never leaves an unexplained stop.
 
+A stop for a restart drains first. The server takes no new turns while it
+waits — a send that would start one is refused with `SERVER_DRAINING`, and
+admission, settle promotions and orphan recovery hold their entries — while
+running turns get up to `restartDrainTimeout` (2m) to finish. Queued and
+scheduled work is never stopped by the drain: it keeps its place, its
+conditions and its times, and runs once the next server is up. Whatever is
+still running when the window closes — or at once, for a forced stop
+(`moxen server stop --force`) — is interrupted with a reason that names the
+restart, and a steer that turn never confirmed is saved first, as queued
+work of its own, so a run whose interrupt hangs cannot take it down with it.
+Connected clients see the wait as it happens (`app.server-draining` says how
+many turns it is waiting on and until when), and `moxen server status`
+reports a drain in progress.
+
 A queued message outlives the settle it was waiting for when the thread
 cannot take it: a snoozed thread, or a provider whose allowance is
 exhausted, holds it instead of starting it (the Work queue says the
@@ -1014,7 +1028,11 @@ pending steers even where no echo could confirm them — our own interrupt
 ended the turn with the CLI queue — so an interrupted steer can arrive
 twice. A provider with no arrival signal keeps push-means-delivered on
 turns that end any other way, and a steer on a session that dies with its
-process goes out again when the orphaned turn is recovered.
+process goes out again when the orphaned turn is recovered. So does a steer
+on a turn a restart's drain stops: its copies are recorded as queued work
+before the interruption, so they run on the next server even if the stopped
+run never settles, and the marker each copy carries keeps that run's own
+late redelivery from sending it a second time.
 
 ### Messaging a delegated task (`task_send`)
 
@@ -1637,7 +1655,10 @@ get to run past the line: when a context reading during it (each request's usage
 is read as it arrives) is over the line that would compact the thread once the turn
 ended (`auto`, a delegated task, or past the hard line on `ask`), Moxen stops the
 turn, compacts, and sends a continue so the task goes on from where it was
-(`compactMidTurn` in `core/threads/operations.ts`). A compaction that left the thread
+(`compactMidTurn` in `core/threads/operations.ts`). The stop names the turn the
+reading came from, so a turn that ended — or one that replaced it — while the
+decision read the thread is never taken instead, and a restart's drain holds the
+whole decision off: it may be waiting on that very turn. A compaction that left the thread
 past its line is not repeated until it has dropped below it once. A hand-off
 document skips a compaction turn when it names the request the thread began
 with and last received, and when it decides whether the work may already be
