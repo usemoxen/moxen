@@ -353,6 +353,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   }
   if (turn.usagePause !== undefined) rest.usagePause = turn.usagePause;
   if (turn.interactionModeExplicit !== undefined) rest.interactionModeExplicit = turn.interactionModeExplicit;
+  if (turn.usageRecoveryNotice === true) rest.usageRecoveryNotice = true;
   if (turn.unanswered !== undefined) rest.unanswered = turn.unanswered;
   if (turn.generation !== undefined) rest.generation = turn.generation;
   if (turn.turnOutputTokens !== undefined) rest.turnOutputTokens = turn.turnOutputTokens;
@@ -431,6 +432,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     completedAt: row.completed_at,
     ...(rest.startedAt === undefined ? {} : { startedAt: rest.startedAt as string }),
     ...(rest.usagePause === undefined ? {} : { usagePause: rest.usagePause as NonNullable<StoredTurn["usagePause"]> }),
+    ...(rest.usageRecoveryNotice === true ? { usageRecoveryNotice: true as const } : {}),
     ...(rest.unanswered === undefined ? {} : { unanswered: true as const }),
     ...(rest.generation === undefined ? {} : { generation: rest.generation as NonNullable<StoredTurn["generation"]> }),
     ...(rest.turnOutputTokens === undefined ? {} : { turnOutputTokens: rest.turnOutputTokens as number }),

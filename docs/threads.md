@@ -1406,20 +1406,20 @@ background wake-up all reach the model as the tagged user text they always
 were (`<task-notification>`, `## Usage-protection wrap-up notes`), so nothing
 another process wrote arrives with a developer's voice. A message the user
 queues behind a held nudge is likewise theirs, however the two are batched
-into one turn.
+into one turn. Scheduling a message for a usage reset does not make it a
+Moxen instruction; only the server's own usage recovery can mark a nudge.
 
 Codex has a channel for Moxen's instruction: those items go in as
 developer-role messages (`thread/inject_items`, codex-cli 0.169 and later),
 which start no turn and read as Moxen's. The user's own prompt is then sent
-unchanged, and a turn that carries nothing but a nudge (a usage continue)
-starts with an empty user input. The fallback is only for a runtime that says
-it has no such method — an app-server answering "method not found" or "not
-supported yet"; the session remembers that and sends the same text ahead of
-the prompt as the tagged block (`<moxen-mode>`,
-`<moxen-instructions-update>`, `<moxen-context-update>`), once, in one
-channel. Any other failure fails the turn rather than risking the text twice,
-and an item the app-server has acknowledged is not appended again in that
-session. Claude, the Moxen Harness and OpenCode always take the tagged block.
+unchanged, and a turn that carries nothing but a nudge starts with an empty
+user input. When app-server explicitly rejects the method as unavailable,
+Codex uses the same text order as other providers: tagged instruction
+blocks, then the prompt (including any owed work ahead of the nudge), then
+any usage-protection notes. An unconfirmed append fails rather than sending
+the same text in both channels or retrying the write into the same history.
+A later turn can legitimately carry the same instruction again, such as
+when switching back to Research mode.
 A notice pushed into a turn already running is a steer, and that is typed
 text in every provider.
 

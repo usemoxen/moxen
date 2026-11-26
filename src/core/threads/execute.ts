@@ -63,7 +63,7 @@ import {
   pinCheckpointRef,
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
-import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueGatedDispatch, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, turnPromptParts, updateThreadMeta, type GateProviders } from "./threads.js";
+import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueGatedDispatch, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, usageNoticeParts, updateThreadMeta, type GateProviders } from "./threads.js";
 import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, ruleUpdateBlock } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
@@ -555,16 +555,10 @@ export interface ExecuteTurnArgs {
   readonly driver: TurnDriver;
   readonly threadId: string;
   readonly storeTurnId: string;
-  /** What the user said; empty on a notice-only turn (`notices`). */
+  /** Original text prompt, including the notice blocks in their composed order. */
   readonly prompt: string;
-  /**
-   * Moxen's own instruction for this turn (`ProviderSendTurnInput.notices`): a
-   * mode procedure, an instruction update, a rule-file patch, a usage
-   * continue. A developer-channel driver sends them as developer items; every
-   * other driver gets them ahead of the prompt. Report data is never one of
-   * these — it stays the tagged user text it always was.
-   */
-  readonly notices?: readonly string[];
+  /** The same delivery split between user text and developer notices, when supported. */
+  readonly developerPrompt?: { readonly prompt: string; readonly notices: readonly string[] };
   /** Images sent with the prompt. */
   readonly images?: readonly ProviderImage[];
   readonly modelSelection?: ModelSelection;
@@ -712,9 +706,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     const messages = await store.readMessages(threadId);
     const prompt = turnPrompt(messages, next);
     if (prompt === null) return;
-    // Moxen's own instruction and the user's text are told apart per message:
-    // a rider queued after a held nudge is the user's, and stays their text.
-    const parts = turnPromptParts(messages, next) ?? { prompt: prompt.text, notices: [] };
+    const usage = usageNoticeParts(messages, next);
     // Its images were saved when it was queued; the bytes come off disk.
     const images = await imagesOf(prompt.attachments);
     // Rule files edited while the session ran the turn before: a patch ahead
@@ -730,7 +722,9 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // so only an edit landing mid-turn waits one extra turn. Rule files need
     // no setup, so they do refresh above.
     const rules = await pendingRuleUpdate(driver, threadId, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), thread.env.path).catch(() => null);
-    const notices = [...parts.notices, ...(rules === null ? [] : [ruleUpdateBlock(rules.text)])];
+    const compact = isCompactCommand(prompt.text);
+    const blocks = rules === null || compact ? [] : [ruleUpdateBlock(rules.text)];
+    const notices = [...blocks, ...(usage?.notices ?? [])];
     // The dispatch gate, split facts from decision like the send boundary
     // (LOCAL-034): the reads resolve, then the setting in force at this
     // promotion is read synchronously. A promoted turn carrying one of
@@ -756,9 +750,9 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       driver,
       threadId,
       storeTurnId: next.id,
-      prompt: parts.prompt,
-      ...(notices.length > 0 ? { notices } : {}),
-      ...(rules ? { afterAnswer: async () => rules.commit() } : {}),
+      prompt: promptWithNotices(prompt.text, blocks),
+      ...(notices.length > 0 && !compact ? { developerPrompt: { prompt: usage?.prompt ?? prompt.text, notices } } : {}),
+      ...(rules && !compact ? { afterAnswer: async () => rules.commit() } : {}),
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
       ...(args.config ? { config: args.config } : {}),
@@ -1722,9 +1716,12 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       }
       return;
     }
-    const developerNotices = !!args.notices?.length && driver.capabilities?.developerNotices === true;
-    const renderedPrompt = developerNotices || isCompactCommand(args.prompt) ? args.prompt : promptWithNotices(args.prompt, args.notices);
-    const dispatchPrompt = args.driverTurnId ? renderedPrompt : await withResumeHandoff(args, renderedPrompt);
+    const developer = driver.capabilities?.developerNotices === true ? args.developerPrompt : undefined;
+    const dispatchPrompt = args.driverTurnId ? args.prompt : await withResumeHandoff(args, args.prompt);
+    if (!args.driverTurnId && controller.signal.aborted) {
+      interrupted = true;
+      return;
+    }
     // Rechecked as late as one read allows, immediately before the prompt
     // leaves: a session start can take the time the user needs to turn the
     // setting off, and no earlier check may stand in for this one. Every
@@ -1756,8 +1753,8 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       : await Effect.runPromise(
           driver.sendTurn({
             threadId,
-            prompt: dispatchPrompt,
-            ...(developerNotices ? { notices: args.notices } : {}),
+            prompt: developer?.prompt ?? dispatchPrompt,
+            ...(developer ? { notices: developer.notices, fallbackPrompt: dispatchPrompt, storeTurnId } : {}),
             ...(args.images?.length ? { images: args.images } : {}),
             ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
             ...(args.runtimeMode ? { runtimeMode: args.runtimeMode } : {}),

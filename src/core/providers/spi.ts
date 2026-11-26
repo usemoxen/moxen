@@ -181,12 +181,13 @@ export interface ProviderSendTurnInput {
    * background output, a model's wrap-up notes — is not one of these: it stays
    * in `prompt`, tagged as the user text it is. A driver with
    * `developerNotices` delivers each notice on its developer-role channel and
-   * sends `prompt` as it is; every other driver folds them ahead of the prompt
-   * (`promptWithNotices`), the tagged-block convention. Empty `prompt` with
-   * notices is a notice-only turn: Moxen starts the turn and the user said
-   * nothing in it.
+   * sends `prompt` as it is. Empty `prompt` with notices is a notice-only turn.
    */
   readonly notices?: readonly string[];
+  /** The original text prompt, in its composed order, for runtimes without notice injection. */
+  readonly fallbackPrompt?: string;
+  /** Logical delivery identity for retrying notice injection, independent of the provider turn ID. */
+  readonly storeTurnId?: string;
   /**
    * Images for the model to see, in each provider's native form. A driver
    * whose provider cannot take them names them in the prompt instead —

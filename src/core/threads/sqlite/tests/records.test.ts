@@ -81,7 +81,7 @@ describe.skipIf(!underBun)("row round trip", () => {
   it("keeps turn order and every queue, handoff, owner and usage field", () => {
     const db = storeWithThreads();
     const completed = completedTurn();
-    const queued = queuedTurn();
+    const queued = { ...queuedTurn(), usageRecoveryNotice: true as const };
     insertRow(db, INSERT_TURN, encodeTurn(completed));
     insertRow(db, INSERT_TURN, encodeTurn(queued));
 

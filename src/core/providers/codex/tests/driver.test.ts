@@ -1132,14 +1132,15 @@ describe("codex runtime notices", () => {
     const driver = new CodexDriver({ transport });
     await Effect.runPromise(driver.startSession(START));
     const server = transport.sessions[0]!.server;
-    const first = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS] }));
+    const fallbackPrompt = `${INSTRUCTIONS}\n\nrun the checks\n\n${USAGE}`;
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS, USAGE], fallbackPrompt }));
     await settleTurn(driver, server, first);
     const second = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "", notices: [USAGE] }));
     await settleTurn(driver, server, second);
 
-    // Ahead of the prompt exactly as before, and never in both channels: the
+    // In the original text order, and never in both channels: the
     // refused injection applied nothing, so the notice is not delivered twice.
-    expect(userInputs(server)).toEqual([`${INSTRUCTIONS}\n\nrun the checks`, USAGE]);
+    expect(userInputs(server)).toEqual([fallbackPrompt, USAGE]);
     // Asked once per session: the runtime said it has no such method.
     expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
     // Nothing failed over it: both turns ran with a prompt of their own.
@@ -1183,6 +1184,59 @@ describe("codex runtime notices", () => {
     await Effect.runPromise(driver.stopAll());
   });
 
+  it("does not fall back when an unrelated error says something is not supported yet", async () => {
+    const error = "Writing after compaction is not supported yet";
+    const transport = new FakeCodexTransport({ failRequests: { "thread/inject_items": error } });
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    try {
+      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "keep going", notices: [INSTRUCTIONS] }))).rejects.toThrow(error);
+      expect(transport.sessions[0]!.server.requestsTo("turn/start")).toEqual([]);
+    } finally {
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("does not append again when Codex wrote the notice but its acknowledgment was lost", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    const spy = vi.spyOn(client, "request").mockImplementation(async (method, params, timeoutMs) => {
+      const result = await request(method, params, timeoutMs);
+      if (method === "thread/inject_items") throw new Error("injection acknowledgment lost");
+      return result;
+    });
+    try {
+      const input = { threadId: START.threadId, storeTurnId: "same-turn", prompt: "keep going", notices: [INSTRUCTIONS] };
+      await expect(Effect.runPromise(driver.sendTurn(input))).rejects.toThrow(/acknowledgment lost/);
+      // The runtime accepted the append; a retry must neither write nor fall back.
+      await expect(Effect.runPromise(driver.sendTurn(input))).rejects.toThrow(/did not confirm/);
+      expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+      expect(server.requestsTo("turn/start")).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("injects the Research procedure again after switching back from Build", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    try {
+      for (const [prompt, notice] of [["research", "Research procedure"], ["build", "Build procedure"], ["research again", "Research procedure"]] as const) {
+        const sent = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: prompt, prompt, notices: [notice] }));
+        await settleTurn(driver, server, sent);
+      }
+      expect(server.requestsTo("thread/inject_items").map(({ params }) => (params as { items: [{ content: [{ text: string }] }] }).items[0].content[0].text)).toEqual(["Research procedure", "Build procedure", "Research procedure"]);
+    } finally {
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
   it("does not append a notice twice when the turn it was injected for never started", async () => {
     const transport = new FakeCodexTransport();
     const driver = new CodexDriver({ transport });
@@ -1194,14 +1248,35 @@ describe("codex runtime notices", () => {
       method === "turn/start" && ++starts === 1 ? Promise.reject(new CliError("PEER_REQUEST_FAILED", "Request failed: turn/start timed out")) : request(method, params, timeoutMs),
     );
     try {
-      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "", notices: [USAGE] }))).rejects.toThrow(/timed out/);
+      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "retried-turn", prompt: "", notices: [USAGE] }))).rejects.toThrow(/timed out/);
       // The item is in the history already: the retry takes the turn and says it once.
-      const retry = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "", notices: [USAGE] }));
+      const retry = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "retried-turn", prompt: "", notices: [USAGE] }));
       await settleTurn(driver, server, retry);
       expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
       expect(userInputs(server)).toEqual([""]);
     } finally {
       spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("sends a compact rider from an old batch as text instead of running maintenance", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    try {
+      const sent = await Effect.runPromise(driver.sendTurn({
+        threadId: START.threadId,
+        prompt: "/compact",
+        notices: [USAGE],
+        fallbackPrompt: `${USAGE}\n\n/compact`,
+      }));
+      await settleTurn(driver, server, sent);
+      expect(server.requestsTo("thread/compact/start")).toHaveLength(0);
+      expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+      expect(userInputs(server)).toEqual(["/compact"]);
+    } finally {
       await Effect.runPromise(driver.stopAll());
     }
   });

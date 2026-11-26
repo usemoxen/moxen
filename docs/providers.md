@@ -422,12 +422,12 @@ turn and appear in no item list; the next turn's request simply reads them. Repo
 data does not travel this way: a settled task's notice, captured background output
 and a model's wrap-up notes stay the tagged user text they were, so nothing another
 process wrote arrives with a developer's voice. The method arrived in codex-cli
-0.169: a runtime that answers "method not found" or "not supported yet" has no such
-channel, and from then on that session sends the same text ahead of the prompt as a
-tagged block instead (the `<moxen-mode>`, `<moxen-instructions-update>` and
-`<moxen-context-update>` blocks every other provider gets). Any other injection
-failure fails the turn rather than duplicating the text, and an acknowledged item is
-never appended twice in one session.
+0.169. If app-server explicitly rejects the method as unavailable, the session uses
+the original text prompt in its original order, with the same tagged blocks other
+providers get. Moxen does not fall back on an unconfirmed write: while the server
+is running, it refuses another injection into that Codex history and asks the
+user to continue in a new conversation. Acknowledged notices are deduplicated
+only on retries of the same turn.
 
 That base prompt doesn't state a model, and neither does the Moxen Harness's, and
 Claude Code's names the model but not the effort, so the runtime instructions tell

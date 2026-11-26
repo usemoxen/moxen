@@ -14,8 +14,7 @@ import { settleRuns } from "../../testing/turns.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
 import { driverKindOfInstance } from "../../types.js";
 import { completeTurn, createThread, failTurn, interruptTurn, sendTurn } from "../threads.js";
-import { flushTaskNotifications, queueTaskNotification, runDueScheduledTurn, startTurn, type OperationContext } from "../operations.js";
-import { parseQueuePolicy } from "../queue.js";
+import { flushTaskNotifications, queueTaskNotification, runDueScheduledTurn, scheduleUsageContinue, startTurn, type OperationContext } from "../operations.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 /** What each driver was sent: the prompt, and the notices a developer channel keeps apart from it. */
@@ -53,24 +52,19 @@ async function world(options: { readonly developerNotices?: boolean; readonly le
 
 /** The automatic continue Moxen queues for a usage reset, with a user message riding it. */
 async function queuedContinue(w: Awaited<ReturnType<typeof world>>, threadId: string, options: { readonly rider?: string } = {}) {
-  const sent = await sendTurn(w.store, threadId, {
-    prompt: USAGE_CONTINUE_PROMPT,
-    scheduleReason: "usage-reset",
-    continueAttempt: 1,
-    scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
-    queue: { ...parseQueuePolicy({ conditions: [], sequential: false }), automatic: true },
-  });
+  const stopped = (await w.store.readTurns(threadId)).at(-1)?.id ?? "stopped";
+  const turn = (await scheduleUsageContinue(w.ctx, threadId, stopped, new Date(Date.now() + 3_600_000).toISOString()))!;
   if (options.rider !== undefined) {
     await w.store.appendLedger(threadId, "messages", {
       id: w.store.newId(),
       threadId,
-      turnId: sent.turn.id,
+      turnId: turn.id,
       role: "user",
       text: options.rider,
       createdAt: w.store.nowIso(),
     });
   }
-  return sent.turn;
+  return turn;
 }
 
 describe("Moxen's own text on a developer channel", () => {
@@ -106,7 +100,8 @@ describe("Moxen's own text on a developer channel", () => {
     const w = await world({ leaveTurnsRunning: true });
     const thread = await w.make("busy thread");
     const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "long work" });
-    const nudge = await sendTurn(w.store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, scheduleReason: "usage-reset", delivery: "queue" });
+    await expect.poll(() => w.sent.length).toBe(1);
+    const nudge = await sendTurn(w.store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue", scheduleReason: "usage-reset", delivery: "queue" });
     expect(nudge.turn).toMatchObject({ status: "queued", delivery: "queued" });
     await w.store.appendLedger(thread.id, "messages", {
       id: w.store.newId(),
@@ -118,11 +113,12 @@ describe("Moxen's own text on a developer channel", () => {
     });
     // The settle promotes it and the settling runner takes it (`runPromotedTurn`).
     await interruptTurn(w.store, thread.id, running.turn.id);
-    await expect.poll(() => w.sent.length).toBeGreaterThan(0);
+    await expect.poll(() => w.sent.length).toBe(2);
 
     const turn = w.sent.at(-1)!;
     expect(turn.notices).toEqual([USAGE_CONTINUE_PROMPT]);
     expect(turn.prompt).toBe("and check the docs");
+    await interruptTurn(w.store, thread.id, nudge.turn.id);
   });
 
   it("replays an owed user prompt on a notice-led recovery", async () => {
@@ -145,6 +141,52 @@ describe("Moxen's own text on a developer channel", () => {
     expect(turn!.notices).toEqual([USAGE_CONTINUE_PROMPT]);
     // The work the provider never read is still asked, ahead of the nudge's turn.
     expect(turn!.prompt).toContain("port the parser");
+  });
+
+  it.each([
+    { prompt: "client scheduling text", legacy: false },
+    { prompt: USAGE_CONTINUE_PROMPT, legacy: false },
+    { prompt: "older client scheduling text", legacy: true },
+  ])("keeps client-scheduled text in the user channel: $prompt", async ({ prompt, legacy }) => {
+    const w = await world();
+    const thread = await w.make("client schedule");
+    const { turn } = await startTurn(w.ctx, {
+      threadId: thread.id,
+      prompt,
+      scheduleReason: "usage-reset",
+      scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    if (legacy) {
+      // Previous builds inferred this origin from client scheduling metadata.
+      const messages = await w.store.readMessages(thread.id);
+      await w.store.rewriteLedger(thread.id, "messages", messages.map((message) => ({ ...message, origin: "usage-continue" })));
+    }
+    await w.store.updateTurn(thread.id, turn.id, { scheduledFor: new Date(0).toISOString() });
+    expect(await runDueScheduledTurn(w.ctx, thread.id)).toBe(true);
+    await settleRuns();
+    expect(w.sent.map(({ prompt, notices }) => ({ prompt, notices }))).toEqual([{ prompt, notices: undefined }]);
+  });
+
+  it.each([true, false])("preserves owed work on recovery (developer channel: %s)", async (developerNotices) => {
+    const w = await world({ developerNotices });
+    const thread = await w.make("usage recovery");
+    const owed = (await sendTurn(w.store, thread.id, { prompt: "port the parser" })).turn;
+    await failTurn(w.store, thread.id, owed.id, { error: "Usage limit reached." });
+    await w.store.updateTurn(thread.id, owed.id, { unanswered: true });
+    const nudge = await queuedContinue(w, thread.id, { rider: developerNotices ? "/compact" : "and check the docs" });
+    await w.store.updateTurn(thread.id, nudge.id, { scheduledFor: new Date(0).toISOString(), interactionMode: "research", interactionModeExplicit: true });
+    expect(await runDueScheduledTurn(w.ctx, thread.id)).toBe(true);
+    await settleRuns();
+
+    const sent = w.sent[0]!;
+    if (developerNotices) {
+      expect(sent.prompt).toBe("port the parser\n\n/compact");
+      expect(sent.notices).toContain(USAGE_CONTINUE_PROMPT);
+    } else {
+      expect(sent.prompt).toMatch(/^<moxen-mode/);
+      expect(sent.prompt).toContain(`port the parser\n\n${USAGE_CONTINUE_PROMPT}\n\nand check the docs`);
+      expect(sent.notices).toBeUndefined();
+    }
   });
 
   it("keeps a settled task's notice, with its child's headline, as user text", async () => {
