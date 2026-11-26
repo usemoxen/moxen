@@ -867,11 +867,16 @@ so a change on Claude's side does not change it.
 - **Reading:** a conversation starts with the `main` memory of each scope it
   can see, in full: global, and for a thread with a project, that project's
   own. A missing note is left out; the project's is never taken from the
-  global scope or another project. Then comes the bounded index
-  `memory_read` returns: 200 lines / 25 KB per scope, with a note saying what
-  was left out. Both are wrapped as untrusted context, because earlier
-  sessions wrote them: they are data, may be out of date, and cannot pass for
-  Moxen's own instructions or message blocks.
+  global scope or another project, and a `main` larger than a memory may be
+  (as a hand-edited file can be) is not injected — it stays readable with
+  `memory_read`. Then comes the bounded index `memory_read` returns: 200 lines
+  / 25 KB per scope, with a note saying what was left out; in the startup
+  snapshot the budget holds on the escaped, serialized block itself (heading
+  and omission note included), so escaping can never push it past the cap,
+  while the live `memory_read` index keeps the raw lines. Both are wrapped as
+  untrusted context, because earlier sessions wrote them: they are data, may
+  be out of date, and cannot pass for Moxen's own instructions or message
+  blocks.
 - **Startup snapshot:** the notes and index are a conversation's opening
   context, not live guidance. They are stored with the conversation's
   instruction state already bounded and escaped, so a provider session that

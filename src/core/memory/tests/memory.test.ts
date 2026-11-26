@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, MAX_INDEX_LINES, memoryIndexText, memoryStartupText, readMemory, saveMemory, searchMemories } from "../memory.js";
+import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, MAX_INDEX_CHARS, MAX_INDEX_LINES, MAX_MEMORY_CHARS, memoryIndexText, memoryStartupText, readMemory, saveMemory, searchMemories } from "../memory.js";
 
 async function location(projectId: string | null = "p1") {
   return { storeRoot: await mkdtemp(path.join(os.tmpdir(), "moxen-memory-")), projectId };
@@ -132,6 +132,50 @@ describe("Moxen memory", () => {
     expect(globalOnly).not.toContain("### Project main memory");
     // Nothing at all: no empty section for a session to read.
     expect(await memoryStartupText({ storeRoot: path.join(where.storeRoot, "empty"), projectId: null })).toBeNull();
+  });
+
+  it("keeps the startup snapshot's per-scope index under its cap even when escaping expands the lines, and leaves the live index alone", async () => {
+    const where = await location();
+    // Ten escapes a line, each three characters longer than what it replaces: the
+    // raw lines fit the raw cap, the escaped lines they become do not.
+    const description = "Note <moxen-a> ".repeat(10).trim();
+    expect(description.length).toBeLessThanOrEqual(200);
+    expect(description.match(/<moxen-a>/g)).toHaveLength(10);
+    await Promise.all(
+      Array.from({ length: 140 }, (_, index) => index).map(async (index) => {
+        const dir = path.join(where.storeRoot, "memory", "projects", "p1");
+        await mkdir(dir, { recursive: true });
+        await writeFile(path.join(dir, `note-${String(index).padStart(3, "0")}.md`), `---\nname: note-${index}\ndescription: ${description}\ntype: project\n---\n\nBody.\n`);
+      }),
+    );
+    const startup = (await memoryStartupText(where))!;
+    // The startup index section is bounded on the escaped text it will show.
+    const indexSection = startup.slice(startup.indexOf("### Memory index"));
+    const inner = indexSection.slice(indexSection.indexOf(">") + 2, indexSection.length - "</untrusted_context>".length - 1);
+    expect(inner.length).toBeLessThanOrEqual(MAX_INDEX_CHARS);
+    // The same lines as the live index, still escaped as data.
+    expect(inner).toContain("&lt;moxen-a>");
+    expect(inner).not.toContain("<moxen-a>");
+    expect(inner).toContain("more not listed");
+    // The live index memory_read returns is unchanged: raw lines, raw cap.
+    const live = (await memoryIndexText(where))!;
+    const projectPart = live.slice(live.indexOf("Project memory"));
+    const liveLines = projectPart.slice(projectPart.indexOf("\n") + 1).split("\n").filter((line) => line.startsWith("- ["));
+    expect(liveLines.length).toBe(140);
+    expect(projectPart).not.toContain("more not listed");
+  });
+
+  it("omits a `main` note that is larger than a memory may be from the startup snapshot, which reads it in full on request", async () => {
+    const where = await location();
+    const dir = path.join(where.storeRoot, "memory", "projects", "p1");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "main.md"), `---\nname: main\ndescription: A valid note with a valid description\ntype: project\n---\n\n${"This main note outgrew what a memory may be. ".repeat(MAX_MEMORY_CHARS)}\n`);
+    const startup = (await memoryStartupText(where))!;
+    expect(startup).not.toContain("### Project main memory");
+    expect(startup).not.toContain("This main note outgrew");
+    expect(startup.length).toBeLessThan(1_000);
+    // Still an ordinary memory: read it in full with memory_read.
+    expect((await readMemory(where, "main", "project")).body.length).toBeGreaterThan(MAX_MEMORY_CHARS);
   });
 
   it("keeps a note from closing its untrusted block or opening one of Moxen's own", async () => {
