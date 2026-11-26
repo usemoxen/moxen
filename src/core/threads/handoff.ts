@@ -15,6 +15,7 @@
  * for recent turns, where the detail is; older turns shrink to a line each
  * so a long thread still fits a context window.
  */
+import { maintenanceTurnIds } from "./maintenance.js";
 import type { ThreadStore } from "./store.js";
 import { isTransferLanded } from "./queue.js";
 import type { StoredActivity, StoredMessage, StoredThread, StoredTurn } from "./types.js";
@@ -193,15 +194,19 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     replies: messages.filter((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0),
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
   }));
+  // A compaction is maintenance, not a request or a result: it says nothing
+  // about what the user wants or whether the work is done.
+  const maintenance = new Set(maintenanceTurnIds(turns, messages));
   const carried = options.queuedTurnIds ?? [];
   // A carried turn may hold a batch (a settle's promotion folds several
   // queued messages into one): every eligible user message is part of the
   // task, in dispatch order, each keeping the control-message exclusions.
   const unsent = turns
-    .filter((turn) => !reached(turn) && !movedIds.has(turn.id) && !neverDispatched(turn) && !(options.preferModelSummary && turn.scheduledFor) && carried.includes(turn.id))
+    .filter((turn) => !reached(turn) && !movedIds.has(turn.id) && !neverDispatched(turn) && !maintenance.has(turn.id) && !(options.preferModelSummary && turn.scheduledFor) && carried.includes(turn.id))
     .flatMap((turn) => messages
       .filter((message) => message.turnId === turn.id && message.role === "user" && message.origin !== "usage-continue" && message.origin !== "usage-protection" && message.origin !== "handoff-summary")
       .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)));
+  const workBlocks = blocks.filter((block) => !maintenance.has(block.turn.id));
 
   // Files the thread changed, summed across every turn's checkpoint.
   const files = new Map<string, { additions: number; deletions: number }>();
@@ -212,11 +217,11 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
     }
   }
 
-  const userPrompts = blocks.flatMap((block) => block.prompts).filter((message) => !message.origin);
+  const userPrompts = workBlocks.flatMap((block) => block.prompts).filter((message) => !message.origin);
   const firstPrompt = userPrompts[0]?.text.trim() ?? null;
   const lastPrompt = userPrompts.at(-1)?.text.trim() ?? null;
   const plan = openPlan(scopedActivities);
-  const stopped = stoppedBecause(blocks.at(-1), activities);
+  const stopped = stoppedBecause(workBlocks.at(-1), activities);
   // Only a last turn that ran to completion, with nothing queued, nothing
   // moved, and no open checklist step, may be a finished task.
   const finished = stopped.completed && unsent.length === 0 && moved.length === 0 && plan.every((row) => row.startsWith("- [x]"));
@@ -265,7 +270,7 @@ export async function buildHandoff(store: ThreadStore, threadId: string, options
   if (images.length > 0) {
     head.push("", "## Original images", "", "These original image files remain on this server. Open them with your image/file tools when the task depends on visual input:", ...images.map((image) => `- ${JSON.stringify(image.name)}: ${JSON.stringify(image.path)}`));
   }
-  const summaryBlock = thread.usagePause?.turnId ? blocks.find((block) => block.turn.id === thread.usagePause!.turnId) : blocks.at(-1);
+  const summaryBlock = thread.usagePause?.turnId ? blocks.find((block) => block.turn.id === thread.usagePause!.turnId) : workBlocks.at(-1);
   const modelSummary = options.modelSummary ?? (options.preferModelSummary ? summaryBlock?.replies.map((reply) => reply.text.trim()).join("\n\n") : null);
   if (modelSummary) return [...head, "", "## Model's wrap-up", "", modelSummary, "", "Continue the unfinished task from these notes; do not repeat completed work."].join("\n");
   const tail = [

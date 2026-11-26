@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildHandoff, continuedTitle } from "../handoff.js";
 import { openThreadStore } from "../store.js";
-import { completeTurn, createThread, failTurn, sendTurn } from "../threads.js";
+import { completeTurn, createThread, failTurn, interruptTurn, sendTurn } from "../threads.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -109,6 +109,44 @@ describe("buildHandoff", () => {
     expect(doc).toContain("The work may already be done");
     expect(doc).toContain("If the work is complete, say so");
     expect(doc).not.toContain("then finish what is left.");
+  });
+
+  it("skips a compaction turn for the first and last request and for where it stopped (MXN-387)", async () => {
+    const { store, threadId } = await thread();
+    const first = await sendTurn(store, threadId, { prompt: "Audit every route for missing auth checks." });
+    await completeTurn(store, threadId, first.turn.id, { text: "Found two routes; not fixed yet." });
+    const last = await sendTurn(store, threadId, { prompt: "Now fix users.ts too." });
+    await interruptTurn(store, threadId, last.turn.id);
+    const compact = await sendTurn(store, threadId, { prompt: "/compact" });
+    await completeTurn(store, threadId, compact.turn.id, { text: "Conversation compacted." });
+
+    const doc = await buildHandoff(store, threadId);
+
+    expect(doc).toContain("The thread began with:\n\n> Audit every route for missing auth checks.");
+    expect(doc).toContain("The last request, verbatim:\n\nNow fix users.ts too.");
+    expect(doc).not.toContain("The last request, verbatim:\n\n/compact");
+    // The compaction said nothing about the work: its completed turn must not read as the task finishing.
+    expect(doc).toContain("Its last turn was interrupted before it finished.");
+    expect(doc).not.toContain("The work may already be done");
+    expect(doc.trimEnd().endsWith("then finish what is left.")).toBe(true);
+  });
+
+  it("reads a compaction turn's prompt in a ledger written before the marker (MXN-387)", async () => {
+    const { store, threadId } = await thread();
+    const first = await sendTurn(store, threadId, { prompt: "Audit every route for missing auth checks." });
+    await completeTurn(store, threadId, first.turn.id, { text: "Found two routes; not fixed yet." });
+    const last = await sendTurn(store, threadId, { prompt: "Now fix users.ts too." });
+    await interruptTurn(store, threadId, last.turn.id);
+    const compact = await sendTurn(store, threadId, { prompt: "/compact" });
+    await completeTurn(store, threadId, compact.turn.id, { text: "Conversation compacted." });
+    await store.rewriteLedger(threadId, "turns", (await store.readTurns(threadId)).map((turn) => ({ ...turn, maintenance: undefined })));
+
+    const doc = await buildHandoff(store, threadId);
+
+    expect(doc).toContain("The last request, verbatim:\n\nNow fix users.ts too.");
+    expect(doc).not.toContain("The last request, verbatim:\n\n/compact");
+    expect(doc).toContain("Its last turn was interrupted before it finished.");
+    expect(doc.trimEnd().endsWith("then finish what is left.")).toBe(true);
   });
 
   it("still treats a completed turn as unfinished work when something is open", async () => {

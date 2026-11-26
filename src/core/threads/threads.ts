@@ -12,8 +12,11 @@ import { readFile } from "node:fs/promises";
 
 import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
+import { isCompactCommand } from "../providers/spi.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { providerExhausted } from "./queue.js";
+import { antigravityHoldsAutomaticDispatch, automaticDispatchPrompt, loadTurnOrigins, turnOriginKey, type TurnOrigins } from "./queue.js";
+import { isMaintenanceTurn } from "./maintenance.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
@@ -664,6 +667,7 @@ export async function sendTurn(
         : delivery === "restart" ? "restarted"
         : "started",
       messageId: store.newId(),
+      ...(isCompactCommand(prompt) ? { maintenance: true as const } : {}),
       runtimeMode,
       interactionMode,
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
@@ -926,6 +930,7 @@ function isOrphaned(store: ThreadStore, turn: StoredTurn): boolean {
 export async function reconcileOrphanedTurn(
   store: ThreadStore,
   rawThreadId: string,
+  gateProviders?: GateProviders,
 ): Promise<{ interrupted: StoredTurn; promoted: StoredTurn | null } | null> {
   const threadId = requireThreadId(rawThreadId);
   const peek = openTurn(await store.readTurns(threadId));
@@ -951,7 +956,7 @@ export async function reconcileOrphanedTurn(
       summary: `Turn ${running.id} was interrupted: its process (pid ${pid}) exited mid-turn.`,
       createdAt: now,
     });
-    await promoteQueuedLocked(store, threadId, now);
+    await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     const promoted = (await store.readTurns(threadId)).find(
       (turn) => turn.status === "running" && turn.id !== running.id && !store.isTracked(turn.id),
     ) ?? null;
@@ -1097,7 +1102,7 @@ export async function redeliverOrphanedSteers(store: ThreadStore, rawThreadId: s
  * turn is already running or nothing is promotable: admission owns those.
  * The caller claims and runs what comes back.
  */
-export async function promoteQueuedTurn(store: ThreadStore, rawThreadId: string): Promise<StoredTurn | null> {
+export async function promoteQueuedTurn(store: ThreadStore, rawThreadId: string, gateProviders?: GateProviders): Promise<StoredTurn | null> {
   const threadId = requireThreadId(rawThreadId);
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
@@ -1106,7 +1111,7 @@ export async function promoteQueuedTurn(store: ThreadStore, rawThreadId: string)
     // queued. Admission retries once the handoff clears its claim.
     const record = await store.readThreadRecord(threadId);
     if (!record || (await continuationInFlight(store, record)).blocked) return null;
-    await promoteQueuedLocked(store, threadId, now);
+    await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     return (await store.readTurns(threadId)).find((turn) => turn.status === "running" && !store.isTracked(turn.id)) ?? null;
   });
 }
@@ -1243,6 +1248,14 @@ function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): 
 }
 
 /**
+ * The Antigravity automatic-prompt setting in force when a decision is made:
+ * `providers.antigravity.allowUnsupportedUse` as the deciding process read
+ * it, never an earlier turn's config snapshot. Undefined means the caller
+ * cannot know it, and the gate holds nothing (as before this field existed).
+ */
+export type GateProviders = Pick<CliConfig, "providers">["providers"];
+
+/**
  * Fold every other queued message that could go now into `next`: queued
  * behind the same turn, or held for the same reset, they are sent together
  * as one turn — not one turn each, with the agent working through the first
@@ -1250,27 +1263,58 @@ function waitingInteractionMode(turn: StoredTurn, threadMode: InteractionMode): 
  * and their messages move onto `next`. A message for another model or mode, or one
  * still waiting for a later time, keeps its own turn.
  *
+ * A turn the Antigravity gate (`gateProviders`) holds never folds either
+ * way: folded into a user's turn the held text would ride a turn it is
+ * forbidden to reach, and the user's own message folded into a held one
+ * would be stranded with it. The eligibility decisions are made here,
+ * before the ledger rewrite, so nothing is merged into a shape the gate
+ * would hold.
+ *
  * A continue set for a usage-limit reset batches the same way even though it
  * carries its automatic wait: that queue holds no conditions of its own, so
  * the folded messages ride the same reset. Any other queue-carrying turn (a
  * wake-up, a handoff, a held entry) keeps its own turn, as before.
+ *
+ * A maintenance turn (`/compact`) never folds either way: folded into an
+ * ordinary follow-up it keeps the marker and hides the real reply, and an
+ * ordinary message folded into it would send `/compact` as text no provider
+ * runs as a compaction. It is also a batching boundary: only messages queued
+ * on the same side of it travel with `next`, so nothing queued after a
+ * `/compact` overtakes it. Each keeps its own turn.
  */
-async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode): Promise<void> {
+async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode, gated: ReadonlySet<string>, antigravity = false): Promise<void> {
   if (next.queue && next.scheduleReason !== "usage-reset") return;
-  const batch = turns.filter(
+  const nextAt = turns.findIndex((turn) => turn.id === next.id);
+  const onwards = nextAt < 0 ? [] : turns.slice(nextAt + 1);
+  const candidates = onwards.filter(
     (turn) =>
-      turn.id !== next.id &&
       turn.status === "queued" &&
       !turn.queue &&
+      !gated.has(turn.id) &&
       (turn.scheduleReason !== "usage-hold" || next.scheduleReason === "usage-reset" || next.scheduleReason === "usage-hold") &&
       !isHeldTurn(turn, Date.parse(now)) &&
       turn.scheduleReason !== "usage-reset" &&
       waitingInteractionMode(turn, threadMode) === waitingInteractionMode(next, threadMode) &&
       sameModel(turn, next),
   );
+  if (candidates.length === 0) return;
+  const messages = await store.readMessages(threadId);
+  if (isMaintenanceTurn(next, messages)) return;
+  // On Antigravity, promotion folds only what shares the dispatch's
+  // provenance: the setting can turn off between this batch and the send that
+  // runs it, and a phase where the user's words live inside a turn the gate
+  // would hold must never be reachable — in either queue order. A task
+  // notice that rides stays a rider wherever it queued (shared decision,
+  // `automaticDispatchPrompt`); a task or agent message keeps its own row
+  // and runs after the user's message, alone.
+  const automaticOf = (turn: StoredTurn): boolean =>
+    automaticDispatchPrompt(turn, turn.origin ?? messages.find((message) => message.turnId === turn.id && message.origin !== undefined)?.origin, turns);
+  // Everything after the first queued maintenance turn is on its far side.
+  const boundary = onwards.findIndex((turn) => turn.status === "queued" && isMaintenanceTurn(turn, messages));
+  const side = new Set((boundary < 0 ? onwards : onwards.slice(0, boundary)).map((turn) => turn.id));
+  const batch = candidates.filter((turn) => side.has(turn.id) && !isMaintenanceTurn(turn, messages) && (!antigravity || automaticOf(turn) === automaticOf(next)));
   if (batch.length === 0) return;
   const folded = new Set(batch.map((turn) => turn.id));
-  const messages = await store.readMessages(threadId);
   await store.rewriteLedger(threadId, "messages", messages.map((message) => (folded.has(message.turnId) ? { ...message, turnId: next.id } : message)));
   await store.rewriteLedger(threadId, "turns", turns.filter((turn) => !folded.has(turn.id)));
   await store.appendLedger(threadId, "activity", {
@@ -1400,7 +1444,7 @@ async function cancelStaleContinueLocked(store: ThreadStore, threadId: string, t
   store.emit(threadId, "turn-interrupted");
 }
 
-async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false): Promise<void> {
+async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false, gateProviders?: GateProviders): Promise<void> {
   const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
   const pause = thread.usagePause;
   if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return;
@@ -1408,6 +1452,20 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
   // A live turn blocks promotion: a running one, an ownerless one, or one
   // with a status no build writes. So does a turns ledger hiding rows.
   if (liveTurn(turns) || hiddenTurnsProblem(store, threadId)) return;
+  // Eligibility is decided here, before anything rewrites the queue: a
+  // queued turn the Antigravity gate holds is never promoted as a runner's
+  // follow-up and never batched into the turn that is, so its text and
+  // metadata survive untouched for admission, which holds them with the
+  // gate's reason until the setting turns on or a user turn releases them.
+  const origins = gateProviders === undefined ? new Map<string, MessageOrigin | undefined>() : await loadTurnOrigins(store, [{ thread, turns }], { providers: gateProviders });
+  const gateHolds = (turn: StoredTurn): boolean => {
+    const selection = turn.modelSelection ?? thread.modelSelection;
+    return antigravityHoldsAutomaticDispatch(gateProviders, selection.instanceId, turn, turn.origin ?? origins.get(turnOriginKey(threadId, turn.id)), turns);
+  };
+  const gated = new Set<string>();
+  for (const turn of turns) {
+    if (turn.status === "queued" && gateHolds(turn)) gated.add(turn.id);
+  }
   // A scheduled turn waits for its time; ordinary queued turns go ahead of it.
   const instant = Date.parse(now);
   if (admittedId === undefined) {
@@ -1431,6 +1489,9 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
   const next = turns.find((turn) => {
     if (turn.status !== "queued" || isHeldTurn(turn, instant)) return false;
     if (admittedId) return turn.id === admittedId;
+    // Held for admission instead of this runner: the gate keeps its turn row
+    // intact, so nothing the user queued there is stranded by a merge.
+    if (gated.has(turn.id)) return false;
     if (threadHeld) return false;
     // A held turn whose time has come starts after the running turn settles,
     // oldest first like any queued turn — but never while the limit stands.
@@ -1458,11 +1519,22 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     // or settle.
     await holdQueuedForAdmission(store, threadId, instant);
   }
+  if (admittedId === undefined && next !== undefined) {
+    // A plain turn the gate held stays marked for the admission path even
+    // while another turn runs: admission reports it with the gate's reason
+    // in the Work queue instead of leaving it waiting for a settle that may
+    // never come.
+    for (const turn of turns) {
+      if (turn.status === "queued" && !turn.queue && gated.has(turn.id) && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold" && !isHeldTurn(turn, instant) && !turn.heldAtSettle) {
+        await store.updateTurn(threadId, turn.id, { heldAtSettle: true });
+      }
+    }
+  }
   if (!next) return;
   if (pause && pause.recoveryTurnId === next.id) {
     await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
   }
-  await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode);
+  await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode, gated, driverKindOfInstance((next.modelSelection ?? thread.modelSelection).instanceId) === "antigravity");
   await store.updateTurn(threadId, next.id, { status: "running", interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now, ...(next.heldAtSettle ? { heldAtSettle: undefined } : {}) });
   await store.appendLedger(threadId, "activity", {
     id: store.newId(),
@@ -1473,6 +1545,33 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     createdAt: now,
   });
   store.emit(threadId, "turn-promoted");
+}
+
+/**
+ * Requeue a dispatch the Antigravity gate denied, durably: back to queued,
+ * marked for admission — which holds it with the gate's reason until the
+ * setting turns on or a genuine fresh user turn releases it — with the held
+ * activity recorded beside it. The caller releases its claim first, so the
+ * lock below never fights another runner; a turn that meanwhile settled or
+ * was claimed elsewhere keeps whatever happened to it.
+ */
+export async function requeueGatedDispatch(store: ThreadStore, threadId: string, turnId: string, reason: string): Promise<void> {
+  store.untrackRunning(turnId);
+  await store.withThreadLock(threadId, async () => {
+    const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+    if (!fresh || fresh.status !== "running" || store.isTracked(turnId)) return;
+    const now = store.nowIso();
+    await store.updateTurn(threadId, turnId, { status: "queued", heldAtSettle: true, owner: null, updatedAt: now });
+    await store.appendLedger(threadId, "activity", {
+      id: store.newId(),
+      threadId,
+      turnId,
+      kind: "turn.held",
+      summary: reason,
+      createdAt: now,
+    });
+    store.emit(threadId, "turn-held");
+  }).catch(() => undefined);
 }
 
 /**
@@ -1528,7 +1627,7 @@ export async function holdStrandedPromotions(store: ThreadStore, rawThreadId: st
  * to run. Null when nothing is due, or a turn is already running — that
  * turn's settle promotes the due held turn instead (see `promoteQueuedLocked`).
  */
-export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: string, admittedId?: string, summary = false): Promise<StoredTurn | null> {
+export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: string, admittedId?: string, summary = false, gateProviders?: GateProviders): Promise<StoredTurn | null> {
   const threadId = requireThreadId(rawThreadId);
   return await store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
@@ -1542,7 +1641,7 @@ export async function promoteDueScheduledTurn(store: ThreadStore, rawThreadId: s
       (turn) => turn.status === "queued" && (admittedId ? turn.id === admittedId : typeof turn.scheduledFor === "string") && !isHeldTurn(turn, Date.parse(now)),
     );
     if (!due) return null;
-    await promoteQueuedLocked(store, threadId, now, admittedId ?? due.id, summary);
+    await promoteQueuedLocked(store, threadId, now, admittedId ?? due.id, summary, gateProviders);
     return (await store.readTurns(threadId)).find((turn) => turn.status === "running" && !store.isTracked(turn.id)) ?? null;
   });
 }
@@ -1562,6 +1661,7 @@ async function finishTurn(
   rawTurnId: string,
   status: "completed" | "failed",
   input: FinishTurnInput = {},
+  gateProviders?: GateProviders,
 ): Promise<{ thread: StoredThread; turn: StoredTurn }> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId.trim();
@@ -1618,7 +1718,7 @@ async function finishTurn(
       summary: status === "failed" ? (input.error ?? turnId) : turnId,
       createdAt: now,
     });
-    await promoteQueuedLocked(store, threadId, now);
+    await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     const next = { ...thread, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, status === "completed" ? "turn-completed" : "turn-failed");
@@ -1632,8 +1732,9 @@ export async function completeTurn(
   threadId: string,
   turnId: string,
   input: FinishTurnInput = {},
+  gateProviders?: GateProviders,
 ): Promise<{ thread: StoredThread; turn: StoredTurn }> {
-  return await finishTurn(store, threadId, turnId, "completed", input);
+  return await finishTurn(store, threadId, turnId, "completed", input, gateProviders);
 }
 
 /** Stage 2 drivers call this when the provider run errors. */
@@ -1642,8 +1743,9 @@ export async function failTurn(
   threadId: string,
   turnId: string,
   input: FinishTurnInput = {},
+  gateProviders?: GateProviders,
 ): Promise<{ thread: StoredThread; turn: StoredTurn }> {
-  return await finishTurn(store, threadId, turnId, "failed", input);
+  return await finishTurn(store, threadId, turnId, "failed", input, gateProviders);
 }
 
 export interface InterruptTurnResult {
@@ -1658,6 +1760,7 @@ export async function interruptTurn(
   rawTurnId?: string,
   usagePause?: StoredTurn["usagePause"],
   options: { readonly reason?: string; readonly usage?: StoredTurn["usage"] } = {},
+  gateProviders?: GateProviders,
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId?.trim() || undefined;
@@ -1690,7 +1793,7 @@ export async function interruptTurn(
     const hasRunner = store.isTracked(target.id);
     const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason, options.usage);
     if (hasRunner) {
-      await promoteQueuedLocked(store, threadId, now);
+      await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     } else {
       // No runner is alive to take a promotion (a dead runner, or a stop
       // from another process): hold the queued turns for the admission path

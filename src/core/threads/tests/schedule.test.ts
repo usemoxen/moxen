@@ -152,6 +152,58 @@ describe("scheduled messages", () => {
     expect(turns.filter((turn) => turn.status === "queued")).toHaveLength(1);
   });
 
+  it("keeps a /compact turn out of a batched follow-up, so the real request is not swallowed", async () => {
+    const { store, thread } = await setup();
+    const running = await sendTurn(store, thread.id, { prompt: "work" });
+    await sendTurn(store, thread.id, { prompt: "/compact", delivery: "queue" });
+    await sendTurn(store, thread.id, { prompt: "then the actual follow-up", delivery: "queue" });
+    await completeTurn(store, thread.id, running.turn.id, { text: "done" });
+
+    // Folded together they would send "/compact\n\nthen the actual follow-up" —
+    // no compaction at all — and the turn would keep the maintenance marker,
+    // hiding the real reply from every reader.
+    const waiting = (await store.readTurns(thread.id)).filter((turn) => turn.status !== "completed");
+    const messages = await store.readMessages(thread.id);
+    expect(waiting.map((turn) => turnPrompt(messages, turn)?.text)).toEqual(["/compact", "then the actual follow-up"]);
+    expect(waiting.map((turn) => turn.maintenance === true)).toEqual([true, false]);
+    expect((await store.readActivities(thread.id)).some((row) => row.kind === "turn.batched")).toBe(false);
+
+    // The follow-up then runs on its own, never behind the compaction command.
+    await completeTurn(store, thread.id, waiting[0]!.id, { text: "compacted" });
+    const next = (await store.readTurns(thread.id)).find((turn) => turn.status === "running" && turn.id === waiting[1]!.id);
+    expect(turnPrompt(await store.readMessages(thread.id), next!)?.text).toBe("then the actual follow-up");
+  });
+
+  it("stops batching at a queued /compact, so a later message never runs ahead of it", async () => {
+    const { store, thread } = await setup();
+    const running = await sendTurn(store, thread.id, { prompt: "work" });
+    await sendTurn(store, thread.id, { prompt: "before", delivery: "queue" });
+    await sendTurn(store, thread.id, { prompt: "/compact", delivery: "queue" });
+    await sendTurn(store, thread.id, { prompt: "after", delivery: "queue" });
+    await completeTurn(store, thread.id, running.turn.id, { text: "done" });
+
+    const messages = await store.readMessages(thread.id);
+    const turns = await store.readTurns(thread.id);
+    const next = turns.find((turn) => turn.status === "running")!;
+    // "after" sits on the far side of the compaction: folded into "before" it
+    // would run ahead of the `/compact`, reordering what the user queued.
+    expect(turnPrompt(messages, next)?.text).toBe("before");
+    expect(turns.filter((turn) => turn.status === "queued").map((turn) => turnPrompt(messages, turn)?.text)).toEqual(["/compact", "after"]);
+
+    // Messages queued before the compaction are on one side of it and still
+    // travel together: the boundary narrows batching, it does not disable it.
+    const other = await setup();
+    const runningOther = await sendTurn(other.store, other.thread.id, { prompt: "work" });
+    await sendTurn(other.store, other.thread.id, { prompt: "before", delivery: "queue" });
+    await sendTurn(other.store, other.thread.id, { prompt: "after", delivery: "queue" });
+    await sendTurn(other.store, other.thread.id, { prompt: "/compact", delivery: "queue" });
+    await completeTurn(other.store, other.thread.id, runningOther.turn.id, { text: "done" });
+    const otherMessages = await other.store.readMessages(other.thread.id);
+    const otherTurns = await other.store.readTurns(other.thread.id);
+    expect(turnPrompt(otherMessages, otherTurns.find((turn) => turn.status === "running")!)?.text).toBe("before\n\nafter");
+    expect(otherTurns.filter((turn) => turn.status === "queued").map((turn) => turnPrompt(otherMessages, turn)?.text)).toEqual(["/compact"]);
+  });
+
   it("run at once when the time has already passed, and never steer or restart", async () => {
     const now = Date.parse("2026-09-25T10:00:00.000Z");
     const { store, thread } = await setup(() => now);

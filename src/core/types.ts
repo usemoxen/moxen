@@ -821,6 +821,13 @@ export interface ThreadEnvelope {
   turnInteractionModes?: Record<string, TurnInteractionMode>;
   /** Completed turns' output tokens per wall-clock second, supplied in thread subscriptions. */
   turnThroughput?: Record<string, number>;
+  /**
+   * Ids of the thread's maintenance turns (a bare `/compact`). They are not
+   * work: their replies are compaction output, so readers looking for the
+   * last real report skip them. Absent when the thread has none, and older
+   * ledgers are recognised by their prompt instead (see `StoredTurn.maintenance`).
+   */
+  maintenanceTurns?: readonly string[];
   /** Historical protection interruptions, keyed by turn id; absent on older/unpaused turns. */
   turnUsagePauses?: Record<string, TurnUsagePause>;
   /** Present while protection holds this thread; omitted on unprotected threads. */

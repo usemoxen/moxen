@@ -68,7 +68,13 @@ first — the new message rides along in the older turn when model and mode
 match, or runs next once it settles.
 
 A due held turn starts after the running turn settles, oldest first, with
-later held messages batched into it as one turn. It never starts while the
+later held messages batched into it as one turn. A `/compact` turn is never
+batched, in either direction: folded into an ordinary follow-up it would send
+the command as text no provider runs, and would carry the maintenance marker
+over a turn that did real work. It is also a batching boundary — only messages
+queued on the same side of it travel together, so nothing queued after a
+`/compact` overtakes it — and it keeps its own turn. It never starts
+while the
 limit still stands, while usage protection holds the thread, or while the
 thread is snoozed or settled: those wait for the reset, the release, or the
 thread becoming active again. An automatic continue whose time came while
@@ -82,12 +88,42 @@ sign-in covers only prompts you type yourself, so a task notice, an
 agent-queued message, a continue after a usage limit, a usage-protection
 wrap-up or recovery, one of Moxen's compaction prompts or its
 post-compaction resume, or an automatic hand-off waits in the work queue or
-the notice batch rather than starting a turn. A running turn is never
+the notice batch rather than starting a turn. The decision is made in one
+place from the same provenance — at the dispatch boundary itself, reading
+the setting in force at that moment, never the config the preceding turn
+started with — so no path can hand an automatic prompt to the driver: not
+the turn a settling run promotes, not recovery and steer redelivery, not
+admission, not a compaction or a hand-off, and not even a send whose
+session started while the setting was still on (the gate is rechecked at the boundary, immediately before the
+prompt leaves, and a denied turn goes back to the queue, held for
+admission — the facts the decision needs resolve first, then the setting is
+read at the moment of the send itself, so a change that lands during the
+gate's own reads is seen, not raced). What was queued behind a denied
+dispatch is handed back to promotion, so a message you wrote runs on its own
+instead of waiting on a held automatic entry. Eligibility is settled before a promotion
+rewrites the queue, and on Antigravity threads promotion never folds a
+message of Moxen's into one of yours or the other way round — even opted
+in, since the setting can change between the two — so a held entry is
+never merged into your message and your message is never stranded in a
+held one: what runs past the gate carries only what could run. Other
+providers batch queued messages exactly as before. A running turn is never
 stopped for a compaction whose follow-up could not start, and a hand-off you
 queued yourself that wants a model summary completes on its stored summary
 rather than waiting on a summary the gate would hold. The
 entry shows why it waits, and runs with your next message or when you turn the
-setting on. Delegating a new task to Antigravity is refused outright while off
+setting on. Recovering a turn whose process died interrupts it either way, but
+the follow-up it had queued is never dispatched past the gate: it goes back to
+queued for the admission path, which holds it like any other automatic prompt.
+A task notice holds its exception only while a live turn of yours can carry
+it: steered into your running turn it rides, but a live turn Moxen started
+does not carry it — a refusal decided before anything is written, so a
+gate-refused notice records no ledger row and arms no retry timer — and
+redelivered standalone — a crash took the turn it steered into before the
+driver confirmed it — it is an automatic prompt like
+any other, held in its durable batch until you send again or turn the
+setting on. Nothing is lost either way: a held entry keeps its text and its
+metadata, and every path that holds it runs it the moment it may.
+Delegating a new task to Antigravity is refused outright while off
 (`ANTIGRAVITY_DELEGATION_OFF`), before a thread or worktree is created; an
 agent's `task_send`/wake and `thread_continue` onto Antigravity are refused the
 same way. What you type, queue, schedule or click always runs, and a turn the
@@ -972,7 +1008,16 @@ is told again, by a task notification, when the task next has nothing left to
 run: the notification is not one-shot, and covers a queued message's turn too.
 `task_status` reports `running` from the moment of the wake.
 
-A turn-end notification always fires on time and nothing can hold it. When the
+A turn-end notification always fires on time and nothing can hold it. A bare
+`/compact` turn is maintenance, not a report: the notification reads the task's
+last turn that did real work, and a batch that comes due while the task is
+still compacting waits for it and then goes out once, instead of being
+dropped. The wait is durable: the entry stays in the batch file, so a restart
+reconciles the task's turn first (a compaction the dead process left `running`
+is interrupted like any orphan), then reads what it has left to run and sends
+once. Waking a batch that was already delivered sends nothing: a run recovered
+while its task's notice is held wakes that entry instead of filing a second
+one, and a run covered by no entry files its own. When the
 task's turn ends with background work still running, the notification names
 that work and for how long (for example "turn ended, 1 background process
 still running: bun run check, 4m"), and reads as not finished: the parent must
@@ -1466,8 +1511,10 @@ is read as it arrives) is over the line that would compact the thread once the t
 ended (`auto`, a delegated task, or past the hard line on `ask`), Moxen stops the
 turn, compacts, and sends a continue so the task goes on from where it was
 (`compactMidTurn` in `core/threads/operations.ts`). A compaction that left the thread
-past its line is not repeated until it has dropped below it once. `off`: nobody
-compacts. With Claude Code compacting by itself, a model's own Compact at size
+past its line is not repeated until it has dropped below it once. A hand-off
+document skips a compaction turn when it names the request the thread began
+with and last received, and when it decides whether the work may already be
+done. `off`: nobody compacts. With Claude Code compacting by itself, a model's own Compact at size
 becomes that model's auto-compact window (100K to 1M) when its session starts;
 on the Moxen Harness a profile's own compaction still wins for its models. The Moxen Harness compacts inside its own loop: its own
 compaction is `auto` (so a global `provider` means `auto` there). On `ask` it

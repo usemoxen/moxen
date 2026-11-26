@@ -96,6 +96,7 @@ import {
   promoteDueScheduledTurn,
   promoteQueuedTurn,
   redeliverOrphanedSteers,
+  requeueGatedDispatch,
   requeueUnownedTurn,
   sendTurn,
   settleThread,
@@ -110,8 +111,9 @@ import {
 } from "./threads.js";
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { QUEUE_ADMISSION_LOCK, isTransferDestinationRequestId, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchGate, antigravitySteerGate, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { buildHandoff, continuedTitle } from "./handoff.js";
+import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
 import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
@@ -152,6 +154,14 @@ export interface OperationContext {
   readonly store: ThreadStore;
   readonly storeRoot: string;
   readonly config: CliConfig;
+  /**
+   * The providers config in force now, for the Antigravity dispatch gate:
+   * a long-lived server keeps refreshing this from the last operation it
+   * ran, so a settle that happens long after its turn started reads the
+   * setting the user switched mid-flight, not the turn's own snapshot.
+   * Absent (tests, CLI): `config` is the setting in force.
+   */
+  readonly providersInForce?: () => CliConfig["providers"];
   /** The driver for a model-selection instance id, shared per context. */
   readonly driverFor: (instanceId: string) => TurnDriver;
   /**
@@ -499,7 +509,7 @@ function sameEndpoint(left: OutOfProcessMcpServerSpec, right: McpServerSpec): bo
  * point that touches a thread can call it. Never throws.
  */
 export async function recoverOrphanedTurn(ctx: OperationContext, threadId: string): Promise<boolean> {
-  const result = await reconcileOrphanedTurn(ctx.store, threadId).catch(() => null);
+  const result = await reconcileOrphanedTurn(ctx.store, threadId, ctx.config.providers).catch(() => null);
   if (!result) return false;
   // Its process died with steers mid-flight whose arrival died with it: the
   // ledger still holds them, so they go out again as queued turns of their
@@ -508,16 +518,94 @@ export async function recoverOrphanedTurn(ctx: OperationContext, threadId: strin
   // run after it; with nothing promoted the first copy is run here, or the
   // copies would sit running with no runner and never heal in-process.
   const copies = await redeliverOrphanedSteers(ctx.store, threadId, result.interrupted.id, ctx.config).catch(() => [] as string[]);
-  if (result.promoted && ctx.store.claimRun(result.promoted.id)) {
-    await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+  if (result.promoted) {
+    // The orphan is interrupted either way; running what it promoted is not.
+    if (await holdGatedPromotion(ctx, threadId, result.promoted)) return true;
+    if (ctx.store.claimRun(result.promoted.id)) {
+      await runRecoveredTurn(ctx, threadId, result.promoted).catch(() => undefined);
+    }
     return true;
   }
-  if (!result.promoted && copies.length > 0) {
+  if (copies.length > 0) {
     for (const id of copies) await requeueUnownedTurn(ctx.store, threadId, id).catch(() => false);
-    const next = await promoteQueuedTurn(ctx.store, threadId).catch(() => null);
-    if (next && ctx.store.claimRun(next.id)) await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
+    const next = await promoteQueuedTurn(ctx.store, threadId, liveProvidersOf(ctx)).catch(() => null);
+    if (next && !(await holdGatedPromotion(ctx, threadId, next)) && ctx.store.claimRun(next.id)) {
+      await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
+    }
   }
   return true;
+}
+
+/**
+ * The one dispatch gate decision for a turn a runner holds: the facts are
+ * resolved first, then the setting in force at the decision — the live
+ * `providersInForce` supplier when the operation has one, else its config —
+ * never a predecessor turn's snapshot (LOCAL-034). Provenance reads with the
+ * message ledger made whole, and the fresh consent that releases a held
+ * entry (a user turn authored after it was queued), so this is the same
+ * verdict admission reaches and the dispatch boundary never drifts apart.
+ */
+async function antigravityGateHoldsTurn(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
+  const gate = await antigravityDispatchGate(ctx.store, threadId, turn.id);
+  return gate !== null && gate.holds(() => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers));
+}
+
+/**
+ * The providers setting in force at this instant — the live supplier when the
+ * operation has one, else its own config — never a captured snapshot
+ * (LOCAL-034).
+ */
+function liveProvidersOf(ctx: OperationContext): CliConfig["providers"] {
+  return ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers;
+}
+
+/**
+ * A dispatch the gate denied hands the turns waiting behind it back to
+ * promotion: the next turn the gate does not hold is promoted and run on its
+ * own provider, so a message the user wrote never strands waiting on the
+ * automatic entry its owner can no longer release. Skipped turns stay
+ * untouched where they are.
+ */
+async function handBackDeniedDispatch(ctx: OperationContext, threadId: string): Promise<void> {
+  const next = await promoteQueuedTurn(ctx.store, threadId, liveProvidersOf(ctx)).catch(() => null);
+  if (next !== null && ctx.store.claimRun(next.id)) {
+    await runRecoveredTurn(ctx, threadId, next).catch(() => undefined);
+  }
+}
+
+/**
+ * Recovery must not become the one path that sends an automatic prompt to
+ * Antigravity while automatic prompts are off. A promoted turn the gate would
+ * hold goes back to queued for admission, which holds it — with its reason —
+ * until the setting turns on or a later user turn releases it. Nothing is
+ * sent, and the setting is never turned on here. The turns queued behind it
+ * are handed back to promotion, so the user's own follow-up runs on its own.
+ * Returns whether it was held.
+ *
+ * Admission's own gate is the authority for turns it starts: it reads fresh
+ * user consent from the ledger, so this only covers turns recovery promotes
+ * and runs itself.
+ */
+async function holdGatedPromotion(ctx: OperationContext, threadId: string, turn: StoredTurn): Promise<boolean> {
+  if (!(await antigravityGateHoldsTurn(ctx, threadId, turn))) return false;
+  // Marked as a promotion no runner took, so admission takes it back.
+  await requeueGatedDispatch(ctx.store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
+  await handBackDeniedDispatch(ctx, threadId);
+  return true;
+}
+
+/**
+ * The parent this task's settle notice is already held for, if any: a batch
+ * entry kept back while the task still had work, inherited across the restart
+ * that recovered this run. That entry owns the notice, so the run wakes it
+ * instead of filing a second one for the same settle. Null when no entry is on
+ * file, and the run files its own.
+ */
+async function heldNoticeParent(ctx: OperationContext, childThreadId: string): Promise<string | null> {
+  const parentThreadId = await notifyDelegationParent(ctx, childThreadId);
+  if (parentThreadId === null) return null;
+  const held = (await readTaskNotificationBatches(ctx.storeRoot))[parentThreadId] ?? [];
+  return held.some((entry) => entry.child === childThreadId && pendingEntryKind(entry) === "settle") ? parentThreadId : null;
 }
 
 /** The caller has claimed `turn` (`claimRun`); every way out here settles or frees it. */
@@ -529,6 +617,19 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // Turns queued behind this one if it settles below with no runner to take
     // a promotion: settled without promoting, held for admission instead.
     const queuedBefore = new Set((await store.readTurns(threadId)).filter((candidate) => candidate.status === "queued").map((candidate) => candidate.id));
+    // The dispatch boundary itself, not a caller's say-so: admission and
+    // promotion both decide with this same check, and the defense holds a
+    // turn that reached a runner anyway — unless fresh consent or the
+    // setting releases it, exactly as admission would. The config is the
+    // operation's, the setting in force at dispatch.
+    if (await antigravityGateHoldsTurn(ctx, threadId, turn)) {
+      await requeueGatedDispatch(store, threadId, turn.id, ANTIGRAVITY_HELD_MESSAGE);
+      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      // The turns queued behind the denied dispatch are handed back to
+      // promotion, so a message the user wrote runs on its own (LOCAL-034).
+      await handBackDeniedDispatch(ctx, threadId);
+      return;
+    }
     // One message, or several queued ones batched into this turn at promotion.
     const message = turnPrompt(await store.readMessages(threadId), turn);
     if (message === null) {
@@ -548,7 +649,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
         }
         return;
       }
-      await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }).catch(() => undefined);
+      await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }, ctx.config.providers).catch(() => undefined);
       store.untrackRunning(turn.id);
       await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
       return;
@@ -570,7 +671,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       await driver.updateNativeTools?.(threadId, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
     } catch (cause) {
       const error = cause instanceof Error ? cause.message : String(cause);
-      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }).catch(() => undefined);
+      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
       store.untrackRunning(turn.id);
       // The failed start settled nothing that runs: a promotion it made has no
       // runner to take it, so hand those turns back to the admission path.
@@ -581,6 +682,9 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
     const images = await imagesOf(message.attachments);
     const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
+    // Decided now, before the run: a notice the batch already holds for this
+    // task owns its settle, and the completion callback below only wakes it.
+    const coveredParent = await heldNoticeParent(ctx, threadId);
     void executeTurn({
       store,
       driver,
@@ -593,6 +697,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
       config: ctx.config,
+      gateProviders: () => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers),
       workingDirectory: thread.env.path,
       ...(turn.queue?.summaryFor ? {} : usageLimitHook(ctx, threadId, selection.instanceId)),
       ...(turn.queue?.summaryFor ? {} : longThreadHook(ctx, threadId)),
@@ -601,7 +706,11 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // still owes its parent the report when it finally ends.
       .then(async () => {
         await syncResearchRun(ctx, threadId).catch(() => undefined);
-        await notifyParentOfResumedTask(ctx, threadId).catch(() => undefined);
+        // One owner for the settle notice: a durable entry kept back for this
+        // task is woken, never filed twice — a flush that took the parent's
+        // lock on the terminal event may already have delivered and removed it.
+        if (coveredParent !== null) await wakeHeldNotification(ctx, coveredParent).catch(() => undefined);
+        else await notifyParentOfResumedTask(ctx, threadId).catch(() => undefined);
         // This thread's own recovery may have released task notices queued
         // while it could not receive them: they go out now, together.
         await flushTaskNotifications(ctx, threadId).catch(() => undefined);
@@ -718,7 +827,7 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     if (candidate.queue && (JSON.stringify(admission.latched) !== JSON.stringify(candidate.queue.latched ?? []) || JSON.stringify(admission.conditions) !== JSON.stringify(candidate.queue.conditions))) await ctx.store.withThreadLock(threadId, () => ctx.store.updateTurn(threadId, candidate.id, { queue: { ...candidate.queue!, latched: admission.latched, conditions: admission.conditions } }));
     if (admission.blocked.length) continue;
     if (await switchColdRecovery(ctx, row, candidate, now)) continue;
-    const turn = await promoteDueScheduledTurn(ctx.store, threadId, candidate.id, !!summary);
+    const turn = await promoteDueScheduledTurn(ctx.store, threadId, candidate.id, !!summary, ctx.config.providers);
     if (!turn || !ctx.store.claimRun(turn.id)) return false;
     await runRecoveredTurn(ctx, threadId, turn);
     rows[index] = { thread: (await ctx.store.readThreadRecord(threadId))!, turns: await ctx.store.readTurns(threadId) };
@@ -978,7 +1087,7 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     if (summaryToStop) {
       const thread = await ctx.store.readThreadRecord(threadId);
       if (thread && summaryToStop.status === "running") await Effect.runPromise(ctx.driverFor((summaryToStop.modelSelection ?? thread.modelSelection).instanceId).interruptTurn(threadId));
-      await interruptTurn(ctx.store, threadId, summaryToStop.id);
+      await interruptTurn(ctx.store, threadId, summaryToStop.id, undefined, undefined, ctx.config.providers);
     }
     if (cancelProtection) await ctx.store.withThreadLock(threadId, async () => {
       const thread = await ctx.store.readThreadRecord(threadId);
@@ -1115,14 +1224,14 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   // forbids: an automatic entry of any continuation (model or stored) is
   // held here — before preparation creates the handoff request, starts a
   // summary, or touches a destination thread.
-  const destinationHeld = antigravityAutoPromptsHeld(ctx.config, (turn.modelSelection ?? source.modelSelection).instanceId);
+  const destinationHeld = antigravityAutoPromptsHeld(ctx.config.providers, (turn.modelSelection ?? source.modelSelection).instanceId);
   if (destinationHeld && !userAuthorized) return;
   // A model summary is a prompt on the source thread, so the source's gate
   // holds it as surely as the destination's: while the source runs on a
   // held Antigravity the summary could only ever sit queued. A handoff the
   // user queued themselves completes on its stored summary instead; an
   // automatic one is held before any mutation.
-  const handoffHeldOff = turn.queue.continuation === "model" && antigravityAutoPromptsHeld(ctx.config, source.modelSelection.instanceId);
+  const handoffHeldOff = turn.queue.continuation === "model" && antigravityAutoPromptsHeld(ctx.config.providers, source.modelSelection.instanceId);
   if (handoffHeldOff && !userAuthorized) return;
   if (!turn.handoff) {
     const handoff = { requestId: store.newId(), destinationThreadId: store.newId() };
@@ -1159,7 +1268,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
         : undefined;
       if (staleSummary?.status === "running") {
         await Effect.runPromise(ctx.driverFor((staleSummary.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
-        await interruptTurn(store, threadId, staleSummary.id);
+        await interruptTurn(store, threadId, staleSummary.id, undefined, undefined, ctx.config.providers);
       } else if (staleSummary?.status === "queued") {
         await interruptTurn(store, threadId, staleSummary.id);
       }
@@ -1187,7 +1296,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
         await Effect.runPromise(ctx.driverFor((summaryTurn.modelSelection ?? source.modelSelection).instanceId).interruptTurn(threadId));
         await interruptTurn(store, threadId, summaryTurn.id);
       }
-      if (summaryTurn?.status === "queued") await interruptTurn(store, threadId, summaryTurn.id);
+      if (summaryTurn?.status === "queued") await interruptTurn(store, threadId, summaryTurn.id, undefined, undefined, ctx.config.providers);
       await store.withThreadLock(threadId, async () => {
         const current = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
         handoff = { ...current!.handoff!, fallback: !current!.handoff!.summary };
@@ -1465,7 +1574,7 @@ export async function compactMidTurn(ctx: OperationContext, threadId: string, us
   // Compacting mid-turn stops the running turn so the `/compact` and its
   // follow-up can take its place: while Antigravity's automatic prompts are
   // held there is no place for them, so the running turn is left alone.
-  if (antigravityAutoPromptsHeld(ctx.config, snapshot.instanceId)) return false;
+  if (antigravityAutoPromptsHeld(ctx.config.providers, snapshot.instanceId)) return false;
   // As it will stand when the turn has settled.
   const action = planLongThreadAction(ctx.config, { ...snapshot, turnRunning: false, usedTokens: usage.usedTokens, maxTokens: usage.maxTokens });
   if (action?.kind !== "compact") return false;
@@ -1509,7 +1618,7 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string, o
     // An automatic hand-off is a prompt the user did not write: held while
     // Antigravity delegation is off. The work stays in this thread; a notice
     // says why, once until something else lands in the ledger.
-    if (antigravityAutoPromptsHeld(ctx.config, snapshot.instanceId)) {
+    if (antigravityAutoPromptsHeld(ctx.config.providers, snapshot.instanceId)) {
       const activities = await ctx.store.readActivities(threadId);
       const last = activities.at(-1);
       if (!(last?.kind === "notice" && last.payload?.held === "antigravity-delegation")) {
@@ -3277,8 +3386,10 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
+    // A side question is the user's own; every other origin is one of Moxen's
+    // automatic prompts, which the steer gate weighs at the boundary.
     const text = imageMention(input.driverPrompt ?? input.prompt.trim(), uploads.map((upload) => upload.name));
-    return { ...sent, run: null, steerDelivered: await deliverSteer(driver, thread.id, text, providerImages(uploads), sent.messageId) };
+    return { ...sent, run: null, steerDelivered: await deliverSteer(ctx, driver, thread.id, text, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer") };
   }
   if (sent.turn.status === "queued" && typeof sent.turn.scheduledFor === "string") {
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
@@ -3325,7 +3436,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
     const queuedBefore = new Set((await store.readTurns(thread.id)).filter((turn) => turn.status === "queued").map((turn) => turn.id));
     if (claimed) store.untrackRunning(sent.turn.id);
-    await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }).catch(() => undefined);
+    await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
     // The failed start settled nothing that runs: a promotion it made has no
     // runner to take it, so hand those turns back to the admission path.
     await holdStrandedPromotions(store, thread.id, queuedBefore).catch(() => undefined);
@@ -3391,6 +3502,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
       // thread's model changed since it started.
       modelSelection: turnModel,
       config: ctx.config,
+      gateProviders: () => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers),
       runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
@@ -3427,15 +3539,34 @@ function providerImages(uploads: readonly ImageAttachmentUpload[]): ProviderImag
  * session. Never starts a session: a session opened just for this would be
  * a second, empty conversation, not the one doing the work.
  *
+ * The steer boundary's own gate (LOCAL-034): every asynchronous fact
+ * resolves first — the session's liveness, the very window where the target
+ * turn can die, then the target's row read after it — and the decision
+ * reads the setting in force at the moment of the steer, synchronously,
+ * with the steer going out right after it and nothing awaited in between.
+ * A refused steer delivers nothing: the caller keeps what it held durable,
+ * and the specific ride exception survives only into a live turn the user
+ * wrote.
+ *
  * True is the push being accepted, not the arrival: the steer carries the
  * ledger message id, and a driver with an arrival signal confirms it later
  * (`takeUnconfirmedSteers`); whatever settles unconfirmed goes out again
  * as a queued turn of its own.
  */
-async function deliverSteer(driver: TurnDriver, threadId: string, text: string, images: readonly ProviderImage[], steerId: string): Promise<boolean> {
+async function deliverSteer(
+  ctx: OperationContext,
+  driver: TurnDriver,
+  threadId: string,
+  text: string,
+  images: readonly ProviderImage[],
+  steerId: string,
+  payloadAutomatic: boolean,
+): Promise<boolean> {
   if (!driver.steerTurn) return false;
   const live = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
   if (!live) return false;
+  const gate = await antigravitySteerGate(ctx.store, threadId);
+  if (gate.refuses(() => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers), payloadAutomatic)) return false;
   return await Effect.runPromise(driver.steerTurn(threadId, text, images, steerId)).then(
     () => true,
     () => false,
@@ -4152,13 +4283,13 @@ const DELEGATE_DEFAULT_TIMEOUT_MS = 600_000;
  * consumer sign-in covers only prompts the user types themselves, so a
  * delegated task or an automatic turn is refused or held, never started.
  */
-function antigravityAutoPromptsHeld(config: CliConfig, instanceId: string): boolean {
-  return driverKindOfInstance(instanceId) === "antigravity" && !antigravityUnsupportedUseAllowed(config);
+function antigravityAutoPromptsHeld(providers: CliConfig["providers"], instanceId: string): boolean {
+  return driverKindOfInstance(instanceId) === "antigravity" && providers?.antigravity?.allowUnsupportedUse !== true;
 }
 
 /** Refuse starting delegated work on Antigravity while the setting is off, before anything is created. */
 function requireAntigravityDelegation(config: CliConfig, instanceId: string): void {
-  if (!antigravityAutoPromptsHeld(config, instanceId)) return;
+  if (!antigravityAutoPromptsHeld(config.providers, instanceId)) return;
   throw new CliError(
     "ANTIGRAVITY_DELEGATION_OFF",
     "Delegation and automatic prompts are off for Antigravity: Google does not support them on consumer plans and may suspend the account. Turn on providers.antigravity.allowUnsupportedUse to allow them.",
@@ -4389,8 +4520,9 @@ async function parentMustWaitForUsage(ctx: OperationContext, parent: StoredThrea
   const selection = openTurn(turns)?.modelSelection ?? parent.modelSelection;
   // An Antigravity parent with delegation off takes no automatic prompt:
   // the notice waits in the batch for the user's next message (or the
-  // setting turning on), exactly as a usage-held parent's does.
-  if (antigravityAutoPromptsHeld(ctx.config, selection.instanceId)) return true;
+  // setting turning on), exactly as a usage-held parent's does — read with
+  // the setting in force now, never this operation's snapshot (LOCAL-034).
+  if (antigravityAutoPromptsHeld(liveProvidersOf(ctx), selection.instanceId)) return true;
   return providerExhausted(usageKeyForInstance(selection.instanceId), Date.now(), selection.model);
 }
 
@@ -4437,16 +4569,32 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     if (held !== null) {
       const turns = await ctx.store.readTurns(parentThreadId).catch(() => [] as StoredTurn[]);
       const running = openTurn(turns) !== null;
+      // The ride exception holds only while the live turn the notice would
+      // ride is the user's own: one Moxen started (a task message, a
+      // continue) is an automatic conversation, and steering into it would
+      // feed exactly what the setting forbids — so it keeps the notice
+      // durable like an idle thread, ready for the user's message.
+      const rides = running && userAuthoredTurn(openTurn(turns)!);
       const activeSelection = openTurn(turns)?.modelSelection ?? held.modelSelection;
       const spent = providerExhausted(usageKeyForInstance(activeSelection.instanceId), Date.now(), activeSelection.model);
       // An archived or deleted parent can never receive again: drop the
       // batch at once instead of keeping what no flush could deliver.
       const receivable = held.archivedAt == null && held.deletedAt == null;
-      // A running turn is the user's own (the flush rides their send): the
-      // notice goes out with it. Idle, an Antigravity parent with delegation
-      // off keeps the batch for the next message or the setting turning on.
-      const antigravityHeld = !running && antigravityAutoPromptsHeld(ctx.config, activeSelection.instanceId);
-      if (receivable && (parentNotificationsHeld(held) || antigravityHeld || (!running && spent))) {
+      // A running user turn is what the flush rides: the notice goes out
+      // with it. Otherwise, an Antigravity parent with delegation off keeps
+      // the batch for the next message or the setting turning on. The
+      // setting is read in force at the flush (LOCAL-034) — a timer's
+      // captured context is as stale as a predecessor turn's snapshot.
+      const antigravityHeld = !rides && antigravityAutoPromptsHeld(liveProvidersOf(ctx), activeSelection.instanceId);
+      // The steer's own gate, asked before anything is written: refusing
+      // here means no ledger row and no driver call, and this hold arms no
+      // child watcher and no retry timer — the batch waits for the next
+      // live user turn, an admission, or the setting turning on. The facts
+      // (the target the notice would ride) are re-read just now, so a turn
+      // that changed since the `rides` check above cannot be steered into.
+      const steerGate = running ? await antigravitySteerGate(ctx.store, parentThreadId) : null;
+      const steerRefused = steerGate !== null && steerGate.refuses(() => liveProvidersOf(ctx), true);
+      if (receivable && (parentNotificationsHeld(held) || antigravityHeld || steerRefused || (!running && spent))) {
         // Still held, or spent with no live turn to steer into: stay durable
         // in the batch file instead of starting a turn into the same wall —
         // startTurn resolves even when the session fails, and the batch would
@@ -4459,11 +4607,46 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
         return;
       }
     }
-    await deliverTaskNotifications(ctx, parentThreadId, mine);
+    const deferred = await deliverTaskNotifications(ctx, parentThreadId, mine);
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-      delete batches[parentThreadId];
+      // A task still running work of its own (a compaction it started after
+      // its turn settled) reports once that work ends: its entry stays in the
+      // batch instead of being dropped, and the watcher below queues it again then.
+      if (deferred.length > 0) batches[parentThreadId] = deferred;
+      else delete batches[parentThreadId];
     });
+    for (const entry of deferred) watchDeferredNotification(ctx, parentThreadId, entry);
   });
+}
+
+/** One watcher per parent and task: a repeated flush must not stack watchers that each flush. */
+const deferredNotificationWatches = new Set<string>();
+
+/**
+ * Queue a task's kept-back notification again once its work ends. The entry
+ * already sits in the durable batch, so the wake arms that batch's window
+ * instead of filing a new entry: a flush that won the parent's notification
+ * lock while this watcher waited has already delivered it and deleted it, and
+ * filing again would report the same settle twice. A wake with nothing left to
+ * deliver is a no-op.
+ *
+ * Watching from the start (`onlyFutureSettles` false) closes the gap between
+ * the flush looking and this subscription: the check runs after it, so a
+ * settle in between is either seen as already done or heard as an event.
+ */
+function watchDeferredNotification(ctx: OperationContext, parentThreadId: string, entry: PendingTaskNotification): void {
+  const key = `${parentThreadId}\0${entry.child}`;
+  if (deferredNotificationWatches.has(key)) return;
+  deferredNotificationWatches.add(key);
+  notifyWhenTaskSettles(
+    ctx,
+    parentThreadId,
+    entry.child,
+    false,
+    null,
+    () => deferredNotificationWatches.delete(key),
+    wakeHeldNotification,
+  );
 }
 
 /**
@@ -4476,9 +4659,18 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
  * windows — an early snapshot yields "not exhausted" only when no data
  * says spent, in which case delivering is correct. A spent parent keeps its
  * batch for the recovery or the next message instead.
+ *
+ * A task still listed in a batch was mid-turn when the previous process died,
+ * so its turn is `running` with a dead owner and nothing will ever settle it:
+ * the watcher armed below would wait for an event that never comes, and the
+ * parent would never hear. Each such child is reconciled first — outside the
+ * parent's notification lock, which is the child's own thread lock — so the
+ * flush reads whether it has live or queued work left, and not a corpse.
  */
 export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
   const batches = await readTaskNotificationBatches(ctx.storeRoot);
+  const children = new Set(Object.values(batches).flatMap((entries) => entries.map((entry) => entry.child)));
+  for (const child of children) await recoverOrphanedTurn(ctx, child).catch(() => undefined);
   for (const parentThreadId of Object.keys(batches)) {
     await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
   }
@@ -4537,9 +4729,36 @@ async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: st
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
       batches[parentThreadId] = unionTaskEntries(batches[parentThreadId] ?? [], entries);
     });
-    const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
-    timer.unref?.();
-    pendingNotifications.set(parentThreadId, { timer, entries });
+    armBatchWindow(ctx, parentThreadId, entries);
+  });
+}
+
+/**
+ * Arm the batch window for a parent, keeping notices already waiting on it: a
+ * second arming is still one flush, and the union above keeps one entry per
+ * task, so two reports of the same settle cannot go out twice.
+ */
+function armBatchWindow(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): void {
+  const pending = pendingNotifications.get(parentThreadId);
+  if (pending) clearTimeout(pending.timer);
+  const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
+  timer.unref?.();
+  pendingNotifications.set(parentThreadId, { timer, entries: unionTaskEntries(pending?.entries ?? [], entries) });
+}
+
+/**
+ * Wake the batch window for a notice the parent already holds. The entry is
+ * durable, so filing a fresh one would report the same settle twice — most
+ * sharply when a flush that won the parent's lock while this watcher waited
+ * has already delivered it and deleted it. A wake with nothing left to deliver
+ * is a no-op.
+ */
+async function wakeHeldNotification(ctx: OperationContext, parentThreadId: string): Promise<void> {
+  await ctx.store.withThreadLock(`\0task-notification:${parentThreadId}`, async () => {
+    const batches = await readTaskNotificationBatches(ctx.storeRoot);
+    const held = batches[parentThreadId] ?? [];
+    if (held.length === 0) return;
+    armBatchWindow(ctx, parentThreadId, held);
   });
 }
 
@@ -4566,10 +4785,18 @@ function hasQueuedResume(turns: readonly StoredTurn[], recoveryTurnId: string | 
   );
 }
 
-/** How many of a task's turns have settled: the generation a notification snapshot was taken at. */
-async function settledTurnCount(ctx: OperationContext, childThreadId: string): Promise<number> {
-  const turns = await ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]);
-  return turns.filter((turn) => turn.completedAt !== null).length;
+/**
+ * How many of a task's *work* turns have settled: the generation a
+ * notification snapshot was taken at. A maintenance turn (`/compact`) is not
+ * work, so its settle never makes a background-work follow-up look like the
+ * task waking to finish.
+ */
+async function settledWorkTurnCount(ctx: OperationContext, childThreadId: string): Promise<number> {
+  const [turns, messages] = await Promise.all([
+    ctx.store.readTurns(childThreadId).catch(() => [] as StoredTurn[]),
+    ctx.store.readMessages(childThreadId).catch(() => [] as StoredMessage[]),
+  ]);
+  return turns.filter((turn) => turn.completedAt !== null && !isMaintenanceTurn(turn, messages)).length;
 }
 
 /** Past this age, background work a task left running is flagged as probably forgotten. Moxen never stops it. */
@@ -4784,7 +5011,7 @@ export function isStoppedBySettle(child: StoredThread | null, status: TaskNotifi
  * settle covers is stale and dropped, and a settle a cancellation covers
  * wins over it, so each child reads once.
  */
-async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<void> {
+async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<PendingTaskNotification[]> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   // A task whose parent continued in a new thread reports there instead.
   const liveParent = (id: string) => rows.find((row) => row.childThreadId === id && row.continuedIn === undefined)?.parentThreadId;
@@ -4797,9 +5024,15 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   // One that handed off to a new thread has not finished either: its parent hears from the continuation.
   const movedOn = (id: string) => rows.some((row) => row.childThreadId === id && row.parentThreadId === parentThreadId && row.continuedIn !== undefined);
   const settleIds = mine.filter((entry) => pendingEntryKind(entry) === "settle").map((entry) => entry.child);
-  const final = (await Promise.all(settleIds.map(async (id) => (!movedOn(id) && (await taskHasSettledForGood(ctx, id)) ? id : null)))).filter(
-    (id): id is string => id !== null,
-  );
+  const settleStates = await Promise.all(settleIds.map(async (id) => {
+    if (movedOn(id)) return { id, final: false, moved: true };
+    return { id, final: await taskHasSettledForGood(ctx, id), moved: false };
+  }));
+  const final = settleStates.filter((state) => state.final && !state.moved).map((state) => state.id);
+  // Work still running: keep the entry for a flush once it ends.
+  const deferred: PendingTaskNotification[] = settleStates
+    .filter((state) => !state.final && !state.moved)
+    .map((state) => ({ child: state.id }));
   const settled = new Set(final);
   // A pause or cancellation a settle report covers is stale: the settle says where the task stands.
   // One whose task handed off is the continuation's to report.
@@ -4828,7 +5061,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   // gap), rather than arming a watcher that only hears future settles.
   const generations = new Map<string, number>();
   const tasks = (await Promise.all(final.map(async (id) => {
-    const since = await settledTurnCount(ctx, id);
+    const since = await settledWorkTurnCount(ctx, id);
     const task = await taskNotificationOf(ctx, id);
     const from = continuesTaskId(id);
     if (task) generations.set(task.taskId, since);
@@ -4852,7 +5085,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     (task): task is TaskNotification => task !== null,
   );
   const all = [...tasks, ...pauseTasks, ...cancelTasks];
-  if (all.length === 0) return;
+  if (all.length === 0) return deferred;
   // A task that ended its turn with background work still running is not
   // done: when that work ends, the provider wakes the task where it can, and
   // the parent hears again once the task next has nothing left to run. Work
@@ -4873,7 +5106,9 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     }
   }
   const parent = await ctx.store.readThreadRecord(parentThreadId);
-  if (!parent || parent.archivedAt != null) return;
+  // Nothing can deliver to an archived or deleted parent, so a task kept
+  // back for later is dropped with the rest instead of waiting forever.
+  if (!parent || parent.archivedAt != null) return [];
   if (parent.deletedAt != null) {
     // Dropped, not queued and not thrown: the conversation is gone. One
     // line in the server log; nothing more (MXN-290 review).
@@ -4882,7 +5117,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
       `${new Date().toISOString()} task notification: parent ${parentThreadId} is deleted; dropping ${all.length} task(s)\n`,
       "utf8",
     ).catch(() => undefined);
-    return;
+    return [];
   }
   const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
   const steerable = running && (await canSteer(ctx, parent));
@@ -4894,6 +5129,13 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     delivery: steerable ? "steer" : "queue",
     wakeSettled: true,
   });
+  // A start that delivered, steered or not, forgets the batch (LOCAL-034):
+  // a steer the gate or the driver refused still wrote its ledger row, and
+  // that unconfirmed row is the notice's own durable redelivery — a crash's
+  // orphan recovery sends it exactly once, and no watcher, timer or later
+  // flush may send it twice. A start that threw keeps the batch the old
+  // way, by never reaching this delete.
+  return deferred;
 }
 
 /**
@@ -6252,7 +6494,10 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
  * `sinceGeneration` is the settle generation the caller's snapshot was taken
  * at: when set, a settle that landed between the snapshot and this arming
  * reports at once instead of being lost. A task that has not settled since
- * keeps waiting for a future one.
+ * keeps waiting for a future one. `onDone` runs once the notice is queued, so
+ * a caller watching on a task's behalf can forget its watch. `wake` is how the
+ * settle is reported: filing a fresh entry by default, or flushing one already
+ * held when the caller kept it durable for this moment.
  */
 function notifyWhenTaskSettles(
   ctx: OperationContext,
@@ -6260,6 +6505,8 @@ function notifyWhenTaskSettles(
   childThreadId: string,
   onlyFutureSettles = false,
   sinceGeneration: number | null = null,
+  onDone: () => void = () => undefined,
+  wake: (ctx: OperationContext, parentThreadId: string, childThreadId: string) => Promise<void> = queueTaskNotification,
 ): void {
   let done = false;
   let checking = false;
@@ -6277,14 +6524,15 @@ function notifyWhenTaskSettles(
       do {
         again = false;
         if (done || !(await taskHasSettledForGood(ctx, childThreadId))) continue;
-        if (sinceGeneration !== null && (await settledTurnCount(ctx, childThreadId)) <= sinceGeneration) {
+        if (sinceGeneration !== null && (await settledWorkTurnCount(ctx, childThreadId)) <= sinceGeneration) {
           // No settle since the caller's snapshot: a turn settling in the gap
           // would have moved the generation. Keep waiting for a future one.
           continue;
         }
         done = true;
         stop();
-        await queueTaskNotification(ctx, parentThreadId, childThreadId);
+        onDone();
+        await wake(ctx, parentThreadId, childThreadId);
       } while (again);
     } finally {
       checking = false;

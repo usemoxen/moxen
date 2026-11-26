@@ -238,7 +238,7 @@ export type TurnOrigins = ReadonlyMap<string, MessageOrigin | undefined>;
 export async function loadTurnOrigins(
   store: { readMessages(threadId: string): Promise<readonly StoredMessage[]> },
   rows: readonly QueueRow[],
-  config: CliConfig,
+  config: Pick<CliConfig, "providers">,
 ): Promise<TurnOrigins> {
   const out = new Map<string, MessageOrigin | undefined>();
   if (antigravityUnsupportedUseAllowed(config)) return out;
@@ -252,6 +252,194 @@ export async function loadTurnOrigins(
     }
   }
   return out;
+}
+
+/** The hold every gate reports for an automatic prompt Antigravity must not receive. */
+export const ANTIGRAVITY_HELD_MESSAGE = "Antigravity automatic prompts are held: turn on providers.antigravity.allowUnsupportedUse";
+
+/**
+ * Whether dispatching `turn` as a turn of its own would send one of Moxen's
+ * automatic prompts rather than a message the user wrote: the queue's own
+ * flags, a usage schedule, or an origin. At the dispatch boundary every
+ * origin says as much — a task or background notice is dispatched as its
+ * own turn there too — with the one exception of `ridesUserTurn`: a notice
+ * that queued behind a user turn may go out with that turn's completion.
+ *
+ * This is the one provenance decision the Antigravity gates share (`queueAdmission`,
+ * promotion, recovery and the dispatch boundary itself): they must never
+ * drift apart on what counts as automatic.
+ */
+export function automaticDispatchPrompt(turn: StoredTurn, origin: MessageOrigin | undefined, turns?: readonly StoredTurn[]): boolean {
+  if (turn.queue?.automatic === true || turn.queue?.wakeUp === true) return true;
+  if (turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold") return true;
+  if (origin === undefined) return false;
+  if (origin !== "task-notification" && origin !== "background-notification") return true;
+  return !(turns !== undefined && noticeRidesUserTurn(turns, turn));
+}
+
+/**
+ * Whether a turn is one the user wrote: no origin, none of the queue's
+ * automatic flags, none of the usage schedules. Moxen-written prompts never
+ * count, whatever their kind — the one predicate every exception that needs
+ * "the user's own turn" shares.
+ */
+export function userAuthoredTurn(turn: StoredTurn): boolean {
+  return turn.origin === undefined
+    && turn.queue?.automatic !== true && turn.queue?.wakeUp !== true
+    && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold";
+}
+
+/**
+ * Whether a notice turn still rides the user turn it was queued behind: the
+ * nearest terminal turn before it completed as the user's own. The notice's
+ * exception ends there — an interrupted or failed turn never carried it, and
+ * a recovery that redelivers the notice standalone dispatches an automatic
+ * prompt like any other. Turns still queued when it was filed never ran, so
+ * the live turn it waited on is further back.
+ */
+function noticeRidesUserTurn(turns: readonly StoredTurn[], turn: StoredTurn): boolean {
+  const index = turns.findIndex((candidate) => candidate.id === turn.id);
+  if (index <= 0) return false;
+  for (let at = index - 1; at >= 0; at -= 1) {
+    const candidate = turns[at]!;
+    if (candidate.status !== "completed" && candidate.status !== "failed" && candidate.status !== "interrupted") continue;
+    return candidate.status === "completed" && userAuthoredTurn(candidate);
+  }
+  return false;
+}
+
+/**
+ * Whether fresh consent releases a held automatic entry: a manual user
+ * turn authored after this entry was queued has run or completed, dated by
+ * when the user submitted it (`createdAt`), never by when its turn happened
+ * to start: a scheduled message that fires late does not authorize work
+ * queued behind its timer, and a scheduled or automatic turn is not consent
+ * at all. An equal timestamp is never proof of a later send on its own —
+ * the generated handoff turn and a moved entry can be stamped in one
+ * millisecond — so "later" leans on the ledger's durable append order
+ * instead: the consent turn must have been written after this entry's row
+ * (the handoff of a move is always written before the copy that waits on
+ * it, so it can never vouch for it). Timestamps take over only when the row
+ * is missing from this snapshot and there is no order to read.
+ */
+export function freshUserConsentReleases(turns: readonly StoredTurn[], turn: StoredTurn, threadId?: string, origins?: TurnOrigins): boolean {
+  const queuedAt = turns.findIndex((candidate) => candidate.id === turn.id);
+  return turns.some((other, index) => other.id !== turn.id
+    && (other.origin ?? (threadId !== undefined && origins !== undefined ? origins.get(turnOriginKey(threadId, other.id)) : undefined)) === undefined
+    && other.queue?.automatic !== true && other.queue?.wakeUp !== true
+    && !other.scheduledFor
+    && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"
+    && (other.status === "running" || other.status === "completed")
+    && (queuedAt < 0
+      ? Date.parse(other.createdAt) > Date.parse(turn.createdAt)
+      : index > queuedAt && Date.parse(other.createdAt) >= Date.parse(turn.createdAt)));
+}
+
+/**
+ * The one Antigravity dispatch gate, shared by every path that hands a
+ * prompt to an Antigravity driver: while `allowUnsupportedUse` is off (the
+ * default) an automatic prompt is held rather than dispatched. `providers`
+ * is the setting in force at the moment of the decision — the dispatching
+ * operation's config — never an earlier turn's snapshot.
+ */
+export function antigravityHoldsAutomaticDispatch(
+  providers: Pick<CliConfig, "providers">["providers"],
+  instanceId: string,
+  turn: StoredTurn,
+  origin: MessageOrigin | undefined,
+  turns?: readonly StoredTurn[],
+): boolean {
+  return driverKindOfInstance(instanceId) === "antigravity"
+    && providers?.antigravity?.allowUnsupportedUse !== true
+    && automaticDispatchPrompt(turn, origin, turns);
+}
+
+/**
+ * The dispatch boundary's decision, split from its facts so no caller can
+ * pass a snapshot (LOCAL-034): the caller resolves every asynchronous fact
+ * first (the turn's row, its provenance made whole with the message ledger,
+ * the fresh consent that releases a held entry), then reads THIS
+ * synchronously with the setting in force at the moment of dispatch — the
+ * driver's send going out right after it, nothing awaited in between.
+ */
+export interface AntigravityDispatchGate {
+  /** Whether the dispatch is denied: `providersInForce` is read at the call, not before. */
+  holds(providersInForce: () => Pick<CliConfig, "providers">["providers"] | undefined): boolean;
+}
+
+/**
+ * Resolve the dispatch decision's facts for a turn a runner is about to put
+ * in front of a driver: whether Antigravity's gate holds it, decided as the
+ * dispatch happens. `antigravityDispatchGate` resolves the facts; the
+ * closure it returns reads the setting in force — never an earlier turn's
+ * or operation's config snapshot.
+ *
+ * Null when nothing running could be denied (no turn row, not Antigravity,
+ * not an automatic prompt, or fresh user consent releases it), so the
+ * caller dispatches with no gate. Unreadable rows fail closed: the closure
+ * holds regardless of the setting, so an unreadable ledger never sends. A
+ * turn no longer running denies nothing, so a concurrent settle keeps its
+ * own behavior.
+ */
+export async function antigravityDispatchGate(
+  store: { readThreadRecord(threadId: string): Promise<StoredThread | null>; readTurns(threadId: string): Promise<readonly StoredTurn[]>; readMessages(threadId: string): Promise<readonly StoredMessage[]> },
+  threadId: string,
+  turnId: string,
+): Promise<AntigravityDispatchGate | null> {
+  const thread = await store.readThreadRecord(threadId).catch(() => null);
+  if (!thread) return { holds: () => true };
+  const turns = await store.readTurns(threadId).catch(() => null);
+  if (turns === null) return { holds: () => true };
+  const turn = turns.find((candidate) => candidate.id === turnId);
+  if (!turn || turn.status !== "running") return null;
+  if (driverKindOfInstance((turn.modelSelection ?? thread.modelSelection).instanceId) !== "antigravity") return null;
+  // Provenance loads unconditionally: the facts cannot depend on a setting
+  // the decision has not read yet.
+  const origins = await loadTurnOrigins(store, [{ thread, turns }], {}).catch(() => null);
+  if (origins === null) return { holds: (providersInForce) => providersInForce()?.antigravity?.allowUnsupportedUse !== true };
+  const origin = turn.origin ?? origins.get(turnOriginKey(threadId, turnId));
+  if (!automaticDispatchPrompt(turn, origin, turns)) return null;
+  if (freshUserConsentReleases(turns, turn, threadId, origins)) return null;
+  return { holds: (providersInForce) => providersInForce()?.antigravity?.allowUnsupportedUse !== true };
+}
+
+/**
+ * The steer boundary's decision, split from its facts the same way
+ * (LOCAL-034): the caller resolves the factual side — the target turn's row,
+ * read after whatever it awaited to reach the boundary — then reads THIS
+ * synchronously with the setting in force at the moment of the steer, the
+ * driver's steer going out right after it, nothing awaited in between.
+ */
+export interface AntigravitySteerRefusal {
+  refuses(providersInForce: () => Pick<CliConfig, "providers">["providers"] | undefined, payloadAutomatic: boolean): boolean;
+}
+
+/**
+ * Whether the steer the caller is about to hand a driver breaches the
+ * Antigravity gate. The ride exception is narrow: an automatic prompt may
+ * ride only a specific live turn the user wrote, and only one still running
+ * when the steer leaves. A target that died, or a turn Moxen started,
+ * refuses the steer so the caller keeps the notice durable instead — a
+ * refused steer never dispatches one of its own. The user's own steer is
+ * never held here, and an opted-in thread steers into any live turn.
+ */
+export async function antigravitySteerGate(
+  store: { readThreadRecord(threadId: string): Promise<StoredThread | null>; readTurns(threadId: string): Promise<readonly StoredTurn[]> },
+  threadId: string,
+): Promise<AntigravitySteerRefusal> {
+  const thread = await store.readThreadRecord(threadId).catch(() => null);
+  const turns = thread !== null ? await store.readTurns(threadId).catch(() => null) : null;
+  const target = (turns ?? []).find((turn) => turn.status === "running") ?? null;
+  const selection = target?.modelSelection ?? thread?.modelSelection ?? null;
+  const targetAntigravity = selection !== null && driverKindOfInstance(selection.instanceId) === "antigravity";
+  return {
+    refuses: (providersInForce, payloadAutomatic) => {
+      if (!payloadAutomatic) return false;
+      if (target === null) return true;
+      if (userAuthoredTurn(target)) return false;
+      return targetAntigravity && providersInForce()?.antigravity?.allowUnsupportedUse !== true;
+    },
+  };
 }
 
 export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly QueueRow[], config: CliConfig, now = Date.now(), origins?: TurnOrigins): { blocked: string[]; latched: number[]; conditions: QueueCondition[] } {
@@ -273,38 +461,17 @@ export function queueAdmission(row: QueueRow, turn: StoredTurn, rows: readonly Q
   // Antigravity with delegation off starts no automatic prompt on its own:
   // the entry waits for a genuine fresh user action (a user turn authored
   // after it was queued releases it, as ending a usage hold does) or for the
-  // setting turning on. Task notices are held in their batch file upstream
-  // and ride the user's send, so they are not this path. Provenance comes
-  // from the turn row, made whole with the message ledger when the turn row
-  // predates its own origin: an absent turn origin is never read as human.
+  // setting turning on. Provenance comes from the turn row, made whole with
+  // the message ledger when the turn row predates its own origin: an absent
+  // turn origin is never read as human. What counts as automatic is the one
+  // shared decision (`automaticDispatchPrompt`): a task notice queued
+  // behind a live user turn still rides it, and one that no longer does —
+  // held in its batch upstream, redelivered standalone — is held like any
+  // other automatic prompt.
   const origin = turn.origin ?? origins?.get(turnOriginKey(row.thread.id, turn.id));
-  const automaticTurn = policy?.automatic === true || policy?.wakeUp === true
-    || turn.scheduleReason === "usage-reset" || turn.scheduleReason === "usage-hold"
-    || (origin !== undefined && origin !== "task-notification");
+  const automaticTurn = automaticDispatchPrompt(turn, origin, row.turns);
   if (automaticTurn && driverKindOfInstance(selection.instanceId) === "antigravity" && !antigravityUnsupportedUseAllowed(config)) {
-    // Fresh consent is a manual user turn authored after this entry was
-    // queued, dated by when the user submitted it (`createdAt`), never by
-    // when its turn happened to start: a scheduled message that fires late
-    // does not authorize work queued behind its timer, and a scheduled or
-    // automatic turn is not consent at all. An equal timestamp is never
-    // proof of a later send on its own — the generated handoff turn and a
-    // moved entry can be stamped in one millisecond — so "later" leans on
-    // the ledger's durable append order instead: the consent turn must
-    // have been written after this entry's row (the handoff of a move is
-    // always written before the copy that waits on it, so it can never
-    // vouch for it). Timestamps take over only when the row is missing
-    // from this snapshot and there is no order to read.
-    const queuedAt = row.turns.findIndex((candidate) => candidate.id === turn.id);
-    const userResumed = row.turns.some((other, index) => other.id !== turn.id
-      && (other.origin ?? origins?.get(turnOriginKey(row.thread.id, other.id))) === undefined
-      && other.queue?.automatic !== true && other.queue?.wakeUp !== true
-      && !other.scheduledFor
-      && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"
-      && (other.status === "running" || other.status === "completed")
-      && (queuedAt < 0
-        ? Date.parse(other.createdAt) > Date.parse(turn.createdAt)
-        : index > queuedAt && Date.parse(other.createdAt) >= Date.parse(turn.createdAt)));
-    if (!userResumed) blocked.push("Antigravity automatic prompts are held: turn on providers.antigravity.allowUnsupportedUse");
+    if (!freshUserConsentReleases(row.turns, turn, row.thread.id, origins)) blocked.push(ANTIGRAVITY_HELD_MESSAGE);
   }
   for (const [index, condition] of (policy?.conditions ?? []).entries()) {
     if (condition.type === "at") { if (Date.parse(condition.at) > now) blocked.push(`Waiting until ${condition.at}`); }

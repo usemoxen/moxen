@@ -63,7 +63,7 @@ import {
   pinCheckpointRef,
   pruneCheckpointRefs,
 } from "../checkpoints/git.js";
-import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta } from "./threads.js";
+import { adoptProviderTitle, completeTurn, failTurn, holdPromotedTurn, interruptTurn, openTurn, promoteQueuedTurn, redeliverUnconfirmedSteers, requeueGatedDispatch, requeueUnownedTurn, sendTurn, startBackgroundTurn, turnPrompt, updateThreadMeta, type GateProviders } from "./threads.js";
 import { captureRuleBaseline, pendingRuleUpdate, refreshRuleBaseline, withRuleUpdate } from "./rulefiles.js";
 import { isolationInstructions, resolveIsolation } from "./isolation.js";
 import { recordNativeSubagent } from "./subagents.js";
@@ -72,6 +72,7 @@ import { failureMessage, reportThreadFailure } from "./failures.js";
 import { ThreadStore } from "./store.js";
 import { toolActivityRow, type ToolRuntimeEvent } from "./toolactivity.js";
 import { permissionActivityRow, userInputActivityRow, type UserInputRuntimeEvent } from "./requestactivity.js";
+import { ANTIGRAVITY_HELD_MESSAGE, antigravityDispatchGate } from "./queue.js";
 import type { StoredAttachment, StoredThread, StoredTurn, TurnUsage } from "./types.js";
 
 /** Structural driver surface the runner needs. All four drivers satisfy it. */
@@ -560,6 +561,13 @@ export interface ExecuteTurnArgs {
   readonly modelSelection?: ModelSelection;
   /** Provider pricing config used to estimate `costUsd` on recorded context readings when the driver reports none. */
   readonly config?: Pick<CliConfig, "providers">;
+  /**
+   * The Antigravity automatic-prompt setting, read live at the dispatch
+   * boundary: every settle and promotion this turn's runner performs decides
+   * with what the supplier says now — never the `config` snapshot this turn
+   * started with, which may predate the user switching the setting.
+   */
+  readonly gateProviders?: () => GateProviders;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: InteractionMode;
   /** Worktree root for checkpoint capture; checkpoints skipped when empty. */
@@ -594,6 +602,18 @@ export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
       // Never the turn's failure: the turn is settled whatever this does.
       .then(() => args.afterSettle?.().catch(() => undefined)),
   );
+}
+
+/**
+ * The providers config the Antigravity dispatch gate reads: the live
+ * `gateProviders` supplier when the runner has one, else the turn's own
+ * config (a caller that never wired a supplier), else nothing — a gate
+ * that cannot read the setting holds nothing, and the setting is never
+ * turned on to make one pass.
+ */
+function gateProvidersOf(args: ExecuteTurnArgs): Pick<CliConfig, "providers"> {
+  const providers = args.gateProviders !== undefined ? args.gateProviders() : args.config?.providers;
+  return providers === undefined ? {} : { providers };
 }
 
 /** Saved attachments as provider images; a file gone from disk is skipped. */
@@ -682,6 +702,25 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     // One message, or several queued ones batched into this turn at promotion.
     const prompt = turnPrompt(await store.readMessages(threadId), next);
     if (prompt === null) return;
+    // The dispatch gate, split facts from decision like the send boundary
+    // (LOCAL-034): the reads resolve, then the setting in force at this
+    // promotion is read synchronously. A promoted turn carrying one of
+    // Moxen's automatic prompts (a task message, an automatic continue, a
+    // notice that no longer rides a live user turn) must not reach an
+    // Antigravity driver while the setting is off. The turn goes back to
+    // the queue, marked for admission, which holds it with its reason until
+    // the setting turns on or a genuine fresh user turn releases it.
+    // Nothing is merged or dropped: the message and its metadata stay where
+    // they are. The turns queued behind it are handed back the same way, so
+    // the user's own follow-up runs on its own instead of stranding.
+    const gate = await antigravityDispatchGate(store, threadId, next.id);
+    if (gate !== null && gate.holds(() => gateProvidersOf(args).providers)) {
+      claimed = null;
+      await requeueGatedDispatch(store, threadId, next.id, ANTIGRAVITY_HELD_MESSAGE);
+      await promoteQueuedTurn(store, threadId, gateProvidersOf(args).providers).catch(() => null);
+      await runPromotedTurn(args);
+      return;
+    }
     // Its images were saved when it was queued; the bytes come off disk.
     const images = await imagesOf(prompt.attachments);
     // Rule files edited while the session ran the turn before: a patch ahead
@@ -708,6 +747,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
       ...(args.config ? { config: args.config } : {}),
+      ...(args.gateProviders ? { gateProviders: args.gateProviders } : {}),
       runtimeMode: thread.runtimeMode,
       interactionMode: next.interactionMode,
       workingDirectory: thread.env.path,
@@ -1667,6 +1707,32 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       }
       return;
     }
+    // Rechecked as late as one read allows, immediately before the prompt
+    // leaves: a session start can take the time the user needs to turn the
+    // setting off, and no earlier check may stand in for this one. Every
+    // dispatch path converges here — a fresh send, a promotion, a recovery.
+    // A denied turn goes back to the queue for admission, held with the
+    // gate's reason; nothing is sent and nothing is lost.
+    const dispatchKind = args.modelSelection !== undefined ? driverKindOfInstance(args.modelSelection.instanceId) : null;
+    if (!args.driverTurnId && (dispatchKind === null || dispatchKind === "antigravity")) {
+      // The dispatch boundary, split facts from decision (LOCAL-034): every
+      // read resolves first — the turn, its provenance, the fresh consent —
+      // then the setting in force at the dispatch is read synchronously, and
+      // the send goes out right after it with nothing awaited in between. A
+      // session start can take the time the user needs to turn the setting
+      // off, and no earlier check may stand in for this one.
+      const gate = await antigravityDispatchGate(store, threadId, storeTurnId);
+      if (gate !== null && gate.holds(() => gateProvidersOf(args).providers)) {
+        // A denied turn goes back to the queue for admission, held with the
+        // gate's reason; nothing is sent and nothing is lost. The turns
+        // queued behind it are handed back to promotion, so a message the
+        // user wrote runs on its own instead of waiting on an automatic
+        // entry it can never release.
+        await requeueGatedDispatch(store, threadId, storeTurnId, ANTIGRAVITY_HELD_MESSAGE);
+        await promoteQueuedTurn(store, threadId, gateProvidersOf(args).providers).catch(() => null);
+        return;
+      }
+    }
     const sent = args.driverTurnId
       ? { turnId: args.driverTurnId }
       : await Effect.runPromise(
@@ -1690,6 +1756,16 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
         captureFinalObservedUsage();
         await Effect.runPromise(driver.interruptTurn(threadId)).catch(() => undefined);
       }
+      // The abort's first capture could not name this run's driver turn
+      // (the prompt was still going out), so it read the thread's open turn
+      // instead — exactly what LOCAL-009 forbids. Re-capture, now that the
+      // driver turn id is known, so the interrupted usage stays this turn's.
+      finalObservedUsage = null;
+      captureFinalObservedUsage();
+      // And never enter the wait: an abort that already fired cannot reach a
+      // driver waiter registered this late, so a run stopped mid-send would
+      // sit forever. The interruption path below settles the turn.
+      throw new CliError("TURN_ABORTED", `Turn ${storeTurnId} was aborted while its prompt was going out.`, {});
     }
     // Persisted as soon as the turn is under way, not only at settle: a
     // process that dies mid-turn is exactly the one whose successor needs it.
@@ -1922,7 +1998,7 @@ async function runStrandedRedelivery(args: ExecuteTurnArgs, copies: readonly str
   const { store, threadId } = args;
   if (copies.length === 0) return;
   for (const id of copies) await requeueUnownedTurn(store, threadId, id).catch(() => false);
-  const next = await promoteQueuedTurn(store, threadId).catch(() => null);
+  const next = await promoteQueuedTurn(store, threadId, gateProvidersOf(args).providers).catch(() => null);
   if (next) await runPromotedTurn(args).catch(() => undefined);
 }
 
@@ -1939,13 +2015,14 @@ async function settleTurn(
   // its checkpoint. Recording the outcome first left a window in which a
   // completed turn had none.
   await settleCheckpoints(store, args, cwd, pre);
+  const gateProviders = gateProvidersOf(args).providers;
   if (outcome.status === "completed") {
     await completeTurn(store, threadId, storeTurnId, {
       ...(outcome.text ? { text: outcome.text } : {}),
       ...(outcome.usage ? { usage: outcome.usage } : {}),
       ...(outcome.turnOutputTokens !== undefined ? { turnOutputTokens: outcome.turnOutputTokens } : {}),
       ...(outcome.generation !== undefined ? { generation: outcome.generation } : {}),
-    });
+    }, gateProviders);
   } else if (outcome.status === "interrupted") {
     // A run stopped without Moxen's interrupt recording the stop first: the
     // process closed its provider sessions (a server shutdown or restart) or
@@ -1960,7 +2037,7 @@ async function settleTurn(
     const interruption = await interruptTurn(store, threadId, storeTurnId, undefined, {
       ...(reason ? { reason } : {}),
       ...(outcome.usage ? { usage: outcome.usage } : {}),
-    }).catch(() => null);
+    }, gateProviders).catch(() => null);
     if (outcome.usage && (interruption === null || interruption.interrupted === false)) {
       // An explicit stop already committed the interruption without the usage:
       // retain it on that row only, under the same lock, never rewriting the
@@ -1977,7 +2054,7 @@ async function settleTurn(
     await failTurn(store, threadId, storeTurnId, {
       error: outcome.error ?? "Turn failed.",
       ...(outcome.usage ? { usage: outcome.usage } : {}),
-    });
+    }, gateProviders);
   }
 }
 
