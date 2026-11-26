@@ -2,7 +2,8 @@
  * Transport seam between the Claude driver and the Agent SDK. The driver
  * only ever talks to `ClaudeTransport` + `ClaudeSessionApi`, so tests
  * inject scripted message streams and no test spawns the real CLI.
- * Only this file imports the SDK at runtime.
+ * This file and `subagents.ts` are the only runtime SDK importers; every
+ * standalone session helper they call runs under `withClaudeConfigDir`.
  */
 import { z } from "zod";
 import {
@@ -201,6 +202,40 @@ export function zodShape(schema: Record<string, unknown>): Record<string, z.ZodT
   );
 }
 
+/**
+ * The SDK's standalone session helpers (`getSessionInfo`,
+ * `getSessionMessages`, `forkSession`, `renameSession`,
+ * `getSubagentMessages`) take no env option: they read
+ * `process.env.CLAUDE_CONFIG_DIR` as they run, at several points across
+ * their awaits (the SDK docs say to set it in the host process). The
+ * server hosts several accounts at once, each with its own folder, so a
+ * bare set/restore around one call would leak one account's folder into
+ * another's concurrent call. Instead every such call in the process runs
+ * through this one queue: the caller's folder is set for the whole call
+ * and restored after, and no two calls ever overlap. `undefined` clears
+ * the variable, which is what an account without one inherits (the SDK
+ * then uses `~/.claude`, exactly as the spawned CLI does).
+ */
+let configDirQueue: Promise<unknown> = Promise.resolve();
+export function withClaudeConfigDir<T>(configDir: string | undefined, run: () => Promise<T>): Promise<T> {
+  const call = configDirQueue.then(async () => {
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    if (configDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = configDir;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+    }
+  });
+  configDirQueue = call.then(
+    () => undefined,
+    () => undefined,
+  );
+  return call;
+}
+
 export interface ForkSessionResult {
   readonly sessionId: string;
 }
@@ -224,26 +259,37 @@ export interface ClaudeSessionApi {
   renameSession(sessionId: string, title: string, dir: string): Promise<void>;
 }
 
+/**
+ * The SDK session helpers for one account: `configDir` is the
+ * `CLAUDE_CONFIG_DIR` the account's spawned CLI gets (from
+ * `makeClaudeEnv`), and every call looks in that folder — never in the
+ * server process's own environment, which after a restart holds no
+ * account's folder at all.
+ */
 export class SdkSessionApi implements ClaudeSessionApi {
+  constructor(private readonly configDir?: string) {}
+
   async getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
-    return await sdkGetSessionMessages(sessionId);
+    return await withClaudeConfigDir(this.configDir, () => sdkGetSessionMessages(sessionId));
   }
 
   async forkSession(sessionId: string, upToMessageId?: string): Promise<ForkSessionResult> {
-    const result = await sdkForkSession(sessionId, upToMessageId === undefined ? {} : { upToMessageId });
+    const result = await withClaudeConfigDir(this.configDir, () =>
+      sdkForkSession(sessionId, upToMessageId === undefined ? {} : { upToMessageId }),
+    );
     return { sessionId: result.sessionId };
   }
 
   async sessionExists(sessionId: string): Promise<boolean> {
-    return (await sdkGetSessionInfo(sessionId)) !== undefined;
+    return (await withClaudeConfigDir(this.configDir, () => sdkGetSessionInfo(sessionId))) !== undefined;
   }
 
   async sessionTitle(sessionId: string, dir: string): Promise<string | null> {
-    return (await sdkGetSessionInfo(sessionId, { dir }))?.customTitle?.trim() || null;
+    return (await withClaudeConfigDir(this.configDir, () => sdkGetSessionInfo(sessionId, { dir })))?.customTitle?.trim() || null;
   }
 
   async renameSession(sessionId: string, title: string, dir: string): Promise<void> {
-    await sdkRenameSession(sessionId, title, { dir });
+    await withClaudeConfigDir(this.configDir, () => sdkRenameSession(sessionId, title, { dir }));
   }
 }
 

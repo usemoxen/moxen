@@ -308,6 +308,15 @@ and the next message resumes the provider's own session from the thread's
 cursor. A wake-up Claude Code schedules inside its own process further out
 than the lifetime is lost with it.
 
+A Claude cursor is looked up in the account's own session folder — the one
+its CLI runs with (`homePath`, or the inherited `CLAUDE_CONFIG_DIR`) — so a
+server restart resumes the same session, never another account's. A session
+confirmed gone starts a new one: a notice in the thread says the saved
+session could not be resumed, and the new session is given a handoff of the
+thread's history ahead of the next prompt. A lookup that itself fails keeps
+the saved cursor and lets the resume attempt decide, so a transient error
+never discards history.
+
 When a plan limit stops a turn, a continue can be scheduled for just after
 the reset: `autoContinueAtUsageLimit`, or `providers.<kind>.autoContinueAtUsageLimit`
 for one provider, at most `usageLimitContinues` (default 2) in a row.

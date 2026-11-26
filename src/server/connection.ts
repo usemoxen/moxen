@@ -39,7 +39,7 @@ import { SdkTransport } from "../core/providers/claude/transport.js";
 import { diagnose } from "../core/diagnostics/doctor.js";
 import { updateProvider, type ProviderUpdate, type UpdatableProvider } from "../core/providers/update.js";
 import type { AccountProviderKind } from "../core/types.js";
-import { managedAccountHomeDisplayPath, probeAntigravityAccountAuth, probeClaudeAccountAuth, removeProviderAccount, resolveChatGptAccount, resolveProfileProviderConfig, setProviderAccountEnabled, summarizeAccount, summarizeProviderAccounts, upsertProviderAccount, type AccountAuthProbe } from "../core/providers/accounts.js";
+import { managedAccountHomeDisplayPath, probeAntigravityAccountAuth, probeClaudeAccountAuth, removeProviderAccount, resolveChatGptAccount, resolveClaudeAccount, resolveProfileProviderConfig, setProviderAccountEnabled, summarizeAccount, summarizeProviderAccounts, upsertProviderAccount, type AccountAuthProbe } from "../core/providers/accounts.js";
 import { startProviderAccountLoginSession, type ProviderAccountLoginDeps, type ProviderAccountLoginSession } from "../core/providers/accountlogin.js";
 import { migrateProviderProfiles } from "../core/providers/migrate.js";
 import { codexProvider } from "../core/providers/codex/catalog.js";
@@ -3288,7 +3288,12 @@ export class DirectConnection implements ClientApi {
         const sessionKey = selection !== undefined ? driverKey(selection.instanceId) : historyProvider;
         const cursor = thread?.providerSessions?.[sessionKey] ?? thread?.providerSessions?.[historyProvider] ?? null;
         const readHistory = driver?.subagentHistory ? (agentId: string) => driver.subagentHistory!(query.threadId, agentId, cursor) : undefined;
-        return await subagentTranscript(store, query.threadId, query.agentId, readHistory, historyProvider);
+        // Claude's on-disk transcript lives in the account's own config folder, which the server's env does not carry.
+        const claudeConfigDir =
+          kind === "claude"
+            ? resolveClaudeAccount((await this.loadConfig()).providers?.claude, selection?.instanceId ?? "claudeAgent").env.CLAUDE_CONFIG_DIR
+            : undefined;
+        return await subagentTranscript(store, query.threadId, query.agentId, readHistory, historyProvider, claudeConfigDir);
       }
       case "provider.latest": {
         // Off by choice (`updates.checkLatest`): nothing is asked, and the answer says so.
