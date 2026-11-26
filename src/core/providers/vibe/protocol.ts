@@ -21,6 +21,7 @@ export const VIBE_METHODS = {
   initialized: "initialized",
   setupStatus: "setup/status",
   configRead: "config/read",
+  configEffectiveRead: "config/effective/read",
   agentsList: "agents/list",
   skillsList: "skills/list",
   // Session lifecycle
@@ -250,12 +251,13 @@ export function vibeMcpServersOf(servers: readonly McpServerSpec[] | undefined):
 
 /**
  * Vibe's MCP server alias normalization (`normalize_mcp_server_name`,
- * `mistral-vibe` v3.1.4): characters outside `[a-zA-Z0-9_-]` become `_`,
- * leading/trailing `_`/`-` are stripped, and the result is cut to 256 chars.
- * Iterates code points so an astral character is one replacement, as Python
- * does (a UTF-16 `.replace` would emit two underscores).
+ * `mistral-vibe` v3.1.4/3.1.5, `vibe/core/config/models.py`): characters
+ * outside `[a-zA-Z0-9_-]` become `_`, leading/trailing `_`/`-` are stripped,
+ * and the result is cut to 256 chars. Iterates code points so an astral
+ * character is one replacement, as Python does (a UTF-16 `.replace` would
+ * emit two underscores).
  */
-function vibeMcpServerAlias(name: string): string {
+export function vibeMcpServerAlias(name: string): string {
   const replaced = [...name].map((ch) => (/[a-zA-Z0-9_-]/.test(ch) ? ch : "_")).join("");
   return replaced.replace(/^[_-]+/, "").replace(/[_-]+$/, "").slice(0, 256);
 }
@@ -550,6 +552,228 @@ export function vibeMcpExclusionPlan(
     }
   }
   return { dropServers, patterns: [...patterns], notes, ...UNSATISFIABLE_PLAN([]) };
+}
+
+export interface VibeMcpGatewayRoute {
+  /** The out-of-process servers implicated by an exclusion — hosted behind Moxen's lazy MCP gateway. */
+  readonly servers: readonly McpServerSpec[];
+  /**
+   * The exclusion strings to deny inside the gateway. The raw `mcp__…` string
+   * already names every parse: `mcp__demo__x__read` covers `demo`/`x__read`
+   * and `demo__x`/`read` alike, because the gateway compares the string its
+   * `server`/`tool` pair builds against it.
+   */
+  readonly denyTools: readonly string[];
+  /** The exclusion plan for the session once these servers leave the direct offer. */
+  readonly plan: VibeMcpExclusionPlan;
+  /** Startup note explaining the routing, added when the route is taken. */
+  readonly note: string;
+}
+
+/**
+ * The servers a per-tool exclusion implicates that `vibeMcpExclusionPlan`
+ * would withhold today because their tool list is unknown: the out-of-process
+ * ones. LOCAL-032 routes exactly those through Moxen's lazy MCP gateway
+ * instead — Vibe only ever sees the gateway's two tools, and the exclusions
+ * are enforced inside the gateway (an ambiguous exclusion is denied under
+ * every parse there). Servers without an exclusion and Moxen's own in-process
+ * server keep `vibeMcpExclusionPlan`'s behaviour; a caller that cannot verify
+ * the Vibe version must NOT take this route, falling back to
+ * `vibeMcpExclusionPlan` on the full server list, which withholds these
+ * servers exactly as main does. The returned `plan` covers the session once
+ * the routed servers leave the offer: an exclusion left over implicates only
+ * retaining servers, so nothing is under-enforced.
+ */
+export function vibeMcpGatewayRoute(
+  servers: readonly McpServerSpec[],
+  disabled: readonly string[],
+): VibeMcpGatewayRoute | null {
+  const implicated = new Set<string>();
+  const denyTools: string[] = [];
+  for (const name of disabled) {
+    const matched = servers.filter(
+      (server) => name.startsWith(`mcp__${server.name}__`) && name.length > `mcp__${server.name}__`.length,
+    );
+    if (matched.some((server) => server.type !== "in-process")) denyTools.push(name);
+    for (const server of matched) {
+      if (server.type !== "in-process") implicated.add(server.name);
+    }
+  }
+  if (implicated.size === 0) return null;
+  const routed = servers.filter((server) => implicated.has(server.name));
+  const plan = vibeMcpExclusionPlan(
+    servers.filter((server) => !implicated.has(server.name)),
+    disabled,
+  );
+  const listed = routed.map((server) => `"${server.name}"`).join(", ");
+  return {
+    servers: routed,
+    denyTools,
+    plan,
+    note: `MCP servers ${listed} have individually excluded tools, so they are attached through Moxen's lazy MCP gateway; the excluded tools stay hidden this session.`,
+  };
+}
+
+/**
+ * Every display name Vibe can publish for `(server, tool)`:
+ * `mcp_tool_config_name` (`{server}_{tool}`), its normalized identifier
+ * candidate, and each with the `_`+sha256(`server\0tool`) digest suffix that
+ * `_display_names` appends on a collision (lengthened step by step).
+ */
+function vibeDisplayForms(server: string, tool: string): string[] {
+  const raw = `${server}_${tool}`;
+  const ident = vibeMcpIdentifier(raw);
+  const digest = createHash("sha256").update(`${server}\u0000${tool}`, "utf8").digest("hex");
+  const forms = new Set<string>([raw, ident]);
+  for (const base of [raw, ident]) {
+    for (let length = 8; length <= digest.length; length += 1) {
+      forms.add(`${base}_${digest.slice(0, length)}`);
+    }
+  }
+  return [...forms];
+}
+
+/**
+ * One of Vibe's `enabled_tools`/`disabled_tools` patterns against a name, as
+ * `MCPToolFilter`/`_pattern_matches` evaluate them (v3.1.5, `_mcp_models.py`):
+ * `re:` bodies compile with `IGNORECASE` and are full-matched, everything else
+ * is a case-insensitive fnmatch glob. An unparseable `re:` body is decided by
+ * `unparseableMatches`, mirroring the disabled/enabled call sites.
+ */
+function vibeToolPatternMatches(pattern: string, name: string, unparseableMatches: boolean): boolean {
+  const raw = pattern.trim();
+  if (raw === "") return false;
+  if (raw.startsWith("re:")) {
+    try {
+      return new RegExp(`^(?:${raw.slice(3)})$`, "i").test(name);
+    } catch {
+      return unparseableMatches;
+    }
+  }
+  const lowered = name.toLowerCase();
+  const glob = raw
+    .toLowerCase()
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${glob}$`).test(lowered);
+}
+
+export interface VibeEffectiveMcpRestrictions {
+  /** The normalized aliases of Mistral Vibe's own configured MCP servers. */
+  readonly nativeServers: ReadonlySet<string>;
+  /** Whether the tool `(server, tool)` may be surfaced by the lazy gateway. */
+  allows(server: string, tool: string): boolean;
+}
+
+/**
+ * `config/effective/read` (v3.1.5, `_unified_harness_backend_adapter.py` →
+ * `effective_config_response`, `_config_introspect.py`) answers the whole
+ * effective `VibeConfigSchema` — merged over user config, trusted project
+ * config, env, the session's own overrides, the agent profile and the admin
+ * layer, with credentials redacted but names, `disabled` and `disabled_tools`
+ * intact. Parse it into the restrictions the lazy gateway must honor so it is
+ * never a way around the user's own Vibe configuration, or null when the shape
+ * cannot be proven: callers must fail closed on null (LOCAL-032).
+ */
+export function parseVibeEffectiveConfig(raw: unknown): VibeEffectiveMcpRestrictions | null {
+  const root = asRecord(raw);
+  const cfg = asRecord(root?.["config"]);
+  if (!cfg) return null;
+  const readPatterns = (value: unknown): string[] | null => {
+    if (!Array.isArray(value)) return null;
+    const out: string[] = [];
+    for (const item of value) {
+      if (typeof item !== "string") return null;
+      out.push(item);
+    }
+    return out;
+  };
+  const disabledPatterns = readPatterns(cfg["disabled_tools"]);
+  const enabledPatterns = readPatterns(cfg["enabled_tools"]);
+  const rawServers = cfg["mcp_servers"];
+  if (disabledPatterns === null || enabledPatterns === null || !Array.isArray(rawServers)) return null;
+  const nativeServers = new Set<string>();
+  const disabledServers = new Set<string>();
+  const disabledTools = new Set<string>();
+  for (const item of rawServers) {
+    const rec = asRecord(item);
+    const name = asNonEmptyString(rec?.["name"]);
+    if (!name) return null;
+    const alias = vibeMcpServerAlias(name).toLowerCase();
+    if (alias === "") return null;
+    const tools = readPatterns(rec?.["disabled_tools"]);
+    if (tools === null || typeof rec?.["disabled"] !== "boolean") return null;
+    nativeServers.add(alias);
+    if (rec["disabled"] === true) disabledServers.add(alias);
+    for (const tool of tools) disabledTools.add(`${alias}\u0000${tool.toLowerCase()}`);
+  }
+  return {
+    nativeServers,
+    allows(server: string, tool: string): boolean {
+      const alias = vibeMcpServerAlias(server).toLowerCase();
+      if (disabledServers.has(alias)) return false;
+      if (disabledTools.has(`${alias}\u0000${tool.toLowerCase()}`)) return false;
+      const forms = vibeDisplayForms(server, tool);
+      if (disabledPatterns.some((pattern) => forms.some((form) => vibeToolPatternMatches(pattern, form, true)))) {
+        return false;
+      }
+      if (enabledPatterns.length > 0
+        && !forms.every((form) => enabledPatterns.some((pattern) => vibeToolPatternMatches(pattern, form, false)))) {
+        // Vibe only publishes a tool the enabled list names; requiring every
+        // plausible form to be named denies at least as strictly.
+        return false;
+      }
+      return true;
+    },
+  };
+}
+
+/** The shape an unwrapped lazy-gateway approval takes (LOCAL-032). */
+export interface VibeGatewayApprovalTarget {
+  readonly kind: "call";
+  readonly server: string;
+  readonly tool: string;
+  readonly arguments: Record<string, unknown>;
+}
+
+/**
+ * Whether `toolName` is the gateway's `tool` as the model sees it. Vibe
+ * publishes the display name (`{server}_{tool}` normalized — digest-suffixed
+ * on a collision), so both the plain form and the suffixed one are accepted,
+ * as is the `group.tool` route form.
+ */
+function isVibeGatewayToolName(toolName: string, gatewayName: string, tool: "call_tool" | "search_tools"): boolean {
+  const alias = vibeMcpServerAlias(gatewayName);
+  if (alias === "") return false;
+  const bare = toolName.trim().toLowerCase();
+  if (bare === "") return false;
+  const display = vibeMcpIdentifier(`${alias}_${tool}`).toLowerCase();
+  const segment = [...alias].map((ch) => (/[A-Za-z0-9_$]/.test(ch) ? ch : "_")).join("") || "_";
+  const route = `mcp_${segment}`;
+  return (
+    new RegExp(`^${display}_[0-9a-f]{8,64}$|^${display}$`).test(bare)
+    || new RegExp(`^${route}(_[0-9a-f]{8,64})?\\.${tool}$`).test(bare)
+  );
+}
+
+/**
+ * A gateway approval (or timeline effect) under the real server and tool:
+ * `null` whenever this is not recognizable as the gateway's `call_tool`
+ * naming a routed server. `search_tools` is not unwrapped — it has no
+ * per-server target and is judged like the read it is.
+ */
+export function unwrapVibeGatewayApproval(
+  gatewayName: string,
+  routedServers: ReadonlySet<string>,
+  toolName: string,
+  input: Record<string, unknown>,
+): VibeGatewayApprovalTarget | null {
+  if (!isVibeGatewayToolName(toolName, gatewayName, "call_tool")) return null;
+  const server = asString(input["server"])?.trim().toLowerCase() ?? "";
+  const tool = asString(input["tool"])?.trim() ?? "";
+  if (server === "" || tool === "" || !routedServers.has(server)) return null;
+  return { kind: "call", server, tool, arguments: asRecord(input["arguments"]) ?? {} };
 }
 
 /** Build `TurnStartParams.message` / `TurnSteerParams.message` content blocks. */

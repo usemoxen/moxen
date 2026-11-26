@@ -38,7 +38,7 @@
  *   server is reported as a lost interruption, never as a failed start: the
  *   server accepted the turn.
  */
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import os from "node:os";
 
 import * as Effect from "effect/Effect";
@@ -53,6 +53,9 @@ import type { ModelSelection, RuntimeMode, VibeProviderConfig } from "../../type
 import { APP_VERSION } from "../../version.js";
 import { conversationContextBreakdown } from "../context.js";
 import { assessCommandLine } from "../harness/commandsafety.js";
+import type { ConnectMcp } from "../harness/mcp.js";
+import { freeName } from "../harness/presets.js";
+import { LazyMcpGateway } from "../lazymcp.js";
 import { SIDE_QUESTION_RULES } from "../sidequestion.js";
 import {
   isCompactCommand,
@@ -108,11 +111,15 @@ import {
   parseVibeAccountRead,
   parseVibeContextBreakdown,
   parseVibeStatsUpdated,
+  unwrapVibeGatewayApproval,
   VIBE_ALWAYS_DISABLED_TOOLS,
   VIBE_METHODS,
   vibeApprovalPolicyForRuntimeMode,
   vibeMcpExclusionPlan,
+  vibeMcpGatewayRoute,
+  vibeMcpServerAlias,
   vibeMcpServersOf,
+  parseVibeEffectiveConfig,
 } from "./protocol.js";
 import { SpawnVibeTransport, type VibeTransport } from "./transport.js";
 import {
@@ -130,6 +137,8 @@ export interface VibeDriverOptions {
   readonly transport?: VibeTransport;
   readonly initializeTimeoutMs?: number;
   readonly requestTimeoutMs?: number;
+  /** Test seam for upstream MCP connections inside the lazy MCP gateway. */
+  readonly connectMcp?: ConnectMcp;
 }
 
 export interface VibeTurnOutcome {
@@ -224,6 +233,13 @@ interface ParkedVibeApproval {
   readonly threadId: ThreadId;
   readonly toolName: string;
   readonly isolated: boolean;
+  /**
+   * Whether a "for the session" grant may be remembered. A call routed through
+   * the lazy MCP gateway is not rememberable: Vibe remembers a provided tool's
+   * session grant for the WHOLE tool, which would approve every server and
+   * tool behind the gateway's `call_tool` (LOCAL-032).
+   */
+  readonly rememberable: boolean;
 }
 
 interface ParkedVibeUserInput {
@@ -248,6 +264,8 @@ interface VibeSession {
   readonly peer: JsonRpcPeer;
   readonly workingDirectory: string;
   readonly startedAt: string;
+  /** Moxen's lazy MCP gateway when excluded-tool servers are routed through it (LOCAL-032); null otherwise. */
+  readonly gateway: LazyMcpGateway | null;
   readonly isolation: WorktreeIsolation | null;
   readonly delegated: boolean;
   vibeSessionId: string;
@@ -286,8 +304,26 @@ interface VibeSession {
 
 const DEFAULT_INIT_TIMEOUT_MS = 15_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+/** Reading `config/effective/read` to arm the lazy gateway: a short, bounded wait (LOCAL-032). */
+const GATEWAY_ARM_TIMEOUT_MS = 10_000;
 const USAGE_REFRESH_COALESCE_MS = 2_000;
 const PASSIVE_USAGE_COALESCE_MS = 30_000;
+
+/**
+ * The Vibe releases the lazy-gateway route is verified against: 3.1.4/3.1.5's
+ * `SessionMCPServer` offers no per-server disabled_tools, session options
+ * merge into the config as overrides, and `config/effective/read` needs a live
+ * session (LOCAL-032). An unknown version falls back to withholding.
+ */
+const GATEWAY_VIBE_VERSIONS = /^3\.(?:1\.4|1\.5)(?:\.|$)/;
+
+/** A deny-everything `disabledTools` entry: pins a zero-tool session even against Vibe's own native MCP servers. */
+const DENY_ALL_TOOLS_PATTERN = "re:.*";
+
+/** The gateway name is randomized per session: Vibe's native MCP servers are unknown before the session starts, so the name must not be guessable or collide with one (a same-named offer would replace a native config entry whole). 12 hex characters of `crypto` randomness. */
+function vibeGatewayName(takenNames: ReadonlySet<string>): string {
+  return freeName(`${"moxen-mcp"}-${randomBytes(6).toString("hex")}`, takenNames);
+}
 
 /** Strictness order of Moxen's runtime modes, least permissive first. */
 const RUNTIME_MODE_RANK: Record<RuntimeMode, number> = {
@@ -453,6 +489,8 @@ export class VibeDriver implements ProviderAdapter<CliError> {
   private readonly transport: VibeTransport;
   private readonly initializeTimeoutMs: number;
   private readonly requestTimeoutMs: number;
+  /** Swapped out in tests for the lazy MCP gateway's upstream connections. */
+  private readonly connectMcp: ConnectMcp | undefined;
   private readonly sessions = new Map<ThreadId, VibeSession>();
   private readonly eventQueue: Queue.Queue<ProviderRuntimeEvent>;
   private lastPassiveWindows: RateLimitWindow[] = [];
@@ -469,6 +507,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
     this.transport = options.transport ?? new SpawnVibeTransport();
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.connectMcp = options.connectMcp;
     this.eventQueue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
     this.streamEvents = Stream.fromQueue(this.eventQueue);
   }
@@ -541,19 +580,25 @@ export class VibeDriver implements ProviderAdapter<CliError> {
           env: this.env,
           cwd: input.workingDirectory,
         });
+        // The lazy MCP gateway for excluded-tool servers (LOCAL-032), closed
+        // again if the session fails to start.
+        let lazyGateway: LazyMcpGateway | null = null;
 
         try {
-          await peer.request(
-            VIBE_METHODS.initialize,
-            {
-              clientInfo: vibeClientInfo(),
-              capabilities: {
-                callbackKinds: ["approval", "user_input"],
+          const init = asRecord(
+            await peer.request(
+              VIBE_METHODS.initialize,
+              {
+                clientInfo: vibeClientInfo(),
+                capabilities: {
+                  callbackKinds: ["approval", "user_input"],
+                },
               },
-            },
-            this.initializeTimeoutMs,
+              this.initializeTimeoutMs,
+            ),
           );
           peer.notify(VIBE_METHODS.initialized, {});
+          const serverVersion = asNonEmptyString(asRecord(init?.["serverInfo"])?.["version"]);
 
           const runtimeMode: RuntimeMode = input.runtimeMode ?? "auto-accept-edits";
           const model = resolveVibeModel(input.modelSelection?.model);
@@ -563,23 +608,74 @@ export class VibeDriver implements ProviderAdapter<CliError> {
           const approvalPolicy = input.isolation
             ? "ask"
             : vibeApprovalPolicyForRuntimeMode(runtimeMode);
-          const mcpPlan = vibeMcpExclusionPlan(input.mcpServers ?? [], input.disabledMcpTools ?? []);
-          if (mcpPlan.unsatisfiable) {
+          // LOCAL-032: servers that hold an individually excluded tool used to
+          // be withheld whole. When the Vibe peer is verified, they are routed
+          // through Moxen's lazy MCP gateway instead: Vibe only ever sees the
+          // gateway (`search_tools` / `call_tool`) and the exclusions are
+          // enforced inside it — together with the tool restrictions of the
+          // user's own Vibe configuration, read from `config/effective/read`
+          // below. Anything less than the verified 3.1.4/3.1.5 wire contract
+          // keeps today's withholding, which never gets less strict.
+          const servers = input.mcpServers ?? [];
+          const excludedTools = input.disabledMcpTools ?? [];
+          const route = vibeMcpGatewayRoute(servers, excludedTools);
+          const versionVerified = serverVersion !== null && GATEWAY_VIBE_VERSIONS.test(serverVersion);
+          const useGateway = route !== null && versionVerified;
+          const mcpPlan = useGateway && route !== null
+            ? route.plan
+            : vibeMcpExclusionPlan(servers, excludedTools);
+          if (!useGateway && mcpPlan.unsatisfiable) {
             // Vibe 3.1.4 sends no MCP override for an empty `mcpServers` list
             // (`_runtime.py` guards `if options.mcp_servers:`), so withholding
             // every offered server would fall back to the native Vibe MCP
             // configuration — where the excluded tools may stay callable, with
             // no deny at all. Refuse instead of sending an empty override.
+            // (With the gateway route the offer is never empty: the gateway
+            // itself is offered, so this refusal is unreachable there.)
             const listed = mcpPlan.unsatisfiableExclusions.map((name) => `"${name}"`).join(", ");
             throw new CliError(
               "VIBE_MCP_EXCLUSION_UNENFORCEABLE",
               `The MCP tool exclusion${mcpPlan.unsatisfiableExclusions.length > 1 ? "s" : ""} ${listed} cannot be enforced: it would withhold every offered MCP server, and Mistral Vibe would then fall back to its native MCP configuration, which may still expose the excluded tool. Remove the exclusion or rename the conflicting tools, then send the session again.`,
             );
           }
+          const startupNotices = [...mcpPlan.notes];
+          if (route !== null && !versionVerified) {
+            startupNotices.push(
+              `Mistral Vibe ${serverVersion ?? "with no version reported"} is not a release this build's lazy MCP gateway is verified against, so MCP servers with individually excluded tools (${route.servers.map((s) => s.name).join(", ")}) are withheld this session.`,
+            );
+          }
+          if (useGateway && route !== null) {
+            // The random-suffixed name cannot collide with a native Vibe MCP
+            // server (unknown until after session start) or an offered one,
+            // and cannot reflow any natively published display name.
+            const taken = new Set<string>(servers.map((server) => server.name));
+            taken.add("moxen");
+            lazyGateway = await LazyMcpGateway.start({
+              specs: route.servers,
+              cwd: input.workingDirectory,
+              disabledTools: route.denyTools,
+              name: vibeGatewayName(taken),
+              takenNames: taken,
+              failClosed: true,
+              ...(this.connectMcp ? { connect: this.connectMcp } : {}),
+            });
+            startupNotices.push(route.note);
+          }
+          const gatewayServerNames = new Set((useGateway ? route?.servers ?? [] : []).map((server) => server.name));
           const disabledTools = mergeDisabledTools(input, mcpPlan.patterns);
-          const mcpServers = vibeMcpServersOf(
-            (input.mcpServers ?? []).filter((server) => !mcpPlan.dropServers.has(server.name)),
+          const directServers = servers.filter(
+            (server) => !mcpPlan.dropServers.has(server.name) && !gatewayServerNames.has(server.name),
           );
+          const mcpServers = [
+            ...vibeMcpServersOf(directServers),
+            ...(lazyGateway ? [lazyGateway.spec] : []),
+          ].map((entry) => entry as Record<string, unknown>);
+          const gatewayInstructions = lazyGateway
+            ? [
+                `External MCP servers (${lazyGateway.serverNames.join(", ")}) are attached through the \`${lazyGateway.name}\` lazy MCP gateway so individually excluded tools stay hidden.`,
+                "Call its `search_tools` tool to list tools or load exact parameter schemas, then its `call_tool` tool with `{ server, tool, arguments }`."
+              ].join("\n")
+            : null;
 
           const agentConfig: Record<string, unknown> = {
             cwd: input.workingDirectory,
@@ -587,8 +683,10 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             approvalPolicy,
             disabledTools,
             ...(input.instructions && input.instructions.trim().length > 0
-              ? { instructions: input.instructions }
-              : {}),
+              ? { instructions: gatewayInstructions ? `${input.instructions}\n\n${gatewayInstructions}` : input.instructions }
+              : gatewayInstructions
+                ? { instructions: gatewayInstructions }
+                : {}),
             ...(mcpServers.length > 0 ? { mcpServers } : {}),
           };
 
@@ -598,6 +696,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             peer,
             workingDirectory: input.workingDirectory,
             startedAt,
+            gateway: lazyGateway,
             isolation: input.isolation ?? null,
             delegated: input.delegated === true,
             vibeSessionId: "",
@@ -618,7 +717,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             admissionChain: Promise.resolve(),
             pendingCompletions: new Map(),
             pendingStarted: new Map(),
-            startupNotices: [...mcpPlan.notes],
+            startupNotices,
             usage: new VibeUsageAccumulator(),
             backgroundProcesses: new Map(),
             lastWindows: [],
@@ -675,7 +774,13 @@ export class VibeDriver implements ProviderAdapter<CliError> {
           this.adoptSessionState(session, state);
           this.sessions.set(input.threadId, session);
 
-          // mcpPlan.notes are kept on the session and published with the
+          // The gateway stays fail-closed until its own tool restrictions are
+          // read from the verified session's effective configuration, and is
+          // locked for the session when that cannot be established — a turn
+          // can never run against a half-configured gateway (LOCAL-032).
+          await this.armGateway(session);
+
+          // Startup notices are kept on the session and published with the
           // first sendTurn: a subscriber that attaches after session/start
           // (the normal send path's turn subscriber) would otherwise miss
           // notices the global pump already consumed.
@@ -690,12 +795,47 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             startedAt: session.startedAt,
           };
         } catch (cause) {
+          void lazyGateway?.close().catch(() => undefined);
           peer.close();
           throw cause;
         }
       },
       catch: (cause) => toCliError("VIBE_SESSION_START_FAILED", "Could not start Mistral Vibe session", cause),
     });
+
+  /**
+   * Arm the session's lazy MCP gateway from `config/effective/read` — the
+   * merged Mistral Vibe configuration (user, trusted project, env, session
+   * overrides, agent profile, admin policy; credentials redacted), which the
+   * installed 3.1.5 only answers for a live session. Anything unexpected —
+   * an error, a timeout, an unrecognized shape, or a native server alias
+   * colliding with the gateway's name — leaves the gateway locked for the
+   * session: none of its servers' tools are reachable through it, which is
+   * at least as strict as today's withholding (LOCAL-032, fail closed). Never
+   * throws: the session survives without the gateway.
+   */
+  private async armGateway(session: VibeSession): Promise<void> {
+    const gateway = session.gateway;
+    if (!gateway) return;
+    try {
+      const raw = await session.peer.request(
+        VIBE_METHODS.configEffectiveRead,
+        { sessionId: session.vibeSessionId },
+        GATEWAY_ARM_TIMEOUT_MS,
+      );
+      const restrictions = parseVibeEffectiveConfig(raw);
+      if (!restrictions) throw new Error("the effective configuration shape was not recognized");
+      if (restrictions.nativeServers.has(vibeMcpServerAlias(gateway.name).toLowerCase())) {
+        throw new Error("the gateway's name collides with a natively configured Mistral Vibe server");
+      }
+      gateway.arm((server, tool) => restrictions.allows(server, tool));
+    } catch {
+      gateway.lock("Mistral Vibe's own MCP tool restrictions for this session could not be verified");
+      session.startupNotices.push(
+        `MCP servers (${gateway.serverNames.join(", ")}) are not available this session: Mistral Vibe's effective configuration could not be read, so the servers' own MCP tool restrictions could not be verified.`,
+      );
+    }
+  }
 
   private wirePeer(session: VibeSession): void {
     session.peer.onRequest((method, params) => {
@@ -713,6 +853,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
       if (session.closed) return;
       session.closed = true;
       this.sessions.delete(session.threadId);
+      void session.gateway?.close().catch(() => undefined);
       for (const row of this.runningRows(session)) {
         this.failTurn(
           session,
@@ -810,9 +951,26 @@ export class VibeDriver implements ProviderAdapter<CliError> {
     const effect = asRecord(detail["effect"]) ?? {};
     const effectKind = asNonEmptyString(effect["kind"]) ?? "tool";
     const rawToolName = asNonEmptyString(effect["toolName"]) ?? effectKind;
-    const toolName = canonicalVibeToolName(rawToolName, effectKind);
     const rawInput = asRecord(effect["input"]) ?? {};
-    const input: Record<string, unknown> = { ...rawInput };
+    // LOCAL-032: a call through the lazy MCP gateway is judged and shown under
+    // the real server and tool with its real arguments, never as a generic
+    // `call_tool` — every gate below (isolation, runtime mode, delegated
+    // denial, the permission panel) sees the unwrapped call. And a session-wide
+    // grant never reaches Vibe as rememberable for the gateway's tool, since
+    // Vibe would remember it for `call_tool` as a whole (every server and
+    // tool behind the gateway).
+    let toolName = canonicalVibeToolName(rawToolName, effectKind);
+    let input: Record<string, unknown> = { ...rawInput };
+    let rememberable = true;
+    if (session.gateway !== null) {
+      const routed = new Set(session.gateway.serverNames.map((name) => name.toLowerCase()));
+      const unwrapped = unwrapVibeGatewayApproval(session.gateway.name, routed, rawToolName, rawInput);
+      if (unwrapped !== null && unwrapped.kind === "call") {
+        toolName = `mcp__${unwrapped.server}__${unwrapped.tool}`;
+        input = unwrapped.arguments;
+        rememberable = false;
+      }
+    }
     if (typeof input["filePath"] === "string" && input["file_path"] === undefined) {
       input["file_path"] = input["filePath"];
     }
@@ -870,6 +1028,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
       threadId: session.threadId,
       toolName,
       isolated: session.isolation !== null,
+      rememberable,
     });
     this.publish({
       type: "permission.request.opened",
@@ -1289,8 +1448,9 @@ export class VibeDriver implements ProviderAdapter<CliError> {
         turn.activeSegment = null;
       }
 
-      const norm = normalizeVibeEffectEntry(entry);
-      if (!norm) return;
+      const gatewayNorm = this.unwrapGatewayEffect(session, normalizeVibeEffectEntry(entry));
+      if (!gatewayNorm) return;
+      const norm = gatewayNorm;
       const alreadyEmitted = turn.emittedEffects.has(norm.callId);
       turn.emittedEffects.add(norm.callId);
       const eventType =
@@ -1340,6 +1500,20 @@ export class VibeDriver implements ProviderAdapter<CliError> {
         });
       }
     }
+  }
+
+  /**
+   * The effect the timeline shows: a call through the lazy MCP gateway is
+   * projected under the real server and tool with its real arguments, exactly
+   * like the approval judged for the same call (LOCAL-032).
+   */
+  private unwrapGatewayEffect(session: VibeSession, norm: ReturnType<typeof normalizeVibeEffectEntry>): ReturnType<typeof normalizeVibeEffectEntry> {
+    if (!norm || session.gateway === null || norm.kind !== "tool") return norm;
+    const routed = new Set(session.gateway.serverNames.map((name) => name.toLowerCase()));
+    const unwrapped = unwrapVibeGatewayApproval(session.gateway.name, routed, norm.rawToolName, norm.input);
+    if (unwrapped === null || unwrapped.kind !== "call") return norm;
+    const tool = `mcp__${unwrapped.server}__${unwrapped.tool}`;
+    return { ...norm, tool, title: tool, input: unwrapped.arguments };
   }
 
   /** Notifications carry `sessionId`; a stale one from a handed-off session is ignored. */
@@ -2062,12 +2236,15 @@ export class VibeDriver implements ProviderAdapter<CliError> {
         const parked = session.parkedApprovals.get(requestId);
         if (!parked) return;
         session.parkedApprovals.delete(requestId);
-        // Never grant session-wide approvals inside worktree-isolated sessions.
+        // Never grant session-wide approvals inside worktree-isolated sessions
+        // (already handled above), and never for a call through the lazy MCP
+        // gateway: Vibe would remember it for `call_tool` as a whole, which
+        // is every server and tool behind the gateway (LOCAL-032).
         const vibeDecisionType =
           decision.kind === "accept"
             ? "approve"
             : decision.kind === "acceptForSession"
-              ? parked.isolated
+              ? parked.isolated || !parked.rememberable
                 ? "approve"
                 : "approve_for_session"
               : decision.kind === "cancel"
@@ -2249,7 +2426,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
                 trustWorkspace: false,
                 approvalPolicy: "ask",
                 enabledTools: [],
-                disabledTools: [...VIBE_ALWAYS_DISABLED_TOOLS],
+                disabledTools: [...VIBE_ALWAYS_DISABLED_TOOLS, DENY_ALL_TOOLS_PATTERN],
               },
               sessionOnly: true,
             },
@@ -2339,7 +2516,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
         trustWorkspace: true,
         approvalPolicy: "ask",
         enabledTools: [],
-        disabledTools: [...VIBE_ALWAYS_DISABLED_TOOLS],
+        disabledTools: [...VIBE_ALWAYS_DISABLED_TOOLS, DENY_ALL_TOOLS_PATTERN],
         instructions: SIDE_QUESTION_RULES,
       };
       const model = resolveVibeModel(input.model);
@@ -2549,6 +2726,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
         session.closed = true;
         this.sessions.delete(threadId);
         this.clearParkedCallbacks(session);
+        void session.gateway?.close().catch(() => undefined);
         if (session.vibeSessionId) {
           await session.peer
             .request(VIBE_METHODS.sessionStop, { sessionId: session.vibeSessionId }, 3_000)

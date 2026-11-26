@@ -8,11 +8,13 @@ import * as Stream from "effect/Stream";
 import { describe, expect, it } from "vitest";
 
 import { CliError } from "../../../errors.js";
+import type { ConnectMcp } from "../../harness/mcp.js";
+import type { McpClient } from "../../harness/mcpclient.js";
 import type { McpServerSpec } from "../../../mcp.js";
 import { subscribeDriverThread, subscribeDriverUsage } from "../../../threads/execute.js";
 import { JsonRpcPeer, type SpawnedProcess } from "../../stdio.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
-import { applyVibeJsonPatch, VIBE_METHODS } from "../protocol.js";
+import { applyVibeJsonPatch, parseVibeEffectiveConfig, VIBE_METHODS } from "../protocol.js";
 import type { VibeTransport } from "../transport.js";
 import { VibeDriver } from "../driver.js";
 import { vibeProvider, forgetVibeCatalogCache } from "../catalog.js";
@@ -680,7 +682,7 @@ describe("VibeDriver round-2 regressions", () => {
     await Effect.runPromise(driver.stopSession("th-alias"));
   });
 
-  it("withholds only the server holding an exclusion whose tool list Moxen cannot know", async () => {
+  it("routes only the server holding an exclusion whose tool list Moxen cannot know through the lazy gateway", async () => {
     const server = new FakeVibeServer();
     setupDefaultServer(server);
     const driver = new VibeDriver({ transport: makeTransport([server]) });
@@ -696,8 +698,10 @@ describe("VibeDriver round-2 regressions", () => {
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
     // `alpha` holds the excluded tool and Moxen cannot know its tool list, so
-    // alpha alone is withheld; `beta` keeps its offer untouched.
-    expect((agentCfg["mcpServers"] as unknown[]).map((s) => (s as { name: string }).name)).toEqual(["beta"]);
+    // alpha alone leaves the direct offer for the lazy MCP gateway (which
+    // enforces the exclusion inside); `beta` keeps its offer untouched.
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name))
+      .toEqual(["beta", expect.stringMatching(/^moxen-mcp-[0-9a-f]+$/)]);
     const disabled = agentCfg["disabledTools"] as string[];
     expect(vibeDisabledMatches(disabled, "alpha_write")).toBe(false);
     expect(vibeDisabledMatches(disabled, "beta_write")).toBe(false);
@@ -983,7 +987,7 @@ describe("VibeDriver round-3 regressions", () => {
     await Effect.runPromise(driver.stopSession("th-exact"));
   });
 
-  it("drops a server whose excluded tools case-fold together rather than hiding one", async () => {
+  it("routes a server whose excluded tools case-fold together through the gateway rather than hiding one", async () => {
     const server = new FakeVibeServer();
     setupDefaultServer(server);
     server.on(VIBE_METHODS.turnStart, () => ({ turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } }));
@@ -998,9 +1002,11 @@ describe("VibeDriver round-3 regressions", () => {
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    // Demo is withheld; the bystander keeps a nonempty override (an empty one
-    // would make the session refuse to start — see the round-6 test below).
-    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name)).toEqual(["extra"]);
+    // Demo's tools are enforced through the gateway (the whole server routes
+    // there); the bystander keeps a nonempty override — the gateway entry is
+    // always offered, so the empty-override refusal cannot be triggered here.
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name))
+      .toEqual(["extra", expect.stringMatching(/^moxen-mcp-[0-9a-f]+$/)]);
     const disabled = agentCfg["disabledTools"] as string[];
     expect(vibeDisabledMatches(disabled, "Demo_READ")).toBe(false);
     // The withheld-server notice rides the first send, so a turn subscriber
@@ -1011,7 +1017,7 @@ describe("VibeDriver round-3 regressions", () => {
     await Effect.runPromise(Fiber.interrupt(fiber));
   });
 
-  it("drops servers whose flattened exclusion key is ambiguous across them", async () => {
+  it("routes both servers a flattened ambiguous exclusion key implicates through the gateway", async () => {
     const server = new FakeVibeServer();
     setupDefaultServer(server);
     const driver = new VibeDriver({ transport: makeTransport([server]) });
@@ -1027,11 +1033,12 @@ describe("VibeDriver round-3 regressions", () => {
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name)).toEqual(["extra"]);
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name))
+      .toEqual(["extra", expect.stringMatching(/^moxen-mcp-[0-9a-f]+$/)]);
     await Effect.runPromise(driver.stopSession("th-flat"));
   });
 
-  it("withholds the server an alias-colliding exclusion names and leaves Vibe's disambiguation alone for the rest", async () => {
+  it("routes the server an alias-colliding exclusion names through the gateway and leaves Vibe's disambiguation alone for the rest", async () => {
     const server = new FakeVibeServer();
     setupDefaultServer(server);
     const driver = new VibeDriver({ transport: makeTransport([server]) });
@@ -1046,10 +1053,11 @@ describe("VibeDriver round-3 regressions", () => {
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    // `foo-bar` holds the excluded tool and cannot be scoped: only it is
-    // withheld. `foo_bar` carries no exclusion, so Vibe's own digest
-    // disambiguation of its tool names is left untouched.
-    expect((agentCfg["mcpServers"] as unknown[]).map((s) => (s as { name: string }).name)).toEqual(["foo_bar"]);
+    // `foo-bar` holds the excluded tool and cannot be scoped: only it routes
+    // through the lazy gateway. `foo_bar` carries no exclusion, so Vibe's own
+    // digest disambiguation of its tool names is left untouched.
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name))
+      .toEqual(["foo_bar", expect.stringMatching(/^moxen-mcp-[0-9a-f]+$/)]);
     const disabled = agentCfg["disabledTools"] as string[];
     expect(vibeDisabledMatches(disabled, "foo_bar_write_f4180191")).toBe(false);
     await Effect.runPromise(driver.stopSession("th-aliascollide"));
@@ -1224,7 +1232,7 @@ describe("VibeDriver round-4 regressions", () => {
     await Effect.runPromise(driver.stopSession("th-pending2"));
   });
 
-  it("withholds a server whose excluded tool Moxen cannot prove un-suffixed on Vibe (real name collision)", async () => {
+  it("routes a server whose excluded tool Moxen cannot prove un-suffixed through the gateway (real name collision)", async () => {
     const server = new FakeVibeServer();
     setupDefaultServer(server);
     const driver = new VibeDriver({ transport: makeTransport([server]) });
@@ -1234,12 +1242,14 @@ describe("VibeDriver round-4 regressions", () => {
       mcpServers: [{ name: "demo", type: "http", url: "http://127.0.0.1:9999/mcp", headers: {} }, { name: "extra", type: "http", url: "http://127.0.0.1:9997/mcp", headers: {} }],
       // A real server offering both spellings: Vibe digest-suffixes BOTH
       // display names, and no unsuffixed pattern can match either. Moxen
-      // cannot see the sibling, so the server itself must be withheld.
+      // cannot see the sibling, so the server routes through the lazy gateway
+      // (where the exclusion is enforced whatever it publishes).
       disabledMcpTools: ["mcp__demo__write-file"],
     }));
     const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
     const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
-    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name)).toEqual(["extra"]);
+    expect((agentCfg["mcpServers"] as Array<{ name: string }>).map((s) => s.name))
+      .toEqual(["extra", expect.stringMatching(/^moxen-mcp-[0-9a-f]+$/)]);
     await Effect.runPromise(driver.stopSession("th-collide-tool"));
   });
 
@@ -1698,5 +1708,460 @@ describe("vibe catalog launcher diagnostics", () => {
     const summary = await vibeProvider({ binaryPath: "vibe-app-server" }, process.env, "/tmp/repo", transport);
     expect(summary.status).toMatch(/drive-relative|absolute path/i);
     expect(summary.status).not.toMatch(/check `vibe` login/i);
+  });
+});
+
+/** A stub upstream MCP connection for gateway tests (LOCAL-032). */
+function stubUpstreamServers(
+  serverTools: Record<string, readonly string[]>,
+  calls: Array<{ server: string; tool: string; args: Record<string, unknown> }>,
+  connects: string[] = [],
+): ConnectMcp {
+  return async (spec) => {
+    connects.push(spec.name);
+    const tools = (serverTools[spec.name] ?? []).map((name) => ({
+      name,
+      description: `Tool ${name} on ${spec.name}.`,
+      inputSchema: { type: "object", properties: {} },
+      readOnly: true,
+    }));
+    return {
+      get alive() {
+        return true;
+      },
+      get closed() {
+        return false;
+      },
+      tools,
+      dropped: 0,
+      async call(tool: string, args: Record<string, unknown>) {
+        calls.push({ server: spec.name, tool, args });
+        return { text: `ok:${spec.name}:${tool}`, isError: false };
+      },
+      async close() {},
+    } as unknown as McpClient;
+  };
+}
+
+describe("VibeDriver lazy MCP gateway (LOCAL-032)", () => {
+  /** The effective-config fixture Vibe's `config/effective/read` answers with. */
+  function effectiveConfigFixture(): Record<string, unknown> {
+    return {
+      config: {
+        mcp_servers: [
+          {
+            name: "exa",
+            transport: "streamable-http",
+            url: "https://mcp.exa.invalid/mcp",
+            auth: { type: "static", headers: { "x-api-key": "<redacted>" } },
+            disabled: false,
+            disabled_tools: ["crawling"],
+          },
+        ],
+        disabled_tools: ["exa_nativeoff_tool"],
+        enabled_tools: [],
+      },
+    };
+  }
+
+  function setupGatewaySession(server: FakeVibeServer, effectiveConfig: Record<string, unknown> | null): void {
+    setupDefaultServer(server);
+    server.on(VIBE_METHODS.configEffectiveRead, () => {
+      if (effectiveConfig === null) throw new Error("effective config unreadable");
+      return effectiveConfig;
+    });
+  }
+
+  interface GatewaySpec {
+    readonly name: string;
+    readonly url: string;
+    readonly headers: Record<string, string>;
+  }
+
+  async function offeredServers(server: FakeVibeServer): Promise<Array<Record<string, unknown>>> {
+    const startCall = server.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const agentCfg = (startCall?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    return (agentCfg["mcpServers"] ?? []) as Array<Record<string, unknown>>;
+  }
+
+  async function gatewaySpec(server: FakeVibeServer): Promise<GatewaySpec> {
+    const offered = await offeredServers(server);
+    const gw = offered.find((entry) => /^moxen-mcp-[0-9a-f]+$/.test(String(entry["name"])));
+    if (!gw) throw new Error("no lazy MCP gateway offered to the session");
+    return {
+      name: String(gw["name"]),
+      url: String(gw["url"]),
+      headers: (gw["headers"] ?? {}) as Record<string, string>,
+    };
+  }
+
+  async function gatewayRpc<T>(gw: GatewaySpec, tool: string, args: Record<string, unknown>): Promise<T> {
+    const res = await fetch(gw.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...gw.headers },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } }),
+    });
+    const body = (await res.json()) as { result: T };
+    return body.result;
+  }
+
+  const callToolViaGateway = (gw: GatewaySpec, server: string, tool: string, args: Record<string, unknown> = {}) =>
+    gatewayRpc<{ content: Array<{ text: string }>; isError: boolean }>(gw, "call_tool", { server, tool, arguments: args });
+
+  it("routes external servers with excluded tools through the loopback gateway, hiding Moxen's exclusions and Vibe's own restrictions there", async () => {
+    const server = new FakeVibeServer();
+    setupGatewaySession(server, effectiveConfigFixture());
+    const calls: Array<{ server: string; tool: string; args: Record<string, unknown> }> = [];
+    const connects: string[] = [];
+    const driver = new VibeDriver({
+      transport: makeTransport([server]),
+      connectMcp: stubUpstreamServers(
+        { exa: ["agent_run", "web_search_exa", "crawling", "nativeoff_tool"] },
+        calls,
+        connects,
+      ),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-route",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [{ name: "exa", type: "http", url: "https://mcp.exa.invalid/mcp", headers: {} }],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+
+    // exa is not offered directly; the gateway is the only MCP entry, and the
+    // effective config was read through the session before startup returned.
+    const offered = await offeredServers(server);
+    expect(offered.map((entry) => String(entry["name"]))).toEqual([expect.stringMatching(/^moxen-mcp-[0-9a-f]+$/)]);
+    const effectiveRead = server.received.find((r) => r.method === VIBE_METHODS.configEffectiveRead);
+    expect(effectiveRead?.params).toMatchObject({ sessionId: "vibe-sess-1" });
+
+    const gw = await gatewaySpec(server);
+    // A Moxen exclusion is neither listed nor callable.
+    const catalog = await gatewayRpc<{ content: Array<{ text: string }>; isError: boolean }>(gw, "search_tools", { server: "exa" });
+    expect(catalog.isError).toBe(false);
+    expect(catalog.content[0]!.text).toContain("web_search_exa");
+    expect(catalog.content[0]!.text).not.toContain("agent_run");
+    expect(catalog.content[0]!.text).not.toContain("crawling");
+    expect(catalog.content[0]!.text).not.toContain("nativeoff_tool");
+
+    const moxenDenied = await callToolViaGateway(gw, "exa", "agent_run");
+    expect(moxenDenied.isError).toBe(true);
+    expect(moxenDenied.content[0]!.text).toContain("disabled");
+    // Vibe's own per-server disabled_tools and global disabled_tools stay off.
+    const nativeDenied = await callToolViaGateway(gw, "exa", "crawling");
+    expect(nativeDenied.isError).toBe(true);
+    const globallyDenied = await callToolViaGateway(gw, "exa", "nativeoff_tool");
+    expect(globallyDenied.isError).toBe(true);
+    // An allowed tool reaches the real server with its real arguments.
+    const allowed = await callToolViaGateway(gw, "exa", "web_search_exa", { query: "moxen" });
+    expect(allowed.isError).toBe(false);
+    expect(allowed.content[0]!.text).toBe("ok:exa:web_search_exa");
+    expect(connects).toEqual(["exa"]);
+    expect(calls).toEqual([{ server: "exa", tool: "web_search_exa", args: { query: "moxen" } }]);
+
+    await Effect.runPromise(driver.stopSession("th-gw-route"));
+  });
+
+  it("fails closed when Vibe's effective configuration cannot be read, and says so with the first turn", async () => {
+    const server = new FakeVibeServer();
+    setupGatewaySession(server, null);
+    const driver = new VibeDriver({
+      transport: makeTransport([server]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-locked",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [{ name: "exa", type: "http", url: "https://mcp.exa.invalid/mcp", headers: {} }],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+
+    const gw = await gatewaySpec(server);
+    const refused = await callToolViaGateway(gw, "exa", "web_search_exa");
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]!.text).toContain("not serving tools");
+
+    // The session explanation rides the first turn's notices.
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
+    server.on(VIBE_METHODS.turnStart, () => {
+      setTimeout(() => {
+        server.sendNotification(VIBE_METHODS.historyEntryAdded, {
+          entry: { id: "m1", type: "message", role: "assistant", content: [{ type: "text", text: "Done" }], generationStatus: "completed" },
+        });
+        server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
+      }, 10);
+      return { turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } };
+    });
+    const { turnId } = await Effect.runPromise(driver.sendTurn({ threadId: "th-gw-locked", prompt: "Search" }));
+    await driver.awaitTurn("th-gw-locked", turnId);
+    const notices = events.filter((e) => e.type === "session.notice" && e.notice === "mcp") as
+      Array<Extract<ProviderRuntimeEvent, { type: "session.notice" }>>;
+    const lockedNotice = notices.find((e) => e.detail?.includes("effective configuration could not be read"));
+    expect(lockedNotice?.detail).toContain("exa");
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    await Effect.runPromise(driver.stopSession("th-gw-locked"));
+  });
+
+  it("denies ambiguous exclusions under every parse through the gateway instead of withholding both servers", async () => {
+    const server = new FakeVibeServer();
+    setupGatewaySession(server, { config: { mcp_servers: [], disabled_tools: [], enabled_tools: [] } });
+    const driver = new VibeDriver({
+      transport: makeTransport([server]),
+      connectMcp: stubUpstreamServers(
+        { demo: ["x__read", "demo_plain"], "demo__x": ["read", "other"] },
+        [],
+      ),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-ambiguous",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [
+        { name: "demo", type: "http", url: "https://mcp.demo.invalid/mcp", headers: {} },
+        { name: "demo__x", type: "http", url: "https://mcp.demox.invalid/mcp", headers: {} },
+      ],
+      disabledMcpTools: ["mcp__demo__x__read"],
+    }));
+
+    // Both implicated servers left the direct offer; the gateway carries them.
+    const offered = await offeredServers(server);
+    expect(offered.map((entry) => String(entry["name"]))).toEqual([expect.stringMatching(/^moxen-mcp-[0-9a-f]+$/)]);
+    const gw = await gatewaySpec(server);
+    // x__read under demo and read under demo__x are both denied...
+    const firstParse = await callToolViaGateway(gw, "demo", "x__read");
+    expect(firstParse.isError).toBe(true);
+    const secondParse = await callToolViaGateway(gw, "demo__x", "read");
+    expect(secondParse.isError).toBe(true);
+    // ...while each server's other tools stay usable.
+    const untouched = await callToolViaGateway(gw, "demo", "demo_plain");
+    expect(untouched.isError).toBe(false);
+    const untouched2 = await callToolViaGateway(gw, "demo__x", "other");
+    expect(untouched2.isError).toBe(false);
+
+    await Effect.runPromise(driver.stopSession("th-gw-ambiguous"));
+  });
+
+  it("resolves in-process exclusions by exact published name even while external excluded servers go through the gateway", async () => {
+    const server = new FakeVibeServer();
+    setupGatewaySession(server, { config: { mcp_servers: [], disabled_tools: [], enabled_tools: [] } });
+    const driver = new VibeDriver({
+      transport: makeTransport([server]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-mixed",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [
+        inProcessServer("docs", ["write", "read"]),
+        { name: "exa", type: "http", url: "https://mcp.exa.invalid/mcp", headers: {} },
+      ],
+      disabledMcpTools: ["mcp__docs__write", "mcp__exa__agent_run"],
+    }));
+
+    const offered = await offeredServers(server);
+    const names = offered.map((entry) => String(entry["name"]));
+    expect(names).toContain("docs");
+    expect(names.some((name) => /^moxen-mcp-[0-9a-f]+$/.test(name))).toBe(true);
+    expect(names).not.toContain("exa");
+    const agentCfg = (server.received.find((r) => r.method === VIBE_METHODS.sessionStart)?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    const disabled = agentCfg["disabledTools"] as string[];
+    expect(vibeDisabledMatches(disabled, "docs_write")).toBe(true);
+    expect(vibeDisabledMatches(disabled, "docs_read")).toBe(false);
+
+    await Effect.runPromise(driver.stopSession("th-gw-mixed"));
+  });
+
+  it("withholds the excluded server on an unverified Vibe version, without opening a gateway or reading the effective config", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    server.on(VIBE_METHODS.initialize, () => ({
+      serverInfo: { name: "vibe-app-server", version: "9.9.9" },
+      processId: 4242,
+      platformCredentials: false,
+    }));
+    const driver = new VibeDriver({
+      transport: makeTransport([server]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-unknown-version",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [
+        { name: "exa", type: "http", url: "https://mcp.exa.invalid/mcp", headers: {} },
+        { name: "extra", type: "http", url: "https://mcp.extra.invalid/mcp", headers: {} },
+      ],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+
+    const offered = await offeredServers(server);
+    expect(offered.map((entry) => String(entry["name"]))).toEqual(["extra"]);
+    expect(server.received.some((r) => r.method === VIBE_METHODS.configEffectiveRead)).toBe(false);
+    await Effect.runPromise(driver.stopSession("th-gw-unknown-version"));
+  });
+
+  it("still refuses to start when withholding every excluded server on an unverified Vibe version", async () => {
+    const server = new FakeVibeServer();
+    setupDefaultServer(server);
+    server.on(VIBE_METHODS.initialize, () => ({
+      serverInfo: { name: "vibe-app-server", version: "9.9.9" },
+      processId: 4242,
+      platformCredentials: false,
+    }));
+    const driver = new VibeDriver({ transport: makeTransport([server]) });
+    const exit = await Effect.runPromiseExit(driver.startSession({
+      threadId: "th-gw-unknown-refusal",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [{ name: "exa", type: "http", url: "https://mcp.exa.invalid/mcp", headers: {} }],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      const cause = exit.cause as { failure?: CliError; reasons?: ReadonlyArray<{ error?: CliError }> };
+      const failure = cause.failure ?? cause.reasons?.[0]?.error;
+      expect(failure?.code).toBe("VIBE_MCP_EXCLUSION_UNENFORCEABLE");
+    }
+  });
+
+  it("unwraps gateway approval callbacks under the real server and tool, and never grants call_tool for the session", async () => {
+    const server = new FakeVibeServer();
+    setupGatewaySession(server, { config: { mcp_servers: [], disabled_tools: [], enabled_tools: [] } });
+    const callbackResults: unknown[] = [];
+    server.on(VIBE_METHODS.callbackResult, (params) => {
+      callbackResults.push(params);
+      return { accepted: true };
+    });
+    const driver = new VibeDriver({
+      transport: makeTransport([server]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-approval",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [{ name: "exa", type: "http", url: "https://mcp.exa.invalid/mcp", headers: {} }],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+    const gw = await gatewaySpec(server);
+
+    // The model-visible name of the gateway's call_tool (Vibe display form).
+    const visibleCallTool = gw.name.replace(/-/g, "_") + "_call_tool";
+    const events: ProviderRuntimeEvent[] = [];
+    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
+    const ack = await server.sendRequest(VIBE_METHODS.callbackCall, {
+      callback: {
+        callbackId: "cb-gw-1",
+        detail: {
+          kind: "approval",
+          effect: { kind: "tool", toolName: visibleCallTool, input: { server: "exa", tool: "web_search_exa", arguments: { query: "moxen" } } },
+        },
+      },
+    });
+    expect(ack["result"]).toEqual({ callbackId: "cb-gw-1", accepted: true });
+    await sleep(30);
+    const open = events.find((e) => e.type === "permission.request.opened");
+    expect(open && "raw" in open ? (open as { raw: Record<string, unknown> }).raw : null).toMatchObject({
+      toolName: "mcp__exa__web_search_exa",
+      input: { query: "moxen" },
+    });
+    // Granting "for the session" must not remember the gateway's call_tool
+    // (Vibe remembers a provided tool's session grant for the WHOLE tool).
+    await Effect.runPromise(driver.respondToRequest("th-gw-approval", "cb-gw-1", { kind: "acceptForSession" }));
+    expect(callbackResults[0]).toMatchObject({
+      result: { callbackId: "cb-gw-1", output: { type: "approval", decision: { type: "approve" } } },
+    });
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    await Effect.runPromise(driver.stopSession("th-gw-approval"));
+  });
+
+  it("closes the gateway with the session", async () => {
+    const server = new FakeVibeServer();
+    setupGatewaySession(server, { config: { mcp_servers: [], disabled_tools: [], enabled_tools: [] } });
+    const driver = new VibeDriver({
+      transport: makeTransport([server]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-close",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [{ name: "exa", type: "http", url: "https://mcp.exa.invalid/mcp", headers: {} }],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+    const gw = await gatewaySpec(server);
+    await Effect.runPromise(driver.stopSession("th-gw-close"));
+    await expect(fetch(gw.url, { method: "POST", headers: gw.headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }) }))
+      .rejects.toThrow();
+  });
+
+  it("sends a deny-all disabledTools to /btw and probe sessions so native Vibe MCP servers stay routed off", async () => {
+    // /btw fresh session (no cursor): nothing Vibe-side is routable.
+    const btwServer = new FakeVibeServer();
+    setupDefaultServer(btwServer);
+    btwServer.on(VIBE_METHODS.turnStart, () => {
+      setTimeout(() => {
+        btwServer.sendNotification(VIBE_METHODS.historyEntryAdded, {
+          entry: { id: "btw-a", type: "message", role: "assistant", content: [{ type: "text", text: "Side answer" }], generationStatus: "completed" },
+        });
+        btwServer.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "btw-t", status: "completed" } });
+      }, 10);
+      return { turn: { id: "btw-t", inputEntryId: "u1", status: "in_progress" } };
+    });
+    const driver = new VibeDriver({ transport: makeTransport([btwServer]) });
+    const side = await driver.sideQuestion({ cursor: null, workingDirectory: "/tmp/repo", question: "Quick one?" });
+    expect(side.text).toBe("Side answer");
+    const sideStart = btwServer.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const sideAgentCfg = (sideStart?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    expect(sideAgentCfg["disabledTools"]).toContain("re:.*");
+    await Effect.runPromise(driver.stopSession("any"));
+
+    // The idle budget probe: a zero-turn session with nothing routable either.
+    const probeServer = new FakeVibeServer();
+    setupDefaultServer(probeServer);
+    const probeDriver = new VibeDriver({ transport: makeTransport([probeServer]) });
+    await probeDriver.refreshUsage();
+    const probeStart = probeServer.received.find((r) => r.method === VIBE_METHODS.sessionStart);
+    const probeAgentCfg = (probeStart?.params as Record<string, unknown>)["agentConfig"] as Record<string, unknown>;
+    expect(probeAgentCfg["disabledTools"]).toContain("re:.*");
+  });
+});
+
+describe("vibe MCP gateway restriction parsing (LOCAL-032)", () => {
+  it("reads Vibe's effective config into per-server and global restrictions, refusing shapes it cannot prove", async () => {
+    const restrictions = parseVibeEffectiveConfig({
+      config: {
+        mcp_servers: [
+          { name: "brave-search", disabled: false, disabled_tools: ["brave_llm_context", "brave_summarizer"] },
+          { name: "off-server", disabled: true, disabled_tools: [] },
+        ],
+        disabled_tools: ["exa_agent_run"],
+        enabled_tools: [],
+      },
+    });
+    expect(restrictions).not.toBeNull();
+    expect(restrictions?.allows("brave-search", "brave_llm_context")).toBe(false);
+    expect(restrictions?.allows("brave-search", "brave_web_search")).toBe(true);
+    expect(restrictions?.allows("off-server", "any_tool")).toBe(false);
+    expect(restrictions?.allows("exa", "agent_run")).toBe(false); // global display-name pattern
+    expect(restrictions?.allows("exa", "web_search_exa")).toBe(true);
+
+    // Unreadable shapes fail closed to null so the caller locks the gateway.
+    expect(parseVibeEffectiveConfig({ config: { mcp_servers: "nonsense" } })).toBeNull();
+    expect(parseVibeEffectiveConfig(null)).toBeNull();
+    expect(parseVibeEffectiveConfig({ config: { mcp_servers: [{ no_name: true }] } })).toBeNull();
+  });
+
+  it("matches global patterns against every display name Vibe can publish for the tool, including digest suffixed forms", async () => {
+    // The digest Vibe appends on a display-name collision: sha256("exa\0agent_run")
+    const digest = createHash("sha256").update("exa\u0000agent_run", "utf8").digest("hex");
+    const suffixed = parseVibeEffectiveConfig({ config: { mcp_servers: [], disabled_tools: [`exa_agent_run_${digest.slice(0, 8)}`], enabled_tools: [] } });
+    expect(suffixed?.allows("exa", "agent_run")).toBe(false);
+    expect(suffixed?.allows("exa", "web_search_exa")).toBe(true);
+
+    // An unparseable re: pattern denies (Vibe treats it as a match).
+    const unparseable = parseVibeEffectiveConfig({ config: { mcp_servers: [], disabled_tools: ["re:("], enabled_tools: [] } });
+    expect(unparseable?.allows("exa", "agent_run")).toBe(false);
+
+    // Non-empty enabled patterns allow only what they name — everything else is denied.
+    const enabled = parseVibeEffectiveConfig({ config: { mcp_servers: [], disabled_tools: [], enabled_tools: ["serena_*"] } });
+    expect(enabled?.allows("serena", "read_file")).toBe(true);
+    expect(enabled?.allows("exa", "web_search_exa")).toBe(false);
   });
 });

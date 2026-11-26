@@ -2,9 +2,9 @@ import { request as httpRequest } from "node:http";
 
 import { describe, expect, it } from "vitest";
 
-import type { McpServerSpec } from "../../../mcp.js";
-import type { McpCallResult, McpClient, McpToolInfo } from "../../harness/mcpclient.js";
-import { AcpLazyMcpGateway } from "../lazymcp.js";
+import type { McpServerSpec } from "../../mcp.js";
+import type { McpCallResult, McpClient, McpToolInfo } from "../harness/mcpclient.js";
+import { LazyMcpGateway } from "../lazymcp.js";
 
 function fakeClient(
   tools: readonly McpToolInfo[],
@@ -34,7 +34,7 @@ function fakeClient(
   } as unknown as McpClient & { closed: boolean; kill: () => void };
 }
 
-describe("AcpLazyMcpGateway", () => {
+describe("LazyMcpGateway", () => {
   it("exposes all external MCP servers behind two compact tools, connects lazily, honors disabledTools, preserves images, and restarts crashed servers", async () => {
     const specs: McpServerSpec[] = [
       { name: "exa", type: "http", url: "https://mcp.exa.ai/mcp", headers: { "x-api-key": "secret" } },
@@ -60,7 +60,7 @@ describe("AcpLazyMcpGateway", () => {
     const calls: Array<{ server: string; tool: string; args: Record<string, unknown> }> = [];
     const clients = new Map<string, ReturnType<typeof fakeClient>>();
 
-    const gateway = await AcpLazyMcpGateway.start({
+    const gateway = await LazyMcpGateway.start({
       specs,
       cwd: process.cwd(),
       disabledTools: ["mcp__linear__delete_issue"],
@@ -171,7 +171,7 @@ describe("AcpLazyMcpGateway", () => {
   });
 
   it("rejects a foreign Origin with 403 and accepts only the expected loopback Host authority, while Origin-less requests still work (LOCAL-009)", async () => {
-    const gateway = await AcpLazyMcpGateway.start({
+    const gateway = await LazyMcpGateway.start({
       specs: [{ name: "exa", type: "http", url: "https://mcp.exa.ai/mcp", headers: {} }],
       cwd: process.cwd(),
       connect: async () => {
@@ -209,6 +209,69 @@ describe("AcpLazyMcpGateway", () => {
       expect(await raw({ ...bearer, host: `127.0.0.1:${Number(port) + 1}` })).toBe(403);
       // The bearer check still applies.
       expect(await raw({ origin: `http://${hostname}:${port}` })).toBe(401);
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("stays fail-closed until armed, then hides and refuses only the restricted tools (LOCAL-032)", async () => {
+    const exaTools: McpToolInfo[] = [
+      { name: "agent_run", description: "Run an agent.", inputSchema: { type: "object" }, readOnly: false },
+      { name: "web_search_exa", description: "Search the web using Exa.", inputSchema: { type: "object" }, readOnly: true },
+    ];
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const gateway = await LazyMcpGateway.start({
+      specs: [{ name: "exa", type: "http", url: "https://mcp.exa.ai/mcp", headers: {} }],
+      cwd: process.cwd(),
+      name: "moxen-mcp-0123456789ab",
+      failClosed: true,
+      connect: async () =>
+        fakeClient(exaTools, async (tool, args) => {
+          calls.push({ tool, args });
+          return { text: `ok:${tool}`, isError: false };
+        }),
+    });
+    const post = (body: unknown) =>
+      fetch(gateway.spec.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...gateway.spec.headers },
+        body: JSON.stringify(body),
+      }).then((res) => res.json() as Promise<{ result: { content: Array<{ text: string }>; isError: boolean } }>);
+    const callGateway = (tool: string, args: Record<string, unknown>) =>
+      post({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } });
+
+    try {
+      // Fail closed before arming: neither listing nor calling works.
+      expect(gateway.name).toBe("moxen-mcp-0123456789ab");
+      const lockedSearch = await callGateway("search_tools", { server: "exa" });
+      expect(lockedSearch.result.isError).toBe(true);
+      expect(lockedSearch.result.content[0]!.text).toContain("not serving tools");
+      const lockedCall = await callGateway("call_tool", { server: "exa", tool: "web_search_exa" });
+      expect(lockedCall.result.isError).toBe(true);
+      expect(calls).toEqual([]);
+
+      // Arm with the provider's own restrictions: agent_run is denied natively,
+      // so only web_search_exa stays listable and callable.
+      gateway.arm((server, tool) => !(server === "exa" && tool === "agent_run"));
+      const catalog = await callGateway("search_tools", { server: "exa" });
+      expect(catalog.result.isError).toBe(false);
+      expect(catalog.result.content[0]!.text).toContain("web_search_exa");
+      expect(catalog.result.content[0]!.text).not.toContain("agent_run");
+
+      const denied = await callGateway("call_tool", { server: "exa", tool: "agent_run", arguments: {} });
+      expect(denied.result.isError).toBe(true);
+      expect(denied.result.content[0]!.text).toContain("disabled");
+
+      const allowed = await callGateway("call_tool", { server: "exa", tool: "web_search_exa", arguments: { query: "moxen" } });
+      expect(allowed.result.isError).toBe(false);
+      expect(calls).toEqual([{ tool: "web_search_exa", args: { query: "moxen" } }]);
+
+      // A permanent lock closes the session's route again — refusing everything.
+      gateway.lock("the effective configuration was unreadable");
+      const reasserted = await callGateway("call_tool", { server: "exa", tool: "web_search_exa", arguments: {} });
+      expect(reasserted.result.isError).toBe(true);
+      expect(reasserted.result.content[0]!.text).toContain("the effective configuration was unreadable");
+      expect(calls).toEqual([{ tool: "web_search_exa", args: { query: "moxen" } }]);
     } finally {
       await gateway.close();
     }
