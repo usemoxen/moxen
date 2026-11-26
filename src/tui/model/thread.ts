@@ -976,6 +976,8 @@ const TURN_LIFECYCLE_KINDS: ReadonlySet<string> = new Set([
   "turn.completed",
   "turn.interrupted",
   "turn.steered",
+  "steer.accepted",
+  "steer.confirmed",
   "message.injected",
   // A redelivery is visible as the queued turn it became; the marker only
   // keeps a repeated recovery from queueing it twice.

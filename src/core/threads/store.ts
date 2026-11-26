@@ -756,13 +756,31 @@ export class ThreadStore {
   async appendLedger(threadId: string, name: LedgerName, row: unknown): Promise<void> {
     await this.assertStoreWriteable();
     await mkdir(this.threadDir(threadId), { recursive: true });
-    await appendFile(ledgerFile(this.root, threadId, name), `${JSON.stringify(row)}\n`, "utf8");
+    const append = () => appendFile(ledgerFile(this.root, threadId, name), `${JSON.stringify(row)}\n`, "utf8");
+    if (name === "messages" || name === "activity") await this.withThreadLock(`\0ledger:${name}:${threadId}`, append);
+    else await append();
     if (name === "activity") {
       const activity = row as StoredActivity;
       if (activity.kind === "context-window.updated" && activity.payload) {
         this.bus.publish({ type: "backend.context.updated", threadId, payload: activity.payload });
       }
     }
+  }
+
+  /** Remove an unsent notice steer without dropping concurrent provider output. */
+  async discardStagedNoticeSteer(threadId: string, messageId: string): Promise<void> {
+    await this.withThreadLock(threadId, async () => {
+      // Provider output appends without the thread lock; coordinate the read
+      // and rewrite with those appends as well as other whole-ledger rewrites.
+      await this.withThreadLock(`\0ledger:messages:${threadId}`, async () => {
+        const messages = await this.readMessages(threadId);
+        await this.rewriteLedger(threadId, "messages", messages.filter((row) => row.id !== messageId));
+      });
+      await this.withThreadLock(`\0ledger:activity:${threadId}`, async () => {
+        const activities = await this.readActivities(threadId);
+        await this.rewriteLedger(threadId, "activity", activities.filter((row) => row.payload?.batchNotice !== true || row.payload.messageId !== messageId));
+      });
+    });
   }
 
   /**
