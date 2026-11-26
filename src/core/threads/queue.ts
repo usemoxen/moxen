@@ -426,6 +426,7 @@ export interface AntigravitySteerRefusal {
 export async function antigravitySteerGate(
   store: { readThreadRecord(threadId: string): Promise<StoredThread | null>; readTurns(threadId: string): Promise<readonly StoredTurn[]> },
   threadId: string,
+  expectedTurnId?: string,
 ): Promise<AntigravitySteerRefusal> {
   const thread = await store.readThreadRecord(threadId).catch(() => null);
   const turns = thread !== null ? await store.readTurns(threadId).catch(() => null) : null;
@@ -435,7 +436,7 @@ export async function antigravitySteerGate(
   return {
     refuses: (providersInForce, payloadAutomatic) => {
       if (!payloadAutomatic) return false;
-      if (target === null) return true;
+      if (target === null || (expectedTurnId !== undefined && target.id !== expectedTurnId)) return true;
       if (userAuthoredTurn(target)) return false;
       return targetAntigravity && providersInForce()?.antigravity?.allowUnsupportedUse !== true;
     },

@@ -974,13 +974,18 @@ message was still being taken). So a steer counts as delivered when the
 provider confirms it reached the conversation — Claude echoes every
 streamed message's id on the reply frames and result of the turn that
 consumes it — and whatever is still unconfirmed when the turn settles goes
-out again, each as a queued turn of its own. Notifications are therefore
+out again, each as a queued turn of its own. A sent message is therefore
 at-least-once and never silently lost. Interrupting a turn redelivers its
 pending steers even where no echo could confirm them — our own interrupt
 ended the turn with the CLI queue — so an interrupted steer can arrive
 twice. A provider with no arrival signal keeps push-means-delivered on
 turns that end any other way, and a steer on a session that dies with its
 process goes out again when the orphaned turn is recovered.
+
+A task notice steers by the same rules, and one the provider never confirms
+goes out again the same way, so a notice a running turn never received is
+redelivered rather than lost. The notice already in the parent's conversation
+is what keeps that from reporting the settle twice (see below).
 
 ### Messaging a delegated task (`task_send`)
 
@@ -1033,7 +1038,20 @@ lists what is still running and for how long; past `backgroundForgottenAfter`
 on its own. Where Moxen cannot check — no live session here, or a provider
 that cannot report it all (OpenCode reports only the background shells and
 subagents its own server started) — the notification and `task_status` say so
-plainly instead of implying nothing is running.
+plainly instead of implying nothing is running. A check that failed names no
+work, so it wakes no follow-up: the parent hears about that task again only
+when the task really does settle after running more. The duration a
+notification shows is the task's last turn, not the wall clock since it was
+delegated, so the idle hours between rounds are not reported as time spent
+finishing.
+
+Moxen deduplicates reports by task, kind of report and last work turn. A
+queued notice or a confirmed steer is recorded in the parent's ledger, so
+filing the same settle again after a restart does not repeat it. Maintenance
+turns do not count as new work. A later work turn, pause or cancellation is a
+separate report. Moxen only steers a notice into providers that report what
+reached the turn; other providers receive it through the turn queue. A push
+the provider refuses stays pending until the parent is idle.
 
 ### A delegated task that runs out of usage
 

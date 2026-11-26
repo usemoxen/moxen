@@ -63,7 +63,7 @@ import type {
   WorkspaceMode,
   WorkspaceResolution,
 } from "../types.js";
-import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent } from "../providers/spi.js";
+import { isCompactCommand, type BackgroundTaskSummary, type ContextWindowUsage, type ProviderImage, type ProviderRuntimeEvent, type SteerOrigin } from "../providers/spi.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
@@ -3360,6 +3360,10 @@ export interface StartedTurn extends SendTurnResult {
   readonly steerDelivered?: boolean;
 }
 
+function noticeSteerGated(): CliError {
+  return new CliError("TASK_NOTICE_STEER_GATED", "The live turn cannot receive a task notice by steer.");
+}
+
 /**
  * Record a turn and, when it opens a fresh one, run it.
  *
@@ -3369,7 +3373,7 @@ export interface StartedTurn extends SendTurnResult {
  * complete or fail the original), and a failed session start left the
  * turn `running` with nothing to ever settle it.
  */
-export async function startTurn(ctx: OperationContext, input: StartTurnInput): Promise<StartedTurn> {
+export async function startTurn(ctx: OperationContext, input: StartTurnInput, expectedNoticeTurnId?: string): Promise<StartedTurn> {
   const { store } = ctx;
   // A dead process's turn must not swallow this send as a steer.
   await recoverOrphanedTurn(ctx, input.threadId);
@@ -3382,14 +3386,49 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput): P
   const { threadId: _threadId, driverPrompt, onEvent, ...send } = input;
   const resolvedQueue = input.queue ? resolveQueueResetConditions(input.queue, turnSelection) : undefined;
   const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(resolvedQueue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : resolvedQueue;
-  const sent = await sendTurn(store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) }, ctx.config);
+  const noticeSteer = input.origin === "task-notification" && input.delivery === "steer";
+  const target = noticeSteer ? openTurn(await store.readTurns(thread.id)) : null;
+  if (noticeSteer) {
+    const live = await Effect.runPromise(driver.hasSession(thread.id)).catch(() => false);
+    const gate = await antigravitySteerGate(store, thread.id, expectedNoticeTurnId ?? target?.id);
+    if (!target || !live || gate.refuses(() => liveProvidersOf(ctx), true)) throw noticeSteerGated();
+  }
+  const sent = await sendTurn(
+    store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) }, ctx.config,
+    target === null ? undefined : (running) => {
+      if (running.id !== target.id || (!userAuthoredTurn(running) && antigravityAutoPromptsHeld(liveProvidersOf(ctx), (running.modelSelection ?? turnSelection).instanceId))) {
+        throw noticeSteerGated();
+      }
+    },
+  );
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
-    // A side question is the user's own; every other origin is one of Moxen's
-    // automatic prompts, which the steer gate weighs at the boundary.
     const text = imageMention(input.driverPrompt ?? input.prompt.trim(), uploads.map((upload) => upload.name));
-    return { ...sent, run: null, steerDelivered: await deliverSteer(ctx, driver, thread.id, text, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer") };
+    const recordSteer = (kind: "steer.accepted" | "steer.confirmed") => store.appendLedger(thread.id, "activity", {
+      id: store.newId(), threadId: thread.id, turnId: sent.turn.id, kind, summary: "", payload: { messageId: sent.messageId }, createdAt: store.nowIso(),
+    });
+    let confirmation: Promise<void> | undefined;
+    const origin: SteerOrigin | undefined = input.origin === "task-notification" ? {
+      notice: true,
+      onArrival: () => { confirmation = recordSteer("steer.confirmed").catch(() => undefined); },
+    } : undefined;
+    // A side question is the user's own; other origins are automatic prompts.
+    const delivery = await deliverSteer(ctx, driver, thread.id, text, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
+    if (noticeSteer && delivery === "gated") {
+      // Policy changed during the write. The staged message was never sent;
+      // leave the batch as its only delivery path, with no idle retry armed.
+      await store.withThreadLock(thread.id, async () => {
+        const messages = await store.readMessages(thread.id);
+        await store.rewriteLedger(thread.id, "messages", messages.filter((message) => message.id !== sent.messageId));
+      });
+      throw noticeSteerGated();
+    }
+    if (noticeSteer && delivery === "accepted") {
+      await recordSteer("steer.accepted");
+      await confirmation;
+    }
+    return { ...sent, run: null, steerDelivered: delivery === "accepted" };
   }
   if (sent.turn.status === "queued" && typeof sent.turn.scheduledFor === "string") {
     armScheduledTurn(thread.id, sent.turn.id, sent.turn.scheduledFor);
@@ -3548,7 +3587,7 @@ function providerImages(uploads: readonly ImageAttachmentUpload[]): ProviderImag
  * and the specific ride exception survives only into a live turn the user
  * wrote.
  *
- * True is the push being accepted, not the arrival: the steer carries the
+ * Acceptance is not arrival: the steer carries the
  * ledger message id, and a driver with an arrival signal confirms it later
  * (`takeUnconfirmedSteers`); whatever settles unconfirmed goes out again
  * as a queued turn of its own.
@@ -3561,15 +3600,16 @@ async function deliverSteer(
   images: readonly ProviderImage[],
   steerId: string,
   payloadAutomatic: boolean,
-): Promise<boolean> {
-  if (!driver.steerTurn) return false;
-  const live = await Effect.runPromise(driver.hasSession(threadId)).catch(() => false);
-  if (!live) return false;
-  const gate = await antigravitySteerGate(ctx.store, threadId);
-  if (gate.refuses(() => (ctx.providersInForce ? ctx.providersInForce() : ctx.config.providers), payloadAutomatic)) return false;
-  return await Effect.runPromise(driver.steerTurn(threadId, text, images, steerId)).then(
-    () => true,
-    () => false,
+  origin?: SteerOrigin,
+  precheckedTurnId?: string,
+): Promise<"accepted" | "refused" | "gated"> {
+  if (!driver.steerTurn) return "gated";
+  if (precheckedTurnId === undefined && !(await Effect.runPromise(driver.hasSession(threadId)).catch(() => false))) return "gated";
+  const gate = await antigravitySteerGate(ctx.store, threadId, precheckedTurnId);
+  if (gate.refuses(() => liveProvidersOf(ctx), payloadAutomatic)) return "gated";
+  return await Effect.runPromise(driver.steerTurn(threadId, text, images, steerId, origin)).then(
+    () => "accepted" as const,
+    () => "refused" as const,
   );
 }
 
@@ -4406,6 +4446,11 @@ export interface PendingTaskNotification {
   readonly child: string;
   readonly resumesAt?: string | null;
   readonly cancelled?: true;
+  /**
+   * The recorded attempt the provider refused. The entry stays pending but
+   * cannot be steered again; it is filed as a turn once the parent goes idle.
+   */
+  readonly refusedMessageId?: string;
 }
 
 /** Settle entries report; pause entries carry `resumesAt` (possibly null), cancel entries `cancelled`. */
@@ -4419,7 +4464,16 @@ function unionTaskEntries(
   right: readonly PendingTaskNotification[],
 ): PendingTaskNotification[] {
   const merged = new Map<string, PendingTaskNotification>();
-  for (const entry of [...left, ...right]) merged.set(`${pendingEntryKind(entry)}:${entry.child}`, entry);
+  for (const entry of [...left, ...right]) {
+    const key = `${pendingEntryKind(entry)}:${entry.child}`;
+    const known = merged.get(key);
+    // A repeat must not clear the hold on a notice the provider refused.
+    if (known?.refusedMessageId !== undefined && entry.refusedMessageId === undefined) {
+      merged.set(key, { ...entry, refusedMessageId: known.refusedMessageId });
+      continue;
+    }
+    merged.set(key, entry);
+  }
   return [...merged.values()];
 }
 
@@ -4434,7 +4488,9 @@ function normalizeTaskEntries(value: unknown): PendingTaskNotification[] | null 
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
     const record = raw as Record<string, unknown>;
     if (typeof record.child !== "string" || record.child.length === 0) return null;
-    const entry: PendingTaskNotification = { child: record.child };
+    const refused = record.refusedMessageId;
+    if (refused !== undefined && (typeof refused !== "string" || refused.length === 0)) return null;
+    const entry: PendingTaskNotification = { child: record.child, ...(refused !== undefined ? { refusedMessageId: refused } : {}) };
     if (record.resumesAt !== undefined) {
       if (record.resumesAt !== null && (typeof record.resumesAt !== "string" || !Number.isFinite(Date.parse(record.resumesAt)))) return null;
       entries.push({ ...entry, resumesAt: record.resumesAt });
@@ -4504,6 +4560,50 @@ async function updateTaskNotificationBatches(storeRoot: string, update: (batches
   await run.catch(() => undefined);
 }
 
+/**
+ * The notice one pending entry stands for: the task, the kind of report, and
+ * the task turn it is about. Stable across a restart and a re-file, and
+ * different for the task's next settle — so a report filed twice is recognised
+ * as the same notice, while the settle after a revert and a wake is a new one.
+ */
+function noticeOf(kind: "settle" | "pause" | "cancel", childThreadId: string, settleTurnId: string | null): string {
+  return `${kind}\0${childThreadId}\0${settleTurnId ?? ""}`;
+}
+
+/** The kind a notice was written as, read back off the facts it carried. */
+function noticeKindOf(task: TaskNotification): "settle" | "pause" | "cancel" {
+  if (task.cancelled === true) return "cancel";
+  return task.resumesAt !== undefined ? "pause" : "settle";
+}
+
+/** A notice is delivered by a durable turn or a confirmed steer. A live accepted push only blocks another attempt while it is in flight. */
+async function filedNoticeKeys(ctx: OperationContext, parentThreadId: string): Promise<Set<string>> {
+  const [messages, turns, activities] = await Promise.all([
+    ctx.store.readMessages(parentThreadId),
+    ctx.store.readTurns(parentThreadId),
+    ctx.store.readActivities(parentThreadId),
+  ]);
+  const filed = new Set(turns.map((turn) => turn.messageId));
+  const turnIds = new Set(turns.map((turn) => turn.id));
+  const running = openTurn(turns);
+  for (const activity of activities) {
+    const messageId = activity.payload?.messageId;
+    if (typeof messageId === "string" && (
+      activity.kind === "steer.confirmed" ||
+      (activity.kind === "steer.accepted" && activity.turnId === running?.id)
+    )) filed.add(messageId);
+  }
+  const keys = new Set<string>();
+  for (const notice of messages) {
+    if (notice.origin !== "task-notification") continue;
+    if (!filed.has(notice.id) && !(notice.queuedTaskNotice && turnIds.has(notice.turnId))) continue;
+    for (const task of notice.notification?.tasks ?? []) {
+      keys.add(noticeOf(noticeKindOf(task), task.taskId, task.settleTurnId ?? null));
+    }
+  }
+  return keys;
+}
+
 /** A parent held by usage protection cannot receive a notification yet: it waits with the batch instead. */
 function parentNotificationsHeld(parent: StoredThread | null): boolean {
   return !!parent?.usagePause && parent.usagePause.phase !== "resuming";
@@ -4534,9 +4634,8 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
       clearTimeout(pending.timer);
       pendingNotifications.delete(parentThreadId);
     }
-    // Delivered before it is forgotten: a crash between the two replays the
-    // batch on restart (at-least-once), while forgetting first could lose it
-    // with the dying process. The union below keeps one flush to one message.
+    // File before forgetting: replay after a crash reconciles against the
+    // parent ledger. The union keeps one flush to one message.
     let replay: PendingTaskNotification[] = [];
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
       replay = batches[parentThreadId] ?? [];
@@ -4607,16 +4706,49 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
         return;
       }
     }
-    const deferred = await deliverTaskNotifications(ctx, parentThreadId, mine);
+    const { kept, deferred } = await deliverTaskNotifications(ctx, parentThreadId, mine);
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-      // A task still running work of its own (a compaction it started after
-      // its turn settled) reports once that work ends: its entry stays in the
-      // batch instead of being dropped, and the watcher below queues it again then.
-      if (deferred.length > 0) batches[parentThreadId] = deferred;
+      // A refused push and a child still working have different watchers,
+      // but both stay durable until the next flush.
+      if (kept.length > 0 || deferred.length > 0) batches[parentThreadId] = [...kept, ...deferred];
       else delete batches[parentThreadId];
     });
     for (const entry of deferred) watchDeferredNotification(ctx, parentThreadId, entry);
+    // Kept back for a turn that is still running: nothing would flush it again
+    // once the batch window's timer is gone, so its end is what files it.
+    if (kept.length > 0) retryTaskNotificationsWhenIdle(ctx, parentThreadId);
   });
+}
+
+/** One retry watch per parent: a notice refused twice must not stack watchers. */
+const idleRetries = new Set<string>();
+
+/**
+ * Flush a parent's held notices once its running turn ends — the moment the
+ * notice can go out as a turn of its own. A steer the provider refused leaves
+ * the batch entry with no timer armed (`flushTaskNotifications` cleared it), so
+ * without this the notice would sit until an unrelated user message. A walk
+ * with nothing left to deliver is a no-op.
+ */
+function retryTaskNotificationsWhenIdle(ctx: OperationContext, parentThreadId: string): void {
+  if (idleRetries.has(parentThreadId)) return;
+  idleRetries.add(parentThreadId);
+  let done = false;
+  const check = async (): Promise<void> => {
+    const turns = await ctx.store.readTurns(parentThreadId);
+    if (done || openTurn(turns)) return;
+    done = true;
+    idleRetries.delete(parentThreadId);
+    stop();
+    await flushTaskNotifications(ctx, parentThreadId);
+  };
+  const wake = () => void check().catch(() => undefined);
+  const stop = ctx.store.subscribe((event) => {
+    if (event.type !== "backend.thread.changed" || event.threadId !== parentThreadId) return;
+    if (event.reason === "turn-completed" || event.reason === "turn-failed" || event.reason === "turn-interrupted") wake();
+  });
+  // The provider may return its refusal after the last parent turn has ended.
+  wake();
 }
 
 /** One watcher per parent and task: a repeated flush must not stack watchers that each flush. */
@@ -4669,11 +4801,12 @@ function watchDeferredNotification(ctx: OperationContext, parentThreadId: string
  */
 export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
   const batches = await readTaskNotificationBatches(ctx.storeRoot);
-  const children = new Set(Object.values(batches).flatMap((entries) => entries.map((entry) => entry.child)));
-  for (const child of children) await recoverOrphanedTurn(ctx, child).catch(() => undefined);
-  for (const parentThreadId of Object.keys(batches)) {
-    await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
-  }
+  const parents = Object.keys(batches);
+  const affected = new Set([...Object.values(batches).flatMap((entries) => entries.map((entry) => entry.child)), ...parents]);
+  // A parent's orphan must also be reconciled before retrying a refused steer:
+  // its end will never arrive on the live idle watcher after a restart.
+  for (const threadId of affected) await recoverOrphanedTurn(ctx, threadId).catch(() => undefined);
+  for (const parentThreadId of parents) await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
 }
 
 /** Note a settled task for its parent; the batch goes out once no other task settles for a moment. */
@@ -4939,10 +5072,14 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   if (!child) return null;
   const record = await ctx.store.readThreadRecord(childThreadId);
   const turns = await ctx.store.readTurns(childThreadId);
-  const first = turns[0] ?? null;
-  const last = [...turns].reverse().find((turn) => turn.completedAt !== null) ?? null;
+  // The last turn's own run, not the wall clock since the task was created:
+  // idle time between rounds is not work, and a task that waited hours for a
+  // wake reported those hours as time spent finishing.
+  const messages = await ctx.store.readMessages(childThreadId);
+  const last = turns.findLast((turn) => turn.completedAt !== null && !isMaintenanceTurn(turn, messages)) ?? null;
+  const ranFrom = last === null ? null : last.startedAt ?? last.createdAt;
   const durationMs =
-    first && last?.completedAt ? Math.max(0, Date.parse(last.completedAt) - Date.parse(first.createdAt)) : null;
+    last?.completedAt && ranFrom ? Math.max(0, Date.parse(last.completedAt) - Date.parse(ranFrom)) : null;
   // What the task changed: its turns' checkpoints, first base to last head.
   let changes: { files: number; additions: number; deletions: number } | null = null;
   const checkpoints = (await ctx.store.readCheckpoints(childThreadId).catch(() => [])).filter((row) => row.status === "available");
@@ -4974,6 +5111,7 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
     taskId: childThreadId,
     title: child.title,
     status,
+    settleTurnId: last?.id ?? null,
     durationMs,
     model: child.modelSelection ? `${child.modelSelection.instanceId}/${child.modelSelection.model}` : null,
     branch: record?.env.mode === "worktree" ? record.env.branch : null,
@@ -5003,23 +5141,53 @@ export function isStoppedBySettle(child: StoredThread | null, status: TaskNotifi
 }
 
 /**
- * Send the parent its settled tasks: into its running turn when the
- * provider takes input mid-turn (Claude, OpenCode) and this process
- * holds that session; otherwise as a turn of its own, queued behind any
- * running one. It wakes a settled parent — the work is the parent's own.
+ * Send the parent its settled tasks: into its running turn when the provider
+ * takes input mid-turn and reports what it consumed, so a push can be trusted
+ * and recovered if it is lost; otherwise as a turn of its own, queued behind
+ * any running one. It wakes a settled parent — the work is the parent's own.
  * Pause and cancellation notices ride along in the same message: a pause a
  * settle covers is stale and dropped, and a settle a cancellation covers
  * wins over it, so each child reads once.
+ *
+ * Once is the contract, and never lost: every report this leaves out is
+ * already in the parent's ledger for the very settle it covers (see
+ * `filedNoticeKeys`), and a steer this process cannot trust to arrive (a
+ * refused push, or a provider that cannot say what arrived) is filed as a
+ * durable turn instead.
+ *
+ * Returns the entries it could not deliver, for the caller to keep durable.
  */
-async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<PendingTaskNotification[]> {
+async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<{ kept: PendingTaskNotification[]; deferred: PendingTaskNotification[] }> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
-  // A task whose parent continued in a new thread reports there instead.
+  // Tasks may have moved since the flush first checked their parent.
   const liveParent = (id: string) => rows.find((row) => row.childThreadId === id && row.continuedIn === undefined)?.parentThreadId;
   for (const entry of entries) {
     const parent = liveParent(entry.child);
     if (parent !== undefined && parent !== parentThreadId) await enqueueTaskNotification(ctx, parent, entry);
   }
-  const mine = entries.filter((entry) => (liveParent(entry.child) ?? parentThreadId) === parentThreadId);
+  const addressed = entries.filter((entry) => (liveParent(entry.child) ?? parentThreadId) === parentThreadId);
+  const parent = await ctx.store.readThreadRecord(parentThreadId);
+  if (!parent || parent.archivedAt != null) return { kept: [], deferred: [] };
+  if (parent.deletedAt != null) {
+    await appendFile(
+      path.join(ctx.storeRoot, "server.log"),
+      `${new Date().toISOString()} task notification: parent ${parentThreadId} is deleted; dropping ${addressed.length} task(s)\n`,
+      "utf8",
+    ).catch(() => undefined);
+    return { kept: [], deferred: [] };
+  }
+  const running = openTurn(await ctx.store.readTurns(parentThreadId));
+  const filed = await filedNoticeKeys(ctx, parentThreadId);
+  const kept: PendingTaskNotification[] = [];
+  const mine: PendingTaskNotification[] = [];
+  for (const entry of addressed) {
+    const [turns, messages] = await Promise.all([ctx.store.readTurns(entry.child), ctx.store.readMessages(entry.child)]);
+    const last = turns.findLast((turn) => turn.completedAt !== null && !isMaintenanceTurn(turn, messages));
+    const notice = noticeOf(pendingEntryKind(entry), entry.child, last?.id ?? null);
+    if (filed.has(notice)) continue;
+    if (running && entry.refusedMessageId !== undefined) kept.push(entry);
+    else mine.push(entry);
+  }
   // A task paused by a usage limit has not finished: its parent hears when the resumed run ends instead.
   // One that handed off to a new thread has not finished either: its parent hears from the continuation.
   const movedOn = (id: string) => rows.some((row) => row.childThreadId === id && row.parentThreadId === parentThreadId && row.continuedIn !== undefined);
@@ -5056,15 +5224,13 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   const pauseEntries = [...mine, ...continuedPauses];
   const cancelIds = mine.filter((entry) => pendingEntryKind(entry) === "cancel" && !settled.has(entry.child) && !movedOn(entry.child)).map((entry) => entry.child);
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
-  // The settle generation each snapshot was taken at: a turn settling between
-  // the snapshot and the arming below must still report at once (finding: the
-  // gap), rather than arming a watcher that only hears future settles.
   const generations = new Map<string, number>();
   const tasks = (await Promise.all(final.map(async (id) => {
-    const since = await settledWorkTurnCount(ctx, id);
+    // Capture before taking the notice snapshot: the watcher must be able to
+    // see a work turn that settles in the gap before it subscribes.
+    generations.set(id, await settledWorkTurnCount(ctx, id));
     const task = await taskNotificationOf(ctx, id);
     const from = continuesTaskId(id);
-    if (task) generations.set(task.taskId, since);
     return task && from ? { ...task, continuedFrom: from } : task;
   }))).filter(
     (task): task is TaskNotification => task !== null,
@@ -5084,13 +5250,33 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   }))).filter(
     (task): task is TaskNotification => task !== null,
   );
-  const all = [...tasks, ...pauseTasks, ...cancelTasks];
-  if (all.length === 0) return deferred;
+  const all = [...tasks, ...pauseTasks, ...cancelTasks].filter((task) => !filed.has(noticeOf(noticeKindOf(task), task.taskId, task.settleTurnId ?? null)));
+  if (all.length === 0) return { kept, deferred };
+  const reported = pauseEntries.filter((entry) => all.some((task) => task.taskId === entry.child && noticeKindOf(task) === pendingEntryKind(entry)));
+  const selection = running?.modelSelection ?? parent.modelSelection;
+  // A refused notice must never steer again, including if the parent starts
+  // another turn between this flush's idle check and the send.
+  const steerable = running !== null && !reported.some((entry) => entry.refusedMessageId !== undefined)
+    && ctx.driverFor(selection.instanceId).reportsSteerArrival?.(parentThreadId) === true
+    && (await canSteer(ctx, { ...parent, modelSelection: selection }));
+  const started = await startTurn(ctx, {
+    threadId: parentThreadId,
+    prompt: taskNotificationText(all),
+    origin: "task-notification",
+    notification: { tasks: all },
+    delivery: steerable ? "steer" : "queue",
+    ...(steerable ? { modelSelection: selection } : {}),
+    wakeSettled: true,
+  }, steerable ? running.id : undefined);
   // A task that ended its turn with background work still running is not
   // done: when that work ends, the provider wakes the task where it can, and
   // the parent hears again once the task next has nothing left to run. Work
   // that never ends wakes nothing, so it sends nothing further and blocks nothing.
-  for (const task of tasks) {
+  // A check that only failed to look (nothing named) arms nothing: there is no
+  // work to wait past, and a settled task must not re-announce because Moxen
+  // could not see. The notice and `task_status` still say the check failed.
+  for (const task of all) {
+    if (noticeKindOf(task) !== "settle" || task.background.length === 0) continue;
     const row = rows.find(
       (candidate) =>
         candidate.childThreadId === task.taskId &&
@@ -5101,41 +5287,14 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     if (!row) continue;
     const child = await ctx.store.readThreadRecord(task.taskId);
     if (!child || threadStatus(child) === "settled") continue;
-    if (task.background.length > 0 || task.backgroundUnknown) {
-      notifyWhenTaskSettles(ctx, parentThreadId, task.taskId, true, generations.get(task.taskId) ?? null);
-    }
+    notifyWhenTaskSettles(ctx, parentThreadId, task.taskId, true, generations.get(task.taskId)!);
   }
-  const parent = await ctx.store.readThreadRecord(parentThreadId);
-  // Nothing can deliver to an archived or deleted parent, so a task kept
-  // back for later is dropped with the rest instead of waiting forever.
-  if (!parent || parent.archivedAt != null) return [];
-  if (parent.deletedAt != null) {
-    // Dropped, not queued and not thrown: the conversation is gone. One
-    // line in the server log; nothing more (MXN-290 review).
-    await appendFile(
-      path.join(ctx.storeRoot, "server.log"),
-      `${new Date().toISOString()} task notification: parent ${parentThreadId} is deleted; dropping ${all.length} task(s)\n`,
-      "utf8",
-    ).catch(() => undefined);
-    return [];
+  if (started.steerDelivered === false) {
+    // No turn read these reports. Keep the refused attempts separate from
+    // the child-settle entries, whose watcher has a different wake condition.
+    kept.push(...reported.map((entry) => ({ ...entry, refusedMessageId: started.messageId })));
   }
-  const running = openTurn(await ctx.store.readTurns(parentThreadId))?.status === "running";
-  const steerable = running && (await canSteer(ctx, parent));
-  await startTurn(ctx, {
-    threadId: parentThreadId,
-    prompt: taskNotificationText(all),
-    origin: "task-notification",
-    notification: { tasks: all },
-    delivery: steerable ? "steer" : "queue",
-    wakeSettled: true,
-  });
-  // A start that delivered, steered or not, forgets the batch (LOCAL-034):
-  // a steer the gate or the driver refused still wrote its ledger row, and
-  // that unconfirmed row is the notice's own durable redelivery — a crash's
-  // orphan recovery sends it exactly once, and no watcher, timer or later
-  // flush may send it twice. A start that threw keeps the batch the old
-  // way, by never reaching this delete.
-  return deferred;
+  return { kept, deferred };
 }
 
 /**

@@ -390,6 +390,7 @@ export async function sendTurn(
   input: SendTurnInput,
   /** The config in force, when the caller has it: lets admission hold Antigravity automatic prompts while delegation is off. */
   config?: Pick<CliConfig, "providers">,
+  guardNoticeSteer?: (target: StoredTurn) => void,
 ): Promise<SendTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const prompt = input.prompt.trim();
@@ -565,6 +566,7 @@ export async function sendTurn(
     const modelSelection: ModelSelection = input.modelSelection ?? thread.modelSelection;
 
     if (running && (delivery === "auto" || delivery === "steer")) {
+      guardNoticeSteer?.(running);
       const messageId = store.newId();
       await store.appendLedger(threadId, "messages", {
         id: messageId,
@@ -585,7 +587,7 @@ export async function sendTurn(
         summary: prompt.slice(0, 120),
         // The message id the steer was filed under: steer confirmation and
         // redelivery match on this, never on text.
-        payload: { messageId },
+        payload: { messageId, ...(guardNoticeSteer ? { batchNotice: true } : {}) },
         createdAt: now,
       });
       if (input.handoffNote !== undefined && input.handoffNote.trim()) {
@@ -700,6 +702,7 @@ export async function sendTurn(
       createdAt: now,
       ...withAttachments,
       ...withOrigin,
+      ...(origin === "task-notification" ? { queuedTaskNotice: true } : {}),
     });
     await store.appendLedger(threadId, "activity", {
       id: store.newId(),
@@ -985,6 +988,10 @@ export interface RedeliverSteer {
  * out bare. Each send is marked (`steer.redelivered`), so a repeated
  * recovery never queues one twice. Never throws: a thread gone, settled
  * without a wake, or held simply keeps nothing. Returns the new turn ids.
+ *
+ * A runtime notice goes out again like anything else: a notice must never be
+ * lost, and the report a duplicate leaves behind is cheaper than a parent kept
+ * waiting on a task it never hears about.
  */
 export async function redeliverUnconfirmedSteers(
   store: ThreadStore,
@@ -1063,11 +1070,16 @@ export function orphanedSteers(
   activities: readonly { readonly kind: string; readonly turnId: string | null; readonly summary: string; readonly payload?: Record<string, unknown> | undefined }[],
   turnId: string,
 ): RedeliverSteer[] {
+  const accepted = new Set(activities.filter((row) => row.kind === "steer.accepted").map((row) => row.payload?.messageId));
+  const confirmed = new Set(activities.filter((row) => row.kind === "steer.confirmed").map((row) => row.payload?.messageId));
   const used = new Set<string>();
   const steers: RedeliverSteer[] = [];
   for (const activity of activities) {
     if (activity.turnId !== turnId || (activity.kind !== "turn.steered" && activity.kind !== "message.injected")) continue;
     const messageId = typeof activity.payload?.["messageId"] === "string" ? (activity.payload["messageId"] as string) : null;
+    // Until the driver accepts a batched notice, the durable batch owns
+    // retries. In particular, a bare or refused steer cannot redeliver here.
+    if (messageId !== null && (confirmed.has(messageId) || (activity.payload?.batchNotice === true && !accepted.has(messageId)))) continue;
     const original = messageId !== null
       ? (messages.find((message) => message.id === messageId && message.role === "user") ?? null)
       : (messages.find((message) => !used.has(message.id) && message.turnId === turnId && message.role === "user" && (message.text === activity.summary || message.text.startsWith(activity.summary))) ?? null);

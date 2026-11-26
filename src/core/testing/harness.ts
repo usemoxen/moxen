@@ -50,27 +50,51 @@ class HarnessDriver implements TurnDriver {
   private sessions = new Set<string>();
   private prompts = new Map<string, string>();
   private turn = 0;
+  /** What each thread's pushes became: the steers a `drops` driver never confirms. */
+  private readonly steered = new Map<string, Array<{ id: string; text: string }>>();
 
   constructor(
     private readonly behavior: "completing" | "pending" | "failing",
     private readonly onStartSession?: (input: Record<string, unknown>) => void,
     private readonly onSendTurn?: (input: SentTurn) => void,
     private readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void,
-    steer?: { readonly mode: "delivers" | "fails"; readonly onSteer?: (threadId: string, text: string) => void },
+    steer?: { readonly mode: "delivers" | "fails" | "drops" | "unreported"; readonly onSteer?: (threadId: string, text: string) => void },
     sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>,
     private readonly onStopSession?: (threadId: string) => void,
   ) {
     // Only a driver whose provider takes mid-turn input has the method, as with the real ones.
     if (steer) {
-      this.steerTurn = (threadId, text) =>
+      this.steerTurn = (threadId, text, _images, steerId, origin) =>
         steer.mode === "fails"
           ? Effect.fail(new CliError("STEER_FAILED", "Harness driver could not steer the turn."))
-          : Effect.sync(() => steer.onSteer?.(threadId, text));
+          : Effect.sync(() => {
+              steer.onSteer?.(threadId, text);
+              if (steer.mode === "delivers") origin?.onArrival?.();
+              if (steer.mode === "drops") {
+                const pushed = this.steered.get(threadId) ?? [];
+                pushed.push({ id: steerId ?? "steer", text });
+                this.steered.set(threadId, pushed);
+              }
+            });
+      // A driver with an arrival signal says which of its pushes never reached the turn;
+      // `unreported` is the older provider that cannot tell either way.
+      if (steer.mode !== "unreported") {
+        this.reportsSteerArrival = () => true;
+        this.takeUnconfirmedSteers = (threadId) => {
+          const pushed = this.steered.get(threadId) ?? [];
+          this.steered.delete(threadId);
+          return pushed.map((steer) => ({ id: steer.id, text: steer.text, images: [] }));
+        };
+      }
     }
     if (sideQuestion) this.sideQuestion = sideQuestion;
   }
 
-  steerTurn?: (threadId: string, text: string) => Effect.Effect<void, CliError>;
+  steerTurn?: NonNullable<TurnDriver["steerTurn"]>;
+
+  reportsSteerArrival?: (threadId: string) => boolean;
+
+  takeUnconfirmedSteers?: (threadId: string) => ReadonlyArray<{ id: string; text: string; images: readonly { name: string; mimeType: string; data: string }[] }>;
 
   /** Only where the test gave the provider one, as with the real drivers that can copy a session. */
   sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>;
@@ -186,8 +210,13 @@ export interface TestHarnessOptions {
   readonly onUpdateMcpServers?: (threadId: string, servers: readonly McpServerSpec[]) => void;
   /** Sees the threads whose provider session is ended on purpose (`stopSession`). */
   readonly onStopSession?: (threadId: string) => void;
-  /** Which providers' drivers take input mid-turn (they have `steerTurn`): `delivers`, or `fails` when asked. The others have none. */
-  readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivers" | "fails">>;
+  /**
+   * Which providers' drivers take input mid-turn (they have `steerTurn`), and
+   * what happens to a push: `delivers` (accepted and confirmed), `drops`
+   * (accepted, never confirmed), `fails` (refused), or `unreported` (accepted,
+   * with no way to tell whether it arrived). The others have none.
+   */
+  readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivers" | "drops" | "fails" | "unreported">>;
   /** Sees each steer a driver accepted. */
   readonly onSteer?: (threadId: string, text: string) => void;
   /** Answers `/btw` for these providers; the others have no `sideQuestion`, so they are `SIDE_QUESTION_UNSUPPORTED`. */
