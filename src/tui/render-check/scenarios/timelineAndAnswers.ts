@@ -29,7 +29,7 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
   }
   await setup.flush();
   for (let wheel = 0; wheel < 60; wheel += 1) {
-    if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(setup.captureCharFrame())) break;
+    if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d/.test(setup.captureCharFrame())) break;
     await act(async () => setup.mockMouse.scroll(70, 5, "up"));
     await setup.flush();
   }
@@ -59,7 +59,7 @@ export async function runTimelineAndAnswers(setup: TestRendererSetup): Promise<v
     const rows = frame().split("\n");
     let y = -1;
     rows.forEach((line, index) => {
-      if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d\d/.test(line)) y = index;
+      if (/Claude Opus 5\s+·\s+(?:\w{3}, )?\d\d:\d/.test(line)) y = index;
     });
     if (y === -1) fail("closing reply header not visible");
     await act(async () => setup.mockMouse.click(rows[y]!.indexOf("Claude Opus 5") + 2, y));
