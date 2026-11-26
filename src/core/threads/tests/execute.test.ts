@@ -1721,6 +1721,7 @@ describe("driver event pump", () => {
     const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
     const usageThis = { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 };
     const usageOther = { input: 900, cacheRead: 0, cacheCreate: 0, output: 90, thinking: 0, costUsd: 0.99 };
+    const awaiting = Promise.withResolvers<void>();
     const driver: TurnDriver = {
       hasSession: () => Effect.succeed(true),
       startSession: () => Effect.succeed({}),
@@ -1729,6 +1730,7 @@ describe("driver event pump", () => {
       awaitTurn: (_threadId, _turnId, signal) =>
         new Promise((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(new CliError("TURN_ABORTED", "Interrupted before result")), { once: true });
+          awaiting.resolve();
         }),
       // Only a lookup by THIS run's driver turn id may return the turn's own
       // usage; a thread-scoped sample would hand back another turn's.
@@ -1736,6 +1738,7 @@ describe("driver event pump", () => {
       streamEvents: Stream.never,
     };
     const running = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    await awaiting.promise;
     await interruptTurn(store, thread.id, turn.id);
     await running;
     const stored = (await store.readTurns(thread.id)).find((t) => t.id === turn.id);
