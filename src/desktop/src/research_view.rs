@@ -770,9 +770,11 @@ fn role_rows(
                         .collect::<Vec<_>>()
                         .join(", "),
                 ),
-                Message::InstructionsUpdated { .. } => {
-                    notice(message("timeline.instructionsUpdated").into())
-                }
+                Message::InstructionsUpdated { changes, .. } => notice(if changes.is_some() {
+                    crate::model::format_instructions_update_detail(changes.as_ref())
+                } else {
+                    message("timeline.instructionsUpdated").into()
+                }),
                 Message::UsageProtection { .. } => {
                     notice(message("timeline.usageProtection").into())
                 }

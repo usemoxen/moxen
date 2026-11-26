@@ -22,6 +22,7 @@
  * this is for what only moxen knows. (What happens when one is edited while a
  * conversation lives is `rulefiles.ts`'s: a patch, not a resend.)
  */
+import { createHash } from "node:crypto";
 import { driverKindOfInstance, type ModelSelection } from "../types.js";
 import { UNTRUSTED_NOTE } from "../untrusted.js";
 import { readFile } from "node:fs/promises";
@@ -476,6 +477,249 @@ export async function projectMemorySetting(workspaceRoot: string | null, key: "m
   }
 }
 
+/**
+ * Built-in section headings produced by `buildRuntimeInstructions`, in the
+ * order a reader meets them. Used as an allowlist when describing what changed
+ * between two instruction revisions so user-authored headings can never leak
+ * into transcript activity rows.
+ */
+const BUILTIN_SECTION_HEADINGS: readonly string[] = [
+  "Environment",
+  "Look it up",
+  "Moxen knowledge base",
+  "Progress notes",
+  "Showing images",
+  "Layouts, charts and states",
+  "Checklist",
+  "Subagents",
+  "Shell",
+  "Managing Moxen threads",
+  "Messages from Moxen",
+  "Memory",
+  "Web",
+  "Your task",
+];
+
+const BUILTIN_SECTION_SET: ReadonlySet<string> = new Set(BUILTIN_SECTION_HEADINGS);
+
+const MODEL_IDENTITY_LINE = /^You are running on the model (.+?)(?: at (.+?) effort)?\. Use this when you name yourself or sign your work; never guess it\.$/;
+
+const CUSTOM_INSTRUCTION_SOURCES = [
+  ["global", "Global instructions"],
+  ["provider", "Provider instructions"],
+  ["project", "Project instructions"],
+] as const;
+
+export interface InstructionCustomHashes {
+  readonly global?: string;
+  readonly provider?: string;
+  readonly project?: string;
+}
+
+/**
+ * Compact, secret-free metadata paired with a rendered runtime instructions
+ * string so later updates can attribute changes accurately across built-in
+ * sections and custom instruction sources without storing user text twice.
+ */
+export interface InstructionMeta {
+  /** Character length of the built-in prefix inside the rendered instructions string. */
+  readonly builtInLength: number;
+  /** Short SHA-256 digests of non-empty custom instruction sources (never the text itself). */
+  readonly custom?: InstructionCustomHashes;
+}
+
+export interface InstructionsUpdateModel {
+  readonly model: string;
+  readonly effort?: string;
+}
+
+export interface InstructionsUpdateModelChange {
+  readonly from?: InstructionsUpdateModel;
+  readonly to?: InstructionsUpdateModel;
+}
+
+export interface InstructionsUpdateChanges {
+  readonly model?: InstructionsUpdateModelChange;
+  readonly added?: readonly string[];
+  readonly updated?: readonly string[];
+  readonly removed?: readonly string[];
+}
+
+function digestCustomInstruction(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return createHash("sha256").update(trimmed).digest("hex").slice(0, 16);
+}
+
+/** Build secret-free attribution metadata for `current = builtIn (+ userInstructions)`. */
+export function instructionMetaOf(
+  builtIn: string,
+  sources: { readonly global?: string | null | undefined; readonly provider?: string | null | undefined; readonly project?: string | null | undefined },
+): InstructionMeta {
+  const global = digestCustomInstruction(sources.global);
+  const provider = digestCustomInstruction(sources.provider);
+  const project = digestCustomInstruction(sources.project);
+  const custom: { global?: string; provider?: string; project?: string } = {};
+  if (global !== undefined) custom.global = global;
+  if (provider !== undefined) custom.provider = provider;
+  if (project !== undefined) custom.project = project;
+  return {
+    builtInLength: builtIn.length,
+    ...(Object.keys(custom).length > 0 ? { custom } : {}),
+  };
+}
+
+function parseBuiltInSections(text: string): Map<string, string> {
+  const sections = new Map<string, string>();
+  let currentHeading: string | null = null;
+  let lines: string[] = [];
+  const flush = () => {
+    if (currentHeading !== null) sections.set(currentHeading, lines.join("\n").trim());
+  };
+  for (const line of text.split("\n")) {
+    const match = /^# (.+)$/.exec(line);
+    if (match && BUILTIN_SECTION_SET.has(match[1]!)) {
+      flush();
+      currentHeading = match[1]!;
+      lines = [];
+      continue;
+    }
+    if (currentHeading !== null) lines.push(line);
+  }
+  flush();
+  return sections;
+}
+
+function splitEnvironmentModel(body: string): { model: InstructionsUpdateModel | null; rest: string } {
+  const paragraphs = body.split("\n\n");
+  let model: InstructionsUpdateModel | null = null;
+  const kept: string[] = [];
+  for (const paragraph of paragraphs) {
+    const match = MODEL_IDENTITY_LINE.exec(paragraph.trim());
+    if (match && model === null) {
+      model = { model: match[1]!, ...(match[2] === undefined ? {} : { effort: match[2] }) };
+      continue;
+    }
+    kept.push(paragraph);
+  }
+  return { model, rest: kept.join("\n\n").trim() };
+}
+
+/**
+ * Describe what changed between the previously delivered runtime instructions
+ * and the new ones, in compact structured form suitable for the transcript
+ * card. Only allowlisted built-in section names, model/effort identity, and
+ * generic custom-instruction source labels are returned — never raw prompt
+ * text, memory notes, or custom instruction content.
+ */
+export function describeInstructionsChange(input: {
+  readonly previous: string;
+  readonly previousMeta?: InstructionMeta | undefined;
+  readonly current: string;
+  readonly currentMeta?: InstructionMeta | undefined;
+}): InstructionsUpdateChanges | null {
+  const { previous, previousMeta, current, currentMeta } = input;
+  if (previous === current) return null;
+
+  const currBuiltIn = currentMeta ? current.slice(0, currentMeta.builtInLength) : current;
+  const currCustomTail = currentMeta && current.length > currentMeta.builtInLength ? current.slice(currentMeta.builtInLength).replace(/^\n\n/, "") : "";
+
+  let prevBuiltIn: string;
+  let prevCustomTail: string;
+  if (previousMeta !== undefined) {
+    prevBuiltIn = previous.slice(0, previousMeta.builtInLength);
+    prevCustomTail = previous.length > previousMeta.builtInLength ? previous.slice(previousMeta.builtInLength).replace(/^\n\n/, "") : "";
+  } else if (previous === currBuiltIn) {
+    prevBuiltIn = previous;
+    prevCustomTail = "";
+  } else if (currBuiltIn.length > 0 && previous.startsWith(`${currBuiltIn}\n\n`)) {
+    prevBuiltIn = currBuiltIn;
+    prevCustomTail = previous.slice(currBuiltIn.length + 2);
+  } else {
+    prevBuiltIn = previous;
+    prevCustomTail = "";
+  }
+
+  const prevSections = parseBuiltInSections(prevBuiltIn);
+  const currSections = parseBuiltInSections(currBuiltIn);
+
+  // For legacy threads without `previousMeta`, trailing custom instructions sit
+  // at the end of the last built-in section. If that section's current body is
+  // an exact prefix of its previous body followed by a blank line, peel off the
+  // custom tail so the built-in section is not falsely reported as updated.
+  if (previousMeta === undefined && prevCustomTail === "" && prevSections.size > 0) {
+    let lastPrevHeading: string | null = null;
+    for (const heading of prevSections.keys()) lastPrevHeading = heading;
+    if (lastPrevHeading !== null) {
+      const prevBody = prevSections.get(lastPrevHeading)!;
+      const currBody = currSections.get(lastPrevHeading);
+      if (currBody !== undefined && currBody.length > 0 && prevBody.startsWith(`${currBody}\n\n`)) {
+        prevSections.set(lastPrevHeading, currBody);
+        prevCustomTail = prevBody.slice(currBody.length + 2);
+      }
+    }
+  }
+
+  let modelChange: InstructionsUpdateModelChange | undefined;
+  const added: string[] = [];
+  const updated: string[] = [];
+  const removed: string[] = [];
+
+  for (const heading of BUILTIN_SECTION_HEADINGS) {
+    const prevBody = prevSections.get(heading);
+    const currBody = currSections.get(heading);
+    if (prevBody === undefined && currBody === undefined) continue;
+    if (heading === "Environment") {
+      const prevEnv = prevBody === undefined ? { model: null, rest: "" } : splitEnvironmentModel(prevBody);
+      const currEnv = currBody === undefined ? { model: null, rest: "" } : splitEnvironmentModel(currBody);
+      if (prevEnv.model?.model !== currEnv.model?.model || prevEnv.model?.effort !== currEnv.model?.effort) {
+        modelChange = {
+          ...(prevEnv.model === null ? {} : { from: prevEnv.model }),
+          ...(currEnv.model === null ? {} : { to: currEnv.model }),
+        };
+      }
+      if (prevBody === undefined) added.push(heading);
+      else if (currBody === undefined) removed.push(heading);
+      else if (prevEnv.rest !== currEnv.rest) updated.push(heading);
+      continue;
+    }
+    if (prevBody === undefined) added.push(heading);
+    else if (currBody === undefined) removed.push(heading);
+    else if (prevBody !== currBody) updated.push(heading);
+  }
+
+  if (previousMeta !== undefined && currentMeta !== undefined) {
+    for (const [key, label] of CUSTOM_INSTRUCTION_SOURCES) {
+      const prevHash = previousMeta.custom?.[key];
+      const currHash = currentMeta.custom?.[key];
+      if (prevHash === undefined && currHash !== undefined) added.push(label);
+      else if (prevHash !== undefined && currHash === undefined) removed.push(label);
+      else if (prevHash !== undefined && currHash !== undefined && prevHash !== currHash) updated.push(label);
+    }
+  } else if (prevCustomTail !== currCustomTail) {
+    if (prevCustomTail === "" && currCustomTail !== "") {
+      const labels = currentMeta?.custom
+        ? CUSTOM_INSTRUCTION_SOURCES.filter(([key]) => currentMeta.custom?.[key] !== undefined).map(([, label]) => label)
+        : [];
+      added.push(...(labels.length > 0 ? labels : ["Custom instructions"]));
+    } else if (prevCustomTail !== "" && currCustomTail === "") {
+      removed.push("Custom instructions");
+    } else {
+      updated.push("Custom instructions");
+    }
+  }
+
+  if (modelChange === undefined && added.length === 0 && updated.length === 0 && removed.length === 0) {
+    return null;
+  }
+  return {
+    ...(modelChange === undefined ? {} : { model: modelChange }),
+    ...(added.length === 0 ? {} : { added }),
+    ...(updated.length === 0 ? {} : { updated }),
+    ...(removed.length === 0 ? {} : { removed }),
+  };
+}
+
 /** What one provider's conversation has been given of the runtime instructions (see `StoredThread.instructionState`). */
 export interface InstructionState {
   /** Change-tracked instructions, without any conversation-only context. */
@@ -489,6 +733,8 @@ export interface InstructionState {
    * off. Only this build can have written one, so older threads have none.
    */
   readonly opening?: string;
+  readonly baselineMeta?: InstructionMeta;
+  readonly deliveredMeta?: InstructionMeta;
 }
 
 /**
@@ -520,16 +766,25 @@ export function planInstructions(
   current: string,
   threadId?: string,
   startup?: string,
+  meta?: InstructionMeta,
 ): { systemPrompt: string; update: string | null; next: InstructionState } {
   const baseline = state?.baseline ?? current;
   const delivered = state?.delivered ?? current;
   const opening = state?.opening ?? (state === undefined ? startup : undefined);
+  const baselineMeta = state?.baselineMeta ?? (state === undefined ? meta : undefined);
+  const deliveredMeta = state?.deliveredMeta ?? (state === undefined ? meta : undefined);
   // Thread identity is immutable session context, not shared, change-tracked guidance.
   const systemPrompt = threadId === undefined ? (opening ?? baseline) : `${opening ?? baseline}\n\nYour Moxen thread id is ${threadId}.`;
   return {
     systemPrompt,
     update: current === delivered ? null : current,
-    next: { baseline, delivered, ...(opening === undefined ? {} : { opening }) },
+    next: {
+      baseline,
+      delivered,
+      ...(opening === undefined ? {} : { opening }),
+      ...(baselineMeta === undefined ? {} : { baselineMeta }),
+      ...(deliveredMeta === undefined ? {} : { deliveredMeta }),
+    },
   };
 }
 

@@ -857,10 +857,12 @@ delegated review task (`delegate` with `mode: "review"`), or one prompt
   answered, along with the mode block.
   The acknowledged instruction update is recorded on the turn that carried it
   as an `instructions.updated` activity, and both clients draw it as a compact
-  system card. It names the provider only: the instructions' text is neither
-  stored there nor shown, a fresh conversation's baseline and a mode change
-  leave no such marker, and an unanswered turn leaves none until a retry is
-  answered. The marker's write is best-effort: if it fails after the provider
+  system card. It records the provider and a structured summary of what changed
+  (model or effort change, allowlisted built-in sections added/updated/removed,
+  and which custom-instruction source changed), never the instructions' text,
+  memory notes, or secrets; older ledger rows with only `provider` fall back to
+  the generic line. A fresh conversation's baseline and a mode change leave no
+  such marker, and an unanswered turn leaves none until a retry is answered. The marker's write is best-effort: if it fails after the provider
   answered, the turn still completes with its reply, and the next turn that
   carries the update lands the marker when its answer arrives.
 - A new thread starts in Build unless a mode is picked while drafting it,

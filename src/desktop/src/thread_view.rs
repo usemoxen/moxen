@@ -687,7 +687,7 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                     }))
                                     .into_any_element()
                             }
-                            Message::InstructionsUpdated { at } => div()
+                            Message::InstructionsUpdated { changes, at } => div()
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.))
@@ -721,8 +721,8 @@ pub fn render(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -
                                     div()
                                         .text_size(px(13.))
                                         .text_color(color("ink-2"))
-                                        .child(crate::language::message(
-                                            "timeline.instructionsUpdatedDetail",
+                                        .child(crate::model::format_instructions_update_detail(
+                                            changes.as_ref(),
                                         )),
                                 )
                                 .into_any_element(),

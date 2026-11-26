@@ -13,7 +13,7 @@ import {
   thoughtDuration,
   thoughtTail,
 } from "../turns.js";
-import type { TimelineEntry } from "../thread.js";
+import { formatInstructionsUpdateDetail, type TimelineEntry } from "../thread.js";
 import { applyLanguage } from "../../i18n/index.js";
 
 function entry(overrides: Partial<TimelineEntry> & { id: string }): TimelineEntry {
@@ -426,6 +426,23 @@ describe("groupTurns", () => {
     expect(groups[0]?.instructionsUpdate?.id).toBe("iu");
     expect(groups[0]?.work).toEqual([]);
     expect(groups[0]?.reply?.id).toBe("a1");
+    expect(formatInstructionsUpdateDetail(groups[0]?.instructionsUpdate?.activity?.payload)).toBe(
+      "This turn ran with Moxen's updated runtime instructions.",
+    );
+    expect(
+      formatInstructionsUpdateDetail({
+        provider: "codex",
+        changes: {
+          model: {
+            from: { model: "gpt-6.2-sol", effort: "medium" },
+            to: { model: "gpt-6.2-sol", effort: "high" },
+          },
+          added: ["Web"],
+          updated: ["Memory", "Project instructions"],
+          removed: ["Checklist"],
+        },
+      }),
+    ).toBe("Model: gpt-6.2-sol (medium → high) · Added: Web · Updated: Memory, Project instructions · Removed: Checklist");
   });
 
   it("only counts a prompt as a nudge once the turn has started working", () => {

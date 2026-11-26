@@ -251,7 +251,24 @@ export interface StoredThread {
    * startup snapshot); absent for a conversation that began with the baseline,
    * and dropped when memory is turned off. See `planInstructions`.
    */
-  readonly instructionState?: Readonly<Record<string, { readonly baseline: string; readonly delivered: string; readonly opening?: string }>>;
+  readonly instructionState?: Readonly<
+    Record<
+      string,
+      {
+        readonly baseline: string;
+        readonly delivered: string;
+        readonly opening?: string;
+        readonly baselineMeta?: {
+          readonly builtInLength: number;
+          readonly custom?: { readonly global?: string; readonly provider?: string; readonly project?: string };
+        };
+        readonly deliveredMeta?: {
+          readonly builtInLength: number;
+          readonly custom?: { readonly global?: string; readonly provider?: string; readonly project?: string };
+        };
+      }
+    >
+  >;
   /**
    * The mode each provider's conversation was last told about, keyed like
    * `providerSessions` (Claude and the Harness; OpenCode's driver keeps its

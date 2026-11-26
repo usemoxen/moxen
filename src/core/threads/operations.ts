@@ -69,7 +69,7 @@ import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, describeInstructionsChange, instructionMetaOf, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState, type InstructionsUpdateChanges } from "./instructions.js";
 import { memoryStartupText } from "../memory/memory.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { ranTurns, toThreadEnvelope } from "./project.js";
@@ -201,16 +201,24 @@ interface InstructionsUpdate {
  * The activity row saying a turn carried the runtime instructions the model
  * had not seen yet. It is recorded only once the provider answered the prompt
  * (`instructionsUpdate.delivered`) and never carries the instructions
- * themselves — only the provider whose conversation received them.
+ * themselves — only the provider and a structured summary of what changed
+ * (model/effort, allowlisted built-in section names, and custom-instruction
+ * source labels).
  */
-function instructionsUpdateRow(store: ThreadStore, threadId: string, turnId: string, provider: string) {
+function instructionsUpdateRow(
+  store: ThreadStore,
+  threadId: string,
+  turnId: string,
+  provider: string,
+  changes: InstructionsUpdateChanges | null = null,
+) {
   return {
     id: store.newId(),
     threadId,
     turnId,
     kind: "instructions.updated",
     summary: "Runtime instructions updated",
-    payload: { provider },
+    payload: { provider, ...(changes === null ? {} : { changes }) },
     createdAt: store.nowIso(),
   };
 }
@@ -431,17 +439,37 @@ async function sessionSetup(
     ...(memoryAccess === null ? {} : { memory: memoryAccess }),
     ...(nativeKind === null ? {} : { web: { provider: nativeKind, disabledNativeTools: nativeConfig?.disabledNativeTools, searchOrder: parseNameList(nativeConfig?.webSearchOrder), fetchOrder: parseNameList(nativeConfig?.webFetchOrder), servers: mcpServers } }),
   } as const;
-  const current = buildRuntimeInstructions(instructions);
+  const builtIn = buildRuntimeInstructions({ ...instructions, userInstructions: [] });
+  const current = user.length > 0 ? `${builtIn}\n\n${user.join("\n\n")}` : builtIn;
+  const meta = instructionMetaOf(builtIn, {
+    global: ctx.config.instructions,
+    provider: providerConfig?.instructions,
+    project: fromProject,
+  });
   // No memory content: the conversation begins with the change-tracked text itself, so it records no opening.
   const startup = memoryStartup === null ? undefined : buildRuntimeInstructions({ ...instructions, memoryStartup });
   // Memory turned off after this conversation began: its stored opening holds a snapshot that must not be
   // sent to a provider session that restarts (or to one that applies its instructions again). Drop it here;
   // the recorded state below stops carrying it, so turning memory back on cannot resurface it either.
   const planningState = state !== undefined && memoryAccess === null && state.opening !== undefined
-    ? { baseline: state.baseline, delivered: state.delivered }
+    ? {
+        baseline: state.baseline,
+        delivered: state.delivered,
+        ...(state.baselineMeta === undefined ? {} : { baselineMeta: state.baselineMeta }),
+        ...(state.deliveredMeta === undefined ? {} : { deliveredMeta: state.deliveredMeta }),
+      }
     : state;
-  const plan = planInstructions(planningState, current, thread.id, startup);
+  const plan = planInstructions(planningState, current, thread.id, startup, meta);
   const next: InstructionState = plan.next;
+  const changes =
+    plan.update === null
+      ? null
+      : describeInstructionsChange({
+          previous: next.delivered,
+          previousMeta: next.deliveredMeta,
+          current: plan.update,
+          currentMeta: meta,
+        });
   const record = async (state: InstructionState): Promise<void> => {
     await ctx.store.withThreadLock(thread.id, async () => {
       const fresh = await ctx.store.readThreadRecord(thread.id);
@@ -466,7 +494,7 @@ async function sessionSetup(
           const marked = (await ctx.store.readActivities(thread.id)).some((activity) => activity.kind === "instructions.updated" && activity.turnId === turnId);
           if (!marked) {
             try {
-              await ctx.store.appendLedger(thread.id, "activity", instructionsUpdateRow(ctx.store, thread.id, turnId, key));
+              await ctx.store.appendLedger(thread.id, "activity", instructionsUpdateRow(ctx.store, thread.id, turnId, key, changes));
             } catch {
               return;
             }
@@ -479,7 +507,14 @@ async function sessionSetup(
     }
   };
   const recorded = thread.instructionState?.[key];
-  if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered || recorded?.opening !== next.opening) await record(next);
+  if (
+    recorded?.baseline !== next.baseline ||
+    recorded?.delivered !== next.delivered ||
+    recorded?.opening !== next.opening ||
+    (recorded?.baselineMeta === undefined && next.baselineMeta !== undefined)
+  ) {
+    await record(next);
+  }
   const baseDisabledTools =
     nativeKind === null
       ? []
@@ -504,7 +539,7 @@ async function sessionSetup(
     instructionsUpdate:
       plan.update === null
         ? null
-        : { text: plan.update, delivered: () => acknowledge({ ...next, delivered: plan.update! }) },
+        : { text: plan.update, delivered: () => acknowledge({ ...next, delivered: plan.update!, deliveredMeta: meta }) },
     modeUpdate: pendingModeUpdate(ctx, thread, key, history),
     fresh: !history,
     key,
@@ -3937,8 +3972,16 @@ export async function revertThread(
       // The provider forgot the dropped turns, and an instruction update may have ridden one of them: the model
       // has certainly seen only what the conversation began with, so the next prompt carries any update again.
       const state = current.instructionState?.[key];
-      const instructionState = state
-        ? { ...current.instructionState, [key]: { ...state, delivered: state.baseline } }
+      const resetState = state
+        ? {
+            baseline: state.baseline,
+            delivered: state.baseline,
+            ...(state.opening === undefined ? {} : { opening: state.opening }),
+            ...(state.baselineMeta === undefined ? {} : { baselineMeta: state.baselineMeta, deliveredMeta: state.baselineMeta }),
+          }
+        : undefined;
+      const instructionState = resetState
+        ? { ...current.instructionState, [key]: resetState }
         : current.instructionState;
       // Likewise a mode change: forget what this provider was told, so the next prompt says it again if it still applies.
       const { [key]: _told, ...modeState } = current.modeState ?? {};

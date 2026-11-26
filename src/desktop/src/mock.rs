@@ -627,6 +627,21 @@ impl MockSource {
         // A turn that carried updated runtime instructions: its own card,
         // never the instructions' text.
         source.messages[0].push(Message::InstructionsUpdated {
+            changes: Some(crate::model::InstructionsUpdateChanges {
+                model: Some(crate::model::InstructionsModelChange {
+                    from: Some(crate::model::InstructionsModelRef {
+                        model: "claude-opus-5".into(),
+                        effort: Some("medium".into()),
+                    }),
+                    to: Some(crate::model::InstructionsModelRef {
+                        model: "claude-opus-5".into(),
+                        effort: Some("high".into()),
+                    }),
+                }),
+                added: Vec::new(),
+                updated: vec!["Memory".into(), "Project instructions".into()],
+                removed: Vec::new(),
+            }),
             at: "Thu 09:54".into(),
         });
         source

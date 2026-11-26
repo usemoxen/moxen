@@ -15,14 +15,14 @@ import { fail } from "../helpers.js";
 export async function runInstructionUpdate(): Promise<void> {
   const createdAt = "2026-09-25T14:00:00.000Z";
   const at = (seconds: number) => new Date(Date.parse(createdAt) + seconds * 1000).toISOString();
-  const marker = (id: string, turnId: string, atIso: string) => ({
+  const marker = (id: string, turnId: string, atIso: string, changes?: Record<string, unknown>) => ({
     id,
     kind: "instructions.updated",
     summary: "Runtime instructions updated",
     tone: "info",
     turnId,
     createdAt: atIso,
-    payload: { provider: "claude" },
+    payload: { provider: "claude", ...(changes ? { changes } : {}) },
   });
   const groups = groupTurns(timeline({
     ...emptyThreadState(),
@@ -32,7 +32,10 @@ export async function runInstructionUpdate(): Promise<void> {
       toMessageEnvelope({ id: "compact", threadId: "t", turnId: "turn-2", role: "user", text: "/compact", createdAt: at(10) }),
     ],
     activities: [
-      marker("instructions-updated", "turn-1", at(3)),
+      marker("instructions-updated", "turn-1", at(3), {
+        model: { from: { model: "claude-opus-5", effort: "medium" }, to: { model: "claude-opus-5", effort: "high" } },
+        updated: ["Memory", "Project instructions"],
+      }),
       marker("instructions-updated-compact", "turn-2", at(11)),
     ],
   }));
@@ -48,7 +51,10 @@ export async function runInstructionUpdate(): Promise<void> {
     console.log(frame);
     const cards = frame.split("Runtime instructions updated").length - 1;
     if (cards !== 2) fail(`expected the card on both turns (a normal one and a /compact one), saw ${cards}`);
-    if (!frame.includes("updated runtime instructions")) fail("the instruction update card does not say what changed");
+    if (!frame.includes("Model: claude-opus-5 (medium → high) · Updated: Memory, Project instructions")) {
+      fail("the instruction update card does not show the structured change summary");
+    }
+    if (!frame.includes("updated runtime instructions")) fail("legacy instruction update rows lost their fallback detail");
     // The card is the record; the instructions themselves never reach the transcript.
     if (frame.includes("<moxen-instructions-update>")) fail("the instruction text leaked into the transcript");
   } finally {

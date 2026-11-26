@@ -133,9 +133,11 @@ pub enum Message {
         /// When it landed, as the header shows it.
         at: String,
     },
-    /// A turn carried updated runtime instructions. The card names the fact
-    /// only: the instructions themselves are never stored or shown.
+    /// A turn carried updated runtime instructions. The card names what changed
+    /// (model/effort, built-in sections, custom-instruction source), never the
+    /// instructions themselves.
     InstructionsUpdated {
+        changes: Option<InstructionsUpdateChanges>,
         /// When it landed, as the header shows it.
         at: String,
     },
@@ -152,6 +154,110 @@ pub enum Message {
         /// When it landed, as the header shows it.
         at: String,
     },
+}
+
+/// One model/effort endpoint inside an `instructions.updated` change summary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InstructionsModelRef {
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+impl InstructionsModelRef {
+    fn display(&self) -> String {
+        match &self.effort {
+            Some(effort) => format!("{} ({effort})", self.model),
+            None => self.model.clone(),
+        }
+    }
+}
+
+/// Model or reasoning-effort change reported on an `instructions.updated` row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InstructionsModelChange {
+    pub from: Option<InstructionsModelRef>,
+    pub to: Option<InstructionsModelRef>,
+}
+
+impl InstructionsModelChange {
+    fn display(&self) -> Option<String> {
+        match (&self.from, &self.to) {
+            (Some(from), Some(to)) => {
+                if from.model == to.model
+                    && let (Some(fe), Some(te)) = (&from.effort, &to.effort)
+                    && fe != te
+                {
+                    return Some(format!("{} ({fe} → {te})", to.model));
+                }
+                Some(format!("{} → {}", from.display(), to.display()))
+            }
+            (None, Some(one)) | (Some(one), None) => Some(one.display()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Structured summary of what changed when runtime instructions updated.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InstructionsUpdateChanges {
+    pub model: Option<InstructionsModelChange>,
+    pub added: Vec<String>,
+    pub updated: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl InstructionsUpdateChanges {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.added.is_empty()
+            && self.updated.is_empty()
+            && self.removed.is_empty()
+    }
+}
+
+/// Localized detail line for an `instructions.updated` card, falling back to
+/// the generic line for older ledger rows without `payload.changes`.
+pub fn format_instructions_update_detail(changes: Option<&InstructionsUpdateChanges>) -> String {
+    let Some(changes) = changes else {
+        return crate::language::message("timeline.instructionsUpdatedDetail").to_string();
+    };
+    let mut parts = Vec::new();
+    if let Some(model) = changes
+        .model
+        .as_ref()
+        .and_then(InstructionsModelChange::display)
+    {
+        parts.push(crate::language::fill(
+            "timeline.instructionsUpdatedModel",
+            &[("{change}", model.as_str())],
+        ));
+    }
+    if !changes.added.is_empty() {
+        let joined = changes.added.join(", ");
+        parts.push(crate::language::fill(
+            "timeline.instructionsUpdatedAdded",
+            &[("{items}", joined.as_str())],
+        ));
+    }
+    if !changes.updated.is_empty() {
+        let joined = changes.updated.join(", ");
+        parts.push(crate::language::fill(
+            "timeline.instructionsUpdatedUpdated",
+            &[("{items}", joined.as_str())],
+        ));
+    }
+    if !changes.removed.is_empty() {
+        let joined = changes.removed.join(", ");
+        parts.push(crate::language::fill(
+            "timeline.instructionsUpdatedRemoved",
+            &[("{items}", joined.as_str())],
+        ));
+    }
+    if parts.is_empty() {
+        crate::language::message("timeline.instructionsUpdatedDetail").to_string()
+    } else {
+        parts.join(" · ")
+    }
 }
 
 /// One settled delegated task, as a task-notification message carries it.

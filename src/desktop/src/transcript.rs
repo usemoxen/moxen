@@ -328,13 +328,21 @@ pub fn project(thread: &Value) -> Vec<Row> {
         }
         if kind == "instructions.updated" {
             // Moxen's acknowledgement that this turn carried new runtime
-            // instructions: its own system card, and never their text.
+            // instructions: its own system card showing structured changes,
+            // never the instructions' text.
+            let changes = activity
+                .get("payload")
+                .and_then(|payload| payload.get("changes"))
+                .and_then(parse_instructions_update_changes);
             rows.push((
                 when,
                 1_000_000 + n,
                 Row {
                     key: text(activity, &["id"]).unwrap_or_default().to_string(),
-                    message: Message::InstructionsUpdated { at: clock(when) },
+                    message: Message::InstructionsUpdated {
+                        changes,
+                        at: clock(when),
+                    },
                 },
             ));
             continue;
@@ -900,6 +908,63 @@ pub fn created_ms(message: &Value) -> i64 {
         .unwrap_or_else(crate::live::now_ms)
 }
 
+fn parse_instructions_model_ref(value: &Value) -> Option<crate::model::InstructionsModelRef> {
+    let model = value.get("model")?.as_str()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let effort = value
+        .get("effort")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(str::to_string);
+    Some(crate::model::InstructionsModelRef {
+        model: model.to_string(),
+        effort,
+    })
+}
+
+fn parse_string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_instructions_update_changes(
+    value: &Value,
+) -> Option<crate::model::InstructionsUpdateChanges> {
+    let model = value.get("model").and_then(|model| {
+        let from = model.get("from").and_then(parse_instructions_model_ref);
+        let to = model.get("to").and_then(parse_instructions_model_ref);
+        if from.is_none() && to.is_none() {
+            None
+        } else {
+            Some(crate::model::InstructionsModelChange { from, to })
+        }
+    });
+    let changes = crate::model::InstructionsUpdateChanges {
+        model,
+        added: parse_string_list(value.get("added")),
+        updated: parse_string_list(value.get("updated")),
+        removed: parse_string_list(value.get("removed")),
+    };
+    if changes.is_empty() {
+        None
+    } else {
+        Some(changes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1134,19 +1199,46 @@ mod tests {
             "messages": [],
             "activities": [
                 activity(
-                    "iu",
+                    "iu-legacy",
                     "instructions.updated",
                     "2026-11-16T10:00:28.000Z",
                     json!({"provider": "claude"})
                 ),
+                activity(
+                    "iu-detailed",
+                    "instructions.updated",
+                    "2026-11-16T10:01:28.000Z",
+                    json!({
+                        "provider": "codex",
+                        "changes": {
+                            "model": {
+                                "from": {"model": "gpt-6.2-sol", "effort": "medium"},
+                                "to": {"model": "gpt-6.2-sol", "effort": "high"}
+                            },
+                            "added": ["Web"],
+                            "updated": ["Memory", "Project instructions"]
+                        }
+                    })
+                ),
             ],
         });
         let rows = project(&value);
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert!(matches!(
-            rows[0].message,
-            Message::InstructionsUpdated { .. }
+            &rows[0].message,
+            Message::InstructionsUpdated { changes: None, .. }
         ));
+        let Message::InstructionsUpdated {
+            changes: Some(changes),
+            ..
+        } = &rows[1].message
+        else {
+            panic!("expected structured instruction changes");
+        };
+        assert_eq!(
+            crate::model::format_instructions_update_detail(Some(changes)),
+            "Model: gpt-6.2-sol (medium → high) · Added: Web · Updated: Memory, Project instructions"
+        );
         // The card is the whole row: no user bubble and no instruction text.
         assert!(
             !rows

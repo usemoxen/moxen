@@ -1191,8 +1191,11 @@ describe("the acknowledgement of a runtime instructions update", () => {
       setInstructions("Rule B.");
       await send(connection, id, "two");
       const [marker] = await markers(harness, id);
-      expect(marker).toMatchObject({ turnId: (await harness.store.readTurns(id))[1]!.id, payload: { provider: "claude" } });
-      // The marker names the fact, never the instructions themselves.
+      expect(marker).toMatchObject({
+        turnId: (await harness.store.readTurns(id))[1]!.id,
+        payload: { provider: "claude", changes: { updated: ["Global instructions"] } },
+      });
+      // The marker names the source that changed, never the instructions themselves.
       expect(JSON.stringify(marker)).not.toContain("Rule B.");
 
       // Acknowledged once: a later turn carries nothing and adds no marker.

@@ -118,6 +118,64 @@ export function emptyThreadState(): ThreadState {
   };
 }
 
+interface InstructionsModelRef {
+  model: string;
+  effort?: string;
+}
+
+function readInstructionsModelRef(raw: unknown): InstructionsModelRef | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.model !== "string" || !obj.model.trim()) return null;
+  const effort = typeof obj.effort === "string" && obj.effort.trim() ? obj.effort.trim() : undefined;
+  return { model: obj.model.trim(), ...(effort === undefined ? {} : { effort }) };
+}
+
+function readInstructionItemList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+}
+
+function formatInstructionsModelRef(ref: InstructionsModelRef): string {
+  return ref.effort ? `${ref.model} (${ref.effort})` : ref.model;
+}
+
+function formatInstructionsModelChange(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const from = readInstructionsModelRef(obj.from);
+  const to = readInstructionsModelRef(obj.to);
+  if (!from && !to) return null;
+  if (from && to) {
+    if (from.model === to.model && from.effort && to.effort && from.effort !== to.effort) {
+      return `${to.model} (${from.effort} → ${to.effort})`;
+    }
+    return `${formatInstructionsModelRef(from)} → ${formatInstructionsModelRef(to)}`;
+  }
+  return formatInstructionsModelRef((to ?? from)!);
+}
+
+/**
+ * Human-readable detail line for an `instructions.updated` card, built from the
+ * structured `payload.changes` summary core recorded. Falls back to the generic
+ * detail line for older ledger rows that carried only `{ provider }`.
+ */
+export function formatInstructionsUpdateDetail(payload: unknown): string {
+  const changes = payload && typeof payload === "object" ? (payload as Record<string, unknown>).changes : undefined;
+  if (!changes || typeof changes !== "object") return tr("timeline.instructionsUpdatedDetail");
+  const obj = changes as Record<string, unknown>;
+  const parts: string[] = [];
+  const model = formatInstructionsModelChange(obj.model);
+  if (model) parts.push(tr("timeline.instructionsUpdatedModel", { change: model }));
+  const added = readInstructionItemList(obj.added);
+  if (added.length > 0) parts.push(tr("timeline.instructionsUpdatedAdded", { items: added.join(", ") }));
+  const updated = readInstructionItemList(obj.updated);
+  if (updated.length > 0) parts.push(tr("timeline.instructionsUpdatedUpdated", { items: updated.join(", ") }));
+  const removed = readInstructionItemList(obj.removed);
+  if (removed.length > 0) parts.push(tr("timeline.instructionsUpdatedRemoved", { items: removed.join(", ") }));
+  return parts.length > 0 ? parts.join(" · ") : tr("timeline.instructionsUpdatedDetail");
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)

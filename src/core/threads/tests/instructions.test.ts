@@ -7,7 +7,7 @@ import { UI_BLOCK_LIMITS, UI_COLORS, UI_NODE_TYPES, UI_OP_NAMES, UI_STATES, pars
 import { describe, expect, it } from "vitest";
 
 import { withModeChange } from "../modes.js";
-import { runningModelOf, ACP_PROGRESS_GUIDANCE, OPENCODE_PROGRESS_GUIDANCE, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, MEMORY_READ_ONLY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, THREAD_CLI_GUIDANCE, BACKGROUND_WAIT_GUIDANCE, buildRuntimeInstructions, harnessName, projectInstructions } from "../instructions.js";
+import { runningModelOf, ACP_PROGRESS_GUIDANCE, OPENCODE_PROGRESS_GUIDANCE, IMAGE_GUIDANCE, UI_BLOCK_EXAMPLE, UI_BLOCK_GUIDANCE, MESSAGES_GUIDANCE, TASK_NOTIFICATION_LINE, CHECKLIST_GUIDANCE, NO_REDELEGATION_GUIDANCE, OPENCODE_SUBAGENT_GUIDANCE, PROGRESS_GUIDANCE, MEMORY_GUIDANCE, MEMORY_READ_ONLY_GUIDANCE, planInstructions, withInstructionsUpdate, LOOKUP_GUIDANCE, THREAD_CLI_GUIDANCE, BACKGROUND_WAIT_GUIDANCE, buildRuntimeInstructions, describeInstructionsChange, harnessName, instructionMetaOf, projectInstructions } from "../instructions.js";
 import { buildShellGuidance, type ShellKind } from "../shells.js";
 
 const LOCAL = { mode: "local" as const, path: "/repo", branch: "main" };
@@ -328,5 +328,51 @@ describe("runtime instructions", () => {
     const risks = buildRuntimeInstructions({ ...base, criticLens: "risks" });
     expect(risks).toContain('labelled "Risks"');
     expect(risks).not.toContain('labelled "Evidence"');
+  });
+
+  it("describes model, built-in section, and custom-instruction changes without leaking user headings or text", () => {
+    const prevBuiltIn = buildRuntimeInstructions({
+      instanceId: "codex",
+      running: { model: "gpt-6.2-sol", effort: "medium" },
+      env: LOCAL,
+      shell: LINUX,
+      memory: "write",
+    });
+    const prevCustom = "# Secret Client Heading\nDo not leak this.";
+    const previous = `${prevBuiltIn}\n\n${prevCustom}`;
+    const previousMeta = instructionMetaOf(prevBuiltIn, { global: prevCustom });
+
+    const currBuiltIn = buildRuntimeInstructions({
+      instanceId: "codex",
+      running: { model: "gpt-6.2-sol", effort: "high" },
+      env: LOCAL,
+      shell: LINUX,
+      knowledge: true,
+    });
+    const currProject = "# Another Secret\nProject rule.";
+    const current = `${currBuiltIn}\n\n${prevCustom}\n\n${currProject}`;
+    const currentMeta = instructionMetaOf(currBuiltIn, { global: prevCustom, project: currProject });
+
+    const changes = describeInstructionsChange({ previous, previousMeta, current, currentMeta });
+    expect(changes).toEqual({
+      model: {
+        from: { model: "gpt-6.2-sol", effort: "medium" },
+        to: { model: "gpt-6.2-sol", effort: "high" },
+      },
+      added: ["Moxen knowledge base", "Project instructions"],
+      removed: ["Memory"],
+    });
+    // Neither custom body nor custom Markdown headings ever appear in the summary.
+    expect(JSON.stringify(changes)).not.toContain("Secret Client Heading");
+    expect(JSON.stringify(changes)).not.toContain("Another Secret");
+    expect(JSON.stringify(changes)).not.toContain("Do not leak");
+
+    // Legacy state (without previousMeta) editing custom instructions does not
+    // misattribute the change to the last built-in section.
+    const editedCurrent = `${prevBuiltIn}\n\nUpdated secret rule.`;
+    const editedMeta = instructionMetaOf(prevBuiltIn, { global: "Updated secret rule." });
+    expect(describeInstructionsChange({ previous, current: editedCurrent, currentMeta: editedMeta })).toEqual({
+      updated: ["Custom instructions"],
+    });
   });
 });

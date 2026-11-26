@@ -553,9 +553,9 @@ fn subagent(w: &Workspace, selected: &Agent, cx: &mut Context<Workspace>) -> Div
                             .collect::<Vec<_>>()
                             .join(", "),
                     ),
-                    Message::InstructionsUpdated { .. } => detail_line(
+                    Message::InstructionsUpdated { changes, .. } => detail_line(
                         "Runtime instructions",
-                        crate::language::message("timeline.instructionsUpdatedDetail").to_string(),
+                        crate::model::format_instructions_update_detail(changes.as_ref()),
                     ),
                     Message::UsageProtection { .. } => detail_line(
                         "Usage protection",

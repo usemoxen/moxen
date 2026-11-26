@@ -22,7 +22,7 @@ import { markModalDismissed } from "../../model/modalDismiss.js";
 import { describeActivity, fileRowCounts, formatMs, memoryLabel, memoryTitle, readRangeLabel, webToolSource } from "../../model/activity.js";
 import { findPatchFile, type PatchFile } from "../../model/patch.js";
 import { renderMessage } from "../../model/message.js";
-import { isBackgroundNotification, isCompactPrompt, isUsageContinue, isUsageProtection, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
+import { formatInstructionsUpdateDetail, isBackgroundNotification, isCompactPrompt, isUsageContinue, isUsageProtection, taskNotifications, untilLabel, type TaskNotificationView, type TimelineEntry } from "../../model/thread.js";
 import { usagePauseLines, usagePauseTitle } from "../../model/usagepause.js";
 import type { TurnUsagePause } from "../../../core/types.js";
 import { clockTime, formatDuration, proportionalTarget, runningThought, thoughtDuration, segmentWork, summarizeWork, type TurnGroup } from "../../model/turns.js";
@@ -993,10 +993,11 @@ function CompactionLine({
 
 /**
  * Moxen's own record that this turn ran with updated runtime instructions:
- * a compact system card, like a task notice, and never the instructions
- * themselves (which the store does not keep).
+ * a compact system card showing what changed (model/effort, sections, or
+ * custom-instruction source), never the instructions themselves.
  */
 function InstructionsUpdateCard({ entry, now }: { entry: TimelineEntry; now: number }) {
+  const detail = formatInstructionsUpdateDetail(entry.activity?.payload);
   return (
     <box
       border={["left"]}
@@ -1006,7 +1007,7 @@ function InstructionsUpdateCard({ entry, now }: { entry: TimelineEntry; now: num
       backgroundColor={SURFACE.panel}
     >
       <SpeakerHeader label={tr("timeline.instructionsUpdated")} time={clockTime(entry.at, now)} color={COLOR.diff} background={SURFACE.panel} />
-      <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word">{tr("timeline.instructionsUpdatedDetail")}</text>
+      <text fg={COLOR.dim} bg={SURFACE.panel} wrapMode="word">{detail}</text>
     </box>
   );
 }
