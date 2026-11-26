@@ -1,10 +1,14 @@
 /**
  * MXN-402: the agent tools list OpenCode Go on a cold start whose credential
- * probe does not answer. A stored usage reading proves the provider runs
- * here, so the catalog keeps its models and reports the auth state unknown;
- * `models` (with and without a provider filter) and `usage_status` must both
- * see it, with its windows. The catalog row is the real one `buildDirectProviders`
+ * probe does not answer. `models` (with and without a provider filter) and
+ * `usage_status` must both see it, with its visible models and an
+ * unconfirmed-auth note. The catalog row is the real one `buildDirectProviders`
  * builds, not a hand-made ProviderSummary.
+ *
+ * Round 9: a stored usage reading is not required. The first cold start on a
+ * machine — no cached auth, no usage window ever recorded — is exactly when
+ * the list matters most, so Go stays discoverable with `authStatus: "unknown"`
+ * rather than being hidden until something proves it runs.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -46,6 +50,24 @@ function brokenOpencodeDir(): string {
   return dir;
 }
 
+/** An `opencode` on PATH that exits cleanly and prints something that is not a credential list. */
+function malformedOpencodeDir(): string {
+  const dir = tempDir("moxen-malformed-open-");
+  const file = path.join(dir, process.platform === "win32" ? "opencode.cmd" : "opencode");
+  if (process.platform === "win32") fs.writeFileSync(file, "@echo off\r\necho not-json\r\n");
+  else fs.writeFileSync(file, "#!/bin/sh\necho not-json\n", { mode: 0o755 });
+  return dir;
+}
+
+/** An `opencode` on PATH that answers an explicit logout, which is not a failed probe. */
+function logoutOpencodeDir(): string {
+  const dir = tempDir("moxen-logout-open-");
+  const file = path.join(dir, process.platform === "win32" ? "opencode.cmd" : "opencode");
+  if (process.platform === "win32") fs.writeFileSync(file, "@echo off\r\necho []\r\n");
+  else fs.writeFileSync(file, "#!/bin/sh\necho '[]'\n", { mode: 0o755 });
+  return dir;
+}
+
 function apiOf(providers: ProviderSummary[], usage: Record<string, ProviderUsageLimits>): ClientApi {
   return {
     query: async (query: { type: string }) => {
@@ -69,10 +91,10 @@ function apiOf(providers: ProviderSummary[], usage: Record<string, ProviderUsage
 }
 
 /** The real catalog, with a cold process cache, a broken probe, and Go's windows on record. */
-async function coldStartProviders(): Promise<ProviderSummary[]> {
+async function coldStartProviders(bin: () => string = brokenOpencodeDir, opencode: { enabled: boolean } = { enabled: true }): Promise<ProviderSummary[]> {
   return await buildDirectProviders({
-    env: { PATH: brokenOpencodeDir() },
-    opencode: { enabled: true },
+    env: { PATH: bin() },
+    opencode,
     storeRoot: tempDir("moxen-cold-store-"),
     modelsDev: async () => ({ catalog: CATALOG, source: "snapshot" }),
     opencodeServed: async () => ({ ids: null, source: "none" }),
@@ -132,5 +154,88 @@ describe("OpenCode Go on a cold start whose credential probe fails", () => {
     expect(go?.authStatus).toBe("unknown");
     expect(go?.authNote).toMatch(/login is unconfirmed/i);
     expect(go?.windows.map((window) => [window.id, window.usedPercent])).toEqual([["session", 3], ["weekly", 55], ["monthly", 63]]);
+  });
+});
+
+/**
+ * The first run on a machine: nothing has ever been read or recorded. A probe
+ * that cannot answer must not hide the provider — that is the state in which
+ * the agent most needs to see what it can run work on.
+ */
+describe("OpenCode Go on a cold start with no saved usage at all", () => {
+  beforeEach(() => {
+    // Zero saved usage windows: no stored reading is available as evidence.
+    resetUsageLimitsForTests();
+    expect(usageLimitsSnapshot()).toEqual({});
+  });
+
+  it("is listed by models with its models and an unconfirmed-auth note", async () => {
+    const providers = await coldStartProviders();
+    const go = providers.find((provider) => provider.instanceId === "opencode/opencode-go");
+    expect(go).toMatchObject({ installed: true, enabled: true, authStatus: "unknown" });
+    expect(go?.models.map((model) => model.slug)).toEqual(["opencode-go/glm-5", "opencode-go/deepseek-v4.1-flash"]);
+
+    const api = apiOf(providers, usageLimitsSnapshot());
+    const one = await callMoxenTool(api, "parent", "models", { provider: "opencode/opencode-go" });
+    expect(one.isError).toBe(false);
+    expect(JSON.parse(one.text)).toEqual({
+      providers: [{
+        provider: "opencode/opencode-go",
+        name: "OpenCode Go",
+        authStatus: "unknown",
+        authNote: "Moxen could not read this provider's credential store, so its login is unconfirmed. Delegating may still work.",
+        models: [
+          { model: "opencode-go/glm-5", name: "GLM-5", efforts: ["low", "high"] },
+          { model: "opencode-go/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", efforts: ["low", "high", "max"] },
+        ],
+      }],
+    });
+
+    const all = JSON.parse((await callMoxenTool(api, "parent", "models", {})).text) as { providers: Array<{ provider: string }> };
+    expect(all.providers.map((row) => row.provider)).toContain("opencode/opencode-go");
+  });
+
+  it("is listed by usage_status with its auth state and no windows, not hidden", async () => {
+    const providers = await coldStartProviders();
+    const result = await callMoxenTool(apiOf(providers, usageLimitsSnapshot()), "parent", "usage_status", {}, { usageRefreshMs: 20 });
+    expect(result.isError).toBe(false);
+    const answer = JSON.parse(result.text) as {
+      providers: Array<{ provider: string; authStatus?: string; authNote?: string; windows: unknown[]; note?: string }>;
+    };
+    const go = answer.providers.find((row) => row.provider === "opencode/opencode-go");
+    expect(go).toMatchObject({ authStatus: "unknown" });
+    expect(go?.authNote).toMatch(/login is unconfirmed/i);
+    expect(go?.windows).toEqual([]);
+    expect(go?.note).toMatch(/No usage reported/);
+  });
+
+  it("holds for a probe that answers something that is not a credential list", async () => {
+    const providers = await coldStartProviders(malformedOpencodeDir);
+    const go = providers.find((provider) => provider.instanceId === "opencode/opencode-go");
+    expect(go).toMatchObject({ installed: true, enabled: true, authStatus: "unknown" });
+    expect(go?.models).toHaveLength(2);
+    const result = await callMoxenTool(apiOf(providers, usageLimitsSnapshot()), "parent", "usage_status", {}, { usageRefreshMs: 20 });
+    const answer = JSON.parse(result.text) as { providers: Array<{ provider: string }> };
+    expect(answer.providers.map((row) => row.provider)).toContain("opencode/opencode-go");
+  });
+
+  it("still narrows to PROVIDER_NOT_FOUND when the probe answers an explicit logout", async () => {
+    // A readable empty list is a confirmed logout, not an unreadable probe:
+    // the disagreement is what keeps "unknown" from meaning "logged in".
+    const providers = await coldStartProviders(logoutOpencodeDir);
+    const go = providers.find((provider) => provider.instanceId === "opencode/opencode-go");
+    expect(go).toMatchObject({ installed: true, enabled: false, authStatus: null });
+    expect(go?.models).toEqual([]);
+    const one = await callMoxenTool(apiOf(providers, usageLimitsSnapshot()), "parent", "models", { provider: "opencode/opencode-go" });
+    expect(one.isError).toBe(true);
+    expect(one.text).toContain("PROVIDER_NOT_FOUND");
+  });
+
+  it("keeps OpenCode out entirely while providers.opencode.enabled is false", async () => {
+    const providers = await coldStartProviders(brokenOpencodeDir, { enabled: false });
+    expect(providers.filter((provider) => provider.driver === "opencode")).toEqual([]);
+    const one = await callMoxenTool(apiOf(providers, usageLimitsSnapshot()), "parent", "models", { provider: "opencode/opencode-go" });
+    expect(one.isError).toBe(true);
+    expect(one.text).toContain("PROVIDER_NOT_FOUND");
   });
 });

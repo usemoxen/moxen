@@ -1,11 +1,12 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CliError } from "../../errors.js";
-import { commandExists, killProcessTree, resolveWindowsLaunch, runProcess } from "../process.js";
+import { commandExists, killProcessTree, killProcessTreeAsync, resolveWindowsLaunch, runProcess } from "../process.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -213,5 +214,104 @@ describe("Windows shim unwrapping and path commandExists (MXN-448)", () => {
       command: "powershell.exe",
       args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\Tools\\script.ps1", "--acp"],
     });
+  });
+});
+
+/**
+ * The async Windows reaper (`taskkill /T /F`) is what a caller uses when its
+ * answer must not wait: MXN-402's credential probe reaps its child off the
+ * response path. It must be bounded too, or a `taskkill` that never exits
+ * holds the loop open, and it must say what happened instead of throwing.
+ *
+ * Driven through an injected spawn, so these run on every platform: only the
+ * real `taskkill` binary is Windows-only.
+ */
+describe("killProcessTreeAsync on Windows (MXN-402)", () => {
+  type Reaper = EventEmitter & { kill: (signal?: NodeJS.Signals) => void };
+
+  /** A `taskkill` child whose exit the test decides. */
+  function fakeReaper(killed: Array<NodeJS.Signals | undefined> = []): Reaper {
+    return Object.assign(new EventEmitter(), {
+      kill: (signal?: NodeJS.Signals) => {
+        killed.push(signal);
+      },
+    });
+  }
+
+  const leader = () => ({ pid: 4242, kill: vi.fn() });
+
+  it("resolves once taskkill exits, reaping the tree instead of the leader alone", async () => {
+    const reaper = fakeReaper();
+    const spawnReaper = vi.fn(() => reaper);
+    const target = leader();
+    const settled = killProcessTreeAsync(target, "SIGTERM", { platform: "win32", spawn: spawnReaper as never });
+    expect(spawnReaper).toHaveBeenCalledWith(
+      "taskkill",
+      ["/PID", "4242", "/T", "/F"],
+      expect.objectContaining({ windowsHide: true }),
+    );
+    reaper.emit("exit", 0);
+    await expect(settled).resolves.toBe("reaped");
+    expect(target.kill).not.toHaveBeenCalled();
+  });
+
+  it("reports a non-zero taskkill exit instead of throwing, and signals the leader", async () => {
+    const reaper = fakeReaper();
+    const target = leader();
+    const settled = killProcessTreeAsync(target, "SIGTERM", { platform: "win32", spawn: (() => reaper) as never });
+    reaper.emit("exit", 128);
+    // A non-zero exit is not proof the tree died (access denied, or somehow
+    // still there), so the leader is signalled rather than the cleanup being
+    // silently given up on — and nothing is thrown.
+    await expect(settled).resolves.toBe("signalled");
+    expect(target.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("falls back to the leader's own kill when taskkill cannot be spawned", async () => {
+    const reaper = fakeReaper();
+    const target = leader();
+    const settled = killProcessTreeAsync(target, "SIGKILL", { platform: "win32", spawn: (() => reaper) as never });
+    reaper.emit("error", new Error("ENOENT"));
+    await expect(settled).resolves.toBe("signalled");
+    expect(target.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("bounds a taskkill that never exits: kills the reaper and signals the leader", async () => {
+    const killed: Array<NodeJS.Signals | undefined> = [];
+    const reaper = fakeReaper(killed);
+    const target = leader();
+    const settled = killProcessTreeAsync(target, "SIGTERM", {
+      platform: "win32",
+      spawn: (() => reaper) as never,
+      timeoutMs: 20,
+    });
+    await expect(settled).resolves.toBe("signalled");
+    // The hung reaper must not be left holding the loop open...
+    expect(killed).toEqual(["SIGKILL"]);
+    // ...and the cleanup must not be silently skipped because it hung.
+    expect(target.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("bounds a spawn that throws synchronously, without an unhandled rejection", async () => {
+    const target = leader();
+    const settled = killProcessTreeAsync(target, "SIGTERM", {
+      platform: "win32",
+      spawn: (() => {
+        throw new Error("EINVAL");
+      }) as never,
+    });
+    await expect(settled).resolves.toBe("signalled");
+    expect(target.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("leaves the POSIX path alone: no taskkill, the group signal it always used", async () => {
+    if (process.platform === "win32") return;
+    const spawnReaper = vi.fn();
+    // Its own pid is a live process group here, so the group signal succeeds.
+    await killProcessTreeAsync({ pid: process.pid, kill: vi.fn() }, "SIGTERM", {
+      platform: "linux",
+      spawn: spawnReaper as never,
+    });
+    expect(spawnReaper).not.toHaveBeenCalled();
   });
 });

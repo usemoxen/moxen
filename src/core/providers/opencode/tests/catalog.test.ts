@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   effortValuesOf,
@@ -595,4 +597,55 @@ describe("loadModelsDevCatalog", () => {
     });
     expect(loaded).toEqual({ catalog: [], source: "empty" });
   });
+});
+
+/**
+ * Finding 3 of the MXN-402 review: the escalation timer must outlive a
+ * one-shot caller. Driven as a real child process, because the bug only shows
+ * up when the caller exits — fake timers cannot reproduce an exit.
+ */
+describe("reaping survives a one-shot caller exiting (MXN-402)", () => {
+  const BUN = process.versions.bun ? process.execPath : "bun";
+  const alivePid = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (cause) {
+      return (cause as { code?: string }).code === "EPERM";
+    }
+  };
+  const runner = fileURLToPath(new URL("../catalog.ts", import.meta.url));
+
+  it.skipIf(process.platform === "win32")(
+    "signals SIGKILL to a SIGTERM-ignoring probe after the caller has exited",
+    { timeout: 30_000 },
+    async () => {
+      const dir = tempDir("moxen-oneshot-");
+      const pidFile = path.join(dir, "probe.pid");
+      const bin = path.join(dir, "opencode");
+      // Ignores SIGTERM, so only the SIGKILL escalation can end it, and writes
+      // its pid so the test can prove it died after the caller had exited.
+      fs.writeFileSync(bin, `#!/bin/sh\ntrap '' TERM\necho $$ > "${pidFile}"\nsleep 30\n`, { mode: 0o755 });
+      const caller = path.join(dir, "caller.ts");
+      fs.writeFileSync(
+        caller,
+        [
+          `import { defaultAuthListRunner } from ${JSON.stringify(runner)};`,
+          // A grace far longer than the caller's own work, so only a timer
+          // that holds the loop open can carry the SIGKILL out.
+          `const answer = await defaultAuthListRunner(${JSON.stringify(bin)}, {}, { timeoutMs: 200, killGraceMs: 1_200 });`,
+          `console.log("answer", answer);`,
+        ].join("\n"),
+      );
+      const exited = new Promise<number | null>((resolve) => {
+        const proc = spawn(BUN, [caller], { stdio: ["ignore", "pipe", "inherit"] });
+        proc.once("exit", (code) => resolve(code));
+      });
+      const code = await exited;
+      expect(code).toBe(0);
+      const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+      // The caller is gone; the probe must be too, within the grace.
+      await vi.waitFor(() => expect(alivePid(pid)).toBe(false), { timeout: 5_000 });
+    },
+  );
 });

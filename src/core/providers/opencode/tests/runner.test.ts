@@ -4,6 +4,11 @@
  * and fake timers: a callback that arrives first must clear the deadline, and
  * a deadline that fires first must answer without waiting for the reaper,
  * ignoring any late output.
+ *
+ * Round 9: stdout is only an answer when the child reported a clean exit. A
+ * probe that prints `[]` and then exits non-zero (or dies on a signal) is a
+ * failed probe whose output means nothing — accepting it would rewrite a
+ * valid login snapshot as an explicit logout.
  */
 import { EventEmitter } from "node:events";
 
@@ -64,7 +69,7 @@ describe("defaultAuthListRunner deadline ordering", () => {
     spawnMock.mockReturnValue(child);
     const result = defaultAuthListRunner("/opt/opencode", {}, { timeoutMs: 500, killGraceMs: 100 });
     child.stdout.emit("data", "[]");
-    child.emit("close");
+    child.emit("close", 0, null);
     await expect(result).resolves.toBe("[]");
     expect(killMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
@@ -87,7 +92,7 @@ describe("defaultAuthListRunner deadline ordering", () => {
 
     // Output that arrives after the deadline is ignored.
     child.stdout.emit("data", "[]");
-    child.emit("close");
+    child.emit("close", 0, null);
     await expect(result).resolves.toBeNull();
   });
 
@@ -99,5 +104,66 @@ describe("defaultAuthListRunner deadline ordering", () => {
     child.stdout.emit("data", "x".repeat(4 * 1024 * 1024 + 1));
     await expect(result).resolves.toBeNull();
     expect(killMock).toHaveBeenCalledWith(child, "SIGTERM");
+  });
+});
+
+describe("defaultAuthListRunner exit status", () => {
+  /** A probe that prints `text` and then closes with the given status. */
+  async function runWithStatus(text: string, code: number | null, signal: NodeJS.Signals | null): Promise<string | null> {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    spawnMock.mockReturnValue(child);
+    const result = defaultAuthListRunner("/opt/opencode", {}, { timeoutMs: 500, killGraceMs: 100 });
+    child.stdout.emit("data", text);
+    child.emit("close", code, signal);
+    return await result;
+  }
+
+  it("accepts stdout only from a clean exit", async () => {
+    await expect(runWithStatus("[]", 0, null)).resolves.toBe("[]");
+  });
+
+  it("refuses a non-zero exit even when its stdout looks like a logout", async () => {
+    // `[]` here is an explicit logout for every provider: accepting it from a
+    // probe that failed would wipe a valid login snapshot.
+    await expect(runWithStatus("[]", 7, null)).resolves.toBeNull();
+    await expect(runWithStatus("[]", 1, null)).resolves.toBeNull();
+  });
+
+  it("refuses a signal exit even when its stdout looks like a logout", async () => {
+    await expect(runWithStatus("[]", null, "SIGKILL")).resolves.toBeNull();
+    await expect(runWithStatus("[]", null, "SIGTERM")).resolves.toBeNull();
+  });
+
+  it("still reports a clean exit that printed nothing as failure", async () => {
+    await expect(runWithStatus("", 0, null)).resolves.toBeNull();
+  });
+});
+
+describe("defaultAuthListRunner escalation keeps the caller alive", () => {
+  /**
+   * A one-shot caller (`moxen models`, the TUI's first catalog) exits as soon
+   * as its promise resolves. If the SIGKILL escalation timer is unreferenced,
+   * the process exits the moment the deadline answers null — inside the grace
+   * period — and a probe that ignores SIGTERM is never reaped. The timer must
+   * hold the loop open until it fires.
+   */
+  it("holds the loop open across the grace period, then releases it", async () => {
+    // Real timers: the question is what Node counts as a live handle.
+    const child = fakeChild();
+    spawnMock.mockReturnValue(child);
+    const result = defaultAuthListRunner("/opt/opencode", {}, { timeoutMs: 20, killGraceMs: 120 });
+    await expect(result).resolves.toBeNull();
+    expect(killMock).toHaveBeenNthCalledWith(1, child, "SIGTERM");
+    // The answer is out, but the grace timer is still ahead: it must be a
+    // referenced Timeout, or a one-shot caller would exit before SIGKILL.
+    const pending = (process.getActiveResourcesInfo?.() ?? []).filter((kind) => kind === "Timeout");
+    expect(pending.length).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(killMock).toHaveBeenCalledWith(child, "SIGKILL"), { timeout: 2_000 });
+    // Once the escalation has fired nothing of the runner's keeps the loop alive.
+    await vi.waitFor(
+      () => expect((process.getActiveResourcesInfo?.() ?? []).filter((kind) => kind === "Timeout")).toHaveLength(0),
+      { timeout: 2_000 },
+    );
   });
 });

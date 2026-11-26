@@ -27,10 +27,15 @@ only keys Moxen holds are a harness profile's and a search key, in the OS
 keychain. Moxen reads OpenCode's credential list to know which providers are
 connected. When that read does not answer, a provider read once before keeps
 its models and stays usable, with its auth state reported `unverified` (the
-answer is no longer current); with nothing ever read it is `unknown`, and a
-stored usage reading is what proves it ran here. A provider is never hidden
-from `providers list` just because its credentials could not be checked, and a
-successful answer, including an empty one, replaces the snapshot on the next probe. Both
+answer is no longer current); with nothing ever read it is `unknown`, and
+either a stored usage reading or the provider being OpenCode Go — which runs
+without a stored credential — keeps its models listed. A provider is never
+hidden from `providers list` just because its credentials could not be
+checked, and a successful answer, including an empty one, replaces the
+snapshot on the next probe. That answer only counts when the probe exited
+cleanly: a non-zero exit code or a signal makes the whole reply a failed probe
+whose output is ignored, so a `[]` printed by an interrupted CLI can never
+wipe a valid login. Both
 agent tools carry that state: each `models` and `usage_status` row has
 `authStatus` when the catalog has a value (it is left out when that value is
 null), and an `authNote` only when it is unknown or unverified. Which replies
@@ -40,9 +45,11 @@ nonempty reply without a Go row updates the other providers but leaves Go as
 it was. A malformed reply, or one with two rows for the same provider,
 replaces nothing. An `unknown`
 provider with no other evidence — no usage reading and no env API key — is
-left out of both tools, except OpenCode's own row: with its free tier enabled
+left out of both tools, except OpenCode's own row (with its free tier enabled
 it can stay listed with zero models, which separates credential status from
-usability, until something proves it runs here. A provider whose
+usability) and OpenCode Go, which is always listed with its models and the
+unconfirmed-auth note. An explicit logout still hides Go: only an unreadable
+probe keeps it listed. A provider whose
 credentials are unknown or unverified, or whose models are all hidden, can be
 listed with no visible models: switching a thread to it without a model
 answers `MODEL_REQUIRED_FOR_PROVIDER`, so name a model explicitly. The catalog

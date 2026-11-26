@@ -294,6 +294,17 @@ export interface AuthListRunnerOptions {
  * ignores SIGTERM, or never exits, is settled as a failure at the deadline and
  * then reaped (SIGTERM, then SIGKILL after a grace). Output that arrives after
  * that is ignored. The output cap still applies.
+ *
+ * Only a clean exit makes stdout an answer. A probe that prints a plausible
+ * list and then exits non-zero or dies on a signal was interrupted, and its
+ * output cannot be told apart from a full reply — `[]` especially, which is an
+ * explicit logout for every provider. So any non-zero code or signal is a
+ * failed probe (`null`), never a snapshot replacement.
+ *
+ * The escalation timer is referenced on purpose. A one-shot caller (`moxen
+ * models`, the TUI's first catalog) exits as soon as this promise resolves; an
+ * unreferenced grace timer dies with it, leaving a SIGTERM-ignoring probe
+ * alive. It is released when it fires, or when the child is confirmed gone.
  */
 export function defaultAuthListRunner(
   binary: string,
@@ -304,24 +315,29 @@ export function defaultAuthListRunner(
   const killGraceMs = options.killGraceMs ?? AUTH_LIST_KILL_GRACE_MS;
   return new Promise((resolve) => {
     let settled = false;
+    let reaped = false;
     let deadline: ReturnType<typeof setTimeout> | null = null;
+    let grace: ReturnType<typeof setTimeout> | null = null;
     let child: ChildProcess | null = null;
     let output = "";
     let overflow = false;
     const reap = (): void => {
       const probe = child;
-      if (probe === null) return;
+      if (probe === null || reaped) return;
+      reaped = true;
       // Off the response path: the answer is already resolved, and the reaper
       // itself is asynchronous (taskkill child on Windows, a group signal on
       // POSIX).
       void killProcessTreeAsync(probe, "SIGTERM");
-      const grace = setTimeout(() => {
+      grace = setTimeout(() => {
         // Escalate on the group even if the leader has exited: descendants
-        // may still be alive.
+        // may still be alive, and the leader's own exit does not prove they
+        // are gone. The answer already went out, so this referenced timer is
+        // what keeps a one-shot caller alive long enough to SIGKILL them; it
+        // is bounded by the grace and drops off by itself once it fires.
+        grace = null;
         void killProcessTreeAsync(probe, "SIGKILL");
       }, killGraceMs);
-      // Reaping does not need to keep the process alive.
-      if (typeof grace === "object" && grace !== null && "unref" in grace) grace.unref();
     };
     const settle = (value: string | null): void => {
       if (settled) return;
@@ -365,7 +381,10 @@ export function defaultAuthListRunner(
       child.once("error", () => settle(null));
       // `close` waits for every stdio stream; after a deadline settlement the
       // streams are destroyed, so a lingering descendant cannot hold it open.
-      child.once("close", () => settle(overflow ? null : output));
+      // It carries the exit status, which is what makes stdout trustworthy.
+      child.once("close", (code, signal) => {
+        settle(overflow || code !== 0 || signal !== null ? null : output.length > 0 ? output : null);
+      });
       deadline = setTimeout(() => {
         settle(null);
         reap();
@@ -435,7 +454,8 @@ interface AuthState {
   others: AuthSnapshot | null;
 }
 
-const GO_PROVIDER = "opencode-go";
+/** OpenCode's own pay-as-you-go plan: the one provider that runs without a stored credential. */
+export const GO_PROVIDER = "opencode-go";
 const authStates = new Map<string, AuthState>();
 
 /** Drop cached auth state (after a login, and between tests). In-flight probes from before this publish nothing. */

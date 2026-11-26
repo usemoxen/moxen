@@ -38,6 +38,7 @@ import { resolveStoreRoot } from "../threads/store.js";
 import { isModelHidden, loadModelPrefs } from "./prefs.js";
 import { OPENCODE_DEFAULT_BINARY } from "../providers/opencode/config.js";
 import {
+  GO_PROVIDER,
   OPENCODE_AUTH_TRUST_MS,
   authForProvider,
   defaultMonotonic,
@@ -48,6 +49,7 @@ import {
   loadServedModels,
   presentApiKeyEnvs,
   readStoredAuth,
+  sameProviderId,
   storedAuthTypeFor,
   type LoadedModelsDevCatalog,
   type LoadedServedModels,
@@ -163,6 +165,11 @@ function elapsed(sinceMs: number): string {
   return hours < 48 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
 
+/** Whether a models.dev provider id is OpenCode Go's, across the v1→v2 spellings. */
+function isGoProvider(providerId: string): boolean {
+  return sameProviderId(providerId, GO_PROVIDER);
+}
+
 /**
  * Per-provider `opencode/<id>` entries: categorized, browsable sections.
  * Credentialed providers list everything. Without a credential only
@@ -174,9 +181,11 @@ function elapsed(sinceMs: number): string {
  * model served, OpenCode's own row still stays listed (zero models): the
  * credential state is unknown, which is not the same as unusable.
  *
- * A probe that never answers is *unknown*, not "not connected": a provider a
- * stored usage reading proves runs here keeps its models and stays
- * delegable, and says the credentials are unknown. A credential read once
+ * A probe that never answers is *unknown*, not "not connected": a provider
+ * with a stored usage reading, or OpenCode Go (which runs without a stored
+ * credential), keeps its models and stays delegable, and says the credentials
+ * are unknown. Requiring that evidence for Go would hide it on every first
+ * run, which is when the catalog most needs to show it. A credential read once
  * but not confirmed since (the latest probe failed, or the last success is
  * older than `OPENCODE_AUTH_TRUST_MS`) stays usable and is reported
  * `unverified` rather than passing an old answer off as current.
@@ -232,8 +241,15 @@ async function opencodeProviders(
     // the credential probe unknown, it is what keeps the provider listed.
     const evidence = usage[instanceId]?.windows.length ? "a usage reading exists for it" : null;
     const unknownButUsed = unknown && credential === null && !freeTier && evidence !== null;
-    const connected = credential !== null || freeTier || unknownButUsed;
-    const models = credential !== null || unknownButUsed
+    // OpenCode Go is the one provider that runs without a stored credential
+    // (its plan is metered per request, and the CLI takes no login for it), so
+    // a probe that cannot answer must not hide it. Requiring a stored usage
+    // reading hid it on every first run — exactly when the agent needs to see
+    // what it can run work on. An explicit logout still hides it: `unknown`
+    // is what separates the two.
+    const unconfirmedGo = unknown && credential === null && !freeTier && isGoProvider(provider.id);
+    const connected = credential !== null || freeTier || unknownButUsed || unconfirmedGo;
+    const models = credential !== null || unknownButUsed || unconfirmedGo
       ? provider.models
       : freeTier
         ? freeTierModels(provider.models, served.ids)
