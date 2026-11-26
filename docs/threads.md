@@ -771,9 +771,13 @@ the user's thread as lead, or one researcher when no full run is approved.
 Full-run leads use role tools, never `delegate`; the server enforces the chosen
 size and review gates. Orchestrate splits the work into tasks, each on the
 model that fits it, checking budget, memory and isolation before delegating.
-Budget means calling the `usage_status` tool before fanning out: every set-up
-provider's windows, fresh rather than the hours-old figures `models` carries,
-so work routes around providers at or near 100%.
+Budget means calling the `usage_status` tool before fanning out: every
+provider Moxen can run work on has its windows, fresh rather than the
+hours-old figures `models` carries, so work routes around providers at or
+near 100%. Each row carries `authStatus` when known, and `authNote` when the
+login is unknown or unverified — separate from usage freshness. A provider
+whose credentials could not be checked stays on the list; that is not on its
+own a reason to skip it.
 **Review** is the fourth procedure but not a fourth thread mode: it runs a
 delegated review task (`delegate` with `mode: "review"`), or one prompt
 (`/review`), and never stays on a thread.
@@ -1466,12 +1470,15 @@ has been gathered, so a task deleted while the read is in flight is refused the
 same way rather than answering with data for a thread that is gone. Its cost is
 not rolled into the delegating thread's.
 
-**Shared usage.** An agent sees every set-up provider's allowance with the
-`usage_status` tool (on the `moxen` server, a delegated task included): each
-window's percent used, reset time and label, when that reading was taken, and
-whether it is stale. It tries a cheap fresh reading first and falls back to
-the stored one with its age, and what usage protection holds or has queued.
-A provider with no windows has no data, which is not the same as unlimited.
+**Shared usage.** An agent sees the allowance of every provider Moxen can run
+work on with the `usage_status` tool (on the `moxen` server, a delegated task
+included): each window's percent used, reset time and label, when that
+reading was taken, and whether it is stale. Each row carries `authStatus`
+when known, and an `authNote` when the OpenCode login is unknown or
+unverified — a separate axis from usage freshness, not a reason by itself to
+skip the provider. It tries a cheap fresh reading first and falls back to the
+stored one with its age, and what usage protection holds or has queued. A
+provider with no windows has no data, which is not the same as unlimited.
 
 **Hand off.** `ask` (the default) draws a card over the composer with **Hand
 off** and **Not now**; `auto` has the server continue the thread itself (the

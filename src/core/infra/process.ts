@@ -317,7 +317,7 @@ export function killProcessTree(
   signal: NodeJS.Signals = "SIGTERM",
 ): void {
   if (process.platform === "win32" && child.pid) {
-    const result = spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+    const result = spawnSync("taskkill", taskkillArgs(child.pid), {
       stdio: "ignore",
       windowsHide: true,
       timeout: 10_000,
@@ -339,7 +339,7 @@ export function killProcessTree(
  */
 export function killProcessGroup(pid: number, signal: NodeJS.Signals = "SIGTERM"): void {
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
+    spawnSync("taskkill", taskkillArgs(pid), { stdio: "ignore", windowsHide: true, timeout: 10_000 });
     return;
   }
   for (const target of [-pid, pid]) {
@@ -350,4 +350,62 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals = "SIGTERM"
       // Not a group leader, or gone: try the process itself, then give up.
     }
   }
+}
+
+/** `taskkill /PID <pid> /T /F` as argv, never a shell string. */
+function taskkillArgs(pid: number): string[] {
+  return ["/PID", String(pid), "/T", "/F"];
+}
+
+/**
+ * The async form of `killProcessTree`, for a caller whose answer must not wait
+ * on the platform's reaper. On Windows `taskkill` runs as a child process —
+ * never `spawnSync`, which would block the event loop for as long as the
+ * reaper takes. On POSIX it signals the child's process group, so descendants
+ * die with it even after the leader has exited.
+ */
+export async function killProcessTreeAsync(
+  child: { readonly pid?: number | undefined; kill(signal?: NodeJS.Signals): unknown },
+  signal: NodeJS.Signals = "SIGTERM",
+): Promise<void> {
+  if (process.platform === "win32") {
+    if (child.pid !== undefined) {
+      await taskkillAsync(child.pid);
+      return;
+    }
+    try {
+      child.kill(signal);
+    } catch {
+      // Already gone.
+    }
+    return;
+  }
+  // The probe runs detached, so its pid is its process-group id: signal the
+  // group (-pid) and not just the leader, which may already be gone.
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Not a group leader, or gone: fall back to the process itself.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Already gone.
+  }
+}
+
+function taskkillAsync(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const killer = spawn("taskkill", taskkillArgs(pid), { stdio: "ignore", windowsHide: true });
+      killer.once("error", () => resolve());
+      killer.once("exit", () => resolve());
+      killer.unref?.();
+    } catch {
+      resolve();
+    }
+  });
 }

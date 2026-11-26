@@ -1,5 +1,5 @@
 import { CliError } from "../errors.js";
-import type { RuntimeMode } from "../types.js";
+import { driverKindOfInstance, type RuntimeMode } from "../types.js";
 
 /**
  * Runtime modes a provider driver understands. Unknown strings are dropped
@@ -320,6 +320,28 @@ export function extractProviders(response: unknown): ProviderSummary[] {
  */
 export function offerableProviders(providers: readonly ProviderSummary[]): ProviderSummary[] {
   return providers.filter((provider) => provider.enabled === true);
+}
+
+/**
+ * Providers the agent tools offer — the ones work can be routed to here.
+ *
+ * `delegate` resolves an instance by its driver and a model by slug; it never
+ * consults `enabled` or `installed`. Those are the catalog's verdicts and they
+ * can lag the truth: `enabled` goes false for every OpenCode provider while
+ * `opencode auth list` does not answer (the driver still runs them, and
+ * `opencode/opencode` hides the gap by falling back to its free tier), and
+ * `installed` only says the provider's CLI is on PATH, one check shared by
+ * every `opencode/*` instance. So a provider is listed when its driver can
+ * route work and it is installed with a visible model to name, or when it is
+ * enabled — a set-up provider with no models still has usage worth reporting.
+ * A provider whose credentials cannot be verified stays here: the catalog
+ * reports its auth state as unknown or unverified, never by hiding it.
+ */
+export function delegableProviders(providers: readonly ProviderSummary[]): ProviderSummary[] {
+  return providers.filter((provider) =>
+    driverKindOfInstance(provider.instanceId) !== null
+    && provider.installed
+    && (provider.enabled || provider.models.some((model) => !model.isHidden)));
 }
 
 /**

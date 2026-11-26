@@ -24,7 +24,8 @@ import type { InteractionMode } from "../types.js";
 const SHARED_STEPS = [
   "## Before the first delegate: find out what you can spend",
   "1. What exists: call `models`. Never guess a provider, model or effort id: an unknown one fails.",
-  "2. What is left: call `usage_status` before fanning out: every set-up provider's windows (`usedPercent`, `resetsAt`, label), when each reading was taken, and whether it is stale. " +
+  "2. What is left: call `usage_status` before fanning out: every provider Moxen can run work on has its windows (`usedPercent`, `resetsAt`, label), when each reading was taken, and whether it is stale. " +
+    "Each row's `authStatus` (with `authNote` when the login is unknown or unverified) is separate from that usage freshness; an unconfirmed login is not on its own a reason to skip the provider. " +
     "A provider at or near 100% is out of the plan, not a retry. A provider with no windows has no data, which is not the same as unlimited. " +
     "The `usageLimits` in `models` can be hours old: route by `usage_status`, never by them. " +
     "Put the bulk of the work where there is headroom, and size the fan-out to what is left.",
