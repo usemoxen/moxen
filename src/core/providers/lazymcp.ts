@@ -169,6 +169,8 @@ export class LazyMcpGateway {
    * that fails to establish its own restrictions locks it again permanently.
    */
   private lockReason: string | null;
+  /** Set by `lock()`: an armed gateway can never be reopened by a later `arm()`. */
+  private lockPermanent = false;
   /** The owner's own per-tool restrictions, once established (Vibe). */
   private nativeAllows: ((server: string, tool: string) => boolean) | null = null;
 
@@ -212,6 +214,7 @@ export class LazyMcpGateway {
    * restriction) becomes searchable and callable.
    */
   arm(nativeAllows: (server: string, tool: string) => boolean): void {
+    if (this.lockPermanent) return;
     this.nativeAllows = nativeAllows;
     this.lockReason = null;
   }
@@ -219,6 +222,7 @@ export class LazyMcpGateway {
   /** Close the gateway for the rest of the session: no tool is listed or callable. */
   lock(reason: string): void {
     this.lockReason = reason;
+    this.lockPermanent = true;
   }
 
   /** Whether an owner-side restriction denies this tool (`server` is the routed spec's name). */
