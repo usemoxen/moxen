@@ -204,6 +204,8 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
     unsettledAt: thread.unsettledAt,
     snoozedUntil: thread.snoozedUntil,
     snoozedAt: thread.snoozedAt,
+    // Only for a snooze that waits on conditions, so every other envelope stays byte-for-byte as it was.
+    ...(thread.snoozeConditions ? { snoozeConditions: thread.snoozeConditions.map((condition) => ({ ...condition })) } : {}),
     latestUserMessageAt: latestUser?.createdAt ?? null,
     hasPendingApprovals: thread.hasPendingApprovals,
     hasPendingUserInput: thread.hasPendingUserInput,
