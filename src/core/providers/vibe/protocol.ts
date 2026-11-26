@@ -633,37 +633,249 @@ function vibeDisplayForms(server: string, tool: string): string[] {
   return [...forms];
 }
 
+/** Escape one literal character for a JS regex, as Python's `re.escape` does. */
+function vibeRegexEscapeChar(ch: string): string {
+  return /[.*+?^${}()|[\]\\-]/.test(ch) ? `\\${ch}` : ch;
+}
+
+/**
+ * Port of CPython's classic `fnmatch.translate` shell-glob → regex body (the
+ * documented `*`, `?`, `[seq]`, `[!seq]` semantics, including range removal for
+ * invalid ranges such as `[z-a]`). Returns null when the pattern uses syntax
+ * this port cannot prove equivalent to the installed Vibe's `fnmatch` — today
+ * the Python 3.14 regex set operations (`&&`, `~~`, `||`) inside a character
+ * class — so the caller fails closed instead of guessing.
+ *
+ * The emitted class escapes a literal `]` (`\]`) because JS, unlike Python,
+ * does not accept a bare leading `]` inside a class; the matching language is
+ * otherwise identical. Both sides are lowercased by the caller, as Vibe's
+ * `_pattern_matches` does (`fnmatch(name.lower(), pattern.lower())`).
+ */
+function vibeFnmatchTranslate(pat: string): string | null {
+  const res: string[] = [];
+  let i = 0;
+  const n = pat.length;
+  while (i < n) {
+    const c = pat[i]!;
+    i += 1;
+    if (c === "*") {
+      if (res.length === 0 || res[res.length - 1] !== ".*") res.push(".*");
+      while (i < n && pat[i] === "*") i += 1;
+    } else if (c === "?") {
+      res.push(".");
+    } else if (c === "[") {
+      let j = i;
+      if (j < n && pat[j] === "!") j += 1;
+      if (j < n && pat[j] === "]") j += 1;
+      while (j < n && pat[j] !== "]") j += 1;
+      if (j >= n) {
+        res.push("\\[");
+      } else {
+        let stuff = pat.slice(i, j);
+        // Python 3.14 character-class set operations are not portable here.
+        if (/[&~|]/.test(stuff)) return null;
+        if (!stuff.includes("-")) {
+          stuff = stuff.replace(/\\/g, "\\\\");
+        } else {
+          const chunks: string[] = [];
+          let k = pat[i] === "!" ? i + 2 : i + 1;
+          for (;;) {
+            const found = pat.indexOf("-", k);
+            if (found < 0 || found >= j) break;
+            k = found;
+            chunks.push(pat.slice(i, k));
+            i = k + 1;
+            k = k + 3;
+          }
+          const chunk = pat.slice(i, j);
+          if (chunk) chunks.push(chunk);
+          else chunks[chunks.length - 1] += "-";
+          // Remove empty ranges (start > end) — invalid in a regex class.
+          for (let kk = chunks.length - 1; kk > 0; kk -= 1) {
+            const prev = chunks[kk - 1]!;
+            const cur = chunks[kk]!;
+            if (prev[prev.length - 1]! > cur[0]!) {
+              chunks[kk - 1] = prev.slice(0, -1) + cur.slice(1);
+              chunks.splice(kk, 1);
+            }
+          }
+          stuff = chunks.map((s) => s.replace(/\\/g, "\\\\").replace(/-/g, "\\-")).join("-");
+        }
+        i = j + 1;
+        if (!stuff) {
+          res.push("(?!)"); // empty range: never matches
+        } else if (stuff === "!") {
+          res.push("."); // negated empty range: matches any character
+        } else {
+          let negated = false;
+          if (stuff[0] === "!") {
+            negated = true;
+            stuff = stuff.slice(1);
+          }
+          if (stuff[0] === "]") stuff = `\\]${stuff.slice(1)}`;
+          else if (stuff[0] === "^" || stuff[0] === "[") stuff = `\\${stuff}`;
+          res.push(`[${negated ? "^" : ""}${stuff}]`);
+        }
+      }
+    } else {
+      res.push(vibeRegexEscapeChar(c));
+    }
+  }
+  return res.join("");
+}
+
+/**
+ * Validate a `re:` body against the subset of regex syntax whose meaning is
+ * provably identical between Python's `re` (IGNORECASE, fullmatch) and a JS
+ * `RegExp` (anchored, `i`) when the matched name is an ASCII identifier — which
+ * every Vibe MCP display name is. Returns the body unchanged when it is within
+ * the subset, or null when it is not (the caller then fails closed).
+ *
+ * Allowed: ASCII literals, `.`, `*`, `+`, `?`, `{m,n}`, `|`, `(...)`/`(?:...)`,
+ * `^`/`$` anchors, ASCII character classes with ranges/negation, escapes of
+ * ASCII punctuation, and `\d \w \s \D \W \S` (equivalent on ASCII input).
+ * Rejected (fail closed): non-ASCII characters, lookarounds, backreferences,
+ * named/inline-flag groups, other backslash escapes, and class set operations.
+ */
+function vibeRegexSubsetBody(body: string): string | null {
+  let i = 0;
+  const n = body.length;
+  const isAscii = (ch: string) => ch.charCodeAt(0) < 128;
+  const isPunct = (ch: string) => /[!-/:-@[-`{-~]/.test(ch);
+  while (i < n) {
+    const c = body[i]!;
+    if (!isAscii(c)) return null;
+    if (c === "\\") {
+      const next = body[i + 1];
+      if (next === undefined) return null;
+      if (/[dDsSwW]/.test(next)) {
+        i += 2;
+        continue;
+      }
+      if (isPunct(next)) {
+        i += 2;
+        continue;
+      }
+      return null; // \n, \1, \A, \b, \q … not proven equivalent
+    }
+    if (c === "[") {
+      i += 1;
+      if (body[i] === "^") i += 1;
+      if (body[i] === "]") return null; // bare leading ] differs in JS
+      let closed = false;
+      while (i < n) {
+        const ch = body[i]!;
+        if (!isAscii(ch)) return null;
+        if (ch === "]") {
+          i += 1;
+          closed = true;
+          break;
+        }
+        if (ch === "\\") {
+          const esc = body[i + 1];
+          if (esc === undefined || !/[\]\\^-]/.test(esc)) return null;
+          i += 2;
+          continue;
+        }
+        if (/[&~|]/.test(ch)) return null; // class set operations
+        if (ch === "-") {
+          // A hyphen is only proven here as a range operator between two
+          // single ASCII characters; a literal/leading/trailing hyphen fails
+          // closed rather than risking a Python/JS divergence.
+          const lo = body[i - 1];
+          const hi = body[i + 1];
+          if (lo === undefined || hi === undefined || hi === "]" || !isAscii(lo) || !isAscii(hi) || /[\\\]-]/.test(lo) || /[\\\]-]/.test(hi)) return null;
+          i += 2;
+          continue;
+        }
+        i += 1;
+      }
+      if (!closed) return null;
+      continue;
+    }
+    if (c === "(") {
+      if (body[i + 1] === "?") {
+        if (body[i + 2] !== ":") return null; // lookaround/named/flag group
+        i += 3;
+      } else {
+        i += 1;
+      }
+      continue;
+    }
+    if (c === "{" ) {
+      // Only a well-formed {m}, {m,}, {m,n} quantifier; anything else fails
+      // closed (Python and JS disagree on literal-brace fallbacks).
+      const m = /^\{(\d+)(,(\d*)?)?\}/.exec(body.slice(i));
+      if (!m) return null;
+      i += m[0].length;
+      continue;
+    }
+    if (/[.*+?|^$)]/.test(c)) {
+      i += 1;
+      continue;
+    }
+    if (/[A-Za-z0-9_]/.test(c)) {
+      i += 1;
+      continue;
+    }
+    // Any other ASCII punctuation used literally (e.g. a bare `-` or `:`) is
+    // equivalent in both engines; a bare `&`, `~`, `#`, space, etc. is literal.
+    if (isPunct(c)) {
+      i += 1;
+      continue;
+    }
+    return null;
+  }
+  return body;
+}
+
 /**
  * One of Vibe's `enabled_tools`/`disabled_tools` patterns against a name, as
  * `MCPToolFilter`/`_pattern_matches` evaluate them (v3.1.5, `_mcp_models.py`):
  * `re:` bodies compile with `IGNORECASE` and are full-matched, everything else
- * is a case-insensitive fnmatch glob. An unparseable `re:` body is decided by
- * `unparseableMatches`, mirroring the disabled/enabled call sites.
+ * is a case-insensitive fnmatch glob (character classes and negation included).
+ * An unparseable `re:` body — or any pattern syntax this port cannot prove
+ * equivalent to the installed Vibe — is decided by `unparseableMatches`,
+ * mirroring the disabled/enabled call sites so the gateway fails closed.
  */
 function vibeToolPatternMatches(pattern: string, name: string, unparseableMatches: boolean): boolean {
   const raw = pattern.trim();
   if (raw === "") return false;
   if (raw.startsWith("re:")) {
+    const body = vibeRegexSubsetBody(raw.slice(3));
+    if (body === null) return unparseableMatches;
     try {
-      return new RegExp(`^(?:${raw.slice(3)})$`, "i").test(name);
+      return new RegExp(`^(?:${body})$`, "i").test(name);
     } catch {
       return unparseableMatches;
     }
   }
-  const lowered = name.toLowerCase();
-  const glob = raw
-    .toLowerCase()
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*")
-    .replace(/\?/g, ".");
-  return new RegExp(`^${glob}$`).test(lowered);
+  const translated = vibeFnmatchTranslate(raw.toLowerCase());
+  if (translated === null) return unparseableMatches;
+  try {
+    return new RegExp(`^(?:${translated})$`).test(name.toLowerCase());
+  } catch {
+    return unparseableMatches;
+  }
 }
 
 export interface VibeEffectiveMcpRestrictions {
-  /** The normalized aliases of Mistral Vibe's own configured MCP servers. */
+  /** The normalized (lowercased) aliases of Mistral Vibe's own configured MCP servers. */
   readonly nativeServers: ReadonlySet<string>;
+  /**
+   * Whether the session's own lazy-gateway entry was found and excluded by
+   * `gatewayEntry` (post-start merge verification). False when no `gatewayEntry`
+   * was given (a pre-merge native read) or the entry was absent/mismatched.
+   */
+  readonly gatewayEntryFound: boolean;
   /** Whether the tool `(server, tool)` may be surfaced by the lazy gateway. */
   allows(server: string, tool: string): boolean;
+}
+
+/** The identity of the session's own gateway entry, to exclude it from a merged read. */
+export interface VibeGatewayEntry {
+  readonly name: string;
+  readonly url: string;
 }
 
 /**
@@ -671,12 +883,21 @@ export interface VibeEffectiveMcpRestrictions {
  * `effective_config_response`, `_config_introspect.py`) answers the whole
  * effective `VibeConfigSchema` — merged over user config, trusted project
  * config, env, the session's own overrides, the agent profile and the admin
- * layer, with credentials redacted but names, `disabled` and `disabled_tools`
- * intact. Parse it into the restrictions the lazy gateway must honor so it is
- * never a way around the user's own Vibe configuration, or null when the shape
- * cannot be proven: callers must fail closed on null (LOCAL-032).
+ * layer, with credentials redacted but names, `disabled`, `disabled_tools` and
+ * the per-tool `tools.<name>.permission` intact. Parse it into the restrictions
+ * the lazy gateway must honor so it is never a way around the user's own Vibe
+ * configuration, or null when the shape cannot be proven: callers must fail
+ * closed on null (LOCAL-032).
+ *
+ * `gatewayEntry` names the session's own offered gateway so a post-start merged
+ * read does not mistake it for a pre-existing native server (its URL survives
+ * redaction intact — loopback, no query or user info). It is excluded from the
+ * native set; any OTHER entry sharing its alias stays visible as a collision.
  */
-export function parseVibeEffectiveConfig(raw: unknown): VibeEffectiveMcpRestrictions | null {
+export function parseVibeEffectiveConfig(
+  raw: unknown,
+  gatewayEntry?: VibeGatewayEntry,
+): VibeEffectiveMcpRestrictions | null {
   const root = asRecord(raw);
   const cfg = asRecord(root?.["config"]);
   if (!cfg) return null;
@@ -693,13 +914,30 @@ export function parseVibeEffectiveConfig(raw: unknown): VibeEffectiveMcpRestrict
   const enabledPatterns = readPatterns(cfg["enabled_tools"]);
   const rawServers = cfg["mcp_servers"];
   if (disabledPatterns === null || enabledPatterns === null || !Array.isArray(rawServers)) return null;
+  // Per-tool permission rules: Vibe's provided-tool resolver treats
+  // `[tools.<server>_<tool>] permission = "never"` as a hard deny
+  // (`_unified_permissions.py`, `_published_mcp_names` keys the rule by the raw
+  // `{server}_{remote}` config name). The gateway must honor it too.
+  const neverTools = new Set<string>();
+  const rawTools = asRecord(cfg["tools"]);
+  if (rawTools) {
+    for (const [key, value] of Object.entries(rawTools)) {
+      const rec = asRecord(value);
+      if (rec?.["permission"] === "never") neverTools.add(key);
+    }
+  }
   const nativeServers = new Set<string>();
   const disabledServers = new Set<string>();
   const disabledTools = new Set<string>();
+  let gatewayEntryFound = false;
   for (const item of rawServers) {
     const rec = asRecord(item);
     const name = asNonEmptyString(rec?.["name"]);
     if (!name) return null;
+    if (gatewayEntry && name === gatewayEntry.name && asString(rec?.["url"]) === gatewayEntry.url) {
+      gatewayEntryFound = true;
+      continue;
+    }
     const alias = vibeMcpServerAlias(name).toLowerCase();
     if (alias === "") return null;
     const tools = readPatterns(rec?.["disabled_tools"]);
@@ -710,10 +948,13 @@ export function parseVibeEffectiveConfig(raw: unknown): VibeEffectiveMcpRestrict
   }
   return {
     nativeServers,
+    gatewayEntryFound,
     allows(server: string, tool: string): boolean {
       const alias = vibeMcpServerAlias(server).toLowerCase();
       if (disabledServers.has(alias)) return false;
       if (disabledTools.has(`${alias}\u0000${tool.toLowerCase()}`)) return false;
+      // A configured `never` is a hard deny, keyed by Vibe's raw config name.
+      if (neverTools.has(`${vibeMcpServerAlias(server)}_${tool}`)) return false;
       const forms = vibeDisplayForms(server, tool);
       if (disabledPatterns.some((pattern) => forms.some((form) => vibeToolPatternMatches(pattern, form, true)))) {
         return false;
@@ -729,6 +970,53 @@ export function parseVibeEffectiveConfig(raw: unknown): VibeEffectiveMcpRestrict
   };
 }
 
+/**
+ * Whether a candidate gateway name is guaranteed unused before it is merged
+ * into Vibe's catalog: no native or offered server shares its normalized alias
+ * (a same-name offer would replace a native entry whole under Vibe's
+ * `MergeStrategy.UNION`), and neither of its two published display candidates
+ * can collide with a native or offered tool's display name (which would
+ * digest-suffix and reflow that tool's name, defeating the user's own
+ * `disabled_tools` globs).
+ *
+ * For servers whose tool list Moxen knows (in-process offers) the check is
+ * exact; for servers whose tools are unknown (native config entries and
+ * out-of-process offers) it is the conservative necessary condition that the
+ * server's identifier segment is not a prefix of a gateway display candidate —
+ * no tool name can then complete a collision. The caller retries with fresh
+ * randomness and fails closed when no candidate passes.
+ */
+export function vibeGatewayIdentityFree(
+  name: string,
+  nativeAliases: ReadonlySet<string>,
+  offered: readonly McpServerSpec[],
+): boolean {
+  const alias = vibeMcpServerAlias(name);
+  if (alias === "") return false;
+  const aliasLower = alias.toLowerCase();
+  if (nativeAliases.has(aliasLower)) return false;
+  const callCandidate = vibeMcpIdentifier(`${alias}_call_tool`).toLowerCase();
+  const searchCandidate = vibeMcpIdentifier(`${alias}_search_tools`).toLowerCase();
+  const segmentPrefixed = (segment: string): boolean =>
+    callCandidate.startsWith(`${segment}_`) || searchCandidate.startsWith(`${segment}_`);
+  for (const native of nativeAliases) {
+    if (segmentPrefixed(vibeMcpIdentifier(native).toLowerCase())) return false;
+  }
+  for (const server of offered) {
+    const serverAlias = vibeMcpServerAlias(server.name);
+    if (serverAlias.toLowerCase() === aliasLower) return false;
+    if (server.type === "in-process") {
+      for (const tool of server.tools) {
+        const candidate = vibeMcpIdentifier(`${serverAlias}_${tool.name}`).toLowerCase();
+        if (candidate === callCandidate || candidate === searchCandidate) return false;
+      }
+    } else if (segmentPrefixed(vibeMcpIdentifier(serverAlias).toLowerCase())) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** The shape an unwrapped lazy-gateway approval takes (LOCAL-032). */
 export interface VibeGatewayApprovalTarget {
   readonly kind: "call";
@@ -738,23 +1026,30 @@ export interface VibeGatewayApprovalTarget {
 }
 
 /**
- * Whether `toolName` is the gateway's `tool` as the model sees it. Vibe
- * publishes the display name (`{server}_{tool}` normalized — digest-suffixed
- * on a collision), so both the plain form and the suffixed one are accepted,
- * as is the `group.tool` route form.
+ * The exact model-visible display name of the gateway's `tool`. The session
+ * allocates a collision-free identity (`vibeGatewayIdentityFree`), so Vibe's
+ * `_display_names` publishes this normalized `{server}_{tool}` form with NO
+ * digest suffix — the name is deterministic, not a pattern to guess.
  */
-function isVibeGatewayToolName(toolName: string, gatewayName: string, tool: "call_tool" | "search_tools"): boolean {
+export function vibeGatewayToolDisplayName(gatewayName: string, tool: "call_tool" | "search_tools"): string {
+  return vibeMcpIdentifier(`${vibeMcpServerAlias(gatewayName)}_${tool}`);
+}
+
+/**
+ * Whether `toolName` is EXACTLY this session's gateway `tool` — the allocated
+ * display name or the exact `group.tool` route form, case-insensitively. No
+ * arbitrary digest suffix is accepted: a native sibling whose display name
+ * merely resembles the gateway's (e.g. the gateway name plus a digest) is not
+ * the gateway and must not be unwrapped or judged as it (LOCAL-032).
+ */
+export function isVibeGatewayToolName(toolName: string, gatewayName: string, tool: "call_tool" | "search_tools"): boolean {
   const alias = vibeMcpServerAlias(gatewayName);
   if (alias === "") return false;
   const bare = toolName.trim().toLowerCase();
   if (bare === "") return false;
-  const display = vibeMcpIdentifier(`${alias}_${tool}`).toLowerCase();
-  const segment = [...alias].map((ch) => (/[A-Za-z0-9_$]/.test(ch) ? ch : "_")).join("") || "_";
-  const route = `mcp_${segment}`;
-  return (
-    new RegExp(`^${display}_[0-9a-f]{8,64}$|^${display}$`).test(bare)
-    || new RegExp(`^${route}(_[0-9a-f]{8,64})?\\.${tool}$`).test(bare)
-  );
+  if (bare === vibeGatewayToolDisplayName(gatewayName, tool).toLowerCase()) return true;
+  const route = `mcp_${vibeMcpIdentifier(alias)}.${tool}`.toLowerCase();
+  return bare === route;
 }
 
 /**
