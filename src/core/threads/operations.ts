@@ -3416,12 +3416,9 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
     // A side question is the user's own; other origins are automatic prompts.
     const delivery = await deliverSteer(ctx, driver, thread.id, text, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
     if (noticeSteer && delivery === "gated") {
-      // Policy changed during the write. The staged message was never sent;
-      // leave the batch as its only delivery path, with no idle retry armed.
-      await store.withThreadLock(thread.id, async () => {
-        const messages = await store.readMessages(thread.id);
-        await store.rewriteLedger(thread.id, "messages", messages.filter((message) => message.id !== sent.messageId));
-      });
+      // Policy changed during the write. No steer was attempted, so leave
+      // only the durable batch, with no idle retry armed.
+      await store.discardStagedNoticeSteer(thread.id, sent.messageId);
       throw noticeSteerGated();
     }
     if (noticeSteer && delivery === "accepted") {

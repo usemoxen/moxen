@@ -1175,6 +1175,41 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     await settleRuns();
   }, 30_000);
 
+  it("keeps the batch without a steer row if the final gate refuses after staging it", async () => {
+    const prompts: string[] = [];
+    const steers: string[] = [];
+    const release: (() => void)[] = [];
+    const driver = raceDriver({ prompts, steers, release, stall: "Automatic work", withSteer: true });
+    const w = await testHarness({ drivers: { antigravity: () => driver } });
+    const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: () => driver };
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } };
+    const env = { mode: "local" as const, path: w.work, branch: null };
+    const parent = await createThread(w.store, { projectId: "p", title: "Parent", env, modelSelection: { instanceId: "antigravity", model: "test-model" } });
+    const child = await createThread(w.store, { projectId: "p", title: "Child", env, modelSelection: { instanceId: "codex", model: "test-model" } });
+    const live = await startTurn(ctx, { threadId: parent.id, prompt: "Automatic work", origin: "task-message" });
+    await vi.waitFor(() => expect(prompts).toContain("Automatic work"));
+    const turn = await sendTurn(w.store, child.id, { prompt: "Work" });
+    await completeTurn(w.store, child.id, turn.turn.id, { text: "Done." });
+
+    const append = w.store.appendLedger.bind(w.store);
+    const optedOut = vi.spyOn(w.store, "appendLedger").mockImplementation(async (id, ledger, row) => {
+      await append(id, ledger, row);
+      if (id === parent.id && ledger === "activity" && (row as { kind: string }).kind === "turn.steered") {
+        ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: false } };
+      }
+    });
+    await queueTaskNotification(ctx, parent.id, child.id);
+    const flushed = flushTaskNotifications(ctx, parent.id);
+    await expect(flushed).rejects.toMatchObject({ code: "TASK_NOTICE_STEER_GATED" });
+    optedOut.mockRestore();
+    await interruptTurn(w.store, parent.id, live.turn.id);
+    await settleRuns();
+    expect(steers).toEqual([]);
+    expect((await w.store.readMessages(parent.id)).some((row) => row.origin === "task-notification")).toBe(false);
+    expect((await w.store.readActivities(parent.id)).some((row) => row.kind === "turn.steered")).toBe(false);
+    expect(await readBatches(w.root)).toHaveProperty(parent.id);
+  }, 30_000);
+
   it("keeps a notice the provider rejected, without a repeating retry while the turn is running", async () => {
     const prompts: string[] = [];
     const steerAttempts: string[] = [];
