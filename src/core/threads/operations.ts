@@ -70,6 +70,7 @@ import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState } from "./instructions.js";
+import { memoryStartupText } from "../memory/memory.js";
 import { modeChange, withModeChange } from "./modes.js";
 import { ranTurns, toThreadEnvelope } from "./project.js";
 import type { ThreadStore } from "./store.js";
@@ -359,7 +360,7 @@ async function sessionSetup(
   const reach = moxenToolsOf(providerConfig);
   // Moxen memory: the config's switch and the project's moxen.json (`"memory": false`); a delegated task only reads it.
   const memoryOn = ctx.config.memory !== false && providerConfig?.memory !== false && (await projectMemorySetting(workspaceRoot)) !== false;
-  const memory = !memoryOn ? "off" : delegation !== null ? "read" : "write";
+  const memory: "off" | "read" | "write" = !memoryOn ? "off" : delegation !== null ? "read" : "write";
   const builtin =
     !reach.orchestration && !reach.webFetch && memory === "off"
       ? []
@@ -396,7 +397,19 @@ async function sessionSetup(
   const user = [ctx.config.instructions, providerConfig?.instructions, fromProject].filter((entry): entry is string => Boolean(entry?.trim()));
   const running = runningModelOf(thread.modelSelection, instanceId);
   const criticLens = thread.researchRole?.role === "critic" ? await criticLensOf(ctx, thread.researchRole.leadThreadId, thread.id) : undefined;
-  const current = buildRuntimeInstructions({
+  // What this provider's conversation was given. With no history behind it (no session handle yet) there
+  // is nothing cached to protect, so the current text starts it.
+  const key = driverKey(instanceId);
+  const history = thread.providerSessions?.[key] !== undefined;
+  const state = history ? thread.instructionState?.[key] : undefined;
+  const memoryAccess = memory !== "off" && builtin.some((server) => server.name === "moxen") ? memory : null;
+  // The main notes and index are a conversation's opening context, not guidance that changes: read them
+  // only when a baseline is being recorded, so a warm turn never re-reads them into an update.
+  const memoryStartup =
+    memoryAccess !== null && state === undefined
+      ? await memoryStartupText({ storeRoot: ctx.storeRoot, projectId: thread.projectId || null })
+      : null;
+  const instructions = {
     instanceId: thread.modelSelection.instanceId,
     ...(running ? { running } : {}),
     env: thread.env,
@@ -409,15 +422,19 @@ async function sessionSetup(
     delegationTools: !isResearchRunActive(thread.researchRun) && reach.orchestration && builtin.some((server) => server.name === "moxen"),
     knowledge: mcpServers.some((server) => server.name === "moxen" && builtin.includes(server)) &&
       !disabledMcpTools.includes("mcp__moxen__knowledge_search") && !disabledMcpTools.includes("mcp__moxen__knowledge_read"),
-    ...(memory !== "off" && builtin.some((server) => server.name === "moxen") ? { memory } : {}),
+    ...(memoryAccess === null ? {} : { memory: memoryAccess }),
     ...(nativeKind === null ? {} : { web: { provider: nativeKind, disabledNativeTools: nativeConfig?.disabledNativeTools, searchOrder: parseNameList(nativeConfig?.webSearchOrder), fetchOrder: parseNameList(nativeConfig?.webFetchOrder), servers: mcpServers } }),
-  });
-  // What this provider's conversation was given. With no history behind it (no session handle yet) there
-  // is nothing cached to protect, so the current text starts it.
-  const key = driverKey(instanceId);
-  const history = thread.providerSessions?.[key] !== undefined;
-  const state = history ? thread.instructionState?.[key] : undefined;
-  const plan = planInstructions(state, current, thread.id);
+  } as const;
+  const current = buildRuntimeInstructions(instructions);
+  // No memory content: the conversation begins with the change-tracked text itself, so it records no opening.
+  const startup = memoryStartup === null ? undefined : buildRuntimeInstructions({ ...instructions, memoryStartup });
+  // Memory turned off after this conversation began: its stored opening holds a snapshot that must not be
+  // sent to a provider session that restarts (or to one that applies its instructions again). Drop it here;
+  // the recorded state below stops carrying it, so turning memory back on cannot resurface it either.
+  const planningState = state !== undefined && memoryAccess === null && state.opening !== undefined
+    ? { baseline: state.baseline, delivered: state.delivered }
+    : state;
+  const plan = planInstructions(planningState, current, thread.id, startup);
   const next: InstructionState = plan.next;
   const record = async (state: InstructionState): Promise<void> => {
     await ctx.store.withThreadLock(thread.id, async () => {
@@ -456,7 +473,7 @@ async function sessionSetup(
     }
   };
   const recorded = thread.instructionState?.[key];
-  if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered) await record(next);
+  if (recorded?.baseline !== next.baseline || recorded?.delivered !== next.delivered || recorded?.opening !== next.opening) await record(next);
   const baseDisabledTools =
     nativeKind === null
       ? []
