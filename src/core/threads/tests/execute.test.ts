@@ -7,12 +7,14 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ClaudeDriver } from "../../providers/claude/driver.js";
+import { FakeSessionApi, FakeTransport, assistantText, initMessage, successResult } from "../../providers/claude/tests/fakes.js";
 import { OpenCodeDriver } from "../../providers/opencode/driver.js";
 import { FakeOpencodeTransport } from "../../providers/opencode/tests/fakes.js";
 import type { ProviderRuntimeEvent } from "../../providers/spi.js";
 import { CliError } from "../../errors.js";
 import { openThreadStore, type ThreadStore } from "../store.js";
-import { adoptProviderTitle, createThread, readThread, sendTurn, interruptTurn, openTurn, settleThread } from "../threads.js";
+import { adoptProviderTitle, completeTurn, createThread, readThread, sendTurn, interruptTurn, openTurn, settleThread } from "../threads.js";
 import type { StoredTurn } from "../types.js";
 import { retitleThread, type OperationContext } from "../operations.js";
 import { driverForInstance, ensureDriverSession, executeTurn, flushTurnRunners, subscribeDriverThread, watchDriverSession, type TurnDriver } from "../execute.js";
@@ -404,6 +406,63 @@ describe("provider session resume", () => {
     await ensureDriverSession(driver, (await store.readThreadRecord(threadId))!);
     expect(transport.servers[0]!.callsTo("session.create")).toHaveLength(1);
     expect(driver.resumeCursor(threadId)).toBe("opencode-session-2");
+  });
+
+  it("a Claude session that cannot be resumed says so in the thread and hands its history to the new one", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "moxen-claude-lost-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const store = await openThreadStore(root);
+    const thread = await createThread(store, {
+      projectId: "project-1",
+      title: "Lost session",
+      modelSelection: { instanceId: "claude", model: "m" },
+      env: { mode: "local", path: root, branch: null },
+    });
+    const first = await sendTurn(store, thread.id, { prompt: "remember 7" });
+    await completeTurn(store, thread.id, first.turn.id, { text: "Noted: 7." });
+    // The cursor a previous process saved; the provider no longer has it.
+    await store.writeThreadRecord({ ...(await store.readThreadRecord(thread.id))!, providerSessions: { claude: "lost-session" } });
+    const next = await sendTurn(store, thread.id, { prompt: "what number?" });
+    const newSessionId = "99999999-8888-4777-8666-777777777777";
+    const transport = new FakeTransport([
+      [
+        initMessage({ session_id: newSessionId }),
+        assistantText("7.", { input_tokens: 10, output_tokens: 5 }, { uuid: "assistant-lost-1", session_id: newSessionId }),
+        successResult("7.", 0.01, { uuid: "result-lost-1", session_id: newSessionId }),
+      ],
+    ]);
+    const driver = new ClaudeDriver({ transport, sessionApi: new FakeSessionApi(), env: {} });
+    await ensureDriverSession(driver, (await store.readThreadRecord(thread.id))!, { store });
+    await executeTurn({ store, driver, threadId: thread.id, storeTurnId: next.turn.id, prompt: "what number?", workingDirectory: root });
+    await settleRuns();
+    // Started fresh, told the thread, and gave the new session the history.
+    expect(transport.created[0]!.options.resume).toBeUndefined();
+    const prompt = transport.created[0]!.prompts[0]!;
+    expect(prompt).toContain("# Continuing: Lost session");
+    expect(prompt).toContain("remember 7");
+    expect(prompt).toContain("Noted: 7.");
+    expect(prompt.endsWith("what number?")).toBe(true);
+    const notices = (await store.readActivities(thread.id)).filter((row) => row.kind === "notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.payload).toMatchObject({ notice: "session-lost", provider: "claude" });
+    // The new cursor is saved, and the next turn carries no handoff and no second notice.
+    expect((await store.readThreadRecord(thread.id))?.providerSessions?.claude).toBe(newSessionId);
+    const again = await sendTurn(store, thread.id, { prompt: "again" });
+    const secondRun = executeTurn({ store, driver, threadId: thread.id, storeTurnId: again.turn.id, prompt: "again", workingDirectory: root });
+    // The reply follows the prompt, as the live CLI's does: pushed earlier,
+    // it would arrive with no open turn.
+    const deadline = Date.now() + 5000;
+    while (transport.created[0]!.prompts.length < 2) {
+      if (Date.now() > deadline) throw new Error("the second prompt never reached the session");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    transport.created[0]!.push(assistantText("7 again.", { input_tokens: 10, output_tokens: 5 }, { uuid: "assistant-lost-2", session_id: newSessionId }));
+    transport.created[0]!.push(successResult("7 again.", 0.01, { uuid: "result-lost-2", session_id: newSessionId }));
+    await secondRun;
+    await settleRuns();
+    expect(transport.created[0]!.prompts[1]).toBe("again");
+    expect((await store.readActivities(thread.id)).filter((row) => row.kind === "notice")).toHaveLength(1);
+    await Effect.runPromise(driver.stopAll());
   });
 });
 

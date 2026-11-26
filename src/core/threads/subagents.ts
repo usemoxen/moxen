@@ -140,6 +140,8 @@ export async function subagentTranscript(
   readHistory?: SubagentHistoryReader,
   /** Whose store `readHistory` reads: it decides which of the thread's sessions must exist, and how the tool rows are mapped. */
   historyProvider: "opencode" | "codex" | "harness" = "opencode",
+  /** The Claude account's `CLAUDE_CONFIG_DIR`; the on-disk transcript is read there, not in the server's own env. */
+  claudeConfigDir?: string,
 ): Promise<SubagentTranscript> {
   const thread = await store.readThreadRecord(threadId);
   const agent = thread?.nativeSubagents?.find((entry) => entry.agentId === agentId) ?? null;
@@ -149,7 +151,7 @@ export async function subagentTranscript(
   }
   const sessionId = thread?.providerSessions?.["claude"];
   if (thread === null || sessionId === undefined) return { available: false, agent, messages: [], activities: [] };
-  const transcript = await readClaudeSubagent(sessionId, agentId, thread.env.path);
+  const transcript = await readClaudeSubagent(sessionId, agentId, thread.env.path, claudeConfigDir);
   const turnId = `subagent:${agentId}`;
   const base = Date.parse(agent?.startedAt ?? thread.createdAt);
   const messages: MessageEnvelope[] = [];

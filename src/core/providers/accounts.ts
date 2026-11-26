@@ -376,7 +376,10 @@ export function resolveClaudeAccount(
     : accountId !== null
       ? {}
       : { ...(config ?? {}) };
-  const withExtra = account?.env ? { ...baseEnv, ...account.env } : baseEnv;
+  // Always a snapshot: a driver that held the live process env would pick
+  // up the temporary CLAUDE_CONFIG_DIR another account's SDK session call
+  // runs under (`withClaudeConfigDir`) and spawn its CLI in that folder.
+  const withExtra = { ...baseEnv, ...(account?.env ?? {}) };
   const env = makeClaudeEnv({ homePath: settings.homePath ?? "" }, withExtra);
   const canonicalId = accountId !== null ? accountInstanceId("claude", accountId) : "claudeAgent";
   return {

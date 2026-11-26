@@ -459,7 +459,11 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     this.settings = normalizeClaudeSettings(options.settings);
     this.baseEnv = options.env ?? process.env;
     this.transport = options.transport ?? new SdkTransport();
-    this.sessionApi = options.sessionApi ?? new SdkSessionApi();
+    // The session helpers look in the same folder the spawned CLI gets:
+    // after a restart the server's own env holds no account's folder, and
+    // a lookup there would read every saved session as lost (LOCAL-036).
+    this.sessionApi =
+      options.sessionApi ?? new SdkSessionApi(makeClaudeEnv({ homePath: this.settings.homePath }, this.baseEnv).CLAUDE_CONFIG_DIR);
     this.usageProbeTimeoutMs = options.usageProbeTimeoutMs ?? 15_000;
     this.stopTimeoutMs = options.stopTimeoutMs ?? 2_000;
     this.skillsMod = options.skillsMod ?? null;
@@ -1061,13 +1065,19 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
 
   /**
    * A cursor from a previous process, if the CLI still has that session.
-   * A lost one (cleared `~/.claude`, another machine) starts fresh instead
-   * of failing the turn; so does a lookup that itself fails.
+   * A confirmed lost one (cleared config folder, another machine) starts
+   * fresh instead of failing the turn — the turn runner says so in the
+   * thread and hands the history to the new session. A lookup that itself
+   * throws is not proof of loss: the cursor stays, and the resume attempt
+   * decides, so a transient error never silently discards history.
    */
   private async liveCursor(cursor: string | undefined): Promise<string | undefined> {
     if (!cursor) return undefined;
-    const exists = await this.sessionApi.sessionExists(cursor).catch(() => false);
-    return exists ? cursor : undefined;
+    try {
+      return (await this.sessionApi.sessionExists(cursor)) ? cursor : undefined;
+    } catch {
+      return cursor;
+    }
   }
 
   private describeSession(session: ClaudeSession): ProviderSession {

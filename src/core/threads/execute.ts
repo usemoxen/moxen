@@ -19,7 +19,8 @@ import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 
 import type { SkillInventory } from "../catalog/summary.js";
-import type { BackgroundTaskSummary, RateLimitWindow } from "../providers/spi.js";
+import { isCompactCommand, type BackgroundTaskSummary, type RateLimitWindow } from "../providers/spi.js";
+import { buildHandoff } from "./handoff.js";
 import { noteMessageId, USAGE_CONTINUE_GRACE_MS } from "./views.js";
 import { chatgptHarnessConfigFor } from "./longthreads.js";
 import { armScheduledTurn } from "./schedule.js";
@@ -792,7 +793,15 @@ export async function ensureDriverSession(
   );
   // A first-turn question can be answered before sendTurn returns. Its
   // conversation identity must already be durable when that question appears.
-  if (options.store) await persistResumeCursor(options.store, driver, thread.id);
+  // A Claude resume the driver dropped is the exception: the store keeps the
+  // saved cursor until the turn that carries the handoff settles, so the
+  // runner still sees the loss (`withResumeHandoff`) even once the new
+  // session's id has arrived.
+  const resumeLost =
+    cursor !== undefined &&
+    driverKindOfInstance(selection.instanceId) === "claude" &&
+    (driver.resumeCursor?.(thread.id) ?? null) !== cursor;
+  if (options.store && !resumeLost) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
   await captureRuleBaseline(driver, thread.id, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), cwd);
   if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onUsageLimit, options.config);
@@ -1512,6 +1521,53 @@ function recordTurnActivity(
   return { onEvent, flush: () => chain, saveUnfinishedText, noteFailure, outputSeen };
 }
 
+/**
+ * A Claude session that could not resume its saved cursor starts blank
+ * under the old transcript (LOCAL-036). The driver starts fresh so the turn
+ * still runs; here the thread is told — a notice row, the same shape
+ * `watchDriverSession` records for provider notices — and the new session
+ * is given the thread's history as a handoff ahead of the prompt, so the
+ * model is not left with none of it.
+ *
+ * Detection needs no extra state: the store keeps the saved cursor until
+ * this turn settles (`ensureDriverSession` skips its early persist on a
+ * lost resume), while the driver's cursor is absent or the new session's
+ * id — never the saved one. Once the new id is persisted the two agree
+ * again, and later turns carry no handoff. A bare `/compact` still gets
+ * the notice but no handoff: it must reach the driver as the command.
+ */
+async function withResumeHandoff(args: ExecuteTurnArgs): Promise<string> {
+  const { store, driver, threadId } = args;
+  const thread = await store.readThreadRecord(threadId).catch(() => null);
+  if (thread === null) return args.prompt;
+  const selection = args.modelSelection ?? thread.modelSelection;
+  if (driverKindOfInstance(selection.instanceId) !== "claude") return args.prompt;
+  const saved = thread.providerSessions?.[driverKey(selection.instanceId)];
+  if (saved === undefined) return args.prompt;
+  if ((driver.resumeCursor?.(threadId) ?? null) === saved) return args.prompt;
+  const handoff = isCompactCommand(args.prompt) ? null : await buildHandoff(store, threadId).catch(() => null);
+  await store
+    .appendLedger(threadId, "activity", {
+      id: store.newId(),
+      threadId,
+      turnId: args.storeTurnId,
+      kind: "notice",
+      summary: "Claude session could not be resumed",
+      payload: {
+        notice: "session-lost",
+        provider: "claude",
+        detail:
+          handoff !== null
+            ? "The saved Claude session is no longer available. A new session was started and given a handoff of this thread's history."
+            : "The saved Claude session is no longer available. A new session was started.",
+      },
+      createdAt: store.nowIso(),
+    })
+    .catch(() => undefined);
+  store.emit(threadId, "activity");
+  return handoff === null ? args.prompt : `${handoff}\n\n${args.prompt}`;
+}
+
 async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
   const { store, driver, threadId, storeTurnId } = args;
   const cwd = args.workingDirectory?.trim() ? args.workingDirectory.trim() : null;
@@ -1616,7 +1672,7 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
       : await Effect.runPromise(
           driver.sendTurn({
             threadId,
-            prompt: args.prompt,
+            prompt: await withResumeHandoff(args),
             ...(args.images?.length ? { images: args.images } : {}),
             ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
             ...(args.runtimeMode ? { runtimeMode: args.runtimeMode } : {}),
