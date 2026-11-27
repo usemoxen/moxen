@@ -476,6 +476,8 @@ export interface StoredMessage {
   readonly origin?: MessageOrigin;
   /** The origin's structured facts (`task-notification`: the tasks), for a client to draw. */
   readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  /** Filed as a turn prompt, even if later folded into another queued turn. */
+  readonly queuedTaskNotice?: true;
 }
 
 /** Internal inputs: task results, usage reset continuations, answer-panel replies, a message from the thread that delegated the task, and Moxen's own compaction prompts. `agent-message` is one an agent queued with `message_queue`, for itself or a task it delegated. */

@@ -640,7 +640,8 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
         }),
       ...(hooks.withSteer === true
         ? {
-            steerTurn: (threadId: string, text: string) =>
+            reportsSteerArrival: () => true,
+            steerTurn: (_threadId: string, text: string) =>
               hooks.steerAttempts === undefined
                 ? Effect.sync(() => { hooks.steers.push(text); })
                 : Effect.tryPromise(async () => { hooks.steerAttempts!.push(text); throw new Error("steer rejected by the driver"); }),
@@ -826,7 +827,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
           return { threadId: input.threadId, turnId };
         }),
       ...(hooks.withSteer === true
-        ? { steerTurn: (threadId: string, text: string) => Effect.sync(() => { hooks.steers.push(text); }) }
+        ? { reportsSteerArrival: () => true, steerTurn: (...[_threadId, text, _images, _id, origin]: Parameters<NonNullable<TurnDriver["steerTurn"]>>) => Effect.sync(() => { hooks.steers.push(text); origin?.onArrival?.(); }) }
         : {}),
       interruptTurn: () => Effect.void,
       awaitTurn: (async (_threadId: string, turnId: string, signal?: AbortSignal) => {
@@ -1120,7 +1121,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     await settleRuns();
   }, 30_000);
 
-  it("refuses a steer whose target died before the driver took it: nothing is sent, nothing is recorded, and the notice stays durable", async () => {
+  it("files the notice as a turn of its own when the turn it meant to steer died before the driver took it", async () => {
     const prompts: string[] = [];
     const steers: string[] = [];
     const release: (() => void)[] = [];
@@ -1145,7 +1146,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
 
     // The parent's own turn is stalled live; the notice's flush decides on it.
     // Between the decision and the driver's steer, the turn dies — the steer
-    // must be refused and the notice kept durable, not steered into nothing.
+    // cannot ride it, and nothing is steered into nothing.
     live = (await startTurn(ctx, { threadId: parent.id, prompt: "User work", onEvent: () => undefined })).turn;
     await vi.waitFor(() => expect(prompts).toContain("User work"), { timeout: 10_000 });
     armed = true;
@@ -1154,27 +1155,56 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     const childTurn = (await sendTurn(w.store, child.id, { prompt: "Do it" })).turn;
     await completeTurn(w.store, child.id, childTurn.id, { text: "Done." });
     await queueTaskNotification(ctx, parent.id, child.id);
-    // The target turn dies between the flush's decision and the send, so the
-    // steered start throws before any ledger row is written: the flush never
-    // reaches its batch delete, and nothing is sent and nothing is recorded.
+    // The target turn dies between the flush's decision and the send: the
+    // steered start throws before any message row is written, and the notice
+    // goes out as a turn of its own for the now-idle parent rather than being
+    // stranded on it until a user message.
     await flushTaskNotifications(ctx, parent.id).catch(() => undefined);
     expect(steers.length).toBe(0);
-    expect((await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(0);
-    // Nothing re-fires on its own either: no watcher, no timer.
-    await new Promise((resolve) => setTimeout(resolve, 2600));
-    expect(steers.length).toBe(0);
-    expect((await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(0);
-    expect(await readBatches(w.root)).toHaveProperty(parent.id);
-
-    // The notice rides the next live user turn.
-    armed = false;
-    const retry = await startTurn(ctx, { threadId: parent.id, prompt: "User work again", onEvent: () => undefined });
-    await vi.waitFor(() => expect(steers.length).toBe(1), { timeout: 10_000 });
-    await interruptTurn(w.store, parent.id, retry.turn.id);
+    await vi.waitFor(async () => expect((await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(1), { timeout: 10_000 });
     await settleRuns();
+    const [notice] = (await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification");
+    expect(notice?.turnId).not.toBe(live.id);
+    expect(steers.length).toBe(0);
+    expect(await readBatches(w.root)).toEqual({});
   }, 30_000);
 
-  it("forgets the batch after a steered delivery the driver rejected, and arms no repeating retry", async () => {
+  it("keeps the batch without a steer row if the final gate refuses after staging it", async () => {
+    const prompts: string[] = [];
+    const steers: string[] = [];
+    const release: (() => void)[] = [];
+    const driver = raceDriver({ prompts, steers, release, stall: "Automatic work", withSteer: true });
+    const w = await testHarness({ drivers: { antigravity: () => driver } });
+    const ctx: OperationContext = { store: w.store, storeRoot: w.root, config: w.config, driverFor: () => driver };
+    ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: true } };
+    const env = { mode: "local" as const, path: w.work, branch: null };
+    const parent = await createThread(w.store, { projectId: "p", title: "Parent", env, modelSelection: { instanceId: "antigravity", model: "test-model" } });
+    const child = await createThread(w.store, { projectId: "p", title: "Child", env, modelSelection: { instanceId: "codex", model: "test-model" } });
+    const live = await startTurn(ctx, { threadId: parent.id, prompt: "Automatic work", origin: "task-message" });
+    await vi.waitFor(() => expect(prompts).toContain("Automatic work"));
+    const turn = await sendTurn(w.store, child.id, { prompt: "Work" });
+    await completeTurn(w.store, child.id, turn.turn.id, { text: "Done." });
+
+    const append = w.store.appendLedger.bind(w.store);
+    const optedOut = vi.spyOn(w.store, "appendLedger").mockImplementation(async (id, ledger, row) => {
+      await append(id, ledger, row);
+      if (id === parent.id && ledger === "activity" && (row as { kind: string }).kind === "turn.steered") {
+        ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: false } };
+      }
+    });
+    await queueTaskNotification(ctx, parent.id, child.id);
+    const flushed = flushTaskNotifications(ctx, parent.id);
+    await expect(flushed).rejects.toMatchObject({ code: "TASK_NOTICE_STEER_GATED" });
+    optedOut.mockRestore();
+    await interruptTurn(w.store, parent.id, live.turn.id);
+    await settleRuns();
+    expect(steers).toEqual([]);
+    expect((await w.store.readMessages(parent.id)).some((row) => row.origin === "task-notification")).toBe(false);
+    expect((await w.store.readActivities(parent.id)).some((row) => row.kind === "turn.steered")).toBe(false);
+    expect(await readBatches(w.root)).toHaveProperty(parent.id);
+  }, 30_000);
+
+  it("keeps a notice the provider rejected, without a repeating retry while the turn is running", async () => {
     const prompts: string[] = [];
     const steerAttempts: string[] = [];
     const release: (() => void)[] = [];
@@ -1194,19 +1224,18 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     const childTurn = (await sendTurn(w.store, child.id, { prompt: "Do it" })).turn;
     await completeTurn(w.store, child.id, childTurn.id, { text: "Done." });
 
-    // One flush, one delivery attempt, and the driver rejects the steer. The
-    // batch is then forgotten (the unconfirmed steer row is the notice's own
-    // durable redelivery), and no watcher or timer may re-fire the flush on
-    // its own while nothing changed: no retry loop, no extra ledger rows.
+    // The driver rejects the recorded attempt. Keep the batch for idle,
+    // without retrying while its parent is still running.
     await queueTaskNotification(ctx, parent.id, child.id);
     await flushTaskNotifications(ctx, parent.id);
     expect(steerAttempts).toHaveLength(1);
     await new Promise((resolve) => setTimeout(resolve, 3200));
     expect(steerAttempts).toHaveLength(1);
     expect((await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(1);
-    expect(await readBatches(w.root)).toEqual({});
+    expect(await readBatches(w.root)).toHaveProperty(parent.id);
 
     for (const resolve of release.splice(0)) resolve();
+    await vi.waitFor(async () => expect(await readBatches(w.root)).toEqual({}));
     await settleRuns();
   }, 30_000);
 
@@ -1223,8 +1252,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     const child = await make("Once only child");
 
     // The user's own turn is live; the notice steers into it, and the driver
-    // rejects the steer after its ledger row was written — unconfirmed,
-    // exactly the row a crash's orphan recovery later redelivers.
+    // rejects the steer after its ledger row was written.
     const live = (await sendTurn(w.store, parent.id, { prompt: "Do a long job." })).turn;
     expect(live.status).toBe("running");
     const now = new Date().toISOString();
@@ -1235,12 +1263,11 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     await flushTaskNotifications(ctx, parent.id);
     expect(steerAttempts).toHaveLength(1);
 
-    // The stalled turn's owner dies; recovery interrupts it and redelivers the
-    // unconfirmed steer as a queued turn of its own, which runs: the notice
-    // reaches the driver once. The batch was already forgotten by the
-    // rejected steer's flush, so no later flush may deliver it twice.
+    // The stalled turn's owner dies. Orphan recovery makes the thread idle
+    // and the held batch delivers the refused notice once.
     await w.store.updateTurn(parent.id, live!.id, { owner: await deadOwner() });
     await recoverOrphanedTurn(ctx, parent.id);
+    await vi.waitFor(async () => expect(await readBatches(w.root)).toEqual({}));
     await settleRuns();
     const copy = (await w.store.readTurns(parent.id)).find((turn) => turn.origin === "task-notification" && turn.id !== live!.id);
     expect(copy?.status).toBe("completed");
@@ -1250,8 +1277,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     expect(prompts.filter((prompt) => prompt.includes(marker))).toHaveLength(1);
 
     // Any later flush — a watcher timer, a user send, a restart's recovery —
-    // must find nothing left to deliver: the batch was forgotten with the
-    // rejected steer, and the notice reached the driver exactly once.
+    // must find nothing left after the queued delivery.
     await flushTaskNotifications(ctx, parent.id);
     await settleRuns();
     expect(prompts.filter((prompt) => prompt.includes(marker))).toHaveLength(1);

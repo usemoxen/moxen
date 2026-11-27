@@ -54,6 +54,7 @@ import type {
   SideQuestionInput,
   TextCompletionInput,
   SubagentHistoryItem,
+  SteerOrigin,
   UnconfirmedSteer,
 } from "../providers/spi.js";
 import { CliError } from "../errors.js";
@@ -128,7 +129,14 @@ export interface TurnDriver extends ProviderSessionTitles {
   refreshUsage?(options?: { readonly force?: boolean }): Promise<{ readonly key: string; readonly windows: ReadonlyArray<RateLimitWindow>; readonly credits?: number | null } | null>;
   /** What fills the window, by category; absent where the provider reports only totals. */
   contextBreakdown?(threadId: string): Promise<ContextBreakdown | null>;
-  steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[], steerId?: string): Effect.Effect<void, CliError>;
+  steerTurn?(threadId: string, text: string, images?: readonly ProviderImage[], steerId?: string, origin?: SteerOrigin): Effect.Effect<void, CliError>;
+  /**
+   * Whether this driver can say that a steer reached the conversation (see
+   * `ProviderAdapter.reportsSteerArrival`). Core delivers a runtime notice as
+   * a durable turn unless it can — a notice must never be lost, so it is not
+   * trusted to a push nothing would report on.
+   */
+  reportsSteerArrival?(threadId: string): boolean;
   /**
    * Steers pushed to the running turn that the provider never confirmed
    * reaching the conversation (see `ProviderAdapter.takeUnconfirmedSteers`).

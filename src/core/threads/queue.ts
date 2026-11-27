@@ -425,6 +425,20 @@ export async function antigravityDispatchGate(
  * driver's steer going out right after it, nothing awaited in between.
  */
 export interface AntigravitySteerRefusal {
+  /**
+   * The turn the caller meant to ride is no longer the running one — it
+   * settled, or another turn replaced it — so there is nothing left to
+   * steer. That is a race, not a decision about the notice: the caller files
+   * the notice as a turn of its own rather than keeping it for the user's
+   * next message.
+   */
+  targetGone(): boolean;
+  /**
+   * The policy alone: an automatic steer into a turn the user did not write,
+   * on Antigravity with `allowUnsupportedUse` off. A notice this refuses is
+   * kept durable, never retried, never filed as a turn of its own.
+   */
+  policyRefuses(providersInForce: () => Pick<CliConfig, "providers">["providers"] | undefined): boolean;
   refuses(providersInForce: () => Pick<CliConfig, "providers">["providers"] | undefined, payloadAutomatic: boolean): boolean;
 }
 
@@ -440,18 +454,25 @@ export interface AntigravitySteerRefusal {
 export async function antigravitySteerGate(
   store: { readThreadRecord(threadId: string): Promise<StoredThread | null>; readTurns(threadId: string): Promise<readonly StoredTurn[]> },
   threadId: string,
+  expectedTurnId?: string,
 ): Promise<AntigravitySteerRefusal> {
   const thread = await store.readThreadRecord(threadId).catch(() => null);
   const turns = thread !== null ? await store.readTurns(threadId).catch(() => null) : null;
   const target = (turns ?? []).find((turn) => turn.status === "running") ?? null;
   const selection = target?.modelSelection ?? thread?.modelSelection ?? null;
   const targetAntigravity = selection !== null && driverKindOfInstance(selection.instanceId) === "antigravity";
+  const targetGone = () => target === null || (expectedTurnId !== undefined && target.id !== expectedTurnId);
+  const policyRefuses = (providersInForce: () => Pick<CliConfig, "providers">["providers"] | undefined) => {
+    if (target !== null && userAuthoredTurn(target)) return false;
+    return targetAntigravity && providersInForce()?.antigravity?.allowUnsupportedUse !== true;
+  };
   return {
+    targetGone,
+    policyRefuses,
     refuses: (providersInForce, payloadAutomatic) => {
       if (!payloadAutomatic) return false;
-      if (target === null) return true;
-      if (userAuthoredTurn(target)) return false;
-      return targetAntigravity && providersInForce()?.antigravity?.allowUnsupportedUse !== true;
+      if (targetGone()) return true;
+      return policyRefuses(providersInForce);
     },
   };
 }

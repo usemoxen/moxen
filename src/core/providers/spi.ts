@@ -170,6 +170,18 @@ export interface UnconfirmedSteer {
   readonly images: readonly ProviderImage[];
 }
 
+/**
+ * What a steer's text is, when it is not the user or another agent speaking:
+ * Moxen's own runtime notice (a task settling, a background wake). Passed to
+ * a driver that can tell its provider, so the turn reads it as a task
+ * delivery rather than as a message the user sent mid-turn.
+ */
+export interface SteerOrigin {
+  readonly notice: true;
+  /** Report consumption, not just acceptance into the provider's input queue. */
+  readonly onArrival?: () => void;
+}
+
 export interface ProviderSendTurnInput {
   readonly threadId: ThreadId;
   readonly prompt: string;
@@ -630,8 +642,24 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
    * pending steers by it, so the turn runner can match a confirmation (or a
    * redelivery) back to the recorded message exactly. Drivers without a
    * confirmation signal ignore it.
+   *
+   * `origin` says what the text is: Moxen's own runtime notice, rather than
+   * something the user or another agent typed. A driver that can tell its
+   * provider passes the provenance on, so the turn reads the notice as a task
+   * delivery instead of a message from the user sent mid-turn.
    */
-  readonly steerTurn?: (threadId: ThreadId, text: string, images?: readonly ProviderImage[], steerId?: string) => Effect.Effect<void, TError>;
+  readonly steerTurn?: (threadId: ThreadId, text: string, images?: readonly ProviderImage[], steerId?: string, origin?: SteerOrigin) => Effect.Effect<void, TError>;
+
+  /**
+   * Whether this driver can say that a steer reached the conversation for the
+   * thread's current session: it has proven the provider reports what it
+   * consumed (Claude's `user_message_uuid` echoes), so a push is not trusted
+   * blindly. False before that proof, and absent for drivers with no arrival
+   * signal at all. Core uses it to deliver a runtime notice as a durable turn
+   * rather than trusting a push that may be dropped — a notice must never be
+   * lost, so it is only trusted to a driver that reports arrivals.
+   */
+  readonly reportsSteerArrival?: (threadId: ThreadId) => boolean;
 
   /**
    * A steer handed to the provider's running turn that the provider has not
