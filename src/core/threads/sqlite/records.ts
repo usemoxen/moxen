@@ -550,6 +550,7 @@ export function encodeDelegation(delegation: StoredDelegation): DelegationRow {
   if (delegation.modelSnapshot !== undefined) rest.modelSnapshot = delegation.modelSnapshot;
   if (delegation.review !== undefined) rest.review = delegation.review;
   if (delegation.cancelledTurnId !== undefined) rest.cancelledTurnId = delegation.cancelledTurnId;
+  if (delegation.cancelledTurnAt !== undefined) rest.cancelledTurnAt = delegation.cancelledTurnAt;
   if (delegation.cancelledGeneration !== undefined) rest.cancelledGeneration = delegation.cancelledGeneration;
   if (delegation.lastSettledTurnId !== undefined) rest.lastSettledTurnId = delegation.lastSettledTurnId;
   return {
@@ -587,6 +588,7 @@ export function decodeDelegation(row: DelegationRow): StoredDelegation {
     ...(rest.modelSnapshot === undefined ? {} : { modelSnapshot: rest.modelSnapshot as NonNullable<StoredDelegation["modelSnapshot"]> }),
     ...(rest.review === undefined ? {} : { review: rest.review as NonNullable<StoredDelegation["review"]> }),
     ...(rest.cancelledTurnId === undefined ? {} : { cancelledTurnId: rest.cancelledTurnId as string }),
+    ...(rest.cancelledTurnAt === undefined ? {} : { cancelledTurnAt: rest.cancelledTurnAt as string }),
     ...(rest.cancelledGeneration === undefined ? {} : { cancelledGeneration: rest.cancelledGeneration as number }),
     ...(rest.lastSettledTurnId === undefined ? {} : { lastSettledTurnId: rest.lastSettledTurnId as string }),
   };

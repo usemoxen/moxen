@@ -271,6 +271,7 @@ export function fullDelegation(): StoredDelegation {
     modelSnapshot: { parent: "claude/claude-test-1" },
     review: { verdict: "MERGE", report: "Looks good 🧵" },
     cancelledTurnId: "turn-2",
+    cancelledTurnAt: AT,
     cancelledGeneration: 2,
     lastSettledTurnId: "turn-3",
     status: "completed",

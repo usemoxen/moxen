@@ -1686,9 +1686,19 @@ async function clearCancelledOnSettle(ctx: OperationContext, threadId: string, s
     const anchor = current.cancelledTurnId;
     if (anchor !== undefined) {
       const anchorAt = ran.findIndex((turn) => turn.id === anchor);
-      // A missing anchor cannot prove this settle came after it, and one at
-      // or before it is the cancelled turn or older work.
-      if (anchorAt < 0 || settledAt <= anchorAt) return null;
+      if (anchorAt >= 0) {
+        // Present in the ledger: execution order decides directly.
+        if (settledAt <= anchorAt) return null;
+      } else {
+        // The stopped turn was reverted out of the ledger: fall back to its
+        // recorded run time so new work that runs afterwards still replaces
+        // the mark instead of leaving the task stuck cancelled.
+        const anchorMs = current.cancelledTurnAt === undefined ? Number.NaN : Date.parse(current.cancelledTurnAt);
+        const settledTurn = ran[settledAt]!;
+        const settledMs = Date.parse(settledTurn.startedAt ?? settledTurn.createdAt);
+        if (!Number.isFinite(anchorMs) || !Number.isFinite(settledMs) || settledMs < anchorMs) return null;
+        if (settledMs === anchorMs && Date.parse(settledTurn.createdAt) < anchorMs) return null;
+      }
     }
     if (turns.some((turn) => turn.status === "running" || turn.status === "queued")) return null;
     return { status: "running" };
@@ -1707,18 +1717,30 @@ async function markCancelled(
   threadId: string,
   rowId: string,
   anchorTurnId?: string,
+  anchorTurnAt?: string,
 ): Promise<StoredDelegation | null> {
   return await ctx.store.updateDelegationWith(rowId, async (current) => {
+    let resolvedAnchorAt = anchorTurnAt;
     if (anchorTurnId !== undefined) {
-      const ran = ranTurns(await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]));
+      const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
+      const ran = ranTurns(turns);
       const anchorAt = ran.findIndex((turn) => turn.id === anchorTurnId);
+      if (resolvedAnchorAt === undefined && anchorAt >= 0) {
+        const anchorTurn = ran[anchorAt]!;
+        resolvedAnchorAt = anchorTurn.startedAt ?? anchorTurn.createdAt;
+      }
       const lastAt = current.lastSettledTurnId === undefined ? -1 : ran.findIndex((turn) => turn.id === current.lastSettledTurnId);
       if (anchorAt >= 0 && lastAt > anchorAt) return null;
+      if (anchorAt < 0 && lastAt >= 0 && resolvedAnchorAt !== undefined) {
+        const lastTurn = ran[lastAt]!;
+        if (Date.parse(lastTurn.startedAt ?? lastTurn.createdAt) > Date.parse(resolvedAnchorAt)) return null;
+      }
     }
     return {
       status: "cancelled",
       cancelledGeneration: (current.cancelledGeneration ?? 0) + 1,
       ...(anchorTurnId === undefined ? {} : { cancelledTurnId: anchorTurnId }),
+      ...(resolvedAnchorAt === undefined ? {} : { cancelledTurnAt: resolvedAnchorAt }),
     };
   }).catch(() => null);
 }
@@ -6606,12 +6628,16 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
   // The turn this call stopped reads as the cancel it ended on, so its own
   // settle leaves the mark: only a turn that ran afterwards replaces it.
   let cancelledTurnId: string | undefined;
+  let cancelledTurnAt: string | undefined;
   let interrupted = false;
   if (isThreadActive(child)) {
     try {
       const stopped = await interruptTurn(ctx.store, child.id);
       interrupted = stopped.interrupted;
-      if (interrupted) cancelledTurnId = stopped.turn?.id;
+      if (interrupted) {
+        cancelledTurnId = stopped.turn?.id;
+        cancelledTurnAt = stopped.turn ? (stopped.turn.startedAt ?? stopped.turn.createdAt) : undefined;
+      }
     } catch (cause) {
       throw new CliError(
         "TASK_CANCEL_UNSUPPORTED",
@@ -6638,7 +6664,7 @@ export async function cancelTask(ctx: OperationContext, rawParentThreadId: strin
     const ended = await describeTask(ctx, parentThreadId, row.childThreadId);
     return { ...ended, interruptRequested: false, stateAfter: ended.child.latestTurn?.state ?? null };
   }
-  const marked = await markCancelled(ctx, child.id, row.id, cancelledTurnId);
+  const marked = await markCancelled(ctx, child.id, row.id, cancelledTurnId, cancelledTurnAt);
   const after = await describeTask(ctx, parentThreadId, row.childThreadId);
   const state = after.child.latestTurn?.state ?? null;
   // A turn that ran after the one this call stopped had already settled

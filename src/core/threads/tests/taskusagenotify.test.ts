@@ -1135,7 +1135,6 @@ describe("cancellations that race later work", () => {
       held.resolve();
       await release.promise;
     });
-    console.error("T5 start B");
     const b = await startTurn({ ...w.ctx, store }, { threadId: child.id, prompt: "Work B" });
     await bRunning.promise;
     bRelease.resolve();
@@ -1156,6 +1155,38 @@ describe("cancellations that race later work", () => {
     await flushTurnRunners();
 
     expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("clears a cancelled mark when the cancelled turn was reverted and new work completes", async () => {
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Fresh work done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+
+    // Reverting to 0 drops the cancelled turn from the ledger; fresh work
+    // that runs afterwards must replace the cancelled mark instead of leaving
+    // the task stuck cancelled.
+    await revertThread(w.ctx, child.id, 0);
+    const b = await startTurn(w.ctx, { threadId: child.id, prompt: "Work B" });
+    await b.run;
+    await flushTurnRunners();
+
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
   });
 
   it("leaves a finished task alone when the cancel stops nothing", async () => {

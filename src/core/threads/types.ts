@@ -570,6 +570,14 @@ export interface StoredDelegation {
    */
   readonly cancelledTurnId?: string;
   /**
+   * The run time (`startedAt ?? createdAt`) of `cancelledTurnId`. When the
+   * stopped turn is later reverted out of the ledger, a settling turn that
+   * ran at or after this time is still recognised as fresh work instead of
+   * leaving the task stuck `cancelled`. Absent on rows cancelled while idle,
+   * and on rows written before it existed.
+   */
+  readonly cancelledTurnAt?: string;
+  /**
    * Counts successful cancellations on this row. A settle reads it with the
    * row and clears only while it still matches, so a cancellation written in
    * between (a recovery cancel included) is never erased by an older settle.
