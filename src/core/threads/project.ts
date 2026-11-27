@@ -168,14 +168,17 @@ export function toThreadEnvelope(thread: StoredThread, turns: StoredTurn[], inpu
   const turnCount = new Map(ran.map((turn, index) => [turn.id, index + 1] as const));
   const queued = turns
     .filter((turn) => turn.status === "queued")
-    .map((turn) => ({
-      turnId: turn.id,
-      messageId: turn.messageId,
-      scheduledFor: turn.scheduledFor ?? null,
-      scheduleReason: turn.scheduleReason ?? null,
-      ...(turn.queue && turn.queue.conditions.length > 0 ? { conditions: turn.queue.conditions.map((condition) => ({ ...condition })) } : {}),
-      ...(turn.queue?.held ? { held: true } : {}),
-    }));
+    .map((turn) => {
+      const visibleConditions = turn.queue?.conditions.filter((condition) => !(condition.type === "entry" && condition.serverWait === true)) ?? [];
+      return {
+        turnId: turn.id,
+        messageId: turn.messageId,
+        scheduledFor: turn.scheduledFor ?? null,
+        scheduleReason: turn.scheduleReason ?? null,
+        ...(visibleConditions.length > 0 ? { conditions: visibleConditions.map((condition) => ({ ...condition })) } : {}),
+        ...(turn.queue?.held ? { held: true } : {}),
+      };
+    });
   const turnModes: Record<string, TurnInteractionMode> = {};
   const turnUsagePauses = Object.fromEntries(turns.flatMap((turn) => turn.usagePause ? [[turn.id, turn.usagePause]] : []));
   // Maintenance turns are not work (see `maintenanceTurnIds`).

@@ -437,4 +437,50 @@ describe("message_queue: whose thread it is", () => {
       await t.connection.close();
     }
   }, 30_000);
+
+  it("keeps agent ownership and internal handoff wait when a continued thread moves a queued entry", async () => {
+    const t = await setup({ leaveTurnsRunning: true });
+    try {
+      const future = new Date(Date.now() + 3_600_000).toISOString();
+      const queued = await t.queue(t.orchestrator, {
+        message: "Follow up after the handoff",
+        conditions: [{ type: "at", at: future }],
+      });
+      expect(queued.isError).toBe(false);
+
+      await t.settleRunningTurns(t.orchestrator);
+      const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });
+      const destId = continued.threadId;
+
+      const listed = await callMoxenTool(t.connection, destId, "message_queue_list", {});
+      expect(listed.isError).toBe(false);
+      const messages = (JSON.parse(listed.text) as { messages: Array<{ threadId: string; turnId: string; text: string }> }).messages;
+      expect(messages).toHaveLength(1);
+      const movedTurnId = messages[0]!.turnId;
+      expect(messages[0]!.threadId).toBe(destId);
+
+      // Editing conditions as the continuation preserves the internal serverWait on the handoff turn.
+      const later = new Date(Date.now() + 7_200_000).toISOString();
+      const edited = await callMoxenTool(t.connection, destId, "message_queue_edit", {
+        turnId: movedTurnId,
+        conditions: [{ type: "at", at: later }],
+      });
+      expect(edited.isError).toBe(false);
+      const destTurns = await (await t.served()).readTurns(destId);
+      const movedTurn = destTurns.find((candidate) => candidate.id === movedTurnId)!;
+      expect(movedTurn.agentThreadId).toBe(t.orchestrator);
+      expect(movedTurn.queue?.conditions).toEqual([
+        { type: "at", at: later },
+        expect.objectContaining({ type: "entry", threadId: destId, serverWait: true }),
+      ]);
+
+      // The continuation can also remove the moved entry cleanly.
+      const removed = await callMoxenTool(t.connection, destId, "message_queue_remove", { turnId: movedTurnId });
+      expect(removed.isError).toBe(false);
+      const listedAfter = await callMoxenTool(t.connection, destId, "message_queue_list", {});
+      expect((JSON.parse(listedAfter.text) as { messages: unknown[] }).messages).toEqual([]);
+    } finally {
+      await t.connection.close();
+    }
+  }, 20_000);
 });

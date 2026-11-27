@@ -1186,8 +1186,9 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
         // it, or omitted it. Client conditions alone must fit the 16-cap, so
         // strip the wait before validating and re-append it after.
         let incoming = policy;
+        let agentConditions = agent?.conditions;
         let internalWait: Extract<QueueCondition, { type: "entry" }> | undefined;
-        if (policy && isTransferDestinationRequestId(turn.queue?.requestId)) {
+        if ((policy || agentConditions) && isTransferDestinationRequestId(turn.queue?.requestId)) {
           const siblings = await ctx.store.readTurns(threadId);
           const handoffTurn = [...siblings]
             .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
@@ -1195,7 +1196,8 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
           if (handoffTurn !== undefined) {
             const isWait = (condition: QueueCondition): boolean =>
               condition.type === "entry" && condition.threadId === threadId && condition.turnId === handoffTurn.id;
-            incoming = { ...policy, conditions: policy.conditions.filter((condition) => !isWait(condition)) };
+            if (policy) incoming = { ...policy, conditions: policy.conditions.filter((condition) => !isWait(condition)) };
+            if (agentConditions) agentConditions = agentConditions.filter((condition) => !isWait(condition));
             // Re-attach the stored condition itself where it is marked, so the
             // server's ownership survives the edit; an older row's unmarked
             // wait is re-attached unmarked (a later move then preserves it).
@@ -1212,8 +1214,22 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
             : conditions.filter((condition) => !(condition.type === "entry" && condition.threadId === threadId && condition.turnId === internalWait!.turnId));
         let next: QueuePolicy = parsedPolicy ? { ...existing, ...parsedPolicy, eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => { const left = stripWait(existing.conditions ?? []); const right = stripWait(parsedPolicy.conditions); return index < left.length && index < right.length && JSON.stringify(left[index]) === JSON.stringify(right[index]); }) } : existing;
         // An agent edits only what it waits for: the user's hold, order,
-        // sequential choice, continuation and latched events all stay.
-        if (agent?.conditions) next = { ...existing, conditions: agent.conditions, eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => JSON.stringify(existing.conditions[index]) === JSON.stringify(agent.conditions![index])) };
+        // sequential choice, continuation and latched events all stay, and
+        // reset conditions resolve against the destination's model.
+        if (agentConditions) {
+          const resolvedAgent = editSelection
+            ? resolveQueueResetConditions(parseQueuePolicy({ conditions: agentConditions }, { deferReset: true }), editSelection).conditions
+            : parseQueuePolicy({ conditions: agentConditions }).conditions;
+          next = {
+            ...existing,
+            conditions: resolvedAgent,
+            eventAfter: ctx.store.nowIso(),
+            latched: observed.filter((index) => {
+              const left = stripWait(existing.conditions ?? []);
+              return index < left.length && index < resolvedAgent.length && JSON.stringify(left[index]) === JSON.stringify(resolvedAgent[index]);
+            }),
+          };
+        }
         if (internalWait) next = { ...next, conditions: [...stripWait(next.conditions), internalWait] };
         if (next.conditions.some((c) => c.type === "thread" && c.threadId === threadId || c.type === "entry" && c.threadId === threadId && c.turnId === turnId)) throw new CliError("QUEUE_DEPENDENCY_CYCLE", "An entry cannot wait for itself or its own thread.");
         if (action === "first" || action === "last") next = { ...next, order: action === "first" ? Math.min(...entries.map((e) => e.policy.order)) - 1 : Math.max(...entries.map((e) => e.policy.order)) + 1 };
@@ -2549,6 +2565,8 @@ function buildTransferEntry(
     ...(sourceTurn.interactionModeExplicit === true ? { interactionModeExplicit: true as const } : {}),
     modelSelection: sourceTurn.modelSelection ?? destination.modelSelection,
     parentTurnId: sourceTurn.parentTurnId,
+    ...(sourceTurn.origin !== undefined ? { origin: sourceTurn.origin } : {}),
+    ...(sourceTurn.agentThreadId !== undefined ? { agentThreadId: sourceTurn.agentThreadId } : {}),
     ...(sourceTurn.scheduledFor !== undefined && sourceTurn.scheduledFor !== null
       ? {
           scheduledFor: sourceTurn.scheduledFor,

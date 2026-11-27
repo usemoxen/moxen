@@ -210,4 +210,47 @@ describe("row projections", () => {
       toCheckpointEnvelope({ id: "c", threadId: "t", turnId: "u", status: "available", ref: "r", baseRef: "b", createdAt: "c" }, 3),
     ).toMatchObject({ checkpointTurnCount: 3, ref: "r" });
   });
+
+  it("hides internal serverWait conditions from queuedTurns projections", () => {
+    const movedOnlyWait = turn({
+      id: "q-wait",
+      status: "queued",
+      delivery: "queued",
+      completedAt: null,
+      queue: {
+        conditions: [{ type: "entry", threadId: "thread-1", turnId: "handoff-turn", serverWait: true }],
+        held: false,
+        order: 1,
+        sequential: false,
+        continuation: "same-thread",
+      },
+    });
+    const movedWithUserCondition = turn({
+      id: "q-user",
+      status: "queued",
+      delivery: "queued",
+      completedAt: null,
+      queue: {
+        conditions: [
+          { type: "at", at: "2026-12-01T12:00:00.000Z" },
+          { type: "entry", threadId: "thread-1", turnId: "handoff-turn", serverWait: true },
+        ],
+        held: false,
+        order: 2,
+        sequential: false,
+        continuation: "same-thread",
+      },
+    });
+    const projected = toThreadEnvelope(thread(), [movedOnlyWait, movedWithUserCondition]);
+    expect(projected.queuedTurns).toEqual([
+      { turnId: "q-wait", messageId: "msg-1", scheduledFor: null, scheduleReason: null },
+      {
+        turnId: "q-user",
+        messageId: "msg-1",
+        scheduledFor: null,
+        scheduleReason: null,
+        conditions: [{ type: "at", at: "2026-12-01T12:00:00.000Z" }],
+      },
+    ]);
+  });
 });

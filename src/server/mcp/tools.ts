@@ -1203,7 +1203,7 @@ export async function callMoxenTool(
           message: argString(args, "message", true)!,
           ...(argString(args, "threadId") !== undefined ? { threadId: argString(args, "threadId")! } : {}),
           ...(argString(args, "at") !== undefined ? { at: argString(args, "at")! } : {}),
-          ...(Array.isArray(args.conditions) ? { conditions: parseQueuePolicy({ conditions: args.conditions }).conditions } : {}),
+          ...(Array.isArray(args.conditions) ? { conditions: parseQueuePolicy({ conditions: args.conditions }, { deferReset: true }).conditions } : {}),
         });
         return ok(queued);
       }
@@ -1212,7 +1212,7 @@ export async function callMoxenTool(
       case "message_queue_edit": {
         const turnId = argString(args, "turnId", true)!;
         if (!Array.isArray(args.conditions)) throw new CliError("INVALID_TOOL_INPUT", "conditions must be an array of queue conditions.");
-        const conditions = parseQueuePolicy({ conditions: args.conditions }).conditions;
+        const conditions = parseQueuePolicy({ conditions: args.conditions }, { deferReset: true }).conditions;
         const edited = await requireAgentQueue(agentQueue).edit(parentThreadId, turnId, conditions);
         return ok({ ...edited, conditions, note: "It now waits for these conditions instead of the old ones." });
       }
