@@ -1143,11 +1143,16 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
           throw new CliError("STORE_READ_FAILED", `Could not verify the turns ledger for thread ${turn.handoff.destinationThreadId}: it skips unreadable rows.`, { details: { threadId: turn.handoff.destinationThreadId } });
         }
         // A staged transfer whose entry does not exist yet is still this
-        // thread's to edit: the migration copies the fresh policy. Anything
-        // already prepared is managed on the destination instead.
+        // thread's to edit: the migration copies the fresh policy. A reserved
+        // destination whose handoff turn was written without its prompt never
+        // delivered either, so the user can still restore or cancel the source
+        // entry instead of hitting a dead-end "already prepared" error.
         const prepared = isTransferredTurn(turn)
           ? destinationTurns.some((candidate) => candidate.queue?.requestId === transferDestinationRequestId(turn.id))
-          : destinationTurns.length > 0;
+          : destinationTurns.length > 0 && (
+            destinationTurns.some((candidate) => candidate.queue?.requestId !== `handoff:${turn.handoff!.requestId}`)
+            || (await handoffDelivered(ctx.store, turn.handoff))
+          );
         if (prepared) throw new CliError("HANDOFF_ALREADY_PREPARED", "The new thread is already prepared. Manage its queue entry instead.");
         // Restoring or removing a staged claim unmarks it, so the next
         // migrate does not move what the user took back.
@@ -1224,7 +1229,10 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
           }),
         );
       } else {
-        await ctx.store.updateTurn(threadId, turnId, { queue: next, ...patchedStatus });
+        const patchedHandoff = action === "restore" && turn.handoff?.repairAttempts !== undefined
+          ? (() => { const { repairAttempts: _reset, ...kept } = turn.handoff; return { handoff: kept }; })()
+          : {};
+        await ctx.store.updateTurn(threadId, turnId, { queue: next, ...patchedStatus, ...patchedHandoff });
       }
       ctx.store.emit(threadId, "queue-edited");
     });
@@ -1310,6 +1318,7 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
           // its claims staged, the queue pass resuming the move.
           const failure = cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.";
           let finalized = false;
+          let migrateDestination: string | null = null;
           await ctx.store.withThreadLock(entry.threadId, async () => {
             const current = (await ctx.store.readTurns(entry.threadId)).find((turn) => turn.id === entry.turnId);
             if (current === undefined) return;
@@ -1317,11 +1326,13 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
             // The completion write landed and something after it (the
             // activity, or the migration it stages) threw: finish the
             // settlement rather than leave a completed handoff without the
-            // notes its readers follow. The staged claims stay for the queue
-            // pass to resume.
+            // notes its readers follow. Any un-staged usage follow-ups are
+            // claimed before clearing the hold, and staged claims stay for
+            // migration below (or the next queue pass).
             if (current.status === "completed") {
               if (handoff !== undefined) {
-                await finalizeHandoffLocked(ctx, entry.threadId, entry.turnId, handoff).catch(() => undefined);
+                const usageDriven = await settleDeliveredHandoffLocked(ctx, entry.threadId, entry.turnId, handoff).catch(() => false);
+                if (usageDriven) migrateDestination = handoff.destinationThreadId;
                 finalized = true;
               }
               return;
@@ -1331,20 +1342,31 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
             // Delivered means the destination turn *and* its prompt: the turn
             // row alone only proves a reservation (threads.ts writes it before
             // the prompt), and completing on it claimed a delivery that never
-            // happened.
+            // happened. Run the same usage-driven staging and finalize path as
+            // `prepareQueuedHandoff` so clearing `usagePause` never strands
+            // plain queued follow-ups on the source thread.
             if (handoff !== undefined && (await handoffDelivered(ctx.store, handoff))) {
-              await finalizeHandoffLocked(ctx, entry.threadId, entry.turnId, handoff);
+              const usageDriven = await settleDeliveredHandoffLocked(ctx, entry.threadId, entry.turnId, handoff);
+              if (usageDriven) migrateDestination = handoff.destinationThreadId;
               finalized = true;
               return;
             }
             // A reserved destination whose prompt has not landed is a partial
             // write from a start that never finished: leave the entry queued
-            // so the next pass repairs the same reservation instead of failing
-            // a handoff that can still land.
-            if (handoff !== undefined && (await reservedHandoffTurn(ctx.store, handoff)) !== undefined) return;
+            // for up to MAX_HANDOFF_REPAIR_ATTEMPTS passes so a transient error
+            // repairs the same reservation, then fail it instead of looping
+            // silently forever when retries keep throwing before prompt repair.
+            if (handoff !== undefined && (await reservedHandoffTurn(ctx.store, handoff)) !== undefined) {
+              const repairAttempts = (handoff.repairAttempts ?? 0) + 1;
+              if (repairAttempts <= MAX_HANDOFF_REPAIR_ATTEMPTS) {
+                await ctx.store.updateTurn(entry.threadId, entry.turnId, { handoff: { ...handoff, repairAttempts } });
+                return;
+              }
+            }
             await ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", handoffFailed: true, error: failure, completedAt: ctx.store.nowIso() });
             ctx.store.emit(entry.threadId, "handoff-failed");
           });
+          if (migrateDestination !== null) await migrateStagedMessages(ctx, entry.threadId, migrateDestination).catch(() => undefined);
           if (finalized) await flushTaskNotifications(ctx, entry.threadId).catch(() => undefined);
           continue;
         }
@@ -1382,6 +1404,7 @@ export async function submitHandoff(ctx: OperationContext, threadId: string, req
 }
 
 const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
+const MAX_HANDOFF_REPAIR_ATTEMPTS = 3;
 
 /**
  * How many continuations a walk follows through a chain — task resolution,
@@ -1458,6 +1481,50 @@ async function finalizeHandoffLocked(ctx: OperationContext, threadId: string, tu
     store.emit(threadId, "thread-continued");
   }
   store.emit(threadId, "handoff-prepared");
+}
+
+/**
+ * Stage any plain queued follow-ups owned by a usage-driven recovery hold and
+ * settle the source handoff in the same thread lock, so releasing `usagePause`
+ * never strands follow-ups on a source thread that will not settle again.
+ * Returns whether the handoff was usage-driven (so the caller migrates staged
+ * claims to the destination once the lock is released).
+ */
+async function settleDeliveredHandoffLocked(
+  ctx: OperationContext,
+  threadId: string,
+  turnId: string,
+  handoff: HandoffRecord,
+): Promise<boolean> {
+  const { store } = ctx;
+  const current = await store.readThreadRecord(threadId);
+  const usageDriven = current?.usagePause?.recoveryTurnId === turnId;
+  if (usageDriven) {
+    const turns = await store.readTurns(threadId);
+    if (!liveTurn(turns)) {
+      const messages = await store.readMessages(threadId);
+      const byId = new Map(messages.map((message) => [message.id, message]));
+      const stageable = turns
+        .filter((candidate) => isTransferableQueuedTurn(candidate, byId.get(candidate.messageId)) && landedBatchWhole(messages, candidate))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+      for (const turn of stageable) {
+        const queue = turn.queue ?? {
+          conditions: [],
+          held: false,
+          order: Date.parse(turn.createdAt),
+          sequential: false,
+          continuation: "same-thread" as const,
+        };
+        await store.updateTurn(threadId, turn.id, {
+          queue: { ...queue, removed: true },
+          handoff: { requestId: transferRequestId(turn.id), destinationThreadId: handoff.destinationThreadId },
+        });
+      }
+      if (stageable.length > 0) store.emit(threadId, "queue-changed");
+    }
+  }
+  await finalizeHandoffLocked(ctx, threadId, turnId, handoff);
+  return usageDriven;
 }
 
 /**
@@ -1632,35 +1699,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   // the source, and no follow-up runs on both threads in the one checkout.
   let usageDriven = false;
   await store.withThreadLock(threadId, async () => {
-    const current = await store.readThreadRecord(threadId);
-    usageDriven = current?.usagePause?.recoveryTurnId === turnId;
-    const turns = await store.readTurns(threadId);
-    if (usageDriven && !liveTurn(turns)) {
-      const messages = await store.readMessages(threadId);
-      const byId = new Map(messages.map((message) => [message.id, message]));
-      const stageable = turns
-        .filter((candidate) => isTransferableQueuedTurn(candidate, byId.get(candidate.messageId)) && landedBatchWhole(messages, candidate))
-        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-      for (const turn of stageable) {
-        const queue = turn.queue ?? {
-          conditions: [],
-          held: false,
-          order: Date.parse(turn.createdAt),
-          sequential: false,
-          continuation: "same-thread" as const,
-        };
-        await store.updateTurn(threadId, turn.id, {
-          queue: { ...queue, removed: true },
-          handoff: { requestId: transferRequestId(turn.id), destinationThreadId: handoff.destinationThreadId },
-        });
-      }
-      if (stageable.length > 0) store.emit(threadId, "queue-changed");
-    }
-    // Settle in the same critical section that staged the follow-ups: the
-    // completion, the released recovery hold and the notes readers follow
-    // (`handoff.prepared`, `thread.continued`) land together, idempotently, so
-    // a retry after a failed write adds only what is missing.
-    await finalizeHandoffLocked(ctx, threadId, turnId, handoff);
+    usageDriven = await settleDeliveredHandoffLocked(ctx, threadId, turnId, handoff);
   });
   // The staged claims land now, as Work queue entries on the destination
   // waiting on its hand-off turn — the same durable move and wait model a

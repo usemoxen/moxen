@@ -1178,6 +1178,70 @@ describe("the queue pass's handoff preparation (MXN-382)", () => {
   });
 
   /**
+   * MXN-382: keeping a prompt-less destination reservation queued for repair
+   * must be bounded, otherwise a persistent failure before prompt repair
+   * retries forever without failing or notifying the user.
+   */
+  it("fails a prompt-less handoff reservation after bounded repair retries and lets restore reset the budget", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const events: string[] = [];
+    const unsubscribe = w.store.subscribe((event) => {
+      if (event.type === "backend.thread.changed" && event.threadId === source.id && event.reason === "handoff-failed") events.push(event.reason);
+    });
+
+    const realAppend = w.store.appendLedger.bind(w.store);
+    let blockDestinationMessages = true;
+    w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+      if (blockDestinationMessages && threadId !== source.id && name === "messages") {
+        throw new Error("persistent prompt write failure");
+      }
+      return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+    };
+    try {
+      // Three passes stay queued while counting repair attempts.
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await runWorkQueue(w.ctx);
+        const turn = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
+        expect(turn.status).toBe("queued");
+        expect(turn.handoffFailed).toBeUndefined();
+        expect(turn.handoff?.repairAttempts).toBe(attempt);
+      }
+      expect(events).toEqual([]);
+
+      // The fourth pass exceeds the repair cap and marks the handoff failed.
+      await runWorkQueue(w.ctx);
+      const failed = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
+      expect(failed.status).toBe("failed");
+      expect(failed.handoffFailed).toBe(true);
+      expect(events).toEqual(["handoff-failed"]);
+
+      // Restoring resets the repair budget so a later pass can repair and complete.
+      blockDestinationMessages = false;
+      await editWorkQueue(w.ctx, source.id, entry.id, "restore");
+      const restored = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
+      expect(restored.handoff?.repairAttempts).toBeUndefined();
+      await editWorkQueue(w.ctx, source.id, entry.id, "release");
+      await runWorkQueue(w.ctx);
+      await flushTurnRunners();
+
+      const settled = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
+      expect(settled.status).toBe("completed");
+      const destinationId = settled.handoff!.destinationThreadId;
+      const destinationTurns = await w.store.readTurns(destinationId);
+      expect(destinationTurns).toHaveLength(1);
+      const prompt = (await w.store.readMessages(destinationId)).find((message) => message.turnId === destinationTurns[0]!.id);
+      expect(prompt?.role).toBe("user");
+      expect(prompt?.text).toContain("# Continuing: solo");
+    } finally {
+      w.store.appendLedger = realAppend;
+      unsubscribe();
+    }
+  });
+
+  /**
    * MXN-382: after a failed attempt the source row keeps `handoffFailed`. The
    * handoff document excluded it even once it was queued again and explicitly
    * the entry being carried, so the restored request vanished from the new

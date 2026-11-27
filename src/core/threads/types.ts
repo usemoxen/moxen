@@ -363,6 +363,12 @@ export interface StoredTurn {
      * lands.
      */
     readonly landed?: boolean;
+    /**
+     * How many queue passes kept this handoff queued to repair a destination
+     * turn row that was written without its prompt. Capped so a persistent
+     * failure before prompt repair fails the entry instead of retrying forever.
+     */
+    readonly repairAttempts?: number;
   };
   /**
    * The queue pass failed this entry's handoff preparation: it never ran here
