@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   ensureStoredProject,
+  findStoredProject,
   listStoredProjects,
   registryFile,
   removeStoredProject,
@@ -114,8 +115,11 @@ describe("projects registry", () => {
     const root = await tmpRoot();
     const { project } = await ensureStoredProject(root, { workspaceRoot: "/repo/" });
     await removeStoredProject(root, project.id);
+    // A first find, removed row included, is what a preview of the revival names.
+    expect(await findStoredProject(root, "/repo")).toMatchObject({ id: project.id, deletedAt: expect.any(String) });
     const revived = await ensureStoredProject(root, { workspaceRoot: "/repo" });
     expect(revived.created).toBe(false);
+    expect(revived.revived).toBe(true);
     expect(revived.project.id).toBe(project.id);
     expect(revived.project.deletedAt).toBeNull();
     expect(revived.command).toBeNull();

@@ -9,7 +9,7 @@ import type { Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
 
 import type { ClientApi } from "../api.js";
-import { callMoxenTool, availableMoxenTools, routeMcpSession, type AgentQueueAccess, type MemoryAccess, type MoxenToolOptions } from "./tools.js";
+import { callMoxenTool, availableMoxenTools, routeMcpSession, type AgentQueueAccess, type MemoryAccess, type MoxenToolOptions, type ProjectRegistrationAccess } from "./tools.js";
 
 /** Newest first; an unknown client version is answered with the newest. */
 export const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
@@ -26,7 +26,7 @@ export const MOXEN_MCP_INSTRUCTIONS =
   "message_queue queues or schedules a message on your own thread (or a task you delegated) through the user's queue: at takes an ISO time or HH:MM, conditions wait for an allowance reset or another thread; with neither it runs after the current turn. A protected thread keeps it waiting. " +
   "message_queue_list shows the messages you queued that are still waiting; message_queue_edit changes what one waits for and message_queue_remove takes it back before it runs. Never the user's entries, and never one that has started; a continuation that takes over a task inherits its earlier entries. This management is MCP-only through the authenticated session for your thread; a stdio session without the daemon credential is refused. " +
   "thread_search and thread_read find and read other threads, a step at a time. " +
-  "project_list lists Moxen's registered projects and project_resolve resolves a folder to one; registering a folder stays the user's (`moxen projects ensure`), never an agent's. " +
+  "project_list lists Moxen's registered projects and project_resolve resolves a folder to one; project_register registers a folder as a project under the configured projectPolicy setting (never bypassing it), and only the orchestrator's own thread has it — a real registration also needs the thread running in Auto or Full access; a dry run never does. " +
   "The models tool lists the providers, models and efforts you can delegate to. " +
   "usage_status reports the user's current shared provider usage, fresh rather than the hours-old figures models carries: call it before fanning work out. " +
   "context_usage reports how full your own context window is, from the latest reading Moxen recorded. " +
@@ -94,6 +94,8 @@ export interface McpSessionOptions {
   readonly memory?: MemoryAccess;
   /** The server-bound agent queue operations for this authenticated session, when the route has them. */
   readonly agentQueue?: AgentQueueAccess;
+  /** The thread-bound registration capability for this authenticated session, when the route has it. */
+  readonly projectRegistration?: ProjectRegistrationAccess;
 }
 
 export interface ServeMcpOptions extends McpSessionOptions {
@@ -132,7 +134,7 @@ export async function answerMcp(options: McpSessionOptions, raw: unknown): Promi
   const params = request.params !== null && typeof request.params === "object" ? (request.params as Record<string, unknown>) : {};
   const fallback: { threadId: string; options: MoxenToolOptions } = {
     threadId: options.parentThreadId,
-    options: { checklist: options.checklist === true, delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write", ...(options.agentQueue ? { agentQueue: options.agentQueue } : {}) },
+    options: { checklist: options.checklist === true, delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write", ...(options.agentQueue ? { agentQueue: options.agentQueue } : {}), ...(options.projectRegistration ? { projectRegistration: options.projectRegistration } : {}) },
   };
   try {
     switch (method) {
@@ -168,6 +170,43 @@ export async function answerMcp(options: McpSessionOptions, raw: unknown): Promi
             : {};
         const routed = await routeMcpSession(options.api, fallback, params, true);
         if ("error" in routed) return fail(-32602, routed.error);
+        // A registry write answers only when the transport itself uniquely
+        // authenticates the calling thread. Request-body session metadata
+        // cannot move a write onto another thread, AND when multiple live
+        // sessions share this MCP entry (e.g. OpenCode's directory-shared
+        // entry), matching metadata still does not prove which sharing
+        // session originated the request — refuse outright (LOCAL-035).
+        if (name === "project_register") {
+          if (routed.threadId !== options.parentThreadId) {
+            return reply({
+              content: [{
+                type: "text",
+                text:
+                  "project_register never runs through session-metadata routing: the write answers only for the thread this connection is authenticated for. " +
+                  "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`, or the thread's own session can call it.",
+              }],
+              isError: true,
+            });
+          }
+          let sharedCount = 2;
+          try {
+            const answer = await options.api.query({ type: "thread.entry-sessions", threadId: options.parentThreadId });
+            if (typeof answer?.count === "number") sharedCount = answer.count;
+          } catch {
+            sharedCount = 2;
+          }
+          if (sharedCount > 1) {
+            return reply({
+              content: [{
+                type: "text",
+                text:
+                  "project_register is refused on a shared MCP entry: multiple live sessions share this connection's credential, so the originating thread cannot be independently authenticated. " +
+                  "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`.",
+              }],
+              isError: true,
+            });
+          }
+        }
         const result = await callMoxenTool(options.api, routed.threadId, name, args, routed.options);
         return reply({ content: [{ type: "text", text: result.text }], isError: result.isError });
       }

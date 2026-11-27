@@ -585,17 +585,29 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    * Live sessions that could place calls on this thread's entry: every live
    * session on its server, since the directory's single `moxen` entry serves
    * them all. More than one makes a call without session identity ambiguous,
-   * so it fails instead of running as the entry owner's thread. A thread
-   * with no live session is not provably single, so it counts as shared.
+   * so it fails instead of running as the entry owner's thread. Returns
+   * `undefined` when this driver holds neither a live session nor a live
+   * `moxen` entry for `threadId`, so an unrelated OpenCode driver never
+   * blocks another provider's dedicated entry; the connection still fails
+   * closed when the thread's own provider implements `entrySessionCount` and
+   * cannot establish exclusivity.
    */
-  readonly entrySessionCount = (threadId: string): number => {
+  readonly entrySessionCount = (threadId: string): number | undefined => {
     const session = this.sessions.get(threadId);
-    if (!session || session.closed) return 2;
-    let count = 0;
-    for (const candidate of this.sessions.values()) {
-      if (!candidate.closed && candidate.workingDirectory === session.workingDirectory) count += 1;
+    if (session && !session.closed) {
+      let count = 0;
+      for (const candidate of this.sessions.values()) {
+        if (!candidate.closed && candidate.workingDirectory === session.workingDirectory) count += 1;
+      }
+      return count;
     }
-    return count;
+    for (const connection of this.liveConnections.values()) {
+      const entry = this.moxenEntry.get(connection);
+      if (entry && (entry.owner === threadId || entry.credentialOwner === threadId)) {
+        return 2;
+      }
+    }
+    return undefined;
   };
 
   /**
@@ -692,7 +704,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
    * `mcp.add`, killing in-flight calls). Only the thread that registered the
    * entry re-registers it, when its own spec changes.
    */
-  private readonly moxenEntry = new WeakMap<OpencodeServerConnection, { owner: ThreadId; key: string }>();
+  private readonly moxenEntry = new WeakMap<OpencodeServerConnection, { owner: ThreadId; credentialOwner: ThreadId; key: string }>();
   /** When each server (by working directory) last had its OpenCode Go usage read. */
   private readonly goUsageReadAt = new Map<string, number>();
   private readonly pumps = new Map<string, { controller: AbortController; ready: Promise<void>; done: Promise<void> }>();
@@ -862,7 +874,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     try {
       await connection.addMcpServer(server.name, config);
       registerOpencodeMcpServer(server.name);
-      this.moxenEntry.set(connection, { owner, key });
+      this.moxenEntry.set(connection, { owner, credentialOwner: owner, key });
     } catch {
       // Retried on the next session start.
     }
@@ -1766,7 +1778,7 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
     const heir = [...this.sessions.values()].find(
       (candidate) => !candidate.closed && candidate.workingDirectory === session.workingDirectory,
     );
-    if (heir) this.moxenEntry.set(connection, { owner: heir.threadId, key: entry.key });
+    if (heir) this.moxenEntry.set(connection, { owner: heir.threadId, credentialOwner: entry.credentialOwner, key: entry.key });
     else this.moxenEntry.delete(connection);
   }
 

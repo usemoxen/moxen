@@ -172,3 +172,63 @@ describe("routed moxen calls (one stable entry per OpenCode server)", () => {
     expect((answer?.result as { instructions: string }).instructions).toContain("use delegate");
   });
 });
+
+describe("routed moxen calls: a registry write never changes identity (LOCAL-035)", () => {
+  /** A recording capability: the write must run for the entry's own thread or not at all. */
+  const recording = (calls: string[]): { projectRegistration: NonNullable<McpSessionOptions["projectRegistration"]> } => ({
+    projectRegistration: {
+      register: async (callerThreadId) => {
+        calls.push(callerThreadId);
+        return {
+          project: { id: "p-1", title: "abs", workspaceRoot: "/abs", createdAt: "now" },
+          workspaceRoot: "/abs",
+          created: true,
+        };
+      },
+    },
+  });
+
+  it("refuses a project_register on a shared entry even when session metadata names the entry owner", async () => {
+    const seen = { toolQueries: [] as string[] };
+    const calls: string[] = [];
+    const ownerRouting: Routing = { threadId: PARENT_THREAD, delegated: false, webFetch: true, memory: "write", checklist: false };
+    const answer = await answerMcp(
+      { ...session(PARENT_THREAD, ownerRouting, seen, 2), ...recording(calls) },
+      withSession("project_register", { cwd: "/abs" }, "ses_owner_shared"),
+    );
+    const result = answer?.result as { content: Array<{ text: string }>; isError: boolean };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("shared MCP entry");
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a project_register that session metadata would move onto another thread", async () => {
+    const seen = { toolQueries: [] as string[] };
+    const calls: string[] = [];
+    // The entry belongs to a delegated child; the request metadata names the
+    // orchestrator's session, which routing would substitute before the call.
+    const orchestrator: Routing = { threadId: "thread-orchestrator", delegated: false, webFetch: true, memory: "write", checklist: false };
+    const answer = await answerMcp(
+      { ...session(PARENT_THREAD, orchestrator, seen), ...recording(calls) },
+      withSession("project_register", { cwd: "/abs" }, CHILD_SESSION),
+    );
+    const result = answer?.result as { content: Array<{ text: string }>; isError: boolean };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("never runs through session-metadata routing");
+    // Fail safe: the write ran for no thread at all.
+    expect(calls).toEqual([]);
+  });
+
+  it("runs a project_register for the entry's own thread when no metadata substitutes another", async () => {
+    const seen = { toolQueries: [] as string[] };
+    const calls: string[] = [];
+    const answer = await answerMcp(
+      { ...session(PARENT_THREAD, childRouting, seen), ...recording(calls) },
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "project_register", arguments: { cwd: "/abs" } } },
+    );
+    const result = answer?.result as { content: Array<{ text: string }>; isError: boolean };
+    expect(result.isError).toBe(false);
+    expect(calls).toEqual([PARENT_THREAD]);
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({ created: true });
+  });
+});

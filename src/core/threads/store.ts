@@ -624,7 +624,7 @@ export class ThreadStore {
    * the rows; rewrites re-read the file themselves and splice skipped lines
    * back, so no writer below can lose what it could not read.
    */
-  private parseLedgerLines<T>(raw: string, file: string, kind: "ledger-line" | "delegation-line", threadId?: string, options?: { reportTornTail?: boolean }): T[] {
+  private parseLedgerLines<T>(raw: string, file: string, kind: "ledger-line" | "delegation-line", threadId?: string, options?: { reportTornTail?: boolean; strict?: boolean }): T[] {
     const rows: T[] = [];
     const lines = raw.split("\n");
     const complete = raw.endsWith("\n");
@@ -633,6 +633,9 @@ export class ThreadStore {
       if (line.trim().length === 0) continue;
       const lineNumber = index + 1;
       const report = (validJson: boolean): void => {
+        if (options?.strict === true) {
+          throw new CliError("STORE_PROBLEM", `Could not read ${file} line ${lineNumber}: the ledger is not fully readable, so nothing may be authorized from it.`, { exitCode: 4 });
+        }
         this.noteProblem({ ...ledgerProblem(kind, file, lineNumber, validJson), ...(threadId !== undefined ? { threadId } : {}) });
       };
       switch (classifyLedgerLine(line)) {
@@ -644,7 +647,9 @@ export class ThreadStore {
           report(true);
           continue;
         case "bad-json":
-          if (index === lines.length - 1 && !complete && !options?.reportTornTail) {
+          // A strict read never waits out a torn tail: a crash mid-append
+          // could be the very row an authorization decision turns on.
+          if (index === lines.length - 1 && !complete && !options?.reportTornTail && options?.strict !== true) {
             const pending = this.pendingTorn.get(file);
             if (!pending || pending.line !== lineNumber || pending.raw !== line) {
               // First sight: a crash in flight, not corruption yet. Re-read once.
@@ -843,6 +848,32 @@ export class ThreadStore {
     return await this.readLedger<StoredTurn>(threadId, "turns", options);
   }
 
+  /**
+   * The turns ledger an authorization decision may rely on, read strictly
+   * (LOCAL-035). `readTurns` tolerates corrupt lines for display, so a
+   * corrupt running-turn row would silently disappear and fall back to the
+   * thread's saved provider instead of the turn's active override. Any
+   * unreadable or truncated line, or a row missing `id`/`status`, fails the
+   * whole read without recording a quarantine or problem entry.
+   */
+  async readTurnsStrict(threadId: string): Promise<StoredTurn[]> {
+    const file = ledgerFile(this.root, threadId, "turns");
+    let raw: string;
+    try {
+      raw = await readFileRetrying(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const rows = this.parseLedgerLines<StoredTurn>(raw, file, "ledger-line", threadId, { strict: true, reportTornTail: true });
+    for (const row of rows) {
+      if (typeof row.id !== "string" || typeof row.status !== "string") {
+        throw new CliError("STORE_PROBLEM", `${file} holds a turn row without its id or status: nothing may be authorized from it.`, { exitCode: 4 });
+      }
+    }
+    return rows;
+  }
+
   async updateTurn(threadId: string, turnId: string, patch: Partial<StoredTurn>): Promise<StoredTurn | null> {
     const turns = await this.readTurns(threadId);
     const index = turns.findIndex((turn) => turn.id === turnId);
@@ -878,6 +909,33 @@ export class ThreadStore {
       throw error;
     }
     return this.parseLedgerLines<StoredDelegation>(raw, this.delegationsFile(), "delegation-line");
+  }
+
+  /**
+   * The delegations an authorization decision may rely on, read strictly.
+   * `readDelegations` tolerates what it cannot parse — a partial list is
+   * right for display — so a corrupt row would read as if the task it named
+   * was never delegated. Here any line that cannot be parsed cleanly, a
+   * torn tail included, and any row a delegation cannot be identified by
+   * (id, parent, child), fails the whole read: a caller that cannot read
+   * the ledger can prove nothing about it. It reports nothing either —
+   * no quarantine, no problem entry — it only refuses.
+   */
+  async readDelegationsStrict(): Promise<StoredDelegation[]> {
+    let raw: string;
+    try {
+      raw = await readFileRetrying(this.delegationsFile());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const rows = this.parseLedgerLines<StoredDelegation>(raw, this.delegationsFile(), "delegation-line", undefined, { strict: true, reportTornTail: true });
+    for (const row of rows) {
+      if (typeof row.id !== "string" || typeof row.parentThreadId !== "string" || typeof row.childThreadId !== "string") {
+        throw new CliError("STORE_PROBLEM", `${this.delegationsFile()} holds a delegation row without its id, parent or child: nothing may be authorized from it.`, { exitCode: 4 });
+      }
+    }
+    return rows;
   }
 
   async appendDelegation(delegation: StoredDelegation): Promise<void> {

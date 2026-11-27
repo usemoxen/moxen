@@ -1,40 +1,55 @@
 /**
- * The project tools (MXN-415): `project_list` and `project_resolve`, the
- * registry as reads, through the real tool handler (`callMoxenTool`), the
- * real server connection and the real registry. The only fakes are the
- * provider drivers (`testHarness`). Registering a folder stays the user's
- * (`moxen projects ensure`), so no `project_register` tool may exist: these
- * tests pin that none is listed and that calling one answers "Unknown tool".
+ * The project tools (MXN-415, LOCAL-035): `project_list` and
+ * `project_resolve` as reads, and `project_register` as the one registry
+ * write an agent has — authorized inside the server, against the calling
+ * thread's live state, never against the flags its session arrived with.
+ * Everything runs through the real tool handler (`callMoxenTool`), the real
+ * server connection and the real registry; the only fakes are the provider
+ * drivers (`testHarness`). `project_register` takes no policy argument on
+ * purpose: the configured `projectPolicy` decides, and these tests pin
+ * that it is honoured, never bypassed.
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { runProcess } from "../../../core/infra/process.js";
+import { OpenCodeDriver } from "../../../core/providers/opencode/driver.js";
 import { testHarness } from "../../../core/testing/harness.js";
 import { DirectConnection } from "../../connection.js";
+import { decodeCommand } from "../../protocol.js";
+import { startMcpHttpServer } from "../http.js";
+import { relayProjectRegistration } from "../main.js";
+import { MOXEN_MCP_TOKEN_ENV, MOXEN_MCP_URL_ENV } from "../stdio.js";
 import { callMoxenTool, fullyQualifiedFolder, moxenToolsFor, PROJECT_TOOLS } from "../tools.js";
 
 /** Paths meet the registry once canonicalized: on macOS `/var` and `/private/var` are the same folder. */
 const real = realpathSync.native;
 
-async function connect() {
+async function connect(config: Record<string, unknown> = {}) {
   const harness = await testHarness({});
   const connection = new DirectConnection({
     storeRoot: harness.root,
     drivers: harness.drivers,
-    config: async () => harness.config,
+    config: async () => ({ ...harness.config, ...config }),
   });
   return { harness, connection };
 }
 
-/** A connection with the harness's work folder registered and a thread in it, the world the tools run in. */
-async function setup() {
-  const { harness, connection } = await connect();
-  const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work });
-  const parent = await connection.dispatch({ type: "thread.create", projectId: ensured.project.id });
-  return { harness, connection, work: real(harness.work), parentThreadId: parent.threadId };
+/**
+ * A connection with the harness's work folder registered and a thread in
+ * it running in Full access, the world the tools run in. The fixture's own
+ * ensure names the policy the CLI's --project-policy create does, so a
+ * config's policy never decides it.
+ */
+async function setup(config: Record<string, unknown> = {}, runtimeMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access" = "full-access") {
+  const { harness, connection } = await connect(config);
+  const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+  const parent = await connection.dispatch({ type: "thread.create", projectId: ensured.project.id, runtimeMode });
+  const register = async (args: Record<string, unknown>, threadId: string = parent.threadId) => callMoxenTool(connection, threadId, "project_register", args);
+  return { harness, connection, work: real(harness.work), parentThreadId: parent.threadId, register };
 }
 
 const registered = (connection: DirectConnection) => connection.query({ type: "projects.list" }).then((result) => result.projects);
@@ -42,28 +57,19 @@ const list = (connection: DirectConnection) => callMoxenTool(connection, "any-th
 const resolve = (connection: DirectConnection, cwd: string) => callMoxenTool(connection, "any-thread", "project_resolve", { cwd });
 
 describe("project tools: which sessions get them", () => {
-  it("offers the registry reads and never a register, to any session and every switch", () => {
+  it("offers the reads to every session, and the register to none that must not write", () => {
     expect(moxenToolsFor({}).filter((tool) => PROJECT_TOOLS.some((project) => project.name === tool.name)).map((tool) => tool.name)).toEqual([
       "project_list",
       "project_resolve",
+      "project_register",
     ]);
-    // The reads ride along unconditionally, so the stripped sessions (delegated, web off, memory off) keep them.
+    // A delegated task (or a provider with orchestration switched off, which shares the flag) never sees the write.
     for (const options of [{ delegated: true }, { delegated: true, webFetch: false, memory: "off" as const }]) {
       expect(moxenToolsFor(options).map((tool) => tool.name)).toEqual(expect.arrayContaining(["project_list", "project_resolve"]));
+      expect(moxenToolsFor(options).map((tool) => tool.name)).not.toContain("project_register");
     }
-    // No tool that writes the registry exists to offer: registering is the user's.
-    expect(moxenToolsFor({}).map((tool) => tool.name)).not.toContain("project_register");
-  });
-
-  it("refuses project_register when it is called anyway, having never been shown", async () => {
-    const { connection } = await connect();
-    try {
-      const refused = await callMoxenTool(connection, "any-thread", "project_register", { cwd: path.join("/") });
-      expect(refused.isError).toBe(true);
-      expect(refused.text).toContain("Unknown tool: project_register");
-    } finally {
-      await connection.close();
-    }
+    // A research run's lead and roles never see it either; the listing is advice, the server authorizes the call.
+    expect(moxenToolsFor({ researchMember: true }).map((tool) => tool.name)).not.toContain("project_register");
   });
 });
 
@@ -88,7 +94,7 @@ describe("project_list", () => {
     try {
       const result = await list(connection);
       expect(result.isError).toBe(false);
-      expect(result.text).toBe("No registered projects. Registering a folder is the user's (`moxen projects ensure`).");
+      expect(result.text).toBe("No registered projects. Register a folder with project_register.");
     } finally {
       await connection.close();
     }
@@ -166,6 +172,732 @@ describe("project_resolve", () => {
       expect(parsed.workspace.workspaceRoot).toBe(real(folder));
       expect(parsed.workspace.workspaceRoot.endsWith("proj-with-space ")).toBe(true);
     } finally {
+      await connection.close();
+    }
+  });
+});
+
+describe("project_register", () => {
+  it("registers an existing folder as a project, and says what already has one", async () => {
+    const { harness, connection, register, work } = await setup();
+    try {
+      const folder = path.join(harness.root, "proj-a");
+      await mkdir(folder);
+      const registeredFolder = real(folder);
+      const created = await register({ cwd: folder });
+      expect(created.isError).toBe(false);
+      expect(JSON.parse(created.text)).toMatchObject({
+        project: { title: "proj-a", workspaceRoot: registeredFolder },
+        workspaceRoot: registeredFolder,
+        created: true,
+      });
+      expect(created.text).toContain("Registered: threads for this folder now live under this project");
+      // It is in the registry the user's project list reads.
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === registeredFolder && entry.title === "proj-a")).toBe(true);
+      // Registering the same folder again says what already has one, changing nothing.
+      const again = await register({ cwd: folder });
+      expect(JSON.parse(again.text)).toMatchObject({ created: false, workspaceRoot: registeredFolder });
+      expect(again.text).toContain("already has a project");
+      // The parent thread's own folder already has one: nothing changed there either.
+      const existing = await register({ cwd: harness.work });
+      expect(JSON.parse(existing.text)).toMatchObject({ created: false, project: { workspaceRoot: work } });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("dryRun reports what would be registered without writing it", async () => {
+    const { harness, connection, register } = await setup();
+    try {
+      const folder = path.join(harness.root, "proj-b");
+      await mkdir(folder);
+      const registeredFolder = real(folder);
+      const dry = await register({ cwd: folder, dryRun: true });
+      expect(dry.isError).toBe(false);
+      expect(JSON.parse(dry.text)).toMatchObject({ dryRun: true, created: true, project: { title: "proj-b", workspaceRoot: registeredFolder } });
+      expect(dry.text).toContain("Dry run: nothing was written");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === registeredFolder)).toBe(false);
+      // The real call still registers it.
+      const realRun = await register({ cwd: folder });
+      expect(JSON.parse(realRun.text)).toMatchObject({ created: true });
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === registeredFolder)).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("honours a projectPolicy that refuses creation, instead of bypassing it", async () => {
+    const { harness, connection, register, work } = await setup({ projectPolicy: "existing" });
+    try {
+      const folder = path.join(harness.root, "proj-c");
+      await mkdir(folder);
+      const registeredFolder = real(folder);
+      const refused = await register({ cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("PROJECT_NOT_FOUND");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === registeredFolder)).toBe(false);
+      // A dry run is refused through the same path, never a preview of a write the policy forbids.
+      const dry = await register({ cwd: folder, dryRun: true });
+      expect(dry.isError).toBe(true);
+      expect(dry.text).toContain("PROJECT_NOT_FOUND");
+      // What the registry already holds is resolved either way, under the same policy.
+      const existing = await register({ cwd: harness.work });
+      expect(JSON.parse(existing.text)).toMatchObject({ created: false, project: { workspaceRoot: work } });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a folder that does not exist or is not a directory, creating nothing", async () => {
+    const { harness, connection, register } = await setup();
+    try {
+      const missing = await register({ cwd: path.join(harness.root, "missing") });
+      expect(missing.isError).toBe(true);
+      expect(missing.text).toContain("WORKSPACE_NOT_FOUND");
+      const file = path.join(harness.root, "file.txt");
+      await writeFile(file, "x");
+      const notDir = await register({ cwd: file });
+      expect(notDir.isError).toBe(true);
+      expect(notDir.text).toContain("WORKSPACE_NOT_DIRECTORY");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(file))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a relative path instead of resolving it against the server's own working directory", async () => {
+    const { harness, connection, register } = await setup();
+    try {
+      const result = await register({ cwd: "some/folder" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toContain("must be a fully qualified absolute path");
+      expect(result.text).toContain("not resolved against your working directory");
+      const badFlag = await register({ cwd: harness.root, dryRun: "yes" });
+      expect(badFlag.isError).toBe(true);
+      expect(badFlag.text).toContain("dryRun must be true or false");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("preserves a folder's exact path, one whose name ends in a space (POSIX: Windows cannot hold the name)", async () => {
+    if (process.platform === "win32") return; // a Windows folder name cannot end in a space, so such a folder does not exist there.
+    const { harness, connection, register } = await setup();
+    try {
+      const folder = path.join(harness.root, "proj-with-space ");
+      await mkdir(folder);
+      const created = await register({ cwd: folder });
+      const canonical = JSON.parse(created.text) as { project: { workspaceRoot: string } };
+      expect(canonical.project.workspaceRoot).toBe(real(folder));
+      expect(canonical.project.workspaceRoot.endsWith("proj-with-space ")).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("keeps every acknowledged registration: two concurrent ones both persist", async () => {
+    const { harness, connection, register } = await setup();
+    try {
+      const folders = [path.join(harness.root, "proj-one"), path.join(harness.root, "proj-two")];
+      for (const folder of folders) await mkdir(folder);
+      const results = await Promise.all(folders.map((folder) => register({ cwd: folder })));
+      for (const result of results) expect(result.isError).toBe(false);
+      const roots = (await registered(connection)).map((entry) => entry.workspaceRoot);
+      expect(roots).toEqual(expect.arrayContaining(folders.map((folder) => real(folder))));
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
+describe("project_register: a removed project comes back", () => {
+  it("reports a revival instead of saying nothing changed, and previews it with the original id", async () => {
+    const { harness, connection, register, work } = await setup();
+    try {
+      const folder = path.join(harness.root, "proj-revive");
+      await mkdir(folder);
+      const first = await register({ cwd: folder });
+      const project = JSON.parse(first.text) as { project: { id: string } };
+      await connection.dispatch({ type: "project.remove", projectId: project.project.id });
+
+      // The dry run previews the revival with the row's original id, not a synthesized one.
+      const dry = await register({ cwd: folder, dryRun: true });
+      expect(JSON.parse(dry.text)).toMatchObject({ dryRun: true, revived: true, created: false, project: { id: project.project.id, workspaceRoot: real(folder) } });
+      expect(dry.text).toContain("would revive its original project");
+      expect((await registered(connection)).some((entry) => entry.id === project.project.id)).toBe(false);
+
+      const revived = await register({ cwd: folder });
+      expect(JSON.parse(revived.text)).toMatchObject({ revived: true, created: false, project: { id: project.project.id } });
+      expect(revived.text).toContain("Revived");
+      expect(revived.text).not.toContain("nothing was changed");
+      // The revival is in the registry with its threads' id, and the parent's own folder still resolves.
+      expect((await registered(connection)).some((entry) => entry.id === project.project.id)).toBe(true);
+      // The parent's own folder still resolves as already registered — a revival is not it.
+      const existing = await register({ cwd: harness.work });
+      expect(JSON.parse(existing.text)).toMatchObject({ created: false });
+      expect(existing.text).toContain("already has a project");
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
+describe("project_register: the server authorizes the calling thread, live", () => {
+  it("registers from a thread running in Auto or Full access, and refuses the lower modes", async () => {
+    for (const [mode, allowed] of [
+      ["full-access", true],
+      ["auto", true],
+      ["auto-accept-edits", false],
+      ["approval-required", false],
+    ] as const) {
+      const { harness, connection, register } = await setup({}, mode);
+      try {
+        const folder = path.join(harness.root, `mode-${mode}`);
+        await mkdir(folder);
+        const result = await register({ cwd: folder });
+        if (allowed) {
+          expect(result.isError).toBe(false);
+          expect((JSON.parse(result.text) as { created: boolean }).created).toBe(true);
+        } else {
+          expect(result.isError).toBe(true);
+          expect(result.text).toContain(`runs in ${mode}`);
+          expect(result.text).toContain("Auto or Full access");
+          expect(result.text).toContain("moxen projects ensure");
+          expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+        }
+      } finally {
+        await connection.close();
+      }
+    }
+  });
+
+  it("lets a lower-mode thread preview with dryRun, and refuses a thread that cannot be read", async () => {
+    const { harness, connection, register } = await setup({}, "approval-required");
+    try {
+      const folder = path.join(harness.root, "preview");
+      await mkdir(folder);
+      const dry = await register({ cwd: folder, dryRun: true });
+      expect(dry.isError).toBe(false);
+      expect(JSON.parse(dry.text)).toMatchObject({ dryRun: true, created: true });
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+    // No thread to read: the registration refuses rather than answering as anyone.
+    const { connection: refusedConnection, register: refusedRegister } = await setup();
+    try {
+      const refused = await refusedRegister({ cwd: harness.root }, "no-such-thread");
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("could not be read");
+      expect(refused.text).toContain("refused rather than answered as anyone");
+    } finally {
+      await refusedConnection.close();
+    }
+  });
+
+  it("fails closed when an authorization lookup throws, refusing the registration", async () => {
+    const { harness, connection, register } = await setup();
+    try {
+      const folder = path.join(harness.root, "lookup-error");
+      await mkdir(folder);
+      // A lookup the server cannot complete: the delegations ledger cannot be read at all.
+      const delegations = path.join(harness.root, "delegations.jsonl");
+      await rm(delegations, { force: true });
+      await mkdir(delegations);
+      const refused = await register({ cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("could not be read");
+      expect(refused.text).toContain("refused rather than answered as anyone");
+      // Nothing was written behind the failed lookup.
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("cannot sneak a write past a mode tightening: the change serializes with the registration", async () => {
+    const { harness, connection, register, parentThreadId } = await setup({}, "auto");
+    try {
+      // A git repository folder: resolving it runs git, a real async gap a
+      // concurrent mode change would land in when the gate reads outside the
+      // mutation. Here the gate and the write share the mode changes' chain,
+      // so the tightening waits for the registration to finish.
+      const folder = path.join(harness.root, "repo-gap");
+      await mkdir(folder);
+      await runProcess("git", ["init", "-b", "main"], { cwd: folder });
+      const registration = connection.projectRegistration.register(parentThreadId, { cwd: folder });
+      const tightened = connection.dispatch({ type: "thread.runtime-mode.set", threadId: parentThreadId, runtimeMode: "approval-required" });
+      let registrationDone = false;
+      void registration.then(() => {
+        registrationDone = true;
+      }, () => {
+        registrationDone = true;
+      });
+      await tightened;
+      // The registration ran inside the mutation's chain link, so it had
+      // already finished — read and write both — before the tightening landed.
+      expect(registrationDone).toBe(true);
+      const result = await registration;
+      expect(result.created).toBe(true);
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(true);
+      // And the tightened mode is what the next registration sees: refused.
+      const after = path.join(harness.root, "after-tighten");
+      await mkdir(after);
+      const refused = await register({ cwd: after }, parentThreadId);
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("runs in approval-required");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("cannot sneak a write past a model-selection change: the change serializes with the registration", async () => {
+    // The thread runs on a provider that allows orchestration; the
+    // tightening switches it to one that does not, mid-registration.
+    const { harness, connection, work } = await setup({ providers: { opencode: { orchestration: false } } });
+    try {
+      const projectId = (await registered(connection)).find((entry) => entry.workspaceRoot === work)!.id;
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+      });
+      const folder = path.join(harness.root, "model-gap");
+      await mkdir(folder);
+      await runProcess("git", ["init", "-b", "main"], { cwd: folder });
+      const registration = connection.projectRegistration.register(thread.threadId, { cwd: folder });
+      const switched = connection.dispatch({
+        type: "thread.model-selection.set",
+        threadId: thread.threadId,
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      let registrationDone = false;
+      void registration.then(() => {
+        registrationDone = true;
+      }, () => {
+        registrationDone = true;
+      });
+      await switched;
+      // The change landed inside its own chain link, after the registration
+      // had finished — so no write sneaks past the tightened provider.
+      expect(registrationDone).toBe(true);
+      const result = await registration;
+      expect(result.created).toBe(true);
+      // The switch landed: the next registration sees the tightened provider.
+      const after = path.join(harness.root, "after-model-switch");
+      await mkdir(after);
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: after });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("orchestration switched off");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("cannot sneak a write past a provider policy tightening: the settings write serializes with the registration", async () => {
+    // File-backed config, so the settings write is what the gate reads next.
+    const harness = await testHarness({});
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const parent = await connection.dispatch({ type: "thread.create", projectId: ensured.project.id, runtimeMode: "full-access" });
+      const folder = path.join(harness.root, "policy-gap");
+      await mkdir(folder);
+      await runProcess("git", ["init", "-b", "main"], { cwd: folder });
+      const registration = connection.projectRegistration.register(parent.threadId, { cwd: folder });
+      // The harness's installation default is OpenCode, so its section is the thread's provider.
+      const tightened = connection.dispatch({ type: "settings.set", key: "providers.opencode.orchestration", value: "false" });
+      let registrationDone = false;
+      void registration.then(() => {
+        registrationDone = true;
+      }, () => {
+        registrationDone = true;
+      });
+      await tightened;
+      // The policy landed inside its own chain link, after the registration
+      // had finished — so no write sneaks past the tightened policy.
+      expect(registrationDone).toBe(true);
+      const result = await registration;
+      expect(result.created).toBe(true);
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(true);
+      // The policy landed: the next registration is refused under it.
+      const after = path.join(harness.root, "after-policy");
+      await mkdir(after);
+      const refused = await callMoxenTool(connection, parent.threadId, "project_register", { cwd: after });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("orchestration switched off");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a delegated task however stale or missing its session flags are", async () => {
+    const { harness, connection, register, parentThreadId } = await setup();
+    try {
+      // A real delegated task, with a real delegation row and a thread of its own.
+      const delegated = await callMoxenTool(connection, parentThreadId, "delegate", { task: "Write the changelog", title: "changelog" });
+      expect(delegated.isError).toBe(false);
+      const taskId = (JSON.parse(delegated.text) as { taskId: string }).taskId;
+      const folder = path.join(harness.root, "from-delegated");
+      await mkdir(folder);
+      // The transport flags say a plain orchestrator session (stale or spoofed):
+      // the server answers for the thread as it sees it, and refuses.
+      const refused = await register({ cwd: folder }, taskId);
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("not available in a delegated task");
+      expect(refused.text).toContain("Say what needs registering in your report");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses an active research run's lead and its roles, stale session flags or not", async () => {
+    const { harness, connection, register, work } = await setup();
+    try {
+      const now = new Date().toISOString();
+      const projectId = (await registered(connection)).find((entry) => entry.workspaceRoot === work)!.id;
+      // The lead: a thread whose research run is live, started after its session was.
+      const lead = await connection.dispatch({ type: "thread.create", projectId, runtimeMode: "full-access" });
+      const leadRecord = await harness.store.readThreadRecord(lead.threadId);
+      await harness.store.writeThreadRecord({
+        ...leadRecord!,
+        researchRun: { leadThreadId: lead.threadId, roles: [{ threadId: "role-x", role: "researcher", question: "Survey" }], state: "running", createdAt: now, updatedAt: now },
+      });
+      // One of the run's roles: its own thread carries the role, not the run.
+      const role = await connection.dispatch({ type: "thread.create", projectId, runtimeMode: "full-access" });
+      const roleRecord = await harness.store.readThreadRecord(role.threadId);
+      await harness.store.writeThreadRecord({ ...roleRecord!, researchRole: { leadThreadId: lead.threadId, role: "researcher" } });
+      const folder = path.join(harness.root, "from-research");
+      await mkdir(folder);
+      // Both call as a plain orchestrator session (no research flags): the live records refuse.
+      const leadRefused = await register({ cwd: folder }, lead.threadId);
+      expect(leadRefused.isError).toBe(true);
+      expect(leadRefused.text).toContain("not available while a research run is active");
+      const roleRefused = await register({ cwd: folder }, role.threadId);
+      expect(roleRefused.isError).toBe(true);
+      expect(roleRefused.text).toContain("not available in a research run");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a thread whose provider has orchestration switched off, reading the live config", async () => {
+    const { harness, connection, register } = await setup({ providers: { opencode: { orchestration: false } } });
+    try {
+      const folder = path.join(harness.root, "no-orchestration");
+      await mkdir(folder);
+      const refused = await register({ cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("orchestration switched off");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses the thread's live provider's policy too: a running turn's one-off override decides", async () => {
+    // The thread's saved provider allows orchestration; the turn it is
+    // running was started with a one-off model override onto a provider
+    // that disables it. The calling session arrives mid-turn, so the
+    // override is the provider it actually runs on.
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => ({ ...harness.config, providers: { opencode: { orchestration: false } } }),
+    });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+      });
+      await connection.dispatch({
+        type: "thread.turn.start",
+        threadId: thread.threadId,
+        message: { text: "Register on my behalf" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      const running = (await harness.store.readTurns(thread.threadId)).at(-1);
+      expect(running?.status).toBe("running");
+      const folder = path.join(harness.root, "override-provider");
+      await mkdir(folder);
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("orchestration switched off");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
+describe("project_register: only the authenticated session's thread writes", () => {
+  it("is not a client command a caller can dispatch for any thread it names", () => {
+    // No protocol command exists: a raw frame naming a thread and a folder
+    // is refused before anything runs, so no ordinary local or paired
+    // remote client can register for someone else's thread.
+    expect(() => decodeCommand({ type: "project.register", threadId: "any-thread", cwd: "/abs" })).toThrow(/project\.register/);
+  });
+
+  it("refuses a caller that reached the server without the thread-bound capability", async () => {
+    // A bare client api (a stub like a remote socket would present) carries
+    // no capability, so the write fails closed rather than trusting a name.
+    const refused = await callMoxenTool({} as never, "any-thread", "project_register", { cwd: "/abs" });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toContain("not available on this connection");
+    expect(refused.text).toContain("moxen projects ensure");
+  });
+
+  it("fails closed when the delegations ledger is not fully readable, instead of reading a partial list", async () => {
+    const { harness, connection, register, parentThreadId } = await setup();
+    try {
+      // A real delegated task, with a real delegation row.
+      const delegated = await callMoxenTool(connection, parentThreadId, "delegate", { task: "Write the changelog", title: "changelog" });
+      expect(delegated.isError).toBe(false);
+      const taskId = (JSON.parse(delegated.text) as { taskId: string }).taskId;
+      const folder = path.join(harness.root, "corrupt-row");
+      await mkdir(folder);
+      // Intact rows: the delegated task is still refused by its own row.
+      const intact = await register({ cwd: folder }, taskId);
+      expect(intact.isError).toBe(true);
+      expect(intact.text).toContain("not available in a delegated task");
+      // Corrupt that row in the ledger: the tolerant reader would skip it
+      // and read the task as never delegated, so the authorization read is
+      // strict — any unreadable row refuses the whole decision.
+      const ledger = path.join(harness.root, "delegations.jsonl");
+      const raw = await readFile(ledger, "utf8");
+      const line = raw.split("\n").find((entry) => entry.includes(taskId));
+      expect(line).toBeTruthy();
+      await writeFile(ledger, raw.replace(line!, line!.slice(0, 20)), "utf8");
+      const refused = await register({ cwd: folder }, taskId);
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("could not be read");
+      expect(refused.text).toContain("refused rather than answered as anyone");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses when the active turn ledger row is corrupt instead of falling back to the saved provider (LOCAL-035)", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => ({ ...harness.config, providers: { opencode: { orchestration: false } } }),
+    });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+      });
+      await connection.dispatch({
+        type: "thread.turn.start",
+        threadId: thread.threadId,
+        message: { text: "Hold turn open" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      const folder = path.join(harness.root, "corrupt-turn");
+      await mkdir(folder);
+      const turnsFile = path.join(harness.root, "threads", thread.threadId, "turns.jsonl");
+      const raw = await readFile(turnsFile, "utf8");
+      await writeFile(turnsFile, raw.slice(0, 20), "utf8");
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("could not be read");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses when a valid JSON running turn row omits modelSelection instead of falling back to the saved provider (LOCAL-035)", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => ({ ...harness.config, providers: { opencode: { orchestration: false } } }),
+    });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+      });
+      await connection.dispatch({
+        type: "thread.turn.start",
+        threadId: thread.threadId,
+        message: { text: "Hold turn open" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      const turnsFile = path.join(harness.root, "threads", thread.threadId, "turns.jsonl");
+      const lines = (await readFile(turnsFile, "utf8")).trim().split("\n");
+      const parsed = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
+      delete parsed["modelSelection"];
+      lines[lines.length - 1] = JSON.stringify(parsed);
+      await writeFile(turnsFile, `${lines.join("\n")}\n`, "utf8");
+
+      const folder = path.join(harness.root, "missing-model-turn");
+      await mkdir(folder);
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("could not be established");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("keeps refusing a still-live shared OpenCode entry even after the thread's saved provider switches away (LOCAL-035)", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const opencodeDriver = harness.drivers.opencode!();
+    let sharedForThread: string | null = null;
+    opencodeDriver.entrySessionCount = (id) => (id === sharedForThread ? 2 : 1);
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: { ...harness.drivers, opencode: () => opencodeDriver },
+      config: async () => harness.config,
+    });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      sharedForThread = thread.threadId;
+      // Touch the OpenCode driver so it is owned and live on this connection.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: thread.threadId })).toEqual({ count: 2 });
+      // Switch the thread's saved provider to Codex while the shared OpenCode entry stays alive.
+      await connection.dispatch({
+        type: "thread.model-selection.set",
+        threadId: thread.threadId,
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      });
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: thread.threadId })).toEqual({ count: 2 });
+
+      const folder = path.join(harness.root, "switched-shared-entry");
+      await mkdir(folder);
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("shared MCP entry");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("relays registration, dryRun, and revival cleanly through the credentialed stdio relay without double-projecting (LOCAL-035)", async () => {
+    const { harness, connection, parentThreadId } = await setup({}, "full-access");
+    const http = await startMcpHttpServer(connection, undefined, connection.agentQueue, connection.projectRegistration);
+    try {
+      const endpoint = http.specFor(parentThreadId);
+      const relay = relayProjectRegistration({
+        [MOXEN_MCP_URL_ENV]: endpoint.url,
+        [MOXEN_MCP_TOKEN_ENV]: (endpoint.headers["Authorization"] ?? "").replace(/^Bearer\s+/i, ""),
+      })!;
+      expect(relay).toBeDefined();
+
+      const folder = path.join(harness.root, "via-relay");
+      await mkdir(folder);
+
+      const preview = await callMoxenTool(connection, parentThreadId, "project_register", { cwd: folder, dryRun: true }, { projectRegistration: relay });
+      expect(preview.isError).toBe(false);
+      expect(JSON.parse(preview.text)).toMatchObject({ workspaceRoot: real(folder), created: true, dryRun: true });
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+
+      const created = await callMoxenTool(connection, parentThreadId, "project_register", { cwd: folder }, { projectRegistration: relay });
+      expect(created.isError).toBe(false);
+      const createdBody = JSON.parse(created.text) as { project: { id: string }; workspaceRoot: string; created: boolean };
+      expect(createdBody).toMatchObject({ workspaceRoot: real(folder), created: true });
+
+      await connection.dispatch({ type: "project.remove", projectId: createdBody.project.id });
+      const revived = await callMoxenTool(connection, parentThreadId, "project_register", { cwd: folder }, { projectRegistration: relay });
+      expect(revived.isError).toBe(false);
+      expect(JSON.parse(revived.text)).toMatchObject({
+        project: { id: createdBody.project.id },
+        workspaceRoot: real(folder),
+        created: false,
+        revived: true,
+      });
+    } finally {
+      await http.close();
+      await connection.close();
+    }
+  });
+
+  it("does not let an unrelated live OpenCode driver block another provider's MCP calls, while failing closed for an unowned OpenCode thread (LOCAL-035)", async () => {
+    const harness = await testHarness({});
+    const realOpencode = new OpenCodeDriver({
+      settings: { binaryPath: "opencode" },
+    });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: { ...harness.drivers, opencode: () => realOpencode },
+      config: async () => harness.config,
+    });
+    const http = await startMcpHttpServer(connection, undefined, connection.agentQueue, connection.projectRegistration);
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const codexThread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      });
+      const opencodeThread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+
+      // Before OpenCode is instantiated, Codex has count 1.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: codexThread.threadId })).toEqual({ count: 1 });
+      // Querying the OpenCode thread instantiates the real OpenCodeDriver in
+      // `ownedDrivers` and fails closed to 2 because OpenCode holds no live
+      // session for that OpenCode thread.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: opencodeThread.threadId })).toEqual({ count: 2 });
+      // The unrelated Codex thread must still count as 1, and ordinary MCP
+      // calls (`project_list` and `project_register`) over loopback HTTP must
+      // succeed without OpenCode session metadata.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: codexThread.threadId })).toEqual({ count: 1 });
+
+      const endpoint = http.specFor(codexThread.threadId);
+      const mcpCall = async (name: string, args: Record<string, unknown>) => {
+        const res = await fetch(endpoint.url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...endpoint.headers },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+        });
+        expect(res.status).toBe(200);
+        return (await res.json()) as { result?: { content: Array<{ text: string }>; isError?: boolean }; error?: { message: string } };
+      };
+
+      const listed = await mcpCall("project_list", {});
+      expect(listed.error).toBeUndefined();
+      expect(listed.result?.isError).toBe(false);
+
+      const folder = path.join(harness.root, "codex-with-opencode-alive");
+      await mkdir(folder);
+      const registeredRes = await mcpCall("project_register", { cwd: folder });
+      expect(registeredRes.error).toBeUndefined();
+      expect(registeredRes.result?.isError).toBe(false);
+      expect(JSON.parse(registeredRes.result!.content[0]!.text)).toMatchObject({ workspaceRoot: real(folder), created: true });
+    } finally {
+      await http.close();
       await connection.close();
     }
   });
