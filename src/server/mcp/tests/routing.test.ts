@@ -180,13 +180,26 @@ describe("routed moxen calls: a registry write never changes identity (LOCAL-035
       register: async (callerThreadId) => {
         calls.push(callerThreadId);
         return {
-          workspace: { inputPath: "/abs", mode: "folder", isGitRepository: false, branch: null, workspaceRoot: "/abs" },
-          project: { id: "p-1", title: "abs", workspaceRoot: "/abs", defaultModelSelection: null, createdAt: "now", updatedAt: "now", deletedAt: null },
+          project: { id: "p-1", title: "abs", workspaceRoot: "/abs", createdAt: "now" },
+          workspaceRoot: "/abs",
           created: true,
-          command: null,
-        } as never;
+        };
       },
     },
+  });
+
+  it("refuses a project_register on a shared entry even when session metadata names the entry owner", async () => {
+    const seen = { toolQueries: [] as string[] };
+    const calls: string[] = [];
+    const ownerRouting: Routing = { threadId: PARENT_THREAD, delegated: false, webFetch: true, memory: "write", checklist: false };
+    const answer = await answerMcp(
+      { ...session(PARENT_THREAD, ownerRouting, seen, 2), ...recording(calls) },
+      withSession("project_register", { cwd: "/abs" }, "ses_owner_shared"),
+    );
+    const result = answer?.result as { content: Array<{ text: string }>; isError: boolean };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("shared MCP entry");
+    expect(calls).toEqual([]);
   });
 
   it("refuses a project_register that session metadata would move onto another thread", async () => {

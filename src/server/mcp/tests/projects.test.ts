@@ -19,6 +19,9 @@ import { runProcess } from "../../../core/infra/process.js";
 import { testHarness } from "../../../core/testing/harness.js";
 import { DirectConnection } from "../../connection.js";
 import { decodeCommand } from "../../protocol.js";
+import { startMcpHttpServer } from "../http.js";
+import { relayProjectRegistration } from "../main.js";
+import { MOXEN_MCP_TOKEN_ENV, MOXEN_MCP_URL_ENV } from "../stdio.js";
 import { callMoxenTool, fullyQualifiedFolder, moxenToolsFor, PROJECT_TOOLS } from "../tools.js";
 
 /** Paths meet the registry once canonicalized: on macOS `/var` and `/private/var` are the same folder. */
@@ -677,6 +680,80 @@ describe("project_register: only the authenticated session's thread writes", () 
       expect(refused.text).toContain("refused rather than answered as anyone");
       expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
     } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses when the active turn ledger row is corrupt instead of falling back to the saved provider (LOCAL-035)", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => ({ ...harness.config, providers: { opencode: { orchestration: false } } }),
+    });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+      });
+      await connection.dispatch({
+        type: "thread.turn.start",
+        threadId: thread.threadId,
+        message: { text: "Hold turn open" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      const folder = path.join(harness.root, "corrupt-turn");
+      await mkdir(folder);
+      const turnsFile = path.join(harness.root, "threads", thread.threadId, "turns.jsonl");
+      const raw = await readFile(turnsFile, "utf8");
+      await writeFile(turnsFile, raw.slice(0, 20), "utf8");
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("could not be read");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("relays registration, dryRun, and revival cleanly through the credentialed stdio relay without double-projecting (LOCAL-035)", async () => {
+    const { harness, connection, parentThreadId } = await setup({}, "full-access");
+    const http = await startMcpHttpServer(connection, undefined, connection.agentQueue, connection.projectRegistration);
+    try {
+      const endpoint = http.specFor(parentThreadId);
+      const relay = relayProjectRegistration({
+        [MOXEN_MCP_URL_ENV]: endpoint.url,
+        [MOXEN_MCP_TOKEN_ENV]: (endpoint.headers["Authorization"] ?? "").replace(/^Bearer\s+/i, ""),
+      })!;
+      expect(relay).toBeDefined();
+
+      const folder = path.join(harness.root, "via-relay");
+      await mkdir(folder);
+
+      const preview = await callMoxenTool(connection, parentThreadId, "project_register", { cwd: folder, dryRun: true }, { projectRegistration: relay });
+      expect(preview.isError).toBe(false);
+      expect(JSON.parse(preview.text)).toMatchObject({ workspaceRoot: real(folder), created: true, dryRun: true });
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+
+      const created = await callMoxenTool(connection, parentThreadId, "project_register", { cwd: folder }, { projectRegistration: relay });
+      expect(created.isError).toBe(false);
+      const createdBody = JSON.parse(created.text) as { project: { id: string }; workspaceRoot: string; created: boolean };
+      expect(createdBody).toMatchObject({ workspaceRoot: real(folder), created: true });
+
+      await connection.dispatch({ type: "project.remove", projectId: createdBody.project.id });
+      const revived = await callMoxenTool(connection, parentThreadId, "project_register", { cwd: folder }, { projectRegistration: relay });
+      expect(revived.isError).toBe(false);
+      expect(JSON.parse(revived.text)).toMatchObject({
+        project: { id: createdBody.project.id },
+        workspaceRoot: real(folder),
+        created: false,
+        revived: true,
+      });
+    } finally {
+      await http.close();
       await connection.close();
     }
   });

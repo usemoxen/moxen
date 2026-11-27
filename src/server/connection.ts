@@ -85,7 +85,7 @@ import { MOXEN_MCP_SERVER_NAME, moxenMcpServerSpec } from "./mcp/main.js";
 import { MOXEN_CHECKLIST_ARG, MOXEN_CHECKLIST_QUERY, MOXEN_DELEGATED_ARG, MOXEN_DELEGATED_QUERY, MOXEN_MCP_TOKEN_ENV, MOXEN_MCP_URL_ENV, MOXEN_MEMORY_ARG, MOXEN_MEMORY_QUERY, MOXEN_NO_WEB_FETCH_ARG, MOXEN_NO_WEB_FETCH_QUERY, moxenInstructions } from "./mcp/stdio.js";
 import { startMcpHttpServer, type McpHttpServer } from "./mcp/http.js";
 import { MOXEN_MCP_INSTRUCTIONS } from "./mcp/stdio.js";
-import { callMoxenTool, moxenToolsFor, type AgentQueueAccess, type MemoryAccess, type ProjectRegistrationAccess } from "./mcp/tools.js";
+import { callMoxenTool, moxenToolsFor, type AgentQueueAccess, type MemoryAccess, type ProjectRegistrationAccess, type RegisteredProject } from "./mcp/tools.js";
 import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
 import { chatgptHarnessConfigFor, driverProviders } from "../core/threads/longthreads.js";
@@ -1118,11 +1118,22 @@ export class DirectConnection implements ClientApi {
    * land between the read and the write. The configured `projectPolicy`
    * decides; a caller never passes one.
    */
-  private async registerProject(callerThreadId: string, request: { readonly cwd: string; readonly dryRun?: boolean }): Promise<EnsuredProject> {
+  private async registerProject(callerThreadId: string, request: { readonly cwd: string; readonly dryRun?: boolean }): Promise<RegisteredProject> {
     return await this.runOnRegistryAuthorizationChain(async () => {
       const refusal = await this.projectRegisterRefusal(callerThreadId, request.dryRun === true);
       if (refusal !== null) throw new CliError("PROJECT_REGISTER_REFUSED", refusal, { exitCode: 4 });
-      return await ensureProject(await this.context(), { cwd: request.cwd, ...(request.dryRun === true ? { dryRun: true } : {}) });
+      const ensured = await ensureProject(await this.context(), { cwd: request.cwd, ...(request.dryRun === true ? { dryRun: true } : {}) });
+      return {
+        project: {
+          id: ensured.project.id,
+          title: ensured.project.title,
+          workspaceRoot: ensured.project.workspaceRoot,
+          createdAt: ensured.project.createdAt,
+        },
+        workspaceRoot: ensured.workspace.workspaceRoot,
+        created: ensured.created,
+        ...(ensured.revived === true ? { revived: true } : {}),
+      };
     });
   }
 
@@ -1160,7 +1171,7 @@ export class DirectConnection implements ClientApi {
       // turn's — a one-off model override is the provider the calling
       // session runs on now. A running turn whose model went unrecorded
       // leaves the live provider impossible to establish, so it refuses.
-      const running = (await store.readTurns(threadId)).find((turn) => turn.status === "running") ?? null;
+      const running = (await store.readTurnsStrict(threadId)).find((turn) => turn.status === "running") ?? null;
       const instanceIds = [thread.modelSelection.instanceId, ...(running?.modelSelection ? [running.modelSelection.instanceId] : [])];
       if (running !== null && running.modelSelection === null) liveProviderUnreadable = true;
       const config = await this.loadConfig();

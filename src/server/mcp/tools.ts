@@ -805,8 +805,21 @@ export interface AgentQueueAccess {
  * MCP credential a stdio child relays through), and the server authorizes
  * inside the mutation, against that thread's live state (LOCAL-035).
  */
+/** Public result returned by an authenticated agent project registration (and relayed cleanly by stdio). */
+export interface RegisteredProject {
+  readonly project: {
+    readonly id: string;
+    readonly title: string;
+    readonly workspaceRoot: string;
+    readonly createdAt: string;
+  };
+  readonly workspaceRoot: string;
+  readonly created: boolean;
+  readonly revived?: boolean;
+}
+
 export interface ProjectRegistrationAccess {
-  register(callerThreadId: string, request: { readonly cwd: string; readonly dryRun?: boolean }): Promise<EnsuredProject>;
+  register(callerThreadId: string, request: { readonly cwd: string; readonly dryRun?: boolean }): Promise<RegisteredProject>;
 }
 
 /** Whether a session with these options may call `name`: hidden tools are refused too, since a client can call a tool it was never shown. */
@@ -1159,9 +1172,9 @@ export async function callMoxenTool(
         const ensured = await projectRegistration.register(parentThreadId, { cwd: argFolder(args), ...(dryRun ? { dryRun: true } : {}) });
         return ok({
           project: { id: ensured.project.id, title: ensured.project.title, workspaceRoot: ensured.project.workspaceRoot, createdAt: ensured.project.createdAt },
-          workspaceRoot: ensured.workspace.workspaceRoot,
+          workspaceRoot: ensured.workspaceRoot,
           created: ensured.created,
-          ...("revived" in ensured && ensured.revived === true ? { revived: true } : {}),
+          ...(ensured.revived === true ? { revived: true } : {}),
           ...(dryRun ? { dryRun: true } : {}),
           note: dryRun
             ? ensured.revived === true

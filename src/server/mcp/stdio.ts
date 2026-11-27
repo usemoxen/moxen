@@ -170,22 +170,42 @@ export async function answerMcp(options: McpSessionOptions, raw: unknown): Promi
             : {};
         const routed = await routeMcpSession(options.api, fallback, params, true);
         if ("error" in routed) return fail(-32602, routed.error);
-        // A registry write answers only for the thread the transport
-        // authenticates. Session metadata from the request body selects the
-        // session a read serves, but a caller-supplied native session id
-        // must never move a write onto another thread: a process sharing
-        // this entry could name the orchestrator's session and register as
-        // it. The substitution is refused outright (LOCAL-035).
-        if (name === "project_register" && routed.threadId !== options.parentThreadId) {
-          return reply({
-            content: [{
-              type: "text",
-              text:
-                "project_register never runs through session-metadata routing: the write answers only for the thread this connection is authenticated for. " +
-                "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`, or the thread's own session can call it.",
-            }],
-            isError: true,
-          });
+        // A registry write answers only when the transport itself uniquely
+        // authenticates the calling thread. Request-body session metadata
+        // cannot move a write onto another thread, AND when multiple live
+        // sessions share this MCP entry (e.g. OpenCode's directory-shared
+        // entry), matching metadata still does not prove which sharing
+        // session originated the request — refuse outright (LOCAL-035).
+        if (name === "project_register") {
+          if (routed.threadId !== options.parentThreadId) {
+            return reply({
+              content: [{
+                type: "text",
+                text:
+                  "project_register never runs through session-metadata routing: the write answers only for the thread this connection is authenticated for. " +
+                  "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`, or the thread's own session can call it.",
+              }],
+              isError: true,
+            });
+          }
+          let sharedCount = 2;
+          try {
+            const answer = await options.api.query({ type: "thread.entry-sessions", threadId: options.parentThreadId });
+            if (typeof answer?.count === "number") sharedCount = answer.count;
+          } catch {
+            sharedCount = 2;
+          }
+          if (sharedCount > 1) {
+            return reply({
+              content: [{
+                type: "text",
+                text:
+                  "project_register is refused on a shared MCP entry: multiple live sessions share this connection's credential, so the originating thread cannot be independently authenticated. " +
+                  "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`.",
+              }],
+              isError: true,
+            });
+          }
         }
         const result = await callMoxenTool(options.api, routed.threadId, name, args, routed.options);
         return reply({ content: [{ type: "text", text: result.text }], isError: result.isError });

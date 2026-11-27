@@ -835,6 +835,32 @@ export class ThreadStore {
     return await this.readLedger<StoredTurn>(threadId, "turns", options);
   }
 
+  /**
+   * The turns ledger an authorization decision may rely on, read strictly
+   * (LOCAL-035). `readTurns` tolerates corrupt lines for display, so a
+   * corrupt running-turn row would silently disappear and fall back to the
+   * thread's saved provider instead of the turn's active override. Any
+   * unreadable or truncated line, or a row missing `id`/`status`, fails the
+   * whole read without recording a quarantine or problem entry.
+   */
+  async readTurnsStrict(threadId: string): Promise<StoredTurn[]> {
+    const file = ledgerFile(this.root, threadId, "turns");
+    let raw: string;
+    try {
+      raw = await readFileRetrying(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const rows = this.parseLedgerLines<StoredTurn>(raw, file, "ledger-line", threadId, { strict: true, reportTornTail: true });
+    for (const row of rows) {
+      if (typeof row.id !== "string" || typeof row.status !== "string") {
+        throw new CliError("STORE_PROBLEM", `${file} holds a turn row without its id or status: nothing may be authorized from it.`, { exitCode: 4 });
+      }
+    }
+    return rows;
+  }
+
   async updateTurn(threadId: string, turnId: string, patch: Partial<StoredTurn>): Promise<StoredTurn | null> {
     const turns = await this.readTurns(threadId);
     const index = turns.findIndex((turn) => turn.id === turnId);

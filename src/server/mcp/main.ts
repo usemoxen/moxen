@@ -12,11 +12,11 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { McpServerSpec } from "../../core/mcp.js";
-import type { AgentQueuedMessage, EnsuredProject, QueuedAgentMessage } from "../../core/threads/operations.js";
+import type { AgentQueuedMessage, QueuedAgentMessage } from "../../core/threads/operations.js";
 import { isStandaloneExecutable, STANDALONE_MCP_ARG } from "../../core/infra/standalone.js";
 import { openClient } from "../client.js";
 import { memoryAccessOf, MOXEN_CHECKLIST_ARG, MOXEN_DELEGATED_ARG, MOXEN_MCP_TOKEN_ENV, MOXEN_MCP_URL_ENV, MOXEN_MEMORY_ARG, MOXEN_NO_WEB_FETCH_ARG, serveMcp } from "./stdio.js";
-import type { AgentQueueAccess, ProjectRegistrationAccess } from "./tools.js";
+import type { AgentQueueAccess, ProjectRegistrationAccess, RegisteredProject } from "./tools.js";
 
 /** The name agents see its tools under (`mcp__moxen__delegate`). */
 export const MOXEN_MCP_SERVER_NAME = "moxen";
@@ -103,7 +103,36 @@ export function relayProjectRegistration(
   const credential = relayCredential(env);
   if (!credential) return undefined;
   return {
-    register: async (_callerThreadId, request) => await relayCall<EnsuredProject>(credential, "project_register", { cwd: request.cwd, ...(request.dryRun === true ? { dryRun: true } : {}) }, send),
+    register: async (_callerThreadId, request) => {
+      const result = await relayCall<RegisteredProject>(
+        credential,
+        "project_register",
+        { cwd: request.cwd, ...(request.dryRun === true ? { dryRun: true } : {}) },
+        send,
+      );
+      if (
+        result === null
+        || typeof result !== "object"
+        || typeof result.workspaceRoot !== "string"
+        || typeof result.created !== "boolean"
+        || result.project === null
+        || typeof result.project !== "object"
+        || typeof result.project.id !== "string"
+      ) {
+        throw new Error("The moxen MCP server returned a malformed project_register response.");
+      }
+      return {
+        project: {
+          id: result.project.id,
+          title: result.project.title,
+          workspaceRoot: result.project.workspaceRoot,
+          createdAt: result.project.createdAt,
+        },
+        workspaceRoot: result.workspaceRoot,
+        created: result.created,
+        ...(result.revived === true ? { revived: true } : {}),
+      };
+    },
   };
 }
 
