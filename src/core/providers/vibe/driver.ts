@@ -900,6 +900,10 @@ export class VibeDriver implements ProviderAdapter<CliError> {
    * native same-name server (kept by `MergeStrategy.UNION` because the gateway
    * route does not offer it) whose own restrictions do not deny the excluded
    * tool. Omission from the offer is not a deny (LOCAL-032).
+   *
+   * This answers the opposite question from the gateway's `allows`: it must
+   * prove Vibe denies the tool natively, so it uses the exposure-leaning
+   * `provenDeniedNatively` — every uncertainty counts as exposed.
    */
   private nativeExclusionsExposed(
     routedServerNames: readonly string[],
@@ -913,7 +917,7 @@ export class VibeDriver implements ProviderAdapter<CliError> {
       const prefix = `mcp__${name}__`;
       for (const exclusion of excludedTools) {
         if (!exclusion.startsWith(prefix) || exclusion.length <= prefix.length) continue;
-        if (restrictions.allows(name, exclusion.slice(prefix.length))) exposed.push(exclusion);
+        if (!restrictions.provenDeniedNatively(name, exclusion.slice(prefix.length))) exposed.push(exclusion);
       }
     }
     return [...new Set(exposed)];

@@ -2100,6 +2100,69 @@ describe("VibeDriver lazy MCP gateway (LOCAL-032)", () => {
     }
   });
 
+  // The exposure checks below pin Vibe 3.1.5's actual native deny semantics
+  // (`_mcp_naming.py:148` compares the raw remote name exactly, case included;
+  // global patterns are evaluated against the one published display name only)
+  // against every deny-lean `allows()` inherited from the gateway filter: a
+  // lean toward denied must not become a false "safe to start" here.
+  interface NativeExposureVector {
+    readonly label: string;
+    readonly native: Record<string, unknown>;
+    readonly connectTools?: string[];
+  }
+
+  const itRefusesForNativeExposure = async (vector: NativeExposureVector): Promise<void> => {
+    const server = new FakeVibeServer();
+    setupGatewaySession(server, vector.native);
+    const driver = new VibeDriver({
+      transport: makeTransport([server]),
+      connectMcp: stubUpstreamServers({ exa: vector.connectTools ?? ["agent_run", "web_search_exa"] }, []),
+    });
+    const exit = await Effect.runPromiseExit(driver.startSession({
+      threadId: `th-gw-native-${vector.label}`,
+      workingDirectory: "/tmp/repo",
+      mcpServers: [exaHttp],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      const cause = exit.cause as { failure?: CliError; reasons?: ReadonlyArray<{ error?: CliError }> };
+      const failure = cause.failure ?? cause.reasons?.[0]?.error;
+      expect(failure?.code).toBe("VIBE_MCP_EXCLUSION_UNENFORCEABLE");
+      expect(failure?.message).toMatch(/mcp__exa__agent_run/);
+    }
+    expect(await Effect.runPromise(driver.hasSession(`th-gw-native-${vector.label}`))).toBe(false);
+  };
+
+  it("refuses when Vibe's deny is only a deny-lean Moxen cannot prove natively (exposure-leaning predicate)", async () => {
+    // Case B: Vibe compares per-server disabled_tools exactly, case included,
+    // so "Agent_Run" does NOT deny `agent_run` natively.
+    await itRefusesForNativeExposure({
+      label: "wrongcase",
+      native: { config: { mcp_servers: [{ name: "exa", disabled: false, disabled_tools: ["Agent_Run"] }], disabled_tools: [], enabled_tools: [] } },
+    });
+    // Case C: a global disabled pattern that matches only the digest-suffixed
+    // form does not match the name Vibe actually publishes (`exa_agent_run`).
+    const digest = createHash("sha256").update("exa\u0000agent_run", "utf8").digest("hex");
+    await itRefusesForNativeExposure({
+      label: "digestonly",
+      native: { config: { mcp_servers: [{ name: "exa", disabled: false, disabled_tools: [] }], disabled_tools: [`exa_agent_run_${digest.slice(0, 8)}`], enabled_tools: [] } },
+    });
+    // Case A: an unparseable regex denies on the gateway side (safe there) but
+    // compiles and runs fine in Vibe's Python, where it does not match.
+    await itRefusesForNativeExposure({
+      label: "lookaround",
+      native: { config: { mcp_servers: [{ name: "exa", disabled: false, disabled_tools: [] }], disabled_tools: ["re:(?=zzz)zzz"], enabled_tools: [] } },
+    });
+    // Case D: a global enabled list naming exactly the published display name
+    // leaves the tool enabled natively; requiring every form to match must not
+    // turn that into a proven deny.
+    await itRefusesForNativeExposure({
+      label: "enabledlist",
+      native: { config: { mcp_servers: [{ name: "exa", disabled: false, disabled_tools: [] }], disabled_tools: [], enabled_tools: ["exa_agent_run", "exa_web_search_exa"] } },
+    });
+  });
+
   it("refuses when no collision-free gateway identity exists against a native server named moxen", async () => {
     const server = new FakeVibeServer();
     setupGatewaySession(server, {

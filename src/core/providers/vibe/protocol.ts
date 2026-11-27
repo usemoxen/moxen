@@ -839,23 +839,33 @@ function vibeRegexSubsetBody(body: string): string | null {
  * mirroring the disabled/enabled call sites so the gateway fails closed.
  */
 function vibeToolPatternMatches(pattern: string, name: string, unparseableMatches: boolean): boolean {
+  const proven = vibeToolPatternProven(pattern, name);
+  return proven === null ? unparseableMatches : proven;
+}
+
+/**
+ * The same evaluation as `vibeToolPatternMatches` without a fallback: null when
+ * the pattern is outside the subset this port can prove equivalent to Vibe's
+ * own Python evaluation (so the caller decides), false/true when it is proven.
+ */
+function vibeToolPatternProven(pattern: string, name: string): boolean | null {
   const raw = pattern.trim();
   if (raw === "") return false;
   if (raw.startsWith("re:")) {
     const body = vibeRegexSubsetBody(raw.slice(3));
-    if (body === null) return unparseableMatches;
+    if (body === null) return null;
     try {
       return new RegExp(`^(?:${body})$`, "i").test(name);
     } catch {
-      return unparseableMatches;
+      return null;
     }
   }
   const translated = vibeFnmatchTranslate(raw.toLowerCase());
-  if (translated === null) return unparseableMatches;
+  if (translated === null) return null;
   try {
     return new RegExp(`^(?:${translated})$`).test(name.toLowerCase());
   } catch {
-    return unparseableMatches;
+    return null;
   }
 }
 
@@ -870,6 +880,16 @@ export interface VibeEffectiveMcpRestrictions {
   readonly gatewayEntryFound: boolean;
   /** Whether the tool `(server, tool)` may be surfaced by the lazy gateway. */
   allows(server: string, tool: string): boolean;
+  /**
+   * Whether the user's own Vibe configuration provably denies the tool
+   * `(server, tool)` on a NATIVE route (`nativeExclusionsExposed`). This is the
+   * opposite question from `allows`: `allows` leans toward denied to keep the
+   * gateway safe in both directions, while this leans toward exposed — any
+   * deny Moxen cannot prove equivalent to Vibe's own native evaluation counts
+   * as potentially exposed, so a surviving native copy of the server is never
+   * mistaken for a safe route (LOCAL-032).
+   */
+  provenDeniedNatively(server: string, tool: string): boolean;
 }
 
 /** The identity of the session's own gateway entry, to exclude it from a merged read. */
@@ -929,6 +949,7 @@ export function parseVibeEffectiveConfig(
   const nativeServers = new Set<string>();
   const disabledServers = new Set<string>();
   const disabledTools = new Set<string>();
+  const disabledToolsExact = new Set<string>();
   let gatewayEntryFound = false;
   for (const item of rawServers) {
     const rec = asRecord(item);
@@ -944,7 +965,10 @@ export function parseVibeEffectiveConfig(
     if (tools === null || typeof rec?.["disabled"] !== "boolean") return null;
     nativeServers.add(alias);
     if (rec["disabled"] === true) disabledServers.add(alias);
-    for (const tool of tools) disabledTools.add(`${alias}\u0000${tool.toLowerCase()}`);
+    for (const tool of tools) {
+      disabledTools.add(`${alias}\u0000${tool.toLowerCase()}`);
+      disabledToolsExact.add(`${alias}\u0000${tool}`);
+    }
   }
   return {
     nativeServers,
@@ -966,6 +990,42 @@ export function parseVibeEffectiveConfig(
         return false;
       }
       return true;
+    },
+    provenDeniedNatively(server: string, tool: string): boolean {
+      const alias = vibeMcpServerAlias(server).toLowerCase();
+      // Whole-server native `disabled: true` denies every tool it holds.
+      if (disabledServers.has(alias)) return true;
+      // Vibe's per-server disabled_tools compares the raw remote tool name
+      // exactly (`remote_name in server.disabled_tools`, `_mcp_naming.py`):
+      // only an exact, case-sensitive match is a proven native deny. The
+      // case-insensitive set used by `allows` stays deny-leaning there — the
+      // gateway denies at least as strictly, but it proves nothing natively.
+      if (disabledToolsExact.has(`${alias}\u0000${tool}`)) return true;
+      // A configured `never` is a hard deny on Vibe's side too, keyed by the
+      // raw `{server}_{remote}` config name (exact-case, as Vibe keys it).
+      if (neverTools.has(`${vibeMcpServerAlias(server)}_${tool}`)) return true;
+      const forms = vibeDisplayForms(server, tool);
+      // A global disabled pattern is a proven native deny only when Moxen can
+      // parse it (null below means outside the proven subset — Vibe compiles
+      // and runs the real Python regex, which may not match at all) AND it
+      // matches every display name Vibe could publish for the tool: Vibe
+      // evaluates patterns against the one name it actually publishes, so a
+      // pattern that matches only some forms (e.g. only a digest-suffixed
+      // form) proves nothing.
+      if (disabledPatterns.some((pattern) =>
+        forms.every((form) => vibeToolPatternProven(pattern, form) === true))) {
+        return true;
+      }
+      // A non-empty global enabled list proves a deny only when every pattern
+      // is readable AND none matches any display-name form — Vibe publishes
+      // the tool as soon as any pattern names it (e.g. the exact published
+      // name `exa_agent_run`).
+      if (enabledPatterns.length > 0
+        && enabledPatterns.every((pattern) =>
+          forms.every((form) => vibeToolPatternProven(pattern, form) === false))) {
+        return true;
+      }
+      return false;
     },
   };
 }
