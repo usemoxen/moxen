@@ -243,7 +243,8 @@ export async function renderPage(url: string, options: RenderOptions): Promise<R
         reject(new WebError("The browser could not be started.", "network"));
       });
     });
-    cdp = await Cdp.connect(endpoint, Math.min(10_000, left()));
+    // Cold starts on Windows can slow WebSocket acceptance too; share the request's deadline.
+    cdp = await Cdp.connect(endpoint, left());
     const { targetId } = (await cdp.send("Target.createTarget", { url: "about:blank" })) as { targetId: string };
     const { sessionId } = (await cdp.send("Target.attachToTarget", { targetId, flatten: true })) as { sessionId: string };
     const send = (method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> => cdp!.send(method, params, sessionId);
@@ -304,7 +305,7 @@ export async function renderPage(url: string, options: RenderOptions): Promise<R
     const navigated = (await send("Page.navigate", { url })) as { frameId?: string; errorText?: string };
     mainFrame = navigated.frameId ?? "";
     if (navigated.errorText) throw new WebError(blockedMain ? `The browser was not allowed to load that page: ${blockedMain}` : `The browser could not load that page (${navigated.errorText.replace(/^net::/, "")}).`, blockedMain ? "blocked" : "network");
-    await Promise.race([loadEvent, new Promise<void>((resolve) => setTimeout(resolve, Math.min(20_000, left())))]);
+    await Promise.race([loadEvent, new Promise<void>((resolve) => setTimeout(resolve, Math.min(30_000, left())))]);
 
     // Scripts keep building the page after the load event: wait until the text stops changing.
     const settleUntil = Date.now() + Math.min(options.settleMs ?? 6000, left());
