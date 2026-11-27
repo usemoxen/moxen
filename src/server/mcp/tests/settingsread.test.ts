@@ -307,6 +307,39 @@ describe("settings_read", () => {
     }
   });
 
+  it("redacts invalid duration and threshold text in both direct and inherited effective values", async () => {
+    const marker = "syntheticPrivateMarker123";
+    const { connection, threadId } = await world((base) => ({
+      ...base,
+      sessionTtl: marker,
+      longThreads: { ...(base.longThreads as Record<string, unknown>), compactAt: "70%" },
+    }));
+    try {
+      for (const key of ["sessionTtl", "providers.claude.sessionTtl"]) {
+        const result = await connection.query({ type: "settings.agent-read", threadId, key });
+        expect(result.settings[0]).toMatchObject({ key, redacted: "free-form" });
+        expect(JSON.stringify(result)).not.toContain(marker);
+      }
+      const valid = await connection.query({ type: "settings.agent-read", threadId, key: "longThreads.compactAt" });
+      expect(valid.settings[0]).toMatchObject({ key: "longThreads.compactAt", redacted: false, value: "70%" });
+    } finally {
+      await connection.close();
+    }
+
+    const lineViews = describeSettings(normalizeConfig({})).map((entry) =>
+      entry.descriptor.key === "longThreads.handoffAt"
+        ? { ...entry, value: marker, explicit: true }
+        : entry.descriptor.key === "providers.claude.handoffAt"
+          ? { ...entry, value: undefined, explicit: false, effective: { value: marker, from: "longThreads.handoffAt", label: "Global" } }
+          : entry,
+    );
+    for (const key of ["longThreads.handoffAt", "providers.claude.handoffAt"]) {
+      const projected = projectAgentSettings(lineViews, { key });
+      expect(projected.settings[0]).toMatchObject({ key, redacted: "free-form" });
+      expect(JSON.stringify(projected)).not.toContain(marker);
+    }
+  });
+
   it("maps config read errors to a path-free SETTINGS_UNAVAILABLE response", async () => {
     const harness = await testHarness();
     let failLoad = false;

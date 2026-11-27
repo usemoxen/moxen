@@ -12,6 +12,8 @@
  */
 import { SETTING_SECTIONS, type SettingAppliesAt, type SettingDescriptor, type SettingEffective, type SettingKind, type SettingValue, type SettingView } from "../core/configschema.js";
 import { CliError } from "../core/errors.js";
+import { durationMs } from "../core/threads/idle.js";
+import { lineText, parseLine } from "../core/threads/lines.js";
 
 /** The MCP tool's name, shared by its definition, its routing and the server's denial check. */
 export const SETTINGS_READ_TOOL = "settings_read";
@@ -210,22 +212,26 @@ function baseOf(descriptor: SettingDescriptor): AgentSettingBase {
   };
 }
 
-const SAFE_LINE_VALUE = /^[a-z0-9.% ]{1,32}$/i;
-
-function safeLiveValue(kind: SettingKind, value: SettingValue): boolean {
-  if (value === undefined) return true;
+function canonicalLiveValue(
+  kind: SettingKind,
+  value: SettingValue,
+): { readonly ok: true; readonly value: SettingValue } | { readonly ok: false } {
+  if (value === undefined) return { ok: true, value: undefined };
   switch (kind.type) {
     case "boolean":
-      return typeof value === "boolean";
+      return typeof value === "boolean" ? { ok: true, value } : { ok: false };
     case "integer":
-      return typeof value === "number" && Number.isFinite(value);
+      return typeof value === "number" && Number.isFinite(value) ? { ok: true, value } : { ok: false };
     case "enum":
-      return typeof value === "string" && kind.choices.some((choice) => choice.value === value);
+      return typeof value === "string" && kind.choices.some((choice) => choice.value === value) ? { ok: true, value } : { ok: false };
     case "duration":
-    case "line":
-      return typeof value === "string" && SAFE_LINE_VALUE.test(value.trim());
+      return typeof value === "string" && durationMs(value) !== null ? { ok: true, value: value.trim() } : { ok: false };
+    case "line": {
+      const parsed = parseLine(value);
+      return parsed !== null ? { ok: true, value: lineText(parsed) } : { ok: false };
+    }
     default:
-      return false;
+      return { ok: false };
   }
 }
 
@@ -234,13 +240,17 @@ function projectView(view: SettingView): AgentSetting {
   if (!agentSettingLiveAllowed(descriptor.key)) {
     return { ...baseOf(descriptor), redacted: redactionOf(descriptor) };
   }
-  const value = view.value === "" ? undefined : view.value;
-  if (!safeLiveValue(descriptor.kind, value) || (view.effective !== undefined && !safeLiveValue(descriptor.kind, view.effective.value))) {
+  const raw = view.value === "" ? undefined : view.value;
+  const checked = canonicalLiveValue(descriptor.kind, raw);
+  const checkedEffective = view.effective === undefined ? undefined : canonicalLiveValue(descriptor.kind, view.effective.value);
+  if (!checked.ok || (checkedEffective !== undefined && !checkedEffective.ok)) {
     return { ...baseOf(descriptor), redacted: "free-form" };
   }
+  const value = checked.value;
+  const effective = view.effective === undefined ? undefined : { ...view.effective, value: checkedEffective!.value };
   const source: AgentSettingValue["source"] = view.explicit
     ? "config"
-    : view.effective !== undefined
+    : effective !== undefined
       ? "fallback"
       : descriptor.defaultValue !== undefined
         ? "default"
@@ -251,7 +261,7 @@ function projectView(view: SettingView): AgentSetting {
     ...(value === undefined || descriptor.kind.type === "secret" ? {} : { value }),
     explicit: view.explicit,
     source,
-    ...(view.effective === undefined ? {} : { effective: view.effective }),
+    ...(effective === undefined ? {} : { effective }),
     ...(view.unavailable === undefined ? {} : { unavailable: view.unavailable }),
     ...(view.inForce === undefined ? {} : { inForce: view.inForce }),
   };
