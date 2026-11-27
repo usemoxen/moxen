@@ -1,7 +1,9 @@
 import { t, t as tr, tx } from "../i18n/index.js";
 import { driverKindOfInstance, type MessageEnvelope, type SessionEnvelope, type ThreadEnvelope, type ActivityEnvelope } from "../../core/types.js";
 import { describeActivity } from "./activity.js";
-import { USAGE_CONTINUE_PROMPT } from "../../core/threads/views.js";
+import { agentMessageBody, USAGE_CONTINUE_PROMPT } from "../../core/threads/views.js";
+
+type QueueCondition = NonNullable<NonNullable<ThreadEnvelope["queuedTurns"]>[number]["conditions"]>[number];
 
 export interface TimelineEntry {
   id: string;
@@ -1182,20 +1184,25 @@ export function pendingPermissionRequests(state: ThreadState): PendingPermission
  */
 export function cancelledBeforeStart(activities: readonly ActivityEnvelope[]): Set<string> {
   const waited = new Set<string>();
-  const promoted = new Set<string>();
-  const interrupted = new Set<string>();
-  const cancelled = new Set<string>();
-  for (const activity of activities) {
+  const lastPromoted = new Map<string, number>();
+  const interruptions = new Map<string, { at: number; beforeStart: boolean }>();
+  for (const [index, activity] of activities.entries()) {
     const turnId = activity.turnId;
     if (turnId === null) continue;
     if (activity.kind === "turn.queued" || activity.kind === "turn.scheduled") waited.add(turnId);
-    else if (activity.kind === "turn.promoted") promoted.add(turnId);
+    else if (activity.kind === "turn.promoted") lastPromoted.set(turnId, index);
     else if (activity.kind === "turn.interrupted") {
-      interrupted.add(turnId);
-      if (asRecord(activity.payload)?.beforeStart === true) cancelled.add(turnId);
+      interruptions.set(turnId, { at: index, beforeStart: asRecord(activity.payload)?.beforeStart === true });
     }
   }
-  for (const turnId of interrupted) if (waited.has(turnId) && !promoted.has(turnId)) cancelled.add(turnId);
+  const cancelled = new Set<string>();
+  for (const [turnId, stop] of interruptions) {
+    // A before-start cancellation is undone by a later restore + promotion;
+    // older rows without the marker are a cancel only if the turn never ran.
+    if (stop.beforeStart) {
+      if ((lastPromoted.get(turnId) ?? -1) < stop.at) cancelled.add(turnId);
+    } else if (waited.has(turnId) && !lastPromoted.has(turnId)) cancelled.add(turnId);
+  }
   return cancelled;
 }
 
@@ -1243,6 +1250,12 @@ export interface QueuedMessage {
   /** When it will be sent, if it waits for a time rather than for the turn. */
   readonly scheduledFor: string | null;
   readonly reason: "user" | "usage-reset" | "usage-hold" | null;
+  /** Every condition the entry waits for; empty or absent when it waits only for the turn (MXN-349). */
+  readonly conditions?: readonly QueueCondition[];
+  /** The user holds it back, even with no condition of its own. */
+  readonly held?: boolean;
+  /** Set when an agent queued it with `message_queue`, rather than the user typing it (MXN-401). */
+  readonly agent?: true;
   /** Set when the message is moxen's own "your delegated tasks settled" note. */
   readonly tasks?: readonly TaskNotificationView[];
   /** Set when it is a provider's own background-task notice, whose text is raw payload. */
@@ -1250,7 +1263,7 @@ export interface QueuedMessage {
 }
 
 /** What the Queued panel shows for a message: its first line, or a summary for a task notification (whose text is a tag the user never typed). */
-export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks" | "background">): string {
+export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks" | "background" | "agent">): string {
   if (item.background === true) return tr("timeline.backgroundNotification");
   const tasks = item.tasks;
   if (tasks !== undefined && tasks.length > 0) {
@@ -1258,7 +1271,10 @@ export function queuedLabel(item: Pick<QueuedMessage, "text" | "tasks" | "backgr
     const task = tasks[0]!;
     return `${task.title} ${tx(task.status === "completed" ? "finished" : task.status)}`;
   }
-  return item.text.split("\n")[0]?.trim() ?? "";
+  const firstLine = agentMessageBody(item.text).split("\n")[0]?.trim() ?? "";
+  // An agent's message opens with a line saying it is not the user's; the row
+  // marks it as the agent's instead, and shows what the agent actually said.
+  return item.agent === true ? `${t("queued.agent")} · ${firstLine}` : firstLine;
 }
 
 /**
@@ -1282,6 +1298,9 @@ export function queuedMessages(state: ThreadState): QueuedMessage[] {
         attachments,
         scheduledFor: queued.scheduledFor,
         reason: queued.scheduleReason,
+        conditions: queued.conditions ?? [],
+        ...(queued.held === true ? { held: true as const } : {}),
+        ...(message.origin === "agent-message" ? { agent: true as const } : {}),
         ...(tasks === null ? {} : { tasks }),
         ...(isBackgroundNotification(message) ? { background: true as const } : {}),
       },

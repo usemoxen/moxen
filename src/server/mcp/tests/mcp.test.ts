@@ -14,13 +14,33 @@ import { TASK_NOTIFICATION_BATCH_MS } from "../../../core/threads/operations.js"
 import { openThreadStore } from "../../../core/threads/store.js";
 import { sendTurn } from "../../../core/threads/threads.js";
 import { serveMcp } from "../stdio.js";
+import { relayAgentQueue } from "../main.js";
+import { MOXEN_MCP_TOKEN_ENV, MOXEN_MCP_URL_ENV } from "../stdio.js";
 import { callMoxenTool, moxenToolsFor } from "../tools.js";
 import { webPolicy } from "../../../core/providers/harness/web/settings.js";
 import { normalizeConfig } from "../../../core/config.js";
 import { describeSettings } from "../../../core/configschema.js";
 
-async function setup(harnessOptions: Parameters<typeof testHarness>[0] = {}) {
-  const starts: Array<Record<string, unknown>> = [];
+describe("agent queue relay", () => {
+  it("has no binding without the daemon-issued credential", () => {
+    expect(relayAgentQueue({})).toBeUndefined();
+    expect(relayAgentQueue({ [MOXEN_MCP_URL_ENV]: "http://127.0.0.1:1/mcp/thread" })).toBeUndefined();
+    expect(relayAgentQueue({ [MOXEN_MCP_URL_ENV]: "http://127.0.0.1:1/mcp/thread", [MOXEN_MCP_TOKEN_ENV]: "secret" })).toBeDefined();
+  });
+
+  it("sends the credential and never a caller id in the payload", async () => {
+    const calls: string[] = [];
+    const relay = relayAgentQueue({ [MOXEN_MCP_URL_ENV]: "http://127.0.0.1:1/mcp/thread", [MOXEN_MCP_TOKEN_ENV]: "secret" }, (async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as { params: { name: string; arguments: Record<string, unknown> } };
+      calls.push(`${new Headers(init?.headers).get("authorization")} ${body.params.name} ${JSON.stringify(body.params.arguments)}`);
+      return new Response(JSON.stringify({ result: { content: [{ type: "text", text: JSON.stringify({ messages: [] }) }], isError: false } }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch)!;
+    expect(await relay.list("pretend-thread")).toEqual([]);
+    expect(calls).toEqual(["Bearer secret message_queue_list {}"]);
+  });
+});
+
+async function setup(harnessOptions: Parameters<typeof testHarness>[0] = {}) {  const starts: Array<Record<string, unknown>> = [];
   const harness = await testHarness({ ...harnessOptions, onStartSession: (input) => starts.push(input) });
   const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => harness.config });
   const parent = await connection.dispatch({
@@ -92,6 +112,9 @@ describe("moxen MCP server", () => {
         "task_send",
         "task_ask",
         "message_queue",
+        "message_queue_list",
+        "message_queue_edit",
+        "message_queue_remove",
         "thread_continue",
         "project_list",
         "project_resolve",
@@ -130,7 +153,7 @@ describe("moxen MCP server", () => {
       // Both sessions carry Moxen's tools, but the subagent's has none that delegate (it does not delegate again).
       const moxen = (input: Record<string, unknown> | undefined) =>
         ((input?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }> | undefined) ?? []).find((server) => server.name === "moxen");
-      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_unsettle", "task_snooze", "task_send", "task_ask", "message_queue", "thread_continue", "project_list", "project_resolve", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_unsettle", "task_snooze", "task_send", "task_ask", "message_queue", "message_queue_list", "message_queue_edit", "message_queue_remove", "thread_continue", "project_list", "project_resolve", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
       expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "usage_status", "web_fetch", "project_list", "project_resolve", "memory_read", "memory_search"]);
     } finally {
       await mcp.close();

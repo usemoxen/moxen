@@ -7,6 +7,17 @@ export const QUEUE_RESET_GRACE_MS = 5000;
 export const QUEUE_ADMISSION_LOCK = "\0queue-admission";
 
 /**
+ * A provider key is data, never a JavaScript prototype member: `constructor`
+ * or `__proto__` as a provider would otherwise resolve to an inherited value
+ * and break the whole queue (`x?.windows.filter` on `undefined`). Unknown
+ * providers stay allowed; they simply have no windows yet.
+ */
+function accountKey(provider: string): string | null {
+  const key = usageKeyForInstance(provider);
+  return key === "__proto__" || key === "prototype" || Object.hasOwn(Object.prototype, key) ? null : key;
+}
+
+/**
  * The reset a `reset` queue condition waits for: the reset of the window it
  * asked about. `all` covers every reported window, so it waits for the latest
  * reset across them — a session reset does not release work that also waits
@@ -116,6 +127,10 @@ export interface WorkQueueEntry {
   readonly threadId: string; readonly turnId: string; readonly title: string; readonly prompt: string;
   readonly provider: string; readonly status: string; readonly policy: QueuePolicy;
   readonly blocked: readonly string[]; readonly scheduledFor: string | null;
+  /** The agent thread that queued this entry with `message_queue`; only it may list or change it (MXN-401). */
+  readonly agentThreadId?: string;
+  /** Whether the turn reached the provider. A restored retry keeps this true even while queued. */
+  readonly started?: boolean;
 }
 
 export interface ParseQueuePolicyOptions {
@@ -134,17 +149,27 @@ export function parseQueuePolicy(value: unknown, options?: ParseQueuePolicyOptio
     const c = raw as Record<string, unknown>;
     const id = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200;
     if (c.type === "at" && typeof c.at === "string" && Number.isFinite(Date.parse(c.at))) return { type: "at", at: new Date(c.at).toISOString() };
-    if (c.type === "usage" && id(c.provider) && ["session", "weekly", "all"].includes(String(c.window)) && typeof c.minimum === "number" && Number.isFinite(c.minimum) && c.minimum >= 0 && c.minimum <= 100) return { type: "usage", provider: c.provider, window: c.window as "session" | "weekly" | "all", minimum: c.minimum };
+    if (c.type === "usage" && id(c.provider) && typeof c.window === "string" && ["session", "weekly", "all"].includes(c.window) && typeof c.minimum === "number" && Number.isFinite(c.minimum) && c.minimum >= 0 && c.minimum <= 100) {
+      const provider = accountKey(c.provider);
+      if (provider === null) return bad();
+      return { type: "usage", provider, window: c.window as "session" | "weekly" | "all", minimum: c.minimum };
+    }
     if (c.type === "reset" && id(c.provider) && (c.window === "session" || c.window === "weekly" || c.window === "all")) {
       if (c.resetsAt !== undefined && c.resetsAt !== null && (typeof c.resetsAt !== "string" || !Number.isFinite(Date.parse(c.resetsAt)))) return bad();
+      const provider = accountKey(c.provider);
+      if (provider === null) return bad();
       const resetsAt = typeof c.resetsAt === "string"
         ? c.resetsAt
         : options?.deferReset === true
           ? null
-          : nextReset(c.provider, c.window, Date.now(), options?.model);
-      return { type: "reset", provider: c.provider, window: c.window, resetsAt };
+          : nextReset(provider, c.window, Date.now(), options?.model);
+      return { type: "reset", provider, window: c.window, resetsAt };
     }
-    if (c.type === "provider" && id(c.provider) && (c.state === "exhausted" || c.state === "protected") && (c.mode === "after" || c.mode === "while")) return { type: "provider", provider: c.provider, state: c.state, mode: c.mode };
+    if (c.type === "provider" && id(c.provider) && (c.state === "exhausted" || c.state === "protected") && (c.mode === "after" || c.mode === "while")) {
+      const provider = accountKey(c.provider);
+      if (provider === null) return bad();
+      return { type: "provider", provider, state: c.state, mode: c.mode };
+    }
     if (c.type === "thread" && id(c.threadId)) return { type: "thread", threadId: c.threadId };
     if (c.type === "entry" && id(c.threadId) && id(c.turnId)) return { type: "entry", threadId: c.threadId, turnId: c.turnId };
     return bad();
@@ -555,31 +580,40 @@ export function conditionBlockers(pass: ConditionsPass): { blocked: string[]; la
   for (const [index, condition] of conditions.entries()) {
     if (condition.type === "at") { if (Date.parse(condition.at) > now) blocked.push(`Waiting until ${condition.at}`); }
     else if (condition.type === "usage") {
-      const condModel = condition.provider === provider ? model : null;
-      const windows = usageWindowsForModel(condition.provider, now, condModel).filter((w) => condition.window === "all" || w.kind === condition.window);
-      if (!windows.length) blocked.push(`${condition.provider}: usage unavailable`);
-      else if (windows.some((w) => w.usedPercent >= 100 || 100 - w.usedPercent < condition.minimum)) blocked.push(`${condition.provider}: needs ${condition.minimum}% ${condition.window} remaining`);
+      const canonical = accountKey(condition.provider);
+      if (canonical === null) { blocked.push(`${condition.provider}: usage unavailable`); continue; }
+      if (canonical !== condition.provider) conditions[index] = { ...condition, provider: canonical };
+      const condModel = canonical === provider ? model : null;
+      const windows = usageWindowsForModel(canonical, now, condModel).filter((w) => condition.window === "all" || w.kind === condition.window);
+      if (!windows.length) blocked.push(`${canonical}: usage unavailable`);
+      else if (windows.some((w) => w.usedPercent >= 100 || 100 - w.usedPercent < condition.minimum)) blocked.push(`${canonical}: needs ${condition.minimum}% ${condition.window} remaining`);
     } else if (condition.type === "reset") {
-      const condModel = condition.provider === provider ? model : null;
+      const canonical = accountKey(condition.provider);
+      if (canonical === null) { blocked.push(`${condition.provider}: usage unavailable`); continue; }
+      if (canonical !== condition.provider) conditions[index] = { ...condition, provider: canonical };
+      const condModel = canonical === provider ? model : null;
       // A window kind the provider still reports nothing for is a reset that
       // can never come: it was withdrawn (Google's separate Argon quota), and
       // a hold keyed on it would wait forever. A provider reporting no windows
       // at all keeps waiting — unavailable is not a reset.
-      const reported = usageWindowsForModel(condition.provider, now, condModel);
+      const reported = usageWindowsForModel(canonical, now, condModel);
       const withdrawn = condition.window !== "all" && reported.length > 0 && !reported.some((window) => window.kind === condition.window);
       if (!withdrawn) {
-        const resetsAt = condition.resetsAt ?? nextReset(condition.provider, condition.window, now, condModel);
-        if (resetsAt && !condition.resetsAt) conditions[index] = { ...condition, resetsAt };
-        if (!resetsAt || Date.parse(resetsAt) + QUEUE_RESET_GRACE_MS > now) blocked.push(`${condition.provider}: waiting for ${condition.window} reset`);
+        const resetsAt = condition.resetsAt ?? nextReset(canonical, condition.window, now, condModel);
+        if (canonical !== condition.provider || resetsAt && !condition.resetsAt) conditions[index] = { ...condition, ...(canonical !== condition.provider ? { provider: canonical } : {}), ...(resetsAt ? { resetsAt } : {}) };
+        if (!resetsAt || Date.parse(resetsAt) + QUEUE_RESET_GRACE_MS > now) blocked.push(`${canonical}: waiting for ${condition.window} reset`);
       }
     } else if (condition.type === "provider") {
-      const condModel = condition.provider === provider ? model : null;
-      const met = condition.state === "exhausted" ? providerExhausted(condition.provider, now, condModel)
-        : rows.some((r) => r.thread.usagePause?.provider === condition.provider && r.thread.usagePause.phase !== "resuming");
-      const signal = usageSignal(condition.provider, condition.state);
+      const canonical = accountKey(condition.provider);
+      if (canonical === null) { blocked.push(`${condition.provider}: usage unavailable`); continue; }
+      if (canonical !== condition.provider) conditions[index] = { ...condition, provider: canonical };
+      const condModel = canonical === provider ? model : null;
+      const met = condition.state === "exhausted" ? providerExhausted(canonical, now, condModel)
+        : rows.some((r) => r.thread.usagePause?.provider === canonical && r.thread.usagePause.phase !== "resuming");
+      const signal = usageSignal(canonical, condition.state);
       const happened = signal !== null && Date.parse(signal) >= Date.parse(since);
       if (condition.mode === "after" && (met || happened) && !latched.includes(index)) latched.push(index);
-      if (!(condition.mode === "after" ? latched.includes(index) : met)) blocked.push(`${condition.mode} ${condition.provider} is ${condition.state}`);
+      if (!(condition.mode === "after" ? latched.includes(index) : met)) blocked.push(`${condition.mode} ${canonical} is ${condition.state}`);
     } else {
       // A dependency condition a client wrote without the thread (or, for an
       // entry, without the turn) can never be judged: it is skipped rather than

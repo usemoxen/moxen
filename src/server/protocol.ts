@@ -43,7 +43,6 @@ import type {
   SettledTask,
   SnoozedTask,
   UnsettledTask,
-  QueuedAgentMessage,
   ChecklistStep,
   DelegateRequest,
   Delegation,
@@ -326,8 +325,6 @@ export type CommandBody =
    * transport must never retry it.
    */
   | { readonly type: "thread.task.ask"; readonly parentThreadId: string; readonly taskId: string; readonly question: string }
-  /** An agent's message into its own thread's queue, or a task it delegated's (moxen's `message_queue`). */
-  | { readonly type: "thread.message.queue"; readonly callerThreadId: string; readonly message: string; readonly threadId?: string; readonly at?: string; readonly conditions?: QueuePolicy["conditions"] }
   /** Stop one background task (a `run_in_background` command, a Monitor watch, a background subagent). */
   | { readonly type: "thread.background.stop"; readonly threadId: string; readonly taskId: string }
   /** The agent's checklist, for a provider with none of its own (moxen's `todos` tool). The whole list. */
@@ -550,7 +547,6 @@ export interface CommandResults {
   "thread.task.unsettle": UnsettledTask;
   "thread.task.snooze": SnoozedTask;
   "thread.task.ask": AskedTask;
-  "thread.message.queue": QueuedAgentMessage;
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
   "thread.plan.set": RecordedChecklist;
   "project.ensure": EnsuredProject;
@@ -1545,16 +1541,6 @@ export function decodeCommand(value: unknown): Command {
         parentThreadId: requireThreadId(record.parentThreadId),
         taskId: requireField(record.taskId, type, "taskId"),
         question: requireField(record.question, type, "question"),
-      };
-    case "thread.message.queue":
-      return {
-        ...meta,
-        type,
-        callerThreadId: requireThreadId(record.callerThreadId),
-        message: requireField(record.message, type, "message"),
-        ...(record.threadId !== undefined ? { threadId: requireThreadId(record.threadId) } : {}),
-        ...optionalString(record, "at"),
-        ...(record.conditions !== undefined ? { conditions: parseQueuePolicy({ conditions: record.conditions }, { deferReset: true }).conditions } : {}),
       };
     case "thread.background.stop":
       return {

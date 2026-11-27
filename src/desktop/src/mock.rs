@@ -838,7 +838,10 @@ impl ThreadSource for MockSource {
                 text: prompt.text.clone(),
                 images: vec![],
                 held: false,
+                agent: false,
                 scheduled: None,
+                condition_count: 0,
+                blocked: vec![],
                 earlier: at,
                 later: last - at,
             })

@@ -322,8 +322,14 @@ pub struct Queued {
     pub images: Vec<Thumbnail>,
     /// Kept back until released.
     pub held: bool,
+    /// An agent queued it with `message_queue`, not the user (MXN-401).
+    pub agent: bool,
     /// When a scheduled send goes out, as the server wrote it.
     pub scheduled: Option<String>,
+    /// How many conditions the entry waits for (the row shows a bounded count).
+    pub condition_count: usize,
+    /// Why it is waiting, from the server, for the full detail behind the count.
+    pub blocked: Vec<String>,
     /// How many places it can move earlier or later.
     pub earlier: usize,
     pub later: usize,

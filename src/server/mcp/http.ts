@@ -15,6 +15,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import type { ClientApi } from "../api.js";
 import { answerMcp, memoryAccessOf, MOXEN_MEMORY_QUERY } from "./stdio.js";
+import type { AgentQueueAccess } from "./tools.js";
 
 export interface McpHttpServer {
   /** How a provider reaches one thread's tools here. */
@@ -25,7 +26,7 @@ export interface McpHttpServer {
 /** Tool calls block for up to 45s (`task_status`); a body past this is not an MCP request. */
 const MAX_BODY_BYTES = 1_000_000;
 
-export async function startMcpHttpServer(api: ClientApi, version?: string): Promise<McpHttpServer> {
+export async function startMcpHttpServer(api: ClientApi, version?: string, agentQueue?: AgentQueueAccess): Promise<McpHttpServer> {
   const tokens = new Map<string, string>();
   const server: Server = createServer((request, response) => {
     void handle(request, response).catch(() => {
@@ -57,7 +58,7 @@ export async function startMcpHttpServer(api: ClientApi, version?: string): Prom
       return;
     }
     const query = new URL(request.url ?? "/", "http://127.0.0.1").searchParams;
-    const session = { api, parentThreadId: threadId, checklist: query.get("checklist") === "1", delegated: query.get("delegated") === "1", webFetch: query.get("webfetch") !== "0", memory: memoryAccessOf(query.get(MOXEN_MEMORY_QUERY)), ...(version ? { version } : {}) };
+    const session = { api, parentThreadId: threadId, checklist: query.get("checklist") === "1", delegated: query.get("delegated") === "1", webFetch: query.get("webfetch") !== "0", memory: memoryAccessOf(query.get(MOXEN_MEMORY_QUERY)), ...(agentQueue ? { agentQueue } : {}), ...(version ? { version } : {}) };
     if (Array.isArray(parsed)) {
       const answers = (await Promise.all(parsed.map((item) => answerMcp(session, item)))).filter((answer) => answer !== null);
       if (answers.length === 0) response.writeHead(202).end();
