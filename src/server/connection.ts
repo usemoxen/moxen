@@ -2591,38 +2591,28 @@ export class DirectConnection implements ClientApi {
           expectedEmail = bundle.identity.email ?? null;
         }
         const savedHome = existingClaude?.homePath ?? existingAgy?.homePath ?? existingChatGpt?.codexHomePath;
-        // Always assign a Moxen-managed isolated folder for non-default accounts (or when requested)
-        // so signing in a new profile never clobbers the user's primary CLI login —
-        // except Antigravity while providers.antigravity.allowUnsupportedUse is
-        // off (the default): the account then signs in on the host `agy`
-        // login, and a managed folder is an isolated home the off-mode gate
-        // would refuse (ANTIGRAVITY_ACCOUNT_OFF). An explicit home still
-        // reaches that gate below and is refused there; while off nothing is
-        // written and nothing is launched on this path.
+        // Always assign a Moxen-managed isolated folder for non-default Claude/ChatGPT accounts
+        // so signing in a new profile never clobbers the user's primary CLI login.
+        // Antigravity is single-account on the host `agy` login only: never assign a managed home.
         const managedHomeDefault =
-          normalizedId !== "default" &&
-          !(command.kind === "antigravity" && !antigravityUnsupportedUseAllowed(config))
+          normalizedId !== "default" && command.kind !== "antigravity"
             ? managedAccountHomeDisplayPath(command.kind, normalizedId)
             : undefined;
         const effectiveHome = command.homePath?.trim() || savedHome?.trim() || managedHomeDefault;
-        // Signing in an Antigravity account anywhere but the host `agy`
-        // login is a multiple-account use: while the setting is off (the
-        // default) it would write a homePath, an env override, or a
-        // `--gemini-dir` Moxen then refuses to ever run. Every input the
-        // login session will be given passes the one off-mode launch
-        // policy first; nothing is written and nothing is launched.
         if (command.kind === "antigravity") {
-          const reason = antigravityOffUseLaunchBlockedReason(config.providers?.antigravity, {
-            homePath: effectiveHome,
-            env: existingAgy?.env,
-            // Account-level launch args, with the provider-level ones the
-            // login inherits when the account sets none of its own.
-            launchArgs: existingAgy?.launchArgs ?? config.providers?.antigravity?.launchArgs,
-          });
+          const reason =
+            antigravityAccountBlockedReason(config.providers?.antigravity, `antigravity/${normalizedId}`)
+            ?? antigravityOffUseLaunchBlockedReason(config.providers?.antigravity, {
+              homePath: effectiveHome,
+              env: existingAgy?.env,
+              // Account-level launch args, with the provider-level ones the
+              // login inherits when the account sets none of its own.
+              launchArgs: existingAgy?.launchArgs ?? config.providers?.antigravity?.launchArgs,
+            });
           if (reason !== null) {
             throw new CliError("ANTIGRAVITY_ACCOUNT_OFF", reason, {
               exitCode: 4,
-              details: { instanceId: `antigravity/${normalizedId}`, setting: "providers.antigravity.allowUnsupportedUse" },
+              details: { instanceId: `antigravity/${normalizedId}` },
             });
           }
         }

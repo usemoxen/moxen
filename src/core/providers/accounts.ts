@@ -777,6 +777,21 @@ export function upsertProviderAccount(
   if (input.kind === "antigravity") {
     const existingList = config.providers?.antigravity?.accounts ?? [];
     const existing = existingList.find((entry) => entry.id.trim().toLowerCase() === normalizedId);
+    if (!existing && existingList.length > 0) {
+      throw new CliError(
+        "ANTIGRAVITY_ACCOUNT_OFF",
+        "Moxen supports a single Antigravity account on the host agy login; multiple Antigravity accounts are not supported.",
+        { exitCode: 4, details: { instanceId: `antigravity/${normalizedId}` } },
+      );
+    }
+    if (typeof input.homePath === "string" && input.homePath.trim().length > 0) {
+      throw new CliError(
+        "ANTIGRAVITY_ACCOUNT_OFF",
+        "Antigravity runs only on the host agy login and does not support an isolated homePath.",
+        { exitCode: 4, details: { instanceId: `antigravity/${normalizedId}` } },
+      );
+    }
+    const nextHome = applyOptionalPatch(existing?.homePath, input.homePath);
     const launchArgsString =
       input.launchArgs === undefined
         ? existing?.launchArgs
@@ -790,7 +805,7 @@ export function upsertProviderAccount(
       id: normalizedId,
       label: applyOptionalPatch(existing?.label, input.label),
       enabled: input.enabled !== undefined ? input.enabled : existing?.enabled,
-      homePath: applyOptionalPatch(existing?.homePath, input.homePath),
+      homePath: nextHome,
       binaryPath: applyOptionalPatch(existing?.binaryPath, input.binaryPath),
       launchArgs: launchArgsString,
       env: applyEnvPatch(existing?.env, input.env),

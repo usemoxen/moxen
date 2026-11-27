@@ -195,13 +195,10 @@ describe("per-account runtime and cache isolation", () => {
     expect(seenEnv?.HOME).toBe(realHome);
   });
 
-  it("isolates Antigravity extra accounts via HOME/USERPROFILE + --gemini-dir and leaves default account HOME untouched", () => {
+  it("leaves host Antigravity account HOME untouched and refuses isolated extra accounts even with allowUnsupportedUse on", () => {
     const baseHome = path.resolve(path.join(os.tmpdir(), "moxen-real-home"));
     const altHome = path.resolve(path.join(os.tmpdir(), "moxen-agy-alt"));
     const baseEnv: NodeJS.ProcessEnv = { HOME: baseHome, USERPROFILE: baseHome };
-    // Isolation exists only while multiple accounts are allowed
-    // (`providers.antigravity.allowUnsupportedUse` on): while it is off the
-    // gated extra account is refused instead (see antigravityaccounts.test.ts).
     const on = { allowUnsupportedUse: true, accounts: [{ id: "default", label: "Default" }, { id: "alt", label: "Alt", homePath: altHome }] };
 
     const defaultAccount = resolveAntigravityAccount(
@@ -213,15 +210,13 @@ describe("per-account runtime and cache isolation", () => {
     expect(defaultAccount.env.USERPROFILE).toBe(baseHome);
     expect(defaultAccount.spec.args).toEqual(["acp"]);
 
-    const altAccount = resolveAntigravityAccount(
-      on,
-      "antigravity/alt",
-      baseEnv,
-    );
-    expect(altAccount.env.HOME).toBe(altHome);
-    expect(altAccount.env.USERPROFILE).toBe(altHome);
-    expect(altAccount.spec.args).toEqual(["acp", "--gemini-dir", path.join(altHome, ".gemini")]);
-    expect(altAccount.spec.env).toMatchObject({ HOME: altHome, USERPROFILE: altHome });
+    expect(() =>
+      resolveAntigravityAccount(
+        on,
+        "antigravity/alt",
+        baseEnv,
+      ),
+    ).toThrow(/homePath|host agy login/);
   });
 
   it("scopes Antigravity usage cache per isolated account home", async () => {

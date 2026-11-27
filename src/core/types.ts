@@ -1079,68 +1079,49 @@ function antigravityLaunchArgsSelectDirectory(launchArgs: string | undefined): b
  * accident to report, not a detail to quietly drop.
  */
 export function antigravityOffUseLaunchBlockedReason(
-  config: Pick<AntigravityProviderConfig, "allowUnsupportedUse"> | undefined,
+  _config: Pick<AntigravityProviderConfig, "allowUnsupportedUse"> | undefined,
   input: { readonly homePath?: string | undefined; readonly env?: Readonly<Record<string, string>> | undefined; readonly launchArgs?: string | undefined },
 ): string | null {
-  if (config?.allowUnsupportedUse === true) return null;
   if (input.homePath?.trim()) {
-    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login runs only on the host agy login, with the host home. Google does not support multiple consumer accounts and may suspend them. Remove this Antigravity profile's homePath so it uses the host agy login, or turn providers.antigravity.allowUnsupportedUse on.`;
+    return `Antigravity runs only on the host agy login with the host home. Google does not support multiple consumer accounts and may suspend them. Remove this Antigravity profile's homePath so it uses the host agy login.`;
   }
   const envOverrides = antigravityLoginEnvOverrides(input.env);
   if (envOverrides.length > 0) {
-    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login runs only in the host user's own environment, and an override of ${envOverrides.join(", ")} would move it off that login. Google does not support multiple consumer accounts and may suspend them. Remove the override${envOverrides.length === 1 ? "" : "s"} from this Antigravity profile, or turn providers.antigravity.allowUnsupportedUse on.`;
+    return `Antigravity runs only in the host user's own environment, and an override of ${envOverrides.join(", ")} would move it off that login. Google does not support multiple consumer accounts and may suspend them. Remove the override${envOverrides.length === 1 ? "" : "s"} from this Antigravity profile.`;
   }
   if (antigravityLaunchArgsSelectDirectory(input.launchArgs)) {
-    return `providers.antigravity.allowUnsupportedUse is off (the default), so an Antigravity launch or login keeps its state in the host user's own home, and --gemini-dir would move it off that login. Google does not support multiple consumer accounts and may suspend them. Remove --gemini-dir from this Antigravity profile's launchArgs, or turn providers.antigravity.allowUnsupportedUse on.`;
+    return `Antigravity keeps its state in the host user's own home, and --gemini-dir would move it off that login. Google does not support multiple consumer accounts and may suspend them. Remove --gemini-dir from this Antigravity profile's launchArgs.`;
   }
   return null;
 }
 
 /**
- * Why the Antigravity account behind `instanceId` cannot run while
- * `providers.antigravity.allowUnsupportedUse` is off (the default): null
- * when it may. While off Moxen runs at most one Antigravity account — the
- * first configured account without a `homePath`, which shares the host
- * `agy` login with its environment untouched — and never launches, probes
- * for usage or credits, or routes to any configured account that has an
- * isolated `homePath`, an env override of a home/profile/SSH/config-dir
- * variable, a `--gemini-dir` launch argument, or any configured account
- * beyond that one; the host instance ids answer the same question for the
- * provider-level launch config. The host instance ids (`antigravity`,
- * legacy `agy`) and an account id with no configured entry are the host
- * login itself (no folder, no isolation) and stay allowed. No path on
- * this gate may read or write another account's folder.
+ * Why the Antigravity account behind `instanceId` cannot run: null when it may.
+ * Moxen supports at most one Antigravity account — the first configured account
+ * without a `homePath` or non-host env/launch-args override, sharing the host
+ * `agy` login — and never launches, probes for usage or credits, or routes to
+ * any isolated or extra Antigravity account.
  */
 export function antigravityAccountBlockedReason(
   config: Pick<AntigravityProviderConfig, "allowUnsupportedUse" | "accounts" | "launchArgs"> | undefined,
   instanceId: string,
 ): string | null {
-  if (config?.allowUnsupportedUse === true) return null;
   if (driverKindOfInstance(instanceId) !== "antigravity") return null;
   const parsed = parseAccountInstanceId(instanceId);
   if (parsed === null) {
-    // The host login: its only launch input of its own is the
-    // provider-level launch config, so an argument that moves the login
-    // off the host home is refused, not quietly dropped.
     return antigravityOffUseLaunchBlockedReason(config, { launchArgs: config?.launchArgs });
   }
   const accounts = config?.accounts ?? [];
   const account = accounts.find((entry) => entry.id.trim().toLowerCase() === parsed.accountId);
-  // No configured entry: no account folder and no isolation, so it runs on
-  // the host `agy` login, the one account that stays while off.
   if (account === undefined) return null;
   if (account.homePath?.trim()) {
-    return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the one that shares the host agy login with no homePath. Google does not support multiple consumer accounts and may suspend them. Remove account "${parsed.accountId}" homePath so it uses the host agy login, or turn providers.antigravity.allowUnsupportedUse on.`;
+    return `Moxen supports at most one Antigravity account, sharing the host agy login with no homePath. Google does not support multiple consumer accounts and may suspend them. Remove account "${parsed.accountId}" homePath with: moxen config set 'providers.antigravity.accounts[${parsed.accountId}].homePath' ''`;
   }
   const launch = antigravityOffUseLaunchBlockedReason(config, { env: account.env, launchArgs: account.launchArgs ?? config?.launchArgs });
   if (launch !== null) return launch;
-  // The account that stays while the gate is off: the first configured
-  // without a `homePath` or any non-host env/launch-args override of its
-  // own — env overrides keep an account out even without a folder, and a
-  // second clean account never displaces the first.
   const survivor = accounts.find((entry) => antigravityOffUseLaunchBlockedReason(config, { homePath: entry.homePath, env: entry.env, launchArgs: entry.launchArgs ?? config?.launchArgs }) === null);
   if (survivor && survivor.id.trim().toLowerCase() === parsed.accountId) return null;
-  return `providers.antigravity.allowUnsupportedUse is off (the default), so Antigravity runs at most one account, the first without a homePath. Google does not support multiple consumer accounts and may suspend them. Keep only that account, or turn providers.antigravity.allowUnsupportedUse on.`;
+  return `Moxen supports at most one Antigravity account, the first without a homePath. Google does not support multiple consumer accounts and may suspend them. Remove extra Antigravity accounts and keep only one host-login account.`;
 }
 
 /** Parse an account-addressed instance id (`claude/<id>`, `chatgpt/<id>`, `antigravity/<id>`), or null for legacy/non-account ids. */

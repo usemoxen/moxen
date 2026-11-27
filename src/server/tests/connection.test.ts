@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -1920,19 +1921,19 @@ describe("DirectConnection plan usage", () => {
       JSON.stringify({
         providers: {
           claude: { accounts: [{ id: "default", label: "Default", homePath: claudeHome }] },
-          // Multiple Antigravity accounts need the setting on (LOCAL-011):
-          // an isolated homePath account is gated while it is off.
-          antigravity: { allowUnsupportedUse: true, accounts: [{ id: "default", label: "Default", homePath: agyHome }] },
+          antigravity: { accounts: [{ id: "default", label: "Default" }] },
         },
       }),
     );
 
+    const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(agyHome);
     const connection = new DirectConnection({ storeRoot: harness.root, configPath, drivers: harness.drivers });
     try {
       const refreshed = await connection.query({ type: "usage.refresh" });
       expect(refreshed.providers["claude/default"]?.windows).toEqual([{ id: "session", kind: "session", label: "Session", usedPercent: 18, resetsAt }]);
       expect(refreshed.providers["antigravity/default"]?.windows).toEqual([{ id: "gemini-5h", kind: "session", label: "Session – Gemini", usedPercent: 82, resetsAt }]);
     } finally {
+      homedirSpy.mockRestore();
       resetUsageLimitsForTests();
       await connection.close();
     }

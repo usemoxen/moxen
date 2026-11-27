@@ -1936,7 +1936,7 @@ async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
       return {
         provider: provider.instanceId,
         name: provider.displayName ?? provider.instanceId,
-        ...(delegationOff ? { note: "Not available for delegation: providers.antigravity.allowUnsupportedUse is off. Google does not support delegation, automatic prompts or multiple accounts on consumer plans and may suspend the account; delegating here is refused until the user turns the setting on." } : {}),
+        ...(delegationOff ? { note: "Not available for delegation: providers.antigravity.allowUnsupportedUse is off. Google does not support delegation or automatic prompts on consumer plans and may suspend the account; delegating here is refused until the user turns the setting on." } : {}),
         ...(provider.authStatus ? { authStatus: provider.authStatus } : {}),
         ...(authNote ? { authNote } : {}),
         ...(provider.usageLimits ? { usageLimits: provider.usageLimits } : {}),

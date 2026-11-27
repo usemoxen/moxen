@@ -14,15 +14,17 @@
 import { copyFile } from "node:fs/promises";
 import fs from "node:fs";
 
-import { loadConfig, normalizeFileConfig, saveConfig } from "../config.js";
+import { loadConfig, normalizeFileConfig, saveConfig, type SkippedConfigEntry } from "../config.js";
 import { listStoredProjects, rewriteStoredProjects } from "../projects/projects.js";
 import type { ThreadStore } from "../threads/store.js";
-import type {
-  AntigravityAccountConfig,
-  ClaudeAccountConfig,
-  CliConfig,
-  ModelSelection,
-  ProvidersConfig,
+import { normalizeAntigravityAccount } from "./accounts.js";
+import {
+  antigravityAccountBlockedReason,
+  type AntigravityAccountConfig,
+  type ClaudeAccountConfig,
+  type CliConfig,
+  type ModelSelection,
+  type ProvidersConfig,
 } from "../types.js";
 
 export interface ProviderProfileMigrationInput {
@@ -78,20 +80,20 @@ function renameRecordKey<T>(
 function rewriteInstanceId(
   instanceId: string,
   migrateClaude: boolean,
-  migrateAntigravity: boolean,
+  antigravityTarget: string | null,
 ): string | null {
   if (migrateClaude && isLegacyClaudeId(instanceId)) return "claude/default";
-  if (migrateAntigravity && isLegacyAntigravityId(instanceId)) return "antigravity/default";
+  if (antigravityTarget && isLegacyAntigravityId(instanceId)) return antigravityTarget;
   return null;
 }
 
 function rewriteModelSelection(
   selection: ModelSelection | null | undefined,
   migrateClaude: boolean,
-  migrateAntigravity: boolean,
+  antigravityTarget: string | null,
 ): ModelSelection | null {
   if (!selection) return null;
-  const nextId = rewriteInstanceId(selection.instanceId, migrateClaude, migrateAntigravity);
+  const nextId = rewriteInstanceId(selection.instanceId, migrateClaude, antigravityTarget);
   return nextId ? { ...selection, instanceId: nextId } : null;
 }
 
@@ -178,6 +180,7 @@ export async function migrateProviderProfiles(
   }
 
   const createdAccounts: string[] = [];
+  const extraSkipped: SkippedConfigEntry[] = [];
   const nextProviders: Record<string, unknown> = {
     ...(fileConfig.providers ?? {}),
     profilesMigrated: true,
@@ -196,23 +199,71 @@ export async function migrateProviderProfiles(
     nextProviders.claude = { accounts };
   }
 
+  let antigravityTarget: string | null = null;
   if (legacyAntigravity) {
     // The consumer-use switch is provider-level, not an account field: it
     // travels across untouched (a migration never turns it on) and stays off
-    // the migrated account entries.
+    // the migrated account entries. Moxen supports at most one host-login
+    // Antigravity profile, so reuse existing profiles instead of adding a
+    // second `default` entry that would disable the user's configured one,
+    // carrying valid legacy top-level fields into each reused profile where it
+    // has no explicit override so working launch settings survive and isolation
+    // args stay visibly blocked for repair. Malformed legacy fields are kept
+    // as skipped diagnostics rather than aborting migration.
     const { accounts: existingAccounts = [], allowUnsupportedUse, ...legacyFields } = fileConfig.providers?.antigravity ?? {};
-    const hasDefault = existingAccounts.some((entry) => entry.id.trim().toLowerCase() === "default");
-    const migratedDefault: AntigravityAccountConfig = {
-      ...legacyFields,
-      id: "default",
-      label: "Default",
-    };
-    const accounts = hasDefault ? existingAccounts : [migratedDefault, ...existingAccounts];
-    if (!hasDefault) createdAccounts.push("antigravity/default");
-    nextProviders.antigravity = {
+    const safeLegacyFields: Record<string, unknown> = {};
+    for (const [fieldKey, fieldValue] of Object.entries(legacyFields)) {
+      if (fieldValue === undefined) continue;
+      const fieldPath = `providers.antigravity.${fieldKey}`;
+      try {
+        normalizeAntigravityAccount({ id: "default", [fieldKey]: fieldValue }, fieldPath);
+        safeLegacyFields[fieldKey] = fieldValue;
+      } catch (cause) {
+        if (!loaded.skipped.some((entry) => entry.path === fieldPath)) {
+          extraSkipped.push({
+            path: fieldPath,
+            message: cause instanceof Error ? cause.message : String(cause),
+            value: fieldValue,
+          });
+        }
+      }
+    }
+    let accounts: AntigravityAccountConfig[];
+    if (existingAccounts.length > 0) {
+      accounts = existingAccounts.map((entry) => {
+        const definedEntry = Object.fromEntries(
+          Object.entries(entry).filter(([, value]) => value !== undefined),
+        ) as AntigravityAccountConfig;
+        return {
+          ...safeLegacyFields,
+          ...definedEntry,
+        };
+      });
+    } else {
+      const migratedDefault: AntigravityAccountConfig = {
+        ...safeLegacyFields,
+        id: "default",
+        label: "Default",
+      };
+      accounts = [migratedDefault];
+      createdAccounts.push("antigravity/default");
+    }
+    const nextAntigravity = {
       accounts,
       ...(allowUnsupportedUse !== undefined ? { allowUnsupportedUse } : {}),
     };
+    // Select the target against the normalized config that will be saved using
+    // the same eligibility rule as runtime so rewritten references stay valid.
+    const normalizedAntigravity = normalizeFileConfig({
+      providers: { antigravity: nextAntigravity },
+    }).providers?.antigravity;
+    const normalizedAccounts = normalizedAntigravity?.accounts ?? accounts;
+    const eligible = normalizedAccounts.find(
+      (entry) => antigravityAccountBlockedReason(normalizedAntigravity, `antigravity/${entry.id.trim().toLowerCase()}`) === null,
+    );
+    const chosen = eligible ?? normalizedAccounts[0]!;
+    antigravityTarget = `antigravity/${chosen.id.trim().toLowerCase()}`;
+    nextProviders.antigravity = nextAntigravity;
   }
 
   let enabledOpencode = false;
@@ -225,7 +276,7 @@ export async function migrateProviderProfiles(
   }
 
   const nextProvider = fileConfig.provider
-    ? (rewriteInstanceId(fileConfig.provider, legacyClaude, legacyAntigravity) ?? fileConfig.provider)
+    ? (rewriteInstanceId(fileConfig.provider, legacyClaude, antigravityTarget) ?? fileConfig.provider)
     : undefined;
   const nextPromptImprover = fileConfig.promptImprover
     ? {
@@ -233,7 +284,7 @@ export async function migrateProviderProfiles(
         ...(fileConfig.promptImprover.provider
           ? {
               provider:
-                rewriteInstanceId(fileConfig.promptImprover.provider, legacyClaude, legacyAntigravity) ??
+                rewriteInstanceId(fileConfig.promptImprover.provider, legacyClaude, antigravityTarget) ??
                 fileConfig.promptImprover.provider,
             }
           : {}),
@@ -246,16 +297,16 @@ export async function migrateProviderProfiles(
     ...(nextPromptImprover !== undefined ? { promptImprover: nextPromptImprover } : {}),
     providers: nextProviders as ProvidersConfig,
   });
-  await saveConfig(loaded.path, nextConfig, loaded.skipped);
+  await saveConfig(loaded.path, nextConfig, [...loaded.skipped, ...extraSkipped]);
 
   const migratedProjects = await rewriteStoredProjects(input.storeRoot, (project) => {
-    const updated = rewriteModelSelection(project.defaultModelSelection, legacyClaude, legacyAntigravity);
+    const updated = rewriteModelSelection(project.defaultModelSelection, legacyClaude, antigravityTarget);
     return updated ? { ...project, defaultModelSelection: updated } : null;
   });
 
   let migratedThreads = 0;
   for (const thread of threads) {
-    const updatedSelection = rewriteModelSelection(thread.modelSelection, legacyClaude, legacyAntigravity);
+    const updatedSelection = rewriteModelSelection(thread.modelSelection, legacyClaude, antigravityTarget);
     let providerSessions = thread.providerSessions;
     let instructionState = thread.instructionState;
     let modeState = thread.modeState;
@@ -278,18 +329,18 @@ export async function migrateProviderProfiles(
         changed = true;
       }
     }
-    if (legacyAntigravity) {
-      const nextSessions = renameRecordKey(providerSessions, "antigravity", "antigravity/default");
+    if (antigravityTarget) {
+      const nextSessions = renameRecordKey(providerSessions, "antigravity", antigravityTarget);
       if (nextSessions) {
         providerSessions = nextSessions;
         changed = true;
       }
-      const nextInstructions = renameRecordKey(instructionState, "antigravity", "antigravity/default");
+      const nextInstructions = renameRecordKey(instructionState, "antigravity", antigravityTarget);
       if (nextInstructions) {
         instructionState = nextInstructions;
         changed = true;
       }
-      const nextModes = renameRecordKey(modeState, "antigravity", "antigravity/default");
+      const nextModes = renameRecordKey(modeState, "antigravity", antigravityTarget);
       if (nextModes) {
         modeState = nextModes;
         changed = true;
@@ -300,7 +351,7 @@ export async function migrateProviderProfiles(
     await input.store.withThreadLock(thread.id, async () => {
       const fresh = await input.store.readThreadRecord(thread.id);
       if (!fresh) return;
-      const freshSelection = rewriteModelSelection(fresh.modelSelection, legacyClaude, legacyAntigravity);
+      const freshSelection = rewriteModelSelection(fresh.modelSelection, legacyClaude, antigravityTarget);
       let nextSessions = fresh.providerSessions;
       let nextInstructions = fresh.instructionState;
       let nextModes = fresh.modeState;
@@ -309,10 +360,10 @@ export async function migrateProviderProfiles(
         nextInstructions = renameRecordKey(nextInstructions, "claude", "claude/default") ?? nextInstructions;
         nextModes = renameRecordKey(nextModes, "claude", "claude/default") ?? nextModes;
       }
-      if (legacyAntigravity) {
-        nextSessions = renameRecordKey(nextSessions, "antigravity", "antigravity/default") ?? nextSessions;
-        nextInstructions = renameRecordKey(nextInstructions, "antigravity", "antigravity/default") ?? nextInstructions;
-        nextModes = renameRecordKey(nextModes, "antigravity", "antigravity/default") ?? nextModes;
+      if (antigravityTarget) {
+        nextSessions = renameRecordKey(nextSessions, "antigravity", antigravityTarget) ?? nextSessions;
+        nextInstructions = renameRecordKey(nextInstructions, "antigravity", antigravityTarget) ?? nextInstructions;
+        nextModes = renameRecordKey(nextModes, "antigravity", antigravityTarget) ?? nextModes;
       }
       await input.store.writeThreadRecord({
         ...fresh,

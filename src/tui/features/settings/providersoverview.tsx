@@ -170,17 +170,16 @@ function fieldsForAccount(account: ProviderAccountSummary): readonly DetailField
       label: t("settings.providers.field.binaryPath"),
       value: (isChatGpt ? account.codexBinaryPath : account.binaryPath) ?? "",
     },
-    {
-      id: "homePath",
-      group: "runtime",
-      label:
-        account.kind === "antigravity"
-          ? t("settings.providers.field.agyHomePath")
-          : isChatGpt
+    ...(account.kind === "antigravity"
+      ? []
+      : [{
+          id: "homePath" as const,
+          group: "runtime" as const,
+          label: isChatGpt
             ? t("settings.providers.field.codexHomePath")
             : t("settings.providers.field.homePath"),
-      value: (isChatGpt ? account.codexHomePath : account.homePath) ?? "",
-    },
+          value: (isChatGpt ? account.codexHomePath : account.homePath) ?? "",
+        }]),
     {
       id: "launchArgs",
       group: "runtime",
@@ -1082,14 +1081,6 @@ export function ProfileAccountHeader({
 
 export interface ProvidersOverviewPanelProps {
   readonly accounts: readonly ProviderAccountSummary[];
-  /**
-   * Whether `providers.antigravity.allowUnsupportedUse` is on, as the
-   * server-provided settings snapshot says. While it is off (the default)
-   * the add wizard gives a new Antigravity account no Moxen-managed isolated
-   * home: the account signs in on the host `agy` login, and a second account
-   * says it will stay disabled.
-   */
-  readonly antigravityUnsupportedUseOn: boolean;
   readonly opencodeEnabled?: boolean;
   readonly onToggleOpencode?: (enabled: boolean) => void;
   readonly onOpenOpencode?: () => void;
@@ -1129,7 +1120,6 @@ export interface ProvidersOverviewPanelProps {
 
 export function ProvidersOverviewPanel({
   accounts,
-  antigravityUnsupportedUseOn,
   opencodeEnabled = false,
   onToggleOpencode,
   onOpenOpencode,
@@ -1199,11 +1189,32 @@ export function ProvidersOverviewPanel({
     ? null
     : (accounts.find((entry) => entry.instanceId === selectedInstance) ?? null);
   const detailFields = selected ? fieldsForAccount(selected) : [];
+  const hasAntigravity = accounts.some((entry) => entry.kind === "antigravity");
   const addableKinds: readonly AddableProviderKind[] = [
-    ...ACCOUNT_PROVIDER_KINDS,
+    ...ACCOUNT_PROVIDER_KINDS.filter((kind) => kind !== "antigravity" || !hasAntigravity),
     ...(opencodeEnabled ? [] : (["opencode"] as const)),
     ...(vibeEnabled ? [] : (["vibe"] as const)),
   ];
+  const pickAddKind = (picked: AddableProviderKind): void => {
+    if (picked === "opencode") {
+      setWizard(null);
+      onToggleOpencode?.(true);
+      onOpenOpencode?.();
+    } else if (picked === "vibe") {
+      setWizard(null);
+      onToggleVibe?.(true);
+      onOpenVibe?.();
+    } else if (picked === "antigravity") {
+      void onSaveAccount({ kind: "antigravity", id: "default" }).then((ok) => {
+        if (ok) {
+          setWizard(null);
+          onSelectAccount("antigravity/default");
+        }
+      });
+    } else {
+      setWizard({ step: "id", kind: picked });
+    }
+  };
 
   // Unified focus stops on Overview: accounts -> optional OpenCode -> optional Mistral Vibe -> "+ Add provider" -> installed CLIs.
   const opencodeStop = opencodeEnabled ? accounts.length : -1;
@@ -1251,18 +1262,8 @@ export function ProvidersOverviewPanel({
         } else if (key.name === "up" || key.name === "k") {
           setWizard({ step: "kind", kindIndex: Math.max(wizard.kindIndex - 1, 0) });
         } else if (enter) {
-          const picked = addableKinds[wizard.kindIndex]!;
-          if (picked === "opencode") {
-            setWizard(null);
-            onToggleOpencode?.(true);
-            onOpenOpencode?.();
-          } else if (picked === "vibe") {
-            setWizard(null);
-            onToggleVibe?.(true);
-            onOpenVibe?.();
-          } else {
-            setWizard({ step: "id", kind: picked });
-          }
+          const picked = addableKinds[wizard.kindIndex];
+          if (picked) pickAddKind(picked);
         }
       }
       return;
@@ -1366,19 +1367,7 @@ export function ProvidersOverviewPanel({
                       key={kind}
                       style={{ flexDirection: "column", marginBottom: 1, paddingLeft: 1, paddingRight: 1 }}
                       backgroundColor={bg}
-                      onMouseDown={() => {
-                        if (kind === "opencode") {
-                          setWizard(null);
-                          onToggleOpencode?.(true);
-                          onOpenOpencode?.();
-                        } else if (kind === "vibe") {
-                          setWizard(null);
-                          onToggleVibe?.(true);
-                          onOpenVibe?.();
-                        } else {
-                          setWizard({ step: "id", kind });
-                        }
-                      }}
+                      onMouseDown={() => pickAddKind(kind)}
                       selectable={false}
                     >
                       <text fg={focused ? COLOR.bright : COLOR.text} bg={bg} selectable={false}>
@@ -1429,34 +1418,14 @@ export function ProvidersOverviewPanel({
             </>
           ) : (
             <>
-              {/* While the setting is off (the default), an Antigravity account gets
-                  no Moxen-managed isolated home: an empty answer signs it in on the
-                  host `agy` login, and a second account is told it stays disabled. */}
-              {wizard.kind === "antigravity" && !antigravityUnsupportedUseOn ? (
-                <>
-                  <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
-                    {t("settings.providers.addHomeShared")}
-                  </text>
-                  {accounts.some((entry) => entry.kind === "antigravity") ? (
-                    <text fg={COLOR.warn} bg={SURFACE.raised} wrapMode="word" selectable={false}>
-                      {t("settings.providers.addAntigravitySecond")}
-                    </text>
-                  ) : null}
-                </>
-              ) : (
-                <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
-                  {t("settings.providers.addHome", { path: defaultHomeHint(wizard.kind, wizard.id) })}
-                </text>
-              )}
+              <text fg={COLOR.dim} bg={SURFACE.raised} wrapMode="word" selectable={false}>
+                {t("settings.providers.addHome", { path: defaultHomeHint(wizard.kind, wizard.id) })}
+              </text>
               <TextField
                 key={`wizard-home-${wizard.kind}-${wizard.id}`}
-                initial={wizard.kind === "antigravity" && !antigravityUnsupportedUseOn ? "" : defaultHomeHint(wizard.kind, wizard.id)}
-                placeholder={wizard.kind === "antigravity" && !antigravityUnsupportedUseOn ? "" : defaultHomeHint(wizard.kind, wizard.id)}
-                fallback={
-                  wizard.kind === "antigravity" && !antigravityUnsupportedUseOn
-                    ? t("settings.providers.addHomeSharedFallback")
-                    : t("settings.default")
-                }
+                initial={defaultHomeHint(wizard.kind, wizard.id)}
+                placeholder={defaultHomeHint(wizard.kind, wizard.id)}
+                fallback={t("settings.default")}
                 width={Math.max(20, width - 4)}
                 onSubmit={(value) => {
                   const dir = value.trim();

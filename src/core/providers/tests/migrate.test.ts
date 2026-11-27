@@ -235,6 +235,153 @@ describe("migrateProviderProfiles", () => {
     expect(after.fileConfig.providers?.antigravity?.accounts?.[0]).not.toHaveProperty("allowUnsupportedUse");
   });
 
+  it("reuses an existing host Antigravity profile during migration instead of creating a second default profile", async () => {
+    const root = makeTempDir();
+    const configPath = path.join(root, "config.json");
+    const storeRoot = path.join(root, "threads");
+    const store = await openThreadStore(storeRoot);
+    await saveConfig(
+      configPath,
+      normalizeFileConfig({
+        provider: "antigravity",
+        providers: {
+          antigravity: {
+            allowUnsupportedUse: true,
+            accounts: [{ id: "personal", label: "Personal" }],
+          },
+        },
+      }),
+    );
+    const workspaceRoot = path.join(root, "repo");
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    const { project } = await ensureStoredProject(storeRoot, {
+      workspaceRoot,
+      defaultModelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+    });
+    const thread = await createThread(store, {
+      projectId: project.id,
+      title: "Legacy Antigravity",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: workspaceRoot },
+    });
+
+    const result = await migrateProviderProfiles({ configPath, storeRoot, store });
+    expect(result.migrated).toBe(true);
+    expect(result.createdAccounts).toEqual([]);
+    const migrated = await loadConfig(configPath);
+    expect(migrated.fileConfig.provider).toBe("antigravity/personal");
+    expect(migrated.fileConfig.providers?.antigravity?.accounts?.map((a) => a.id)).toEqual(["personal"]);
+    const updatedThread = await store.readThreadRecord(thread.id);
+    expect(updatedThread?.modelSelection.instanceId).toBe("antigravity/personal");
+  });
+
+  it("carries legacy Antigravity settings into reused profiles and selects a target that remains eligible after reload", async () => {
+    const root1 = makeTempDir();
+    const configPath1 = path.join(root1, "config.json");
+    const storeRoot1 = path.join(root1, "threads");
+    const store1 = await openThreadStore(storeRoot1);
+    await saveConfig(
+      configPath1,
+      normalizeFileConfig({
+        provider: "agy",
+        providers: {
+          antigravity: {
+            launchArgs: "--gemini-dir /fixture/isolated",
+            accounts: [
+              { id: "first", label: "First" },
+              { id: "second", label: "Second", launchArgs: "--debug" },
+            ],
+          },
+        },
+      }),
+    );
+    await migrateProviderProfiles({ configPath: configPath1, storeRoot: storeRoot1, store: store1 });
+    const reloaded1 = await loadConfig(configPath1);
+    expect(reloaded1.fileConfig.provider).toBe("antigravity/second");
+    expect(reloaded1.config.providers?.antigravity?.accounts?.[0]?.launchArgs).toBe("--gemini-dir /fixture/isolated");
+    expect(reloaded1.config.providers?.antigravity?.accounts?.[1]?.launchArgs).toBe("--debug");
+    const { antigravityAccountBlockedReason } = await import("../../types.js");
+    expect(antigravityAccountBlockedReason(reloaded1.config.providers?.antigravity, "antigravity/first")).toContain("--gemini-dir");
+    expect(antigravityAccountBlockedReason(reloaded1.config.providers?.antigravity, "antigravity/second")).toBeNull();
+
+    const root2 = makeTempDir();
+    const configPath2 = path.join(root2, "config.json");
+    const storeRoot2 = path.join(root2, "threads");
+    const store2 = await openThreadStore(storeRoot2);
+    await saveConfig(
+      configPath2,
+      normalizeFileConfig({
+        provider: "agy",
+        providers: {
+          antigravity: {
+            binaryPath: "/fixture/agy",
+            runtimeMode: "approval-required",
+            accounts: [{ id: "personal", label: "Personal" }],
+          },
+        },
+      }),
+    );
+    await migrateProviderProfiles({ configPath: configPath2, storeRoot: storeRoot2, store: store2 });
+    const reloaded2 = await loadConfig(configPath2);
+    expect(reloaded2.fileConfig.provider).toBe("antigravity/personal");
+    expect(reloaded2.config.providers?.antigravity?.accounts?.[0]).toMatchObject({
+      id: "personal",
+      binaryPath: "/fixture/agy",
+      runtimeMode: "approval-required",
+    });
+    expect(antigravityAccountBlockedReason(reloaded2.config.providers?.antigravity, "antigravity/personal")).toBeNull();
+  });
+
+  it("does not abort migration when legacy Antigravity top-level fields contain malformed values and keeps diagnostics on reload", async () => {
+    const { antigravityAccountBlockedReason } = await import("../../types.js");
+    const { resolveAntigravityAccount } = await import("../accounts.js");
+    const cases: Array<{ badLegacy: Record<string, unknown>; problemPath: string }> = [
+      { badLegacy: { launchArgs: '--debug "' }, problemPath: "providers.antigravity.launchArgs" },
+      { badLegacy: { launchArgs: '--gemini-dir "' }, problemPath: "providers.antigravity.launchArgs" },
+      { badLegacy: { homePath: false }, problemPath: "providers.antigravity.homePath" },
+    ];
+    for (const { badLegacy, problemPath } of cases) {
+      for (const existingAccounts of [[{ id: "personal", label: "Personal" }], [] as Array<{ id: string; label: string }>]) {
+        const root = makeTempDir();
+        const configPath = path.join(root, "config.json");
+        const storeRoot = path.join(root, "threads");
+        const store = await openThreadStore(storeRoot);
+        fs.writeFileSync(
+          configPath,
+          JSON.stringify({
+            provider: "antigravity",
+            providers: {
+              antigravity: {
+                ...badLegacy,
+                binaryPath: "/fixture/agy",
+                accounts: existingAccounts,
+              },
+            },
+          }),
+          "utf8",
+        );
+
+        const expectedId = existingAccounts.length > 0 ? "personal" : "default";
+        const expectedInstance = `antigravity/${expectedId}`;
+        const result = await migrateProviderProfiles({ configPath, storeRoot, store });
+        expect(result.migrated).toBe(true);
+        expect(result.createdAccounts).toEqual(existingAccounts.length > 0 ? [] : ["antigravity/default"]);
+        const reloaded = await loadConfig(configPath);
+        expect(reloaded.fileConfig.providers?.profilesMigrated).toBe(true);
+        expect(reloaded.fileConfig.provider).toBe(expectedInstance);
+        expect(reloaded.problems.some((problem) => problem.path === problemPath)).toBe(true);
+        expect(reloaded.config.providers?.antigravity?.launchArgs).toBeUndefined();
+        expect((reloaded.config.providers?.antigravity as Record<string, unknown> | undefined)?.homePath).toBeUndefined();
+        const account = reloaded.config.providers?.antigravity?.accounts?.[0];
+        expect(account).toMatchObject({ id: expectedId, binaryPath: "/fixture/agy" });
+        expect(account?.homePath).toBeUndefined();
+        expect(account?.launchArgs).toBeUndefined();
+        expect(antigravityAccountBlockedReason(reloaded.config.providers?.antigravity, expectedInstance)).toBeNull();
+        expect(resolveAntigravityAccount(reloaded.config.providers?.antigravity, expectedInstance, { HOME: "/host" }).spec.command).toBe("/fixture/agy");
+      }
+    }
+  });
+
   it("keeps per-profile settings completely independent and writable via account setting keys", () => {
     const base = normalizeFileConfig({
       providers: {

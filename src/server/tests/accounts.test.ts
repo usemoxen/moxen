@@ -242,10 +242,9 @@ describe("per-account work queue admission isolation (MXN-458)", () => {
   });
 });
 
-describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)", () => {
+describe("Antigravity single-account enforcement and allowUnsupportedUse setting (LOCAL-037)", () => {
   const SETTING = "providers.antigravity.allowUnsupportedUse";
 
-  /** A folder that looks signed in to the auth probe (a real probe would say so). */
   function signedInAntigravityHome(): string {
     const home = makeTempDir("moxen-agy-away-");
     fs.mkdirSync(path.join(home, ".gemini", "antigravity-cli"), { recursive: true });
@@ -277,90 +276,64 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
     );
   }
 
-  it("marks gated accounts disabled without reading their home folders, and behaves as today once on", async () => {
+  it("marks extra and isolated Antigravity accounts disabled without reading their home folders, even when allowUnsupportedUse is on", async () => {
     const dir = makeTempDir("moxen-agy-gate-");
     const configPath = path.join(dir, "config.json");
-    antigravityConfig(configPath, false);
+    antigravityConfig(configPath, true);
     const conn = new DirectConnection({ storeRoot: path.join(dir, "store"), configPath, builtinMcpServers: null });
     try {
       const listed = await conn.query({ type: "providers.accounts" });
       const alt = listed.accounts.find((account) => account.instanceId === "antigravity/alt")!;
       const base = listed.accounts.find((account) => account.instanceId === "antigravity/default")!;
-      expect(alt.disabledReason ?? "").toContain(SETTING);
       expect(alt.disabledReason ?? "").toContain("homePath");
-      // While off nothing may read the gated account's folder: the sign-in
-      // state it holds stays unread, rather than reported.
       expect(alt.signedIn).toBeNull();
       expect(base.disabledReason ?? null).toBeNull();
-
-      // Turning the setting on restores today's behavior without rewriting config.
-      antigravityConfig(configPath, true);
-      const enabled = await conn.query({ type: "providers.accounts" });
-      const altOn = enabled.accounts.find((account) => account.instanceId === "antigravity/alt")!;
-      expect(altOn.disabledReason ?? null).toBeNull();
-      expect(altOn.signedIn).toBe(true);
     } finally {
       await conn.close();
     }
   });
 
-  it("signs an Antigravity account in on the host login while off, and keeps assigning its managed home once on", async () => {
-    const dir = makeTempDir("moxen-agy-login-home-");
+  it("exposes allowUnsupportedUse under antigravity/default profile settings at its provider-level key and saves it there", async () => {
+    const dir = makeTempDir("moxen-agy-setting-key-");
     const configPath = path.join(dir, "config.json");
-    // A second account with no homePath of its own: the add flow's outcome
-    // must not silently hand it one while the setting is off.
-    const writeConfig = (allow: boolean): void => {
-      fs.writeFileSync(configPath, JSON.stringify({ providers: { antigravity: {
-        ...(allow ? { allowUnsupportedUse: true } : {}),
-        accounts: [{ id: "default", label: "Default" }, { id: "team", label: "Team" }],
-      } } }));
-    };
-    const spawnChildCalls: string[] = [];
-    const conn = new DirectConnection({
-      storeRoot: path.join(dir, "store"),
+    fs.writeFileSync(
       configPath,
-      builtinMcpServers: null,
-      providerAccountLoginDeps: {
-        urlWaitMs: 0,
-        ensureDir: () => {},
-        spawnChild: (command) => {
-          spawnChildCalls.push(command);
-          const child = new EventEmitter() as unknown as import("node:child_process").ChildProcess;
-          (child as unknown as { stdout: EventEmitter }).stdout = new EventEmitter();
-          (child as unknown as { stderr: EventEmitter }).stderr = new EventEmitter();
-          (child as unknown as { stdin: unknown }).stdin = {
-            write: (_data: string, _enc: string, cb: (err?: Error | null) => void) => cb(null),
-          };
-          return child;
+      JSON.stringify({
+        providers: {
+          antigravity: {
+            accounts: [{ id: "default", label: "Default" }],
+          },
         },
-      },
-    });
+      }),
+    );
+    const conn = new DirectConnection({ storeRoot: path.join(dir, "store"), configPath, builtinMcpServers: null });
     try {
-      // While off (the default) no managed isolated home is assigned or
-      // written: the account signs in on the host `agy` login, like "default".
-      writeConfig(false);
-      const shared = await conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "team" });
-      expect(shared.homePath).toBeNull();
-      expect(spawnChildCalls).toEqual(["agy"]);
-      expect(JSON.parse(fs.readFileSync(configPath, "utf8")).providers.antigravity.accounts[1]).toEqual({ id: "team", label: "Team" });
+      const before = await conn.query({ type: "settings.read" });
+      const profileView = before.accountSettings?.["antigravity/default"]?.find((v) => v.descriptor.key === SETTING);
+      expect(profileView).toBeDefined();
+      expect(profileView?.value).toBe(false);
 
-      // Once the setting is on, the saved account still gets today's managed
-      // home, written to the config before the login session starts.
-      writeConfig(true);
-      const isolated = await conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "team" });
-      expect(isolated.homePath).toBe(managedAccountHomeDisplayPath("antigravity", "team"));
-      const stored = JSON.parse(fs.readFileSync(configPath, "utf8")).providers.antigravity.accounts[1];
-      expect(stored.homePath).toBe(managedAccountHomeDisplayPath("antigravity", "team"));
-      await conn.dispatch({ type: "provider.account.login.cancel", sessionId: isolated.sessionId });
+      const saved = await conn.dispatch({ type: "settings.set", key: SETTING, value: "true" });
+      const afterProfileView = saved.accountSettings?.["antigravity/default"]?.find((v) => v.descriptor.key === SETTING);
+      expect(afterProfileView?.value).toBe(true);
+      const onDisk = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      expect(onDisk.providers.antigravity.allowUnsupportedUse).toBe(true);
+      expect("allowUnsupportedUse" in onDisk.providers.antigravity.accounts[0]).toBe(false);
+      await expect(
+        conn.dispatch({ type: "settings.set", key: "providers.antigravity.accounts[default].allowUnsupportedUse", value: "true" }),
+      ).rejects.toMatchObject({ code: "INVALID_CONFIG_KEY" });
+      await expect(
+        conn.dispatch({ type: "settings.set", key: "providers.antigravity.accounts[default].homePath", value: "~/agy-alt" }),
+      ).rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF" });
     } finally {
       await conn.close();
     }
   });
 
-  it("refuses to start a login session for an isolated Antigravity account while off, and keeps the host account's sign-in", async () => {
+  it("refuses to start a login session for an extra or isolated Antigravity account even when allowUnsupportedUse is on, and keeps host sign-in", async () => {
     const dir = makeTempDir("moxen-agy-login-gate-");
     const configPath = path.join(dir, "config.json");
-    antigravityConfig(configPath, false);
+    antigravityConfig(configPath, true);
     const spawnChildCalls: string[] = [];
     const conn = new DirectConnection({
       storeRoot: path.join(dir, "store"),
@@ -384,9 +357,7 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
     try {
       await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "alt" })).rejects.toMatchObject({
         code: "ANTIGRAVITY_ACCOUNT_OFF",
-        message: expect.stringContaining(SETTING) as unknown as string,
       });
-      // The one host-login account still signs in, with the environment untouched.
       const host = await conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" });
       expect(host.homePath).toBeNull();
       expect(spawnChildCalls).toEqual(["agy"]);
@@ -396,13 +367,11 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
     }
   });
 
-  it("never probes a gated Antigravity account for usage or credits while off", async () => {
+  it("never probes an isolated or extra Antigravity account for usage or credits even when allowUnsupportedUse is on", async () => {
     const dir = makeTempDir("moxen-agy-usage-gate-");
     const configPath = path.join(dir, "config.json");
     const altHome = signedInAntigravityHome();
-    // Keep the host account disabled so this test does not depend on whether
-    // the test runner's own host $HOME happens to hold an agy login.
-    antigravityConfig(configPath, false, { defaultEnabled: false, altHome });
+    antigravityConfig(configPath, true, { defaultEnabled: false, altHome });
     let madeDrivers = 0;
     const conn = new DirectConnection({
       storeRoot: path.join(dir, "store"),
@@ -418,17 +387,12 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
     try {
       await conn.query({ type: "usage.refresh" });
       expect(madeDrivers).toBe(0);
-
-      // Once the setting is on, the same account is probed again as today.
-      antigravityConfig(configPath, true, { defaultEnabled: false, altHome });
-      await conn.query({ type: "usage.refresh" });
-      expect(madeDrivers).toBe(1);
     } finally {
       await conn.close();
     }
   });
 
-  it("refuses an Antigravity login that would sign in a non-host environment (env or --gemini-dir), and keeps them once on", async () => {
+  it("refuses an Antigravity login with non-host env or --gemini-dir launch args even when allowUnsupportedUse is on", async () => {
     const dir = makeTempDir("moxen-agy-login-env-gate-");
     const configPath = path.join(dir, "config.json");
     const launched: Array<{ command: string; args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
@@ -458,44 +422,32 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
       },
     });
     try {
-      // Environment overrides select a non-host login: refused while off.
-      writeConfig({ env: { HOME: "/ag/elsewhere" } }, false);
-      await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" }))
-        .rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF", message: expect.stringContaining("HOME") });
-      // A --gemini-dir launch arg does too.
-      writeConfig({ launchArgs: "--gemini-dir=/ag/elsewhere/.gemini" }, false);
-      await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" }))
-        .rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF", message: expect.stringContaining("--gemini-dir") });
+      for (const allow of [false, true]) {
+        writeConfig({ env: { HOME: "/ag/elsewhere" } }, allow);
+        await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" }))
+          .rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF", message: expect.stringContaining("HOME") });
+        writeConfig({ launchArgs: "--gemini-dir=/ag/elsewhere/.gemini" }, allow);
+        await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" }))
+          .rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF", message: expect.stringContaining("--gemini-dir") });
+      }
       expect(launched).toEqual([]);
-
-      // Once on, the same login keeps today's environment and arguments.
-      writeConfig({ env: { HOME: "/ag/elsewhere" }, launchArgs: "--gemini-dir=/ag/elsewhere/.gemini --verbose" }, true);
-      const allowed = await conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" });
-      expect(allowed.homePath).toBeNull();
-      expect(launched).toHaveLength(1);
-      expect(launched[0]!.command).toBe("agy");
-      expect(launched[0]!.env.HOME).toBe("/ag/elsewhere");
-      expect(launched[0]!.args).toContain("--gemini-dir=/ag/elsewhere/.gemini");
-      await conn.dispatch({ type: "provider.account.login.cancel", sessionId: allowed.sessionId });
     } finally {
       await conn.close();
     }
   });
 
-  it("refuses a login that inherits provider-level --gemini-dir launch args while off, quoted or not", async () => {
+  it("refuses a login that inherits provider-level --gemini-dir launch args, quoted or not", async () => {
     const dir = makeTempDir("moxen-agy-login-args-gate-");
     const configPath = path.join(dir, "config.json");
-    // The launch args live at the provider level; the account sets none of its own.
     const writeConfig = (launchArgs?: string): void => {
       fs.writeFileSync(configPath, JSON.stringify({
         providers: { antigravity: {
+          allowUnsupportedUse: true,
           ...(launchArgs ? { launchArgs } : {}),
           accounts: [{ id: "default", label: "Default" }],
         } },
       }));
     };
-    // A plain accounts file: the one-time profile migration has run against it,
-    // so a provider-level edit made while the server runs is read as-is.
     writeConfig();
     const conn = new DirectConnection({
       storeRoot: path.join(dir, "store"),
@@ -516,55 +468,6 @@ describe("Antigravity multiple accounts behind allowUnsupportedUse (LOCAL-011)",
         await expect(conn.dispatch({ type: "provider.account.login.start", kind: "antigravity", id: "default" }))
           .rejects.toMatchObject({ code: "ANTIGRAVITY_ACCOUNT_OFF", message: expect.stringContaining("--gemini-dir") });
       }
-    } finally {
-      await conn.close();
-    }
-  });
-
-  it("turning the setting off without a restart revokes the isolated driver, its probes, and its stored usage", async () => {
-    const dir = makeTempDir("moxen-agy-usage-revoke-");
-    const configPath = path.join(dir, "config.json");
-    const altHome = signedInAntigravityHome();
-    // Keep the host account disabled so only the isolated account is under test,
-    // regardless of whether the host $HOME has a live agy login.
-    antigravityConfig(configPath, true, { defaultEnabled: false, altHome }); // acquire while on
-    let refreshCalls = 0;
-    let stops = 0;
-    const driver = {
-      refreshUsage: async () => {
-        refreshCalls += 1;
-        return {
-          key: "antigravity/alt",
-          windows: [{ id: "weekly", label: "Weekly", usedPercent: 40, resetsAt: new Date(Date.now() + 86_400_000).toISOString() }],
-          credits: 5,
-        };
-      },
-      stopAll: () => {
-        stops += 1;
-        return Effect.succeed(undefined);
-      },
-    } as unknown as TurnDriver;
-    const conn = new DirectConnection({
-      storeRoot: path.join(dir, "store"),
-      configPath,
-      builtinMcpServers: null,
-      drivers: { antigravity: () => driver } as never,
-    });
-    try {
-      const on = await conn.query({ type: "usage.refresh" });
-      expect(refreshCalls).toBe(1);
-      expect(on.providers).toHaveProperty("antigravity/alt");
-
-      // The user opts out, without restarting the server.
-      antigravityConfig(configPath, false, { defaultEnabled: false, altHome });
-      const off = await conn.query({ type: "usage.refresh" });
-      // The owned isolated driver is neither probed nor served again...
-      expect(refreshCalls).toBe(1);
-      expect(off.providers).not.toHaveProperty("antigravity/alt");
-      const limits = await conn.query({ type: "usage.limits" });
-      expect(limits.providers).not.toHaveProperty("antigravity/alt");
-      // ...and it was revoked, so no live isolated session keeps running.
-      expect(stops).toBe(1);
     } finally {
       await conn.close();
     }
