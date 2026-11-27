@@ -117,7 +117,7 @@ export function toMessageEnvelope(message: StoredMessage): MessageEnvelope {
     createdAt: message.createdAt,
     updatedAt: message.createdAt,
     ...(message.attachments?.length ? { attachments: message.attachments } : {}),
-    ...(message.origin !== undefined ? { origin: message.origin, ...(message.notification ? { notification: message.notification } : {}) } : {}),
+    ...(message.origin !== undefined ? { origin: message.origin, ...(message.notification ? { notification: { tasks: message.notification.tasks } } : {}) } : {}),
   };
 }
 

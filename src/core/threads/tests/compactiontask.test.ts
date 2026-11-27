@@ -146,6 +146,15 @@ async function batchesOnDisk(w: Awaited<ReturnType<typeof world>>): Promise<Reco
   return JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, unknown>;
 }
 
+/** The durable batch as the tests assert it: each entry is its task and kind, the notice's identity is the batch's own bookkeeping. */
+async function batchesOnDiskNamed(w: Awaited<ReturnType<typeof world>>): Promise<Record<string, unknown[]>> {
+  const batches = await batchesOnDisk(w) as Record<string, Record<string, unknown>[]>;
+  return Object.fromEntries(Object.entries(batches).map(([key, entries]) => [
+    key,
+    entries.map((entry) => ({ child: entry.child, ...(entry.resumesAt !== undefined ? { resumesAt: entry.resumesAt } : {}), ...(entry.cancelled !== undefined ? { cancelled: entry.cancelled } : {}) })),
+  ]));
+}
+
 /** The pid of a process that has already exited, as a crash leaves behind. */
 async function deadPid(): Promise<number> {
   const child = spawn(process.execPath, ["-e", "0"]);
@@ -273,7 +282,7 @@ describe("a delegated task that compacts after its turn settles", () => {
     // the notice would otherwise be lost for good.
     await queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTaskNotifications(w.ctx, parent.id);
-    expect(await batchesOnDisk(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await batchesOnDiskNamed(w)).toEqual({ [parent.id]: [{ child: child.id }] });
 
     // Restart while the compaction still runs: the recovery re-reads the batch,
     // finds the task with work in flight, and leaves the entry alone.
@@ -281,7 +290,7 @@ describe("a delegated task that compacts after its turn settles", () => {
     const restartedCtx: OperationContext = { ...w.ctx, store: restarted };
     await recoverTaskNotifications(restartedCtx);
     expect(await notificationsIn(w, parent.id)).toHaveLength(0);
-    expect(await batchesOnDisk(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await batchesOnDiskNamed(w)).toEqual({ [parent.id]: [{ child: child.id }] });
 
     // Once the compaction ends the notice goes out, with the worker's report.
     release();
@@ -305,7 +314,7 @@ describe("a delegated task that compacts after its turn settles", () => {
     // The flush that came due before the process died kept the entry durable.
     await queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTaskNotifications(w.ctx, parent.id);
-    expect(await batchesOnDisk(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await batchesOnDiskNamed(w)).toEqual({ [parent.id]: [{ child: child.id }] });
     expect(await notificationsIn(w, parent.id)).toHaveLength(0);
 
     // The restart replays that batch on its own store — no shared event bus,
@@ -330,7 +339,7 @@ describe("a delegated task that compacts after its turn settles", () => {
     // is waiting on the child's next terminal event.
     await queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTaskNotifications(w.ctx, parent.id);
-    expect(await batchesOnDisk(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await batchesOnDiskNamed(w)).toEqual({ [parent.id]: [{ child: child.id }] });
 
     // The compaction settles in the ledger, and the flush wins: it delivers the
     // notice and deletes the entry, before the settle's event has been heard.
@@ -365,7 +374,7 @@ describe("a delegated task that compacts after its turn settles", () => {
     // The notice the dying process kept back.
     await queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTaskNotifications(w.ctx, parent.id);
-    expect(await batchesOnDisk(w)).toEqual({ [parent.id]: [{ child: child.id }] });
+    expect(await batchesOnDiskNamed(w)).toEqual({ [parent.id]: [{ child: child.id }] });
 
     // A parent flush wins the notification lock on the child's terminal event,
     // as a server subscriber would: it delivers the durable notice and removes

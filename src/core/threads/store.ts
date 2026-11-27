@@ -784,6 +784,32 @@ export class ThreadStore {
   }
 
   /**
+   * Take the notice identities off a message whose delivery never happened —
+   * a steer the provider refused, or a send that failed after the message was
+   * staged. The message stays in the turn's transcript, but its `notices`
+   * record would read as delivered on the next flush: the failed attempt
+   * delivered nothing, and the batch entry (with `refusedMessageId`, or the
+   * still-durable batch) keeps the retry. With `turnId` given, the newest
+   * task-notification message on that turn that still records identities is
+   * the one; without it, the message is named by id.
+   */
+  async clearStagedNoticeIdentities(threadId: string, target: { readonly turnId: string } | { readonly messageId: string }): Promise<void> {
+    await this.withThreadLock(threadId, async () => {
+      await this.withThreadLock(`\0ledger:messages:${threadId}`, async () => {
+        const messages = await this.readMessages(threadId);
+        const staged = "turnId" in target
+          ? [...messages].reverse().find((row) => row.turnId === target.turnId && row.origin === "task-notification" && row.notification?.notices)
+          : messages.find((row) => row.id === target.messageId);
+        if (!staged?.notification?.notices) return;
+        const { notices: _notices, ...notification } = staged.notification;
+        await this.rewriteLedger(threadId, "messages", messages.map((row) => row.id === staged.id
+          ? { ...row, notification: { ...notification } }
+          : row));
+      });
+    });
+  }
+
+  /**
    * Turns ledger rows. With `reportTornTail`, an unterminated bad-JSON tail
    * is reported at once instead of being pended for a confirming re-read:
    * the admission read runs under the source lock and cannot proceed on an

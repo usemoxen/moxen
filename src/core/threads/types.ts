@@ -174,6 +174,16 @@ export interface StoredThread {
    */
   readonly handoffFacts?: HandoffFacts;
   /**
+   * Set from the moment this thread is created for a handoff until that
+   * handoff's adoption write lands (its tasks re-pointed here and its waiting
+   * notices moved): the thread is still receiving its predecessor's work.
+   * Written with the reservation so a crash mid-handoff is durable, and read
+   * by every continuation reservation so the thread cannot hand its
+   * predecessor's tasks on before it owns them. Cleared once that adoption
+   * commits; a later continue of this thread is its own, as before.
+   */
+  readonly adoptingFrom?: string | null;
+  /**
    * A manual continuation in flight on this thread (`reserveContinuation`):
    * while present, admission starts no turn here, so the new worker never
    * runs beside one. Set and cleared under the thread lock around the
@@ -477,7 +487,16 @@ export interface StoredMessage {
   /** A message moxen wrote into the thread rather than the user (see `MessageOrigin`). */
   readonly origin?: MessageOrigin;
   /** The origin's structured facts (`task-notification`: the tasks), for a client to draw. */
-  readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  readonly notification?: {
+    readonly tasks: readonly TaskNotification[];
+    /**
+     * Identity of each pending task notice this message reports, in the same
+     * ledger write that accepts the turn: a replay after a failed batch
+     * acknowledgement reads it here and sends nothing twice. Internal, never
+     * projected to clients.
+     */
+    readonly notices?: readonly string[];
+  };
   /** Filed as a turn prompt, even if later folded into another queued turn. */
   readonly queuedTaskNotice?: true;
 }
@@ -584,6 +603,8 @@ export interface CreateThreadInput {
   readonly continuedFrom?: string;
   /** The hand-off facts the new thread carries (see `HandoffFacts`); only the continue path passes them. */
   readonly handoffFacts?: HandoffFacts;
+  /** Set on a destination created for a handoff; cleared once its adoption commits (see `StoredThread.adoptingFrom`). */
+  readonly adoptingFrom?: string;
 }
 
 export type SendIfBusy = "reject" | "inject";
@@ -614,7 +635,7 @@ export interface SendTurnInput {
   readonly continueAttempt?: number;
   /** A message moxen writes itself (with its facts), rather than the user. */
   readonly origin?: MessageOrigin;
-  readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  readonly notification?: { readonly tasks: readonly TaskNotification[]; readonly notices?: readonly string[] };
   /** Internal: the prompt is the generated hand-off that opens a continued thread, recorded as its provenance. */
   readonly handoffOpen?: true;
   /** Internal: the pending request message ids this hand-off opener carries as its task (see `StoredTurn.handoffPending`). */
