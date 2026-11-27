@@ -20,8 +20,10 @@ configuration, credentials or personal memory.
 The tools use the server's corpus, including over paired connections. They
 remain available to delegated tasks and do not depend on memory, web fetch
 or embeddings. If the built-in `moxen` MCP server is removed, replaced,
-excluded or not attached, its knowledge tools are unavailable too. Turning
-off orchestration, web fetch and memory together still omits that server.
+excluded or not attached, its knowledge tools are unavailable too. The server
+also stays for the knowledge and settings tools when orchestration, web fetch
+and memory are all off; only removing, replacing or excluding it takes those
+away.
 Runtime guidance names the KB only when both tools reach the session.
 
 ## Maintain it

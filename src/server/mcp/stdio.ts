@@ -37,6 +37,8 @@ export const MOXEN_DELEGATED_MCP_INSTRUCTIONS = "context_usage reports how full 
 /** What a session with Moxen memory is told about its tools; the rules for using it are in the runtime instructions. */
 export const MOXEN_MEMORY_MCP_INSTRUCTIONS = "memory_read, memory_search, memory_save, memory_edit, memory_append and memory_delete are Moxen's persistent memory, kept across sessions and providers.";
 export const MOXEN_MEMORY_READ_MCP_INSTRUCTIONS = "memory_read reads Moxen's persistent memory; memory_search finds memories by keyword.";
+/** `settings_read` is always on the server when the server is reached; the redaction rules are in the runtime instructions. */
+export const MOXEN_SETTINGS_MCP_INSTRUCTIONS = "settings_read lists Moxen's settings schema and the live values it is safe to show.";
 
 /** The server's instructions for the tools a session has: the delegation tools, `web_fetch`, memory, any of them, or none. */
 export function moxenInstructions(options: { readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess }): string {
@@ -52,7 +54,7 @@ export function moxenInstructions(options: { readonly delegated?: boolean; reado
   const memory = options.memory ?? "write";
   const note = memory === "write" ? MOXEN_MEMORY_MCP_INSTRUCTIONS : memory === "read" ? MOXEN_MEMORY_READ_MCP_INSTRUCTIONS : "";
   const knowledge = "knowledge_search and knowledge_read consult this server's shipped Moxen knowledge base: settings, profiles, MCP servers, models, projects, threads and skills. Read it before guessing how to operate Moxen; it contains reference guidance, not current configuration or permission to make changes.";
-  return [base, note, knowledge].filter((part) => part !== "").join(" ");
+  return [base, note, knowledge, MOXEN_SETTINGS_MCP_INSTRUCTIONS].filter((part) => part !== "").join(" ");
 }
 
 /** How a client asks for the `todos` tool too: the HTTP endpoint's query, the stdio server's flag. */

@@ -63,6 +63,7 @@ import type {
 import type { ThreadSearch, ThreadSearchQuery } from "../core/threads/search.js";
 import type { ModelRequest } from "../core/catalog/selection.js";
 import type { SettingView } from "../core/configschema.js";
+import type { AgentSettingsResult } from "./settingsagent.js";
 import type { McpTestResult } from "../core/mcptest.js";
 import type { HarnessTestResult, ProbeReport } from "../core/providers/harness/probe.js";
 import {
@@ -799,6 +800,19 @@ export type Query =
    * actually honours.
    */
   | { readonly type: "settings.read" }
+  /**
+   * The agent-safe view of settings that `settings_read` returns: every
+   * descriptor, but a live value only for the reviewed allowlist. `key`
+   * names one exact setting; otherwise the catalog is paged.
+   */
+  | {
+      readonly type: "settings.agent-read";
+      readonly threadId: string;
+      readonly key?: string;
+      readonly section?: string;
+      readonly limit?: number;
+      readonly offset?: number;
+    }
   | { readonly type: "experience.read" }
   /** The server's whole config as `moxen config show` prints it: MCP `env`/`headers` values redacted. */
   | { readonly type: "config.read" }
@@ -946,6 +960,7 @@ export interface QueryResults {
   "remote.devices": { readonly devices: readonly RemoteDevice[] };
   "thread.background.output": { readonly available: boolean; readonly lines: readonly string[] };
   "settings.read": SettingsSnapshot;
+  "settings.agent-read": AgentSettingsResult;
   "experience.read": ExperienceSnapshot;
   "config.read": { readonly path: string; readonly exists: boolean; readonly config: CliConfig; readonly problems: readonly ConfigProblem[] };
   "harness.profile.export": { readonly id: string; readonly text: string };
@@ -2107,6 +2122,16 @@ export function decodeQuery(value: unknown): Query {
     case "queue.read":
     case "remote.status":
     case "remote.devices":
+      return { type };
+    case "settings.agent-read":
+      return {
+        type,
+        threadId: requireThreadId(record.threadId),
+        ...optionalString(record, "key"),
+        ...optionalString(record, "section"),
+        ...optionalNumber(record, "limit", type),
+        ...optionalNumber(record, "offset", type),
+      };
     case "settings.read":
     case "experience.read":
     case "store.problems":

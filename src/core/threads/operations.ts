@@ -412,18 +412,16 @@ async function sessionSetup(
   const kind = driverKindOfInstance(instanceId);
   const providerConfig = resolveProfileProviderConfig(ctx.config, instanceId);
   // A delegated thread gets Moxen's tools less the ones that delegate (it does not delegate again), and so does a provider
-  // the user turned orchestration off for; `web_fetch` is switched on its own. With both off, the server is left out.
+  // the user turned orchestration off for; `web_fetch` is switched on its own. Knowledge and settings are not part of
+  // those switches: the server stays for them, and only an explicit removal, exclusion or hiding takes it away.
   const reach = moxenToolsOf(providerConfig);
   // Moxen memory: the config's switch and the project's moxen.json (`"memory": false`); a delegated task only reads it.
   const memoryOn = ctx.config.memory !== false && providerConfig?.memory !== false && (await projectMemorySetting(workspaceRoot)) !== false;
   const memory: "off" | "read" | "write" = !memoryOn ? "off" : delegation !== null ? "read" : "write";
-  const builtin =
-    !reach.orchestration && !reach.webFetch && memory === "off"
-      ? []
-      : (await ctx.builtinMcpServers?.(thread.id, {
-          delegated: delegation !== null || isResearchRunActive(thread.researchRun) || !reach.orchestration,
-          webFetch: reach.webFetch, memory,
-        }) ?? []);
+  const builtin = await ctx.builtinMcpServers?.(thread.id, {
+    delegated: delegation !== null || isResearchRunActive(thread.researchRun) || !reach.orchestration,
+    webFetch: reach.webFetch, memory,
+  }) ?? [];
   const base: Record<string, McpServerEntry> = {};
   for (const built of builtin) {
     // Layered by name like any configured server, in the form a config entry has.
@@ -478,6 +476,8 @@ async function sessionSetup(
     delegationTools: !isResearchRunActive(thread.researchRun) && reach.orchestration && builtin.some((server) => server.name === "moxen"),
     knowledge: mcpServers.some((server) => server.name === "moxen" && builtin.includes(server)) &&
       !disabledMcpTools.includes("mcp__moxen__knowledge_search") && !disabledMcpTools.includes("mcp__moxen__knowledge_read"),
+    settings: mcpServers.some((server) => server.name === "moxen" && builtin.includes(server)) &&
+      !disabledMcpTools.includes("mcp__moxen__settings_read"),
     ...(memoryAccess === null ? {} : { memory: memoryAccess }),
     ...(nativeKind === null ? {} : { web: { provider: nativeKind, disabledNativeTools: nativeConfig?.disabledNativeTools, searchOrder: parseNameList(nativeConfig?.webSearchOrder), fetchOrder: parseNameList(nativeConfig?.webFetchOrder), servers: mcpServers } }),
   } as const;

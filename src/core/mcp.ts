@@ -308,6 +308,23 @@ async function projectMcpServers(workspaceRoot: string): Promise<Record<string, 
 }
 
 /**
+ * One server's entry as a session in `workspaceRoot` sees it, without reading
+ * any secret: the global `mcpServers` with the project's `moxen.json` layered
+ * over it. `undefined` when neither declares the name, `null` when the project
+ * removes it, and the entry otherwise. Read-only; never touches the keychain.
+ */
+export async function mcpServerEntryFor(
+  global: Readonly<Record<string, McpServerEntry>> | undefined,
+  workspaceRoot: string | null,
+  name: string,
+): Promise<McpServerEntry | null | undefined> {
+  const merged: Record<string, McpServerEntry | null> = { ...global };
+  if (workspaceRoot) Object.assign(merged, await projectMcpServers(workspaceRoot));
+  const key = name.toLowerCase();
+  return Object.hasOwn(merged, key) ? merged[key] : undefined;
+}
+
+/**
  * The servers a session in `workspaceRoot` gets: the global ones, with the
  * project's `moxen.json` layered over them by name. Sorted by name, so a
  * provider sees the same order every start.
