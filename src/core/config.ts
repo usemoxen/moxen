@@ -864,7 +864,28 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
     // allowUnsupportedUse is the one provider-level key for every account: it is
     // not a per-profile field, so the account list above does not take it.
     const antigravity = normalizeSection<AntigravityProviderConfig>(input.antigravity, "providers.antigravity", [...antigravityFields, "allowUnsupportedUse"], skipped);
-    if (antigravity) delete (antigravity as unknown as Record<string, unknown>).accounts;
+    if (antigravity) {
+      const antigravityRecord = antigravity as unknown as Record<string, unknown>;
+      delete antigravityRecord.accounts;
+      if (antigravity.launchArgs !== undefined) {
+        const rawLaunchArgs = antigravity.launchArgs;
+        let validLaunchArgs = false;
+        guarded(skipped, "providers.antigravity.launchArgs", rawLaunchArgs, () => {
+          normalizeAntigravityAccount({ id: "default", launchArgs: rawLaunchArgs }, "providers.antigravity");
+          validLaunchArgs = true;
+        });
+        if (!validLaunchArgs) delete antigravityRecord.launchArgs;
+      }
+      if ("homePath" in antigravityRecord && antigravityRecord.homePath !== undefined) {
+        const rawHomePath = antigravityRecord.homePath;
+        let validHomePath = false;
+        guarded(skipped, "providers.antigravity.homePath", rawHomePath, () => {
+          normalizeAntigravityAccount({ id: "default", homePath: rawHomePath }, "providers.antigravity");
+          validHomePath = true;
+        });
+        if (!validHomePath) delete antigravityRecord.homePath;
+      }
+    }
     const cleaned = antigravity && Object.keys(antigravity).length > 0 ? antigravity : undefined;
     const models = handoffModelsOf(input.antigravity, "providers.antigravity", skipped);
     const prices = modelPricesOf(input.antigravity, "providers.antigravity", skipped);

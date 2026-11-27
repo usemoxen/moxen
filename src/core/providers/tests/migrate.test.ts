@@ -332,41 +332,53 @@ describe("migrateProviderProfiles", () => {
     expect(antigravityAccountBlockedReason(reloaded2.config.providers?.antigravity, "antigravity/personal")).toBeNull();
   });
 
-  it("does not abort migration when legacy Antigravity top-level fields contain malformed values", async () => {
+  it("does not abort migration when legacy Antigravity top-level fields contain malformed values and keeps diagnostics on reload", async () => {
     const { antigravityAccountBlockedReason } = await import("../../types.js");
     const { resolveAntigravityAccount } = await import("../accounts.js");
-    for (const badLegacy of [{ launchArgs: '--debug "' }, { homePath: false }]) {
-      const root = makeTempDir();
-      const configPath = path.join(root, "config.json");
-      const storeRoot = path.join(root, "threads");
-      const store = await openThreadStore(storeRoot);
-      fs.writeFileSync(
-        configPath,
-        JSON.stringify({
-          provider: "antigravity",
-          providers: {
-            antigravity: {
-              ...badLegacy,
-              binaryPath: "/fixture/agy",
-              accounts: [{ id: "personal", label: "Personal" }],
+    const cases: Array<{ badLegacy: Record<string, unknown>; problemPath: string }> = [
+      { badLegacy: { launchArgs: '--debug "' }, problemPath: "providers.antigravity.launchArgs" },
+      { badLegacy: { launchArgs: '--gemini-dir "' }, problemPath: "providers.antigravity.launchArgs" },
+      { badLegacy: { homePath: false }, problemPath: "providers.antigravity.homePath" },
+    ];
+    for (const { badLegacy, problemPath } of cases) {
+      for (const existingAccounts of [[{ id: "personal", label: "Personal" }], [] as Array<{ id: string; label: string }>]) {
+        const root = makeTempDir();
+        const configPath = path.join(root, "config.json");
+        const storeRoot = path.join(root, "threads");
+        const store = await openThreadStore(storeRoot);
+        fs.writeFileSync(
+          configPath,
+          JSON.stringify({
+            provider: "antigravity",
+            providers: {
+              antigravity: {
+                ...badLegacy,
+                binaryPath: "/fixture/agy",
+                accounts: existingAccounts,
+              },
             },
-          },
-        }),
-        "utf8",
-      );
+          }),
+          "utf8",
+        );
 
-      const result = await migrateProviderProfiles({ configPath, storeRoot, store });
-      expect(result.migrated).toBe(true);
-      expect(result.createdAccounts).toEqual([]);
-      const reloaded = await loadConfig(configPath);
-      expect(reloaded.fileConfig.providers?.profilesMigrated).toBe(true);
-      expect(reloaded.fileConfig.provider).toBe("antigravity/personal");
-      const account = reloaded.config.providers?.antigravity?.accounts?.[0];
-      expect(account).toMatchObject({ id: "personal", binaryPath: "/fixture/agy" });
-      expect(account?.homePath).toBeUndefined();
-      expect(account?.launchArgs).toBeUndefined();
-      expect(antigravityAccountBlockedReason(reloaded.config.providers?.antigravity, "antigravity/personal")).toBeNull();
-      expect(resolveAntigravityAccount(reloaded.config.providers?.antigravity, "antigravity/personal", { HOME: "/host" }).spec.command).toBe("/fixture/agy");
+        const expectedId = existingAccounts.length > 0 ? "personal" : "default";
+        const expectedInstance = `antigravity/${expectedId}`;
+        const result = await migrateProviderProfiles({ configPath, storeRoot, store });
+        expect(result.migrated).toBe(true);
+        expect(result.createdAccounts).toEqual(existingAccounts.length > 0 ? [] : ["antigravity/default"]);
+        const reloaded = await loadConfig(configPath);
+        expect(reloaded.fileConfig.providers?.profilesMigrated).toBe(true);
+        expect(reloaded.fileConfig.provider).toBe(expectedInstance);
+        expect(reloaded.problems.some((problem) => problem.path === problemPath)).toBe(true);
+        expect(reloaded.config.providers?.antigravity?.launchArgs).toBeUndefined();
+        expect((reloaded.config.providers?.antigravity as Record<string, unknown> | undefined)?.homePath).toBeUndefined();
+        const account = reloaded.config.providers?.antigravity?.accounts?.[0];
+        expect(account).toMatchObject({ id: expectedId, binaryPath: "/fixture/agy" });
+        expect(account?.homePath).toBeUndefined();
+        expect(account?.launchArgs).toBeUndefined();
+        expect(antigravityAccountBlockedReason(reloaded.config.providers?.antigravity, expectedInstance)).toBeNull();
+        expect(resolveAntigravityAccount(reloaded.config.providers?.antigravity, expectedInstance, { HOME: "/host" }).spec.command).toBe("/fixture/agy");
+      }
     }
   });
 
