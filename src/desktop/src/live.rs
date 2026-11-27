@@ -933,16 +933,38 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
         let listed = entries
             .iter()
             .position(|e| text(e, &["turnId"]) == Some(turn_id));
-        let (body, images) =
-            attachments::user_images(message, text(message, &["text"]).unwrap_or_default());
+        let agent = text(message, &["origin"]) == Some("agent-message");
+        let raw = text(message, &["text"]).unwrap_or_default();
+        // An agent's message opens with a line saying it is not the user's;
+        // the strip marks it as the agent's and shows what it actually wrote.
+        let body_text = if agent {
+            raw.split_once("\n\n").map_or(raw, |(_, body)| body)
+        } else {
+            raw
+        };
+        let (body, images) = attachments::user_images(message, body_text);
+        let wait = listed.and_then(|at| entries.get(at));
+        let condition_count = wait
+            .and_then(|e| e["policy"]["conditions"].as_array())
+            .map_or(0, Vec::len);
+        let blocked = wait
+            .and_then(|e| e["blocked"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|reason| reason.as_str().map(str::to_string))
+            .collect();
         waiting.push((
             listed.unwrap_or(usize::MAX),
             Queued {
                 key: turn_id.to_string(),
                 text: body,
                 images,
-                held: listed.is_some_and(|at| entries[at]["policy"]["held"] == true),
+                held: listed.is_some_and(|at| entries[at]["policy"]["held"] == true)
+                    || turn["held"] == true,
+                agent,
                 scheduled: text(turn, &["scheduledFor"]).map(str::to_string),
+                condition_count,
+                blocked,
                 earlier: 0,
                 later: 0,
             },
@@ -960,6 +982,31 @@ pub fn queue_of(thread: &Value, read: Option<&Value>) -> Vec<Queued> {
             queued
         })
         .collect()
+}
+
+/// The row's attribution and state, never one replacing the other: an agent's
+/// message keeps its marker beside held/scheduled, plus a bounded count of
+/// what it waits for. The full reasons stay on the row's control text.
+pub fn queue_label(item: &Queued) -> String {
+    let mut parts = Vec::new();
+    if item.agent {
+        parts.push(crate::language::message("queued.agent").to_string());
+    }
+    if item.held {
+        parts.push("held".to_string());
+    } else if item.scheduled.is_some() {
+        parts.push("scheduled".to_string());
+    } else if !item.agent {
+        parts.push(crate::language::message("queued.queued_7b2f").to_lowercase());
+    }
+    if item.condition_count > 0 {
+        parts.push(crate::language::plural(
+            "queued.conditions.one",
+            "queued.conditions.other",
+            item.condition_count,
+        ));
+    }
+    parts.join(" · ")
 }
 
 /// The server queue as `queue.read` lists it, without removed entries.
@@ -5857,6 +5904,74 @@ mod tests {
         assert!(queue[0].held && !queue[1].held);
         assert_eq!((queue[0].earlier, queue[0].later), (0, 1));
         assert_eq!((queue[1].earlier, queue[1].later), (1, 0));
+    }
+
+    #[test]
+    fn the_queue_marks_an_agents_message_and_shows_what_it_wrote() {
+        let thread = json!({
+            "messages": [{"id": "m1", "origin": "agent-message",
+                "text": "Message you queued for this thread earlier with message_queue (not from the user):\n\nRecheck the build\nthen lint"}],
+            "queuedTurns": [{"turnId": "t1", "messageId": "m1", "scheduledFor": null, "scheduleReason": null}],
+        });
+        let queue = queue_of(&thread, None);
+        assert!(queue[0].agent);
+        assert_eq!(queue[0].text, "Recheck the build\nthen lint");
+        // The user's own message keeps its text and is not marked as an agent's.
+        let typed = json!({
+            "messages": [{"id": "m1", "text": "Run the tests"}],
+            "queuedTurns": [{"turnId": "t1", "messageId": "m1", "scheduledFor": null, "scheduleReason": null}],
+        });
+        let queue = queue_of(&typed, None);
+        assert!(!queue[0].agent);
+        assert_eq!(queue[0].text, "Run the tests");
+    }
+
+    #[test]
+    fn the_queue_label_keeps_agent_attribution_state_and_conditions() {
+        let thread = json!({
+            "messages": [{"id": "m1", "origin": "agent-message",
+                "text": "Message you queued for this thread earlier with message_queue (not from the user):\n\nRecheck the build"}],
+            "queuedTurns": [{"turnId": "t1", "messageId": "m1", "scheduledFor": "2026-11-16T20:00:00.000Z", "scheduleReason": null}],
+        });
+        let read = json!({"entries": [{
+            "threadId": "a", "turnId": "t1",
+            "policy": {"held": false, "conditions": [{}, {}, {}]},
+            "blocked": ["claude: waiting for session reset", "Thread is running"],
+        }]});
+        let queue = queue_of(&thread, Some(&read));
+        assert!(queue[0].agent);
+        assert!(queue[0].scheduled.is_some());
+        assert_eq!(queue[0].condition_count, 3);
+        assert_eq!(queue[0].blocked.len(), 2);
+        assert_eq!(queue_label(&queue[0]), "agent · scheduled · 3 conditions");
+        // Attribution is not replaced by the state: both stay in the label.
+        assert!(queue_label(&queue[0]).starts_with("agent · scheduled"));
+    }
+
+    #[test]
+    fn the_queue_label_keeps_a_manual_or_usage_hold_and_its_condition_count() {
+        let entry = |scheduled: Option<&str>| Queued {
+            key: "t1".into(),
+            text: "waiting".into(),
+            images: vec![],
+            held: true,
+            agent: false,
+            scheduled: scheduled.map(str::to_string),
+            condition_count: 2,
+            blocked: vec![
+                "claude: waiting for session reset".into(),
+                "Thread is running".into(),
+            ],
+            earlier: 0,
+            later: 0,
+        };
+        assert_eq!(queue_label(&entry(None)), "held · 2 conditions");
+        // A usage hold that is also scheduled still shows the count; the state
+        // is not replaced by the time.
+        assert_eq!(
+            queue_label(&entry(Some("2026-11-16T20:00:00.000Z"))),
+            "held · 2 conditions"
+        );
     }
 
     #[test]

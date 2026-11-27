@@ -11,7 +11,33 @@
  */
 import { CliError } from "../errors.js";
 import type { ThreadEnvelope } from "../types.js";
-import type { ReadView } from "./types.js";
+import type { ReadView, StoredTurn } from "./types.js";
+
+/** Opens a message from the thread that delegated a task, so the task's model does not read it as the user's. */
+export const TASK_MESSAGE_HEADER = "Message from the thread that delegated this task (not from the user):";
+
+/** Opens a message a thread queued for itself with `message_queue`, so it is not read as the user's. */
+export const SELF_QUEUED_HEADER = "Message you queued for this thread earlier with message_queue (not from the user):";
+
+/** What an agent actually wrote in a message it queued, without the line that marks it as the agent's (MXN-401). */
+export function agentMessageBody(text: string): string {
+  for (const header of [SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER]) {
+    const prefix = `${header}\n\n`;
+    if (text.startsWith(prefix)) return text.slice(prefix.length);
+  }
+  return text;
+}
+
+/**
+ * Whether a turn reached the provider: a promoted turn records `startedAt`,
+ * and a turn that ran at once is not `queued` delivery. A message that never
+ * left the queue carries no provider prompts and no checkpoint. Shared by
+ * history projection, the agent's queue tools and the queued-cancel path, so
+ * a restored retry that already ran is never hidden as unsent.
+ */
+export function startedTurn(turn: StoredTurn): boolean {
+  return turn.delivery !== "queued" || turn.startedAt !== undefined;
+}
 
 export type ThreadListStatus = "active" | "settled" | "snoozed" | "all";
 

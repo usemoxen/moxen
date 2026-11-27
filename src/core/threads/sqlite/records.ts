@@ -369,6 +369,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.turnOutputTokens !== undefined) rest.turnOutputTokens = turn.turnOutputTokens;
   if (turn.startedAt !== undefined) rest.startedAt = turn.startedAt;
   if (turn.heldBySnooze !== undefined) rest.heldBySnooze = turn.heldBySnooze;
+  if (turn.agentThreadId !== undefined) rest.agentThreadId = turn.agentThreadId;
 
   return {
     id: turn.id,
@@ -443,6 +444,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
     ...(rest.startedAt === undefined ? {} : { startedAt: rest.startedAt as string }),
+    ...(rest.agentThreadId === undefined ? {} : { agentThreadId: rest.agentThreadId as string }),
     ...(rest.usagePause === undefined ? {} : { usagePause: rest.usagePause as NonNullable<StoredTurn["usagePause"]> }),
     ...(rest.handoffOpen === undefined ? {} : { handoffOpen: true as const }),
     ...(rest.handoffPending === undefined ? {} : { handoffPending: rest.handoffPending as readonly string[] }),

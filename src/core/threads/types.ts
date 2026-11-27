@@ -333,6 +333,8 @@ export interface StoredTurn {
    */
   readonly handoffPending?: readonly string[];
   readonly queue?: QueuePolicy;
+  /** The agent thread that queued this turn with `message_queue`; only it may list or change the entry (MXN-401). */
+  readonly agentThreadId?: string;
   /**
    * Settle left this plain turn queued because the thread was settled or its
    * provider was exhausted — states the admission path reports as blocked —
@@ -593,6 +595,8 @@ export interface SendTurnInput {
   readonly queue?: QueuePolicy;
   /** Internal coordinator input; never accepted from the client protocol. */
   readonly usageControl?: boolean;
+  /** The agent thread that queued this message with `message_queue`; only it may list or change the entry (MXN-401). */
+  readonly agentThreadId?: string;
   readonly prompt: string;
   readonly ifBusy?: SendIfBusy;
   readonly delivery?: SendDelivery;

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ActivityEnvelope, MessageEnvelope } from "../../../core/types.js";
 import { describeActivity } from "../activity.js";
-import { USAGE_CONTINUE_PROMPT } from "../../../core/threads/views.js";
+import { SELF_QUEUED_HEADER, USAGE_CONTINUE_PROMPT } from "../../../core/threads/views.js";
 import { toMessageEnvelope } from "../../../core/threads/project.js";
 import { isBackgroundNotification, applyThreadFrame, detectUsageLimit, emptyThreadState, isCompactPrompt, isUsageContinue, isUsageProtection, promptSuggestion, retractedIds, taskNotifications, timeline, untilLabel, type ThreadState, queuedLabel, queuedMessages, queuedSummary } from "../thread.js";
 
@@ -203,6 +203,24 @@ describe("waiting messages", () => {
     expect(items[0]).toMatchObject({ turnId: "t-queued", text: "first queued", attachments: 0, scheduledFor: null });
   });
 
+  it("carries every condition and shows an agent's own first line with its marker", () => {
+    const text = `${SELF_QUEUED_HEADER}\n\nRecheck the build\nthen the tests`;
+    const agent = { ...user("m-agent", text), origin: "agent-message" } as MessageEnvelope;
+    const items = queuedMessages(
+      state({
+        messages: [agent],
+        thread: {
+          queuedTurns: [
+            { turnId: "t-agent", messageId: "m-agent", scheduledFor: null, scheduleReason: null, conditions: [{ type: "reset", provider: "claude", window: "session" }] },
+          ],
+        } as unknown as ThreadState["thread"],
+      }),
+    );
+    expect(items[0]!.conditions).toEqual([{ type: "reset", provider: "claude", window: "session" }]);
+    expect(items[0]!.agent).toBe(true);
+    expect(queuedLabel(items[0]!)).toBe("agent · Recheck the build");
+  });
+
   it("labels a queued task notification by what settled, not by its tag", () => {
     const task = { taskId: "t1", source: "moxen" as const, title: "Analyze SFU", status: "completed", durationMs: null, model: null, branch: null, headline: null, filesChanged: null, additions: null, deletions: null, verdict: null, review: false, resumesAt: null, cancelled: false };
     expect(queuedLabel({ text: "<task-notification>\nA task…", tasks: [task] })).toBe("Analyze SFU finished");
@@ -326,6 +344,39 @@ describe("continuing after a usage limit", () => {
     const promoted = activity("p1", "turn.promoted", {}, "turn-2");
     const ran = timeline(state({ activities: [queued, promoted, stopped], messages: [prompt("m2", "turn-2", "queued one")] }));
     expect(ran.map((entry) => entry.id)).toEqual(["m2"]);
+  });
+
+  it("shows a message again after a before-start cancel is restored and promoted", () => {
+    const queued = activity("q1", "turn.queued", {}, "turn-2");
+    const cancelled = activity("i1", "turn.interrupted", { beforeStart: true }, "turn-2");
+    const promoted = activity("p2", "turn.promoted", {}, "turn-2");
+    expect(timeline(state({ activities: [queued, cancelled], messages: [prompt("m2", "turn-2", "later please")] }))).toEqual([]);
+    const restored = timeline(state({ activities: [queued, cancelled, promoted], messages: [prompt("m2", "turn-2", "later please")] }));
+    expect(restored.map((entry) => entry.id)).toEqual(["m2"]);
+  });
+
+  it("uses ledger order for a same-millisecond cancellation and promotion", () => {
+    const at = "2026-09-25T10:00:02.000Z";
+    const queued = { ...activity("q1", "turn.queued", {}, "turn-2"), createdAt: at };
+    const cancelled = { ...activity("i1", "turn.interrupted", { beforeStart: true }, "turn-2"), createdAt: at };
+    const promoted = { ...activity("p1", "turn.promoted", {}, "turn-2"), createdAt: at };
+    const shown = (activities: ActivityEnvelope[]) => timeline(state({ activities, messages: [prompt("m2", "turn-2", "restored")] })).map((entry) => entry.id);
+    expect(shown([queued, cancelled])).toEqual([]);
+    expect(shown([queued, cancelled, promoted])).toEqual(["m2"]);
+    // A cancellation after the promotion is a new take-back: the prompt is gone again.
+    expect(shown([queued, promoted, cancelled])).toEqual([]);
+  });
+
+  it("keeps a restored held message in the queue until its turn starts", () => {
+    const queued = activity("q1", "turn.queued", {}, "turn-2");
+    const cancelled = activity("i1", "turn.interrupted", { beforeStart: true }, "turn-2");
+    const held = state({
+      activities: [queued, cancelled],
+      messages: [prompt("m2", "turn-2", "restored and held")],
+      thread: { id: "t", queuedTurns: [{ turnId: "turn-2", messageId: "m2", scheduledFor: null, scheduleReason: null, held: true }] } as unknown as ThreadState["thread"],
+    });
+    expect(timeline(held)).toEqual([]);
+    expect(queuedMessages(held)[0]?.held).toBe(true);
   });
 
   it("labels a queued native background notification instead of dumping its raw payload", () => {

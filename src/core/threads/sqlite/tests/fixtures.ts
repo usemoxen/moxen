@@ -164,6 +164,7 @@ export function queuedTurn(threadId = "thread-1"): StoredTurn {
     generation: { characters: 100, durationMs: 2_500 },
     turnOutputTokens: 42,
     usagePause: { provider: "claude", windows: [], resetsAt: null, pausedAt: AT, hasUncommittedChanges: null, forced: true },
+    agentThreadId: "thread-agent",
     createdAt: AT,
     updatedAt: LATER,
     startedAt: AT,

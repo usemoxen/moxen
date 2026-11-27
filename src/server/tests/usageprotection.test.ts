@@ -116,7 +116,7 @@ it("accepts handoffs only for the bound request and ignores arbitrary final resp
   await w.store.updateTurn(thread.id, waiting.turn.id, { handoff: { requestId: "request-one", destinationThreadId: w.store.newId(), summaryTurnId: summary.turn.id } });
   const api = new DirectConnection({ storeRoot: w.root, drivers: w.drivers, builtinMcpServers: null });
   try {
-    const scoped: ClientApi = { ...api, query: (async (query) => query.type === "image-generation.availability" ? { available: false } : api.query(query)) as ClientApi["query"] } as ClientApi;
+    const scoped: ClientApi = { ...api, query: (async (query) => query.type === "image-generation.availability" ? { available: false } : api.query(query)) as ClientApi["query"] } as unknown as ClientApi;
     expect((await availableMoxenTools(scoped, thread.id, {})).some((tool) => tool.name === "submit_handoff")).toBe(true);
     expect((await callMoxenTool(api, thread.id, "submit_handoff", { requestId: "another-request", summary: "wrong" })).isError).toBe(true);
     expect((await callMoxenTool(api, thread.id, "submit_handoff", { requestId: "request-one", summary: "Only this payload is the summary" })).isError).toBe(false);

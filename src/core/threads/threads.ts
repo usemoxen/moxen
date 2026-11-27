@@ -15,6 +15,7 @@ import { CliError } from "../errors.js";
 import { isCompactCommand } from "../providers/spi.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
 import { antigravityHoldsAutomaticDispatch, automaticDispatchPrompt, hasSnoozeConditions, loadTurnOrigins, providerExhausted, snoozeActive, turnOriginKey, type QueueCondition, type TurnOrigins } from "./queue.js";
+import { startedTurn } from "./views.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { isDraining, serverDrainingError } from "./drain.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
@@ -693,6 +694,7 @@ export async function sendTurn(
       threadId,
       status,
       ...(heldQueue ? { queue: heldQueue } : {}),
+      ...(input.agentThreadId ? { agentThreadId: input.agentThreadId } : {}),
       ...(heldBehind || (drainHeld && !snoozeHeld) ? { heldAtSettle: true } : {}),
       ...(snoozeHeld ? { heldBySnooze: true } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
@@ -797,7 +799,7 @@ async function interruptTurnLocked(
     summary: reason ?? turn.id,
     // A queued or scheduled message taken back before it ran: clients drop
     // it from the transcript rather than show a turn that never happened.
-    ...(turn.status === "queued" ? { payload: { beforeStart: true } } : {}),
+    ...(!startedTurn(turn) ? { payload: { beforeStart: true } } : {}),
     createdAt: now,
   });
   if (!updated) {
@@ -1506,7 +1508,7 @@ async function cancelStaleContinueLocked(store: ThreadStore, threadId: string, t
     summary: turn.id,
     // Taken back before it ran: clients drop it from the transcript rather
     // than show a turn that never happened.
-    payload: { beforeStart: true },
+    ...(!startedTurn(turn) ? { payload: { beforeStart: true } } : {}),
     createdAt: now,
   });
   store.emit(threadId, "turn-interrupted");

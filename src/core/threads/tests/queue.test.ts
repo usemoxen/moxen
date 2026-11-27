@@ -16,7 +16,8 @@ import { settleRuns } from "../../testing/turns.js";
 import { automaticUsageBlock, loadTurnOrigins, parseQueuePolicy, queueAdmission, type QueuePolicy, type QueueRow } from "../queue.js";
 import type { StoredMessage, StoredThread, StoredTurn } from "../types.js";
 import { DEFAULT_CONFIG } from "../../config.js";
-import { editWorkQueue, prepareQueuedHandoff, queueAgentMessage, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, wakeDueSnoozes, type OperationContext } from "../operations.js";
+import { editWorkQueue, prepareQueuedHandoff, queueAgentMessage, editAgentQueuedMessage, listAgentQueuedMessages, removeAgentQueuedMessage, readWorkQueue, recoverOrphanedTurn, runDueScheduledTurn, runWorkQueue, pendingHandoff, startTurn, submitHandoff, scheduleUsageContinue, wakeDueSnoozes, type OperationContext } from "../operations.js";
+import { toThreadEnvelope } from "../project.js";
 import { USAGE_CONTINUE_PROMPT } from "../views.js";
 
 afterEach(resetUsageLimitsForTests);
@@ -280,6 +281,158 @@ describe("conditional work queue", () => {
     recordUsageWindows("codex", [{ id: "weekly", label: "Weekly", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 86400_000).toISOString() }]);
     expect(automaticUsageBlock("codex", w.ctx.config)).not.toEqual([]);
     expect(automaticUsageBlock("opencode", w.ctx.config)).toEqual([]);
+  });
+});
+
+describe("a message an agent queues on a running thread", () => {
+  /** The turn that is running when the agent queues its own message. */
+  async function selfQueued(w: Awaited<ReturnType<typeof world>>, provider: string, conditions: readonly unknown[]) {
+    const thread = await w.make(provider);
+    const running = await sendTurn(w.store, thread.id, { prompt: "first turn" });
+    const queued = await queueAgentMessage(w.ctx, thread.id, { message: "after the wait", conditions: parseQueuePolicy({ conditions }).conditions });
+    expect(queued).toMatchObject({ status: "queued", self: true });
+    expect(queued.waitingFor).toEqual(expect.arrayContaining([expect.stringContaining("Thread is running")]));
+    return { thread, running, queued };
+  }
+
+  it("runs once the turn ends and a reset condition, named by the provider instance, is met", async () => {
+    const w = await world();
+    const now = Date.now();
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 60_000).toISOString() }], now);
+    const { thread, running, queued } = await selfQueued(w, "claudeAgent", [{ type: "reset", provider: "claudeAgent", window: "session" }]);
+    // The account key, not the instance id, is what the usage snapshot holds (MXN-349).
+    expect(queued.waitingFor).not.toEqual(expect.arrayContaining([expect.stringContaining("claudeAgent")]));
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx, now); await settleRuns();
+    expect(w.sent).toEqual([]);
+    await runWorkQueue(w.ctx, now + 66_000); await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turnId)?.status).not.toBe("queued");
+  });
+
+  it("runs once the turn ends and a usage condition, named by the provider instance, is met", async () => {
+    const w = await world();
+    const now = Date.now();
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 99, exhausted: false, resetsAt: new Date(now + 60_000).toISOString() }], now);
+    const { thread, running, queued } = await selfQueued(w, "claudeAgent", [{ type: "usage", provider: "claudeAgent", window: "session", minimum: 40 }]);
+    expect(queued.waitingFor).toEqual(expect.arrayContaining([expect.stringContaining("needs 40%")]));
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx, now + 1000); await settleRuns();
+    expect(w.sent).toEqual([]);
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 20, exhausted: false, resetsAt: new Date(now + 120_000).toISOString() }], now + 2000);
+    await runWorkQueue(w.ctx, now + 3000); await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+  });
+
+  it("runs once the turn ends and the thread it waits for has nothing running or queued", async () => {
+    const w = await world();
+    const dependency = await w.make();
+    const dependencyTurn = await sendTurn(w.store, dependency.id, { prompt: "prerequisite" });
+    const { thread, running } = await selfQueued(w, "codex", [{ type: "thread", threadId: dependency.id }]);
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx); await settleRuns();
+    expect(w.sent).toEqual([]);
+    await completeTurn(w.store, dependency.id, dependencyTurn.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx); await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+  });
+
+  it("runs once the turn ends and an at condition's time arrives", async () => {
+    const w = await world();
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const { thread, running } = await selfQueued(w, "codex", [{ type: "at", at }]);
+    await completeTurn(w.store, thread.id, running.turn.id, { text: "done" });
+    await runWorkQueue(w.ctx, Date.parse(at) - 1000); await settleRuns();
+    expect(w.sent).toEqual([]);
+    await runWorkQueue(w.ctx, Date.parse(at) + 1000); await settleRuns();
+    expect(w.sent.map((turn) => turn.threadId)).toEqual([thread.id]);
+  });
+
+  it("refuses a thread condition that names the calling thread, because after this turn is already implied", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const before = await w.store.readTurns(thread.id);
+    await expect(queueAgentMessage(w.ctx, thread.id, { message: "later", conditions: parseQueuePolicy({ conditions: [{ type: "thread", threadId: thread.id }] }).conditions }))
+      .rejects.toMatchObject({ code: "QUEUE_THREAD_SELF", message: expect.stringContaining("after this turn") });
+    expect(await w.store.readTurns(thread.id)).toHaveLength(before.length);
+  });
+
+  it("refuses a provider key that is a prototype member, and reads a bad one already stored", async () => {
+    const w = await world();
+    const thread = await w.make();
+    expect(() => parseQueuePolicy({ conditions: [{ type: "usage", provider: "constructor", window: "session", minimum: 5 }] })).toThrow(CliError);
+    expect(() => parseQueuePolicy({ conditions: [{ type: "reset", provider: "__proto__", window: "session" }] })).toThrow(CliError);
+    const queued = await sendTurn(w.store, thread.id, { prompt: "bad condition", queue: parseQueuePolicy({ conditions: [] }) });
+    await w.store.updateTurn(thread.id, queued.turn.id, { queue: { ...queued.turn.queue!, conditions: [{ type: "usage", provider: "constructor", window: "session", minimum: 5 }] } });
+    const entry = (await readWorkQueue(w.ctx)).find((candidate) => candidate.turnId === queued.turn.id);
+    expect(entry?.blocked).toContain("constructor: usage unavailable");
+    await expect(runWorkQueue(w.ctx)).resolves.toBeUndefined();
+    await settleRuns();
+    expect(w.sent).toEqual([]);
+    await editWorkQueue(w.ctx, thread.id, queued.turn.id, "remove");
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)?.queue?.removed).toBe(true);
+  });
+
+  it("refuses an agent removal once the entry has failed instead of taking it back", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const queued = await sendTurn(w.store, thread.id, {
+      prompt: "agent work", agentThreadId: thread.id,
+      queue: parseQueuePolicy({ conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }] }),
+    });
+    await w.store.updateTurn(thread.id, queued.turn.id, { status: "failed", error: "boom", completedAt: w.store.nowIso() });
+    await expect(removeAgentQueuedMessage(w.ctx, thread.id, queued.turn.id)).rejects.toMatchObject({ code: "QUEUE_MESSAGE_STARTED" });
+    const turn = (await w.store.readTurns(thread.id)).find((candidate) => candidate.id === queued.turn.id)!;
+    expect(turn.status).toBe("failed");
+    expect(turn.queue?.removed).not.toBe(true);
+  });
+
+  it.each(["session", "weekly", "all"] as const)("accepts the exact usage window %s", (window) => {
+    expect(parseQueuePolicy({ conditions: [{ type: "usage", provider: "codex", window, minimum: 5 }] }).conditions[0]).toMatchObject({ type: "usage", window });
+  });
+
+  it.each([["session"], { kind: "session" }, "daily", null, 1])("rejects a coerced or unknown usage window %j before it is stored", (window) => {
+    expect(() => parseQueuePolicy({ conditions: [{ type: "usage", provider: "codex", window, minimum: 5 }] })).toThrow(CliError);
+  });
+
+  it("exposes the user's hold on the queued-turn envelope", async () => {
+    const w = await world();
+    const thread = await w.make();
+    const queued = await sendTurn(w.store, thread.id, { prompt: "hold me", queue: parseQueuePolicy({ conditions: [] }) });
+    await editWorkQueue(w.ctx, thread.id, queued.turn.id, "hold");
+    const envelope = toThreadEnvelope((await w.store.readThreadRecord(thread.id))!, await w.store.readTurns(thread.id));
+    expect(envelope.queuedTurns?.[0]).toMatchObject({ turnId: queued.turn.id, held: true });
+  });
+
+  it.each([
+    { title: "a message that never ran", started: false, restored: false, listed: true, mutable: true, beforeStart: 1 },
+    { title: "a promoted and failed message", started: true, restored: false, listed: false, mutable: false, beforeStart: 0 },
+    { title: "a promoted, failed, then restored message", started: true, restored: true, listed: false, mutable: false, beforeStart: 0 },
+  ])("treats $title by whether it started", async ({ started, restored, listed, mutable, beforeStart }) => {
+    const w = await world();
+    const thread = await w.make();
+    const queue = parseQueuePolicy({ conditions: [{ type: "at", at: new Date(Date.now() + 3_600_000).toISOString() }] });
+    const queued = await sendTurn(w.store, thread.id, { prompt: "agent work", agentThreadId: thread.id, queue });
+    if (started) await w.store.updateTurn(thread.id, queued.turn.id, { status: "failed", error: "boom", startedAt: w.store.nowIso(), completedAt: w.store.nowIso() });
+    if (restored) await editWorkQueue(w.ctx, thread.id, queued.turn.id, "restore");
+    if (restored) expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turn.id)?.startedAt).toBeDefined();
+
+    expect((await listAgentQueuedMessages(w.ctx, thread.id)).some((entry) => entry.turnId === queued.turn.id)).toBe(listed);
+    const edit = editAgentQueuedMessage(w.ctx, thread.id, queued.turn.id, parseQueuePolicy({ conditions: [] }).conditions);
+    if (mutable) await expect(edit).resolves.toMatchObject({ turnId: queued.turn.id });
+    else await expect(edit).rejects.toMatchObject({ code: "QUEUE_MESSAGE_STARTED" });
+    const remove = removeAgentQueuedMessage(w.ctx, thread.id, queued.turn.id);
+    if (mutable) await expect(remove).resolves.toMatchObject({ turnId: queued.turn.id });
+    else await expect(remove).rejects.toMatchObject({ code: "QUEUE_MESSAGE_STARTED" });
+
+    // The operator's own remove stays available, but only writes a
+    // before-start cancellation when the turn never ran.
+    const second = await sendTurn(w.store, thread.id, { prompt: "operator work", queue });
+    if (started) await w.store.updateTurn(thread.id, second.turn.id, { status: "failed", error: "boom", startedAt: w.store.nowIso(), completedAt: w.store.nowIso() });
+    if (restored) await editWorkQueue(w.ctx, thread.id, second.turn.id, "restore");
+    await editWorkQueue(w.ctx, thread.id, second.turn.id, "remove");
+    const cancelled = (await w.store.readActivities(thread.id)).filter((activity) => activity.turnId === second.turn.id && activity.kind === "turn.interrupted" && (activity.payload as { beforeStart?: boolean } | undefined)?.beforeStart === true);
+    expect(cancelled).toHaveLength(beforeStart);
   });
 });
 

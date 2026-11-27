@@ -3192,6 +3192,7 @@ export function App({
               width={chatWidth}
               now={now}
               onCancel={queued.cancel}
+              threads={shell.threads}
               {...(dockPagerControl ? { pager: dockPagerControl } : {})}
             />
           ) : null}

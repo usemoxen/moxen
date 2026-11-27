@@ -69,7 +69,8 @@ import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
 import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, ruleUpdateBlock, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
-import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, buildRuntimeInstructions, describeInstructionsChange, instructionMetaOf, instructionsUpdateBlock, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState, type InstructionsUpdateChanges } from "./instructions.js";
+import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT, agentMessageBody, startedTurn } from "./views.js";
+import { buildRuntimeInstructions, describeInstructionsChange, instructionMetaOf, instructionsUpdateBlock, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState, type InstructionsUpdateChanges } from "./instructions.js";
 import { memoryStartupText } from "../memory/memory.js";
 import { modeChange, modeChangeBlock, withModeChange } from "./modes.js";
 import { ranTurns, toThreadEnvelope } from "./project.js";
@@ -123,7 +124,6 @@ import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchGate
 import { prepareHandoff, continuedTitle } from "./handoff.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
-import { USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT } from "./views.js";
 import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
@@ -1076,13 +1076,20 @@ export async function readWorkQueue(ctx: OperationContext, snapshot?: readonly Q
       }
       // A moved entry may carry a batch: show what its turn sends, not only
       // its first message.
-      entries.push({ threadId: row.thread.id, turnId: turn.id, title: row.thread.title, prompt: turnPrompt(messages, turn)?.text ?? "", provider: driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) ?? "unknown", status: turn.status, policy, blocked, scheduledFor: turn.scheduledFor ?? null });
+      entries.push({ threadId: row.thread.id, turnId: turn.id, title: row.thread.title, prompt: turnPrompt(messages, turn)?.text ?? "", provider: driverKindOfInstance((turn.modelSelection ?? row.thread.modelSelection).instanceId) ?? "unknown", status: turn.status, policy, blocked, scheduledFor: turn.scheduledFor ?? null, started: startedTurn(turn), ...(turn.agentThreadId ? { agentThreadId: turn.agentThreadId } : {}) });
     }
   }
   return entries.sort((a, b) => a.policy.order - b.policy.order || a.turnId.localeCompare(b.turnId));
 }
 
-export async function editWorkQueue(ctx: OperationContext, threadId: string, turnId: string, action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit", policy?: QueuePolicy, notifyParent?: boolean): Promise<void> {
+/** An agent's own queue change (`message_queue_edit` / `message_queue_remove`), checked under the admission lock. */
+export interface AgentQueueEdit {
+  readonly callerThreadId: string;
+  /** For an edit: the new conditions, applied to the current policy so a hold or order is never undone. */
+  readonly conditions?: readonly QueueCondition[];
+}
+
+export async function editWorkQueue(ctx: OperationContext, threadId: string, turnId: string, action: "first" | "last" | "up" | "down" | "hold" | "release" | "remove" | "restore" | "edit", policy?: QueuePolicy, notifyParent?: boolean, agent?: AgentQueueEdit): Promise<void> {
   await ctx.store.withThreadLock(QUEUE_ADMISSION_LOCK, async () => {
     const allEntries = await readWorkQueue(ctx);
     const selected = allEntries.find((entry) => entry.threadId === threadId && entry.turnId === turnId);
@@ -1125,108 +1132,153 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     }
     let summaryToStop: StoredTurn | undefined;
     let cancelProtection = false;
-    const rows = policy ? await queueRows(ctx) : [];
+    const rows = policy || agent ? await queueRows(ctx) : [];
     await ctx.store.withThreadLock(threadId, async () => {
-      const turn = (await ctx.store.readTurns(threadId)).find((t) => t.id === turnId);
-      if (!turn || turn.status !== "queued" && !(turn.queue && (turn.status === "interrupted" || turn.status === "failed"))) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
-      let clearStagedTransfer = false;
-      if (turn.handoff) {
-        let destinationTurns: StoredTurn[] | null;
-        try {
-          destinationTurns = await ctx.store.readTurns(turn.handoff.destinationThreadId, { reportTornTail: true });
-        } catch (cause) {
-          throw new CliError("STORE_READ_FAILED", `Could not read the turns ledger for thread ${turn.handoff.destinationThreadId}.`, { cause });
+      const editLocked = async (): Promise<void> => {
+        const turn = (await ctx.store.readTurns(threadId)).find((t) => t.id === turnId);
+        if (!turn) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
+        if (agent) {
+          if (action !== "edit" && action !== "remove") throw new CliError("INVALID_QUEUE", "Only an edit or a removal can be made for an agent's own entry.");
+          // Under admission + thread + delegation locks: authority, authorship
+          // and eligibility are all read through the same transaction as the
+          // write, so an adoption cannot move the task between them.
+          const scope = await managementScope(ctx, agent.callerThreadId);
+          if (!canManageAgentEntry(scope, agent.callerThreadId, turn.agentThreadId, threadId)) {
+            throw new CliError("QUEUE_MESSAGE_NOT_YOURS", "Only a message this thread's chain queued on a thread it still owns can be changed.");
+          }
+          // A restored retry keeps `startedAt`: it already ran, so the agent can
+          // neither list it nor take it back as an unsent message.
+          if (startedTurn(turn) || turn.status !== "queued" || turn.queue?.removed) throw new CliError("QUEUE_MESSAGE_STARTED", "That message has already run; a message that started cannot be taken back.");
         }
-        if (hiddenTurnsProblem(ctx.store, turn.handoff.destinationThreadId)) {
-          // A skipped destination row could be the entry itself: unknown,
-          // not absent. Refuse before any change, like a failed read.
-          throw new CliError("STORE_READ_FAILED", `Could not verify the turns ledger for thread ${turn.handoff.destinationThreadId}: it skips unreadable rows.`, { details: { threadId: turn.handoff.destinationThreadId } });
+        if (turn.status !== "queued" && !(turn.queue && (turn.status === "interrupted" || turn.status === "failed"))) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
+        let clearStagedTransfer = false;
+        if (turn.handoff) {
+          let destinationTurns: StoredTurn[] | null;
+          try {
+            destinationTurns = await ctx.store.readTurns(turn.handoff.destinationThreadId, { reportTornTail: true });
+          } catch (cause) {
+            throw new CliError("STORE_READ_FAILED", `Could not read the turns ledger for thread ${turn.handoff.destinationThreadId}.`, { cause });
+          }
+          if (hiddenTurnsProblem(ctx.store, turn.handoff.destinationThreadId)) {
+            // A skipped destination row could be the entry itself: unknown,
+            // not absent. Refuse before any change, like a failed read.
+            throw new CliError("STORE_READ_FAILED", `Could not verify the turns ledger for thread ${turn.handoff.destinationThreadId}: it skips unreadable rows.`, { details: { threadId: turn.handoff.destinationThreadId } });
+          }
+          // A staged transfer whose entry does not exist yet is still this
+          // thread's to edit: the migration copies the fresh policy. Anything
+          // already prepared is managed on the destination instead.
+          const prepared = isTransferredTurn(turn)
+            ? destinationTurns.some((candidate) => candidate.queue?.requestId === transferDestinationRequestId(turn.id))
+            : destinationTurns.length > 0;
+          if (prepared) throw new CliError("HANDOFF_ALREADY_PREPARED", "The new thread is already prepared. Manage its queue entry instead.");
+          // Restoring or removing a staged claim unmarks it, so the next
+          // migrate does not move what the user took back.
+          if (isTransferredTurn(turn) && (action === "remove" || action === "restore")) clearStagedTransfer = true;
         }
-        // A staged transfer whose entry does not exist yet is still this
-        // thread's to edit: the migration copies the fresh policy. Anything
-        // already prepared is managed on the destination instead.
-        const prepared = isTransferredTurn(turn)
-          ? destinationTurns.some((candidate) => candidate.queue?.requestId === transferDestinationRequestId(turn.id))
-          : destinationTurns.length > 0;
-        if (prepared) throw new CliError("HANDOFF_ALREADY_PREPARED", "The new thread is already prepared. Manage its queue entry instead.");
-        // Restoring or removing a staged claim unmarks it, so the next
-        // migrate does not move what the user took back.
-        if (isTransferredTurn(turn) && (action === "remove" || action === "restore")) clearStagedTransfer = true;
-      }
-      const existing = turn.queue ?? parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
-      const row = rows.find((candidate) => candidate.thread.id === threadId);
-      const editThread = row?.thread ?? await ctx.store.readThreadRecord(threadId);
-      const editSelection = turn.modelSelection ?? editThread?.modelSelection;
-      const observed = row ? queueAdmission(row, turn, rows, ctx.config).latched : existing.latched ?? [];
-      // A moved entry carries one internal condition — the wait on the
-      // destination's first turn. It is an invariant, not a user condition:
-      // retain it exactly once whether the incoming policy echoed it, moved
-      // it, or omitted it. Client conditions alone must fit the 16-cap, so
-      // strip the wait before validating and re-append it after.
-      let incoming = policy;
-      let internalWait: Extract<QueueCondition, { type: "entry" }> | undefined;
-      if (policy && isTransferDestinationRequestId(turn.queue?.requestId)) {
-        const siblings = await ctx.store.readTurns(threadId);
-        const handoffTurn = [...siblings]
-          .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-          .find((candidate) => !isTransferDestinationRequestId(candidate.queue?.requestId));
-        if (handoffTurn !== undefined) {
-          const isWait = (condition: QueueCondition): boolean =>
-            condition.type === "entry" && condition.threadId === threadId && condition.turnId === handoffTurn.id;
-          incoming = { ...policy, conditions: policy.conditions.filter((condition) => !isWait(condition)) };
-          // Re-attach the stored condition itself where it is marked, so the
-          // server's ownership survives the edit; an older row's unmarked
-          // wait is re-attached unmarked (a later move then preserves it).
-          const stored = turn.queue?.conditions.find((condition): condition is Extract<QueueCondition, { type: "entry" }> => isWait(condition));
-          internalWait = { type: "entry", threadId, turnId: handoffTurn.id, ...(stored?.serverWait === true ? { serverWait: true } : {}) };
+        const existing = turn.queue ?? parseQueuePolicy({ conditions: [], order: Date.parse(turn.createdAt), sequential: false });
+        const row = rows.find((candidate) => candidate.thread.id === threadId);
+        const editThread = row?.thread ?? await ctx.store.readThreadRecord(threadId);
+        const editSelection = turn.modelSelection ?? editThread?.modelSelection;
+        const observed = row ? queueAdmission(row, turn, rows, ctx.config).latched : existing.latched ?? [];
+        // A moved entry carries one internal condition — the wait on the
+        // destination's first turn. It is an invariant, not a user condition:
+        // retain it exactly once whether the incoming policy echoed it, moved
+        // it, or omitted it. Client conditions alone must fit the 16-cap, so
+        // strip the wait before validating and re-append it after.
+        let incoming = policy;
+        let agentConditions = agent?.conditions;
+        let internalWait: Extract<QueueCondition, { type: "entry" }> | undefined;
+        if ((policy || agentConditions) && isTransferDestinationRequestId(turn.queue?.requestId)) {
+          const siblings = await ctx.store.readTurns(threadId);
+          const handoffTurn = [...siblings]
+            .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+            .find((candidate) => !isTransferDestinationRequestId(candidate.queue?.requestId));
+          if (handoffTurn !== undefined) {
+            const isWait = (condition: QueueCondition): boolean =>
+              condition.type === "entry" && condition.threadId === threadId && condition.turnId === handoffTurn.id;
+            if (policy) incoming = { ...policy, conditions: policy.conditions.filter((condition) => !isWait(condition)) };
+            if (agentConditions) agentConditions = agentConditions.filter((condition) => !isWait(condition));
+            // Re-attach the stored condition itself where it is marked, so the
+            // server's ownership survives the edit; an older row's unmarked
+            // wait is re-attached unmarked (a later move then preserves it).
+            const stored = turn.queue?.conditions.find((condition): condition is Extract<QueueCondition, { type: "entry" }> => isWait(condition));
+            internalWait = { type: "entry", threadId, turnId: handoffTurn.id, ...(stored?.serverWait === true ? { serverWait: true } : {}) };
+          }
         }
-      }
-      const parsedPolicy = incoming
-        ? (editSelection ? resolveQueueResetConditions(parseQueuePolicy(incoming, { deferReset: true }), editSelection) : parseQueuePolicy(incoming))
-        : undefined;
-      const stripWait = (conditions: readonly QueueCondition[]): QueueCondition[] =>
-        internalWait === undefined
-          ? [...conditions]
-          : conditions.filter((condition) => !(condition.type === "entry" && condition.threadId === threadId && condition.turnId === internalWait!.turnId));
-      let next: QueuePolicy = parsedPolicy ? { ...existing, ...parsedPolicy, eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => { const left = stripWait(existing.conditions ?? []); const right = stripWait(parsedPolicy.conditions); return index < left.length && index < right.length && JSON.stringify(left[index]) === JSON.stringify(right[index]); }) } : existing;
-      if (internalWait) next = { ...next, conditions: [...stripWait(next.conditions), internalWait] };
-      if (next.conditions.some((c) => c.type === "thread" && c.threadId === threadId || c.type === "entry" && c.threadId === threadId && c.turnId === turnId)) throw new CliError("QUEUE_DEPENDENCY_CYCLE", "An entry cannot wait for itself or its own thread.");
-      if (action === "first" || action === "last") next = { ...next, order: action === "first" ? Math.min(...entries.map((e) => e.policy.order)) - 1 : Math.max(...entries.map((e) => e.policy.order)) + 1 };
-      if (movedOrder !== undefined) next = { ...next, order: movedOrder };
-      if (action === "hold" || action === "release") next = { ...next, held: action === "hold" };
-      if (action === "remove" || action === "restore") next = { ...next, removed: action === "remove", held: action === "restore" ? true : next.held };
-      if (action === "restore") {
-        const thread = await ctx.store.readThreadRecord(threadId);
-        if (thread?.usagePause?.recoveryTurnId === turnId) {
-          const { error, ...pause } = thread.usagePause;
-          if (error !== undefined || pause.phase !== "waiting") await ctx.store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "waiting" } });
+        const parsedPolicy = incoming
+          ? (editSelection ? resolveQueueResetConditions(parseQueuePolicy(incoming, { deferReset: true }), editSelection) : parseQueuePolicy(incoming))
+          : undefined;
+        const stripWait = (conditions: readonly QueueCondition[]): QueueCondition[] =>
+          internalWait === undefined
+            ? [...conditions]
+            : conditions.filter((condition) => !(condition.type === "entry" && condition.threadId === threadId && condition.turnId === internalWait!.turnId));
+        let next: QueuePolicy = parsedPolicy ? { ...existing, ...parsedPolicy, eventAfter: ctx.store.nowIso(), latched: observed.filter((index) => { const left = stripWait(existing.conditions ?? []); const right = stripWait(parsedPolicy.conditions); return index < left.length && index < right.length && JSON.stringify(left[index]) === JSON.stringify(right[index]); }) } : existing;
+        // An agent edits only what it waits for: the user's hold, order,
+        // sequential choice, continuation and latched events all stay, and
+        // reset conditions resolve against the destination's model.
+        if (agentConditions) {
+          const resolvedAgent = editSelection
+            ? resolveQueueResetConditions(parseQueuePolicy({ conditions: agentConditions }, { deferReset: true }), editSelection).conditions
+            : parseQueuePolicy({ conditions: agentConditions }).conditions;
+          next = {
+            ...existing,
+            conditions: resolvedAgent,
+            eventAfter: ctx.store.nowIso(),
+            latched: observed.filter((index) => {
+              const left = stripWait(existing.conditions ?? []);
+              return index < left.length && index < resolvedAgent.length && JSON.stringify(left[index]) === JSON.stringify(resolvedAgent[index]);
+            }),
+          };
         }
-      }
-      if (action === "remove" || action === "hold" || next.continuation !== "model") summaryToStop = (await ctx.store.readTurns(threadId)).find((candidate) => candidate.id === turn.handoff?.summaryTurnId && (candidate.status === "queued" || candidate.status === "running"));
-      const protection = (await ctx.store.readThreadRecord(threadId))?.usagePause;
-      if (action === "remove" && !protection?.forced && protection?.recoveryTurnId === turnId) {
-        cancelProtection = true;
-        summaryToStop = openTurn(await ctx.store.readTurns(threadId)) ?? summaryToStop;
-      }
-      const patchedStatus = action === "remove" ? { status: "interrupted" as const, completedAt: ctx.store.nowIso() } : action === "restore" ? { status: "queued" as const, completedAt: null } : {};
-      if (clearStagedTransfer) {
-        // Drop the staging claim itself (updateTurn cannot delete a key):
-        // a restored or removed staged entry reads as ordinary queue
-        // history from here on.
-        const current = await ctx.store.readTurns(threadId);
-        await ctx.store.rewriteLedger(
-          threadId,
-          "turns",
-          current.map((candidate) => {
-            if (candidate.id !== turnId) return candidate;
-            const { handoff: _clearedClaim, ...rest } = candidate;
-            return { ...rest, queue: next, ...patchedStatus };
-          }),
-        );
-      } else {
-        await ctx.store.updateTurn(threadId, turnId, { queue: next, ...patchedStatus });
-      }
-      ctx.store.emit(threadId, "queue-edited");
+        if (internalWait) next = { ...next, conditions: [...stripWait(next.conditions), internalWait] };
+        if (next.conditions.some((c) => c.type === "thread" && c.threadId === threadId || c.type === "entry" && c.threadId === threadId && c.turnId === turnId)) throw new CliError("QUEUE_DEPENDENCY_CYCLE", "An entry cannot wait for itself or its own thread.");
+        if (action === "first" || action === "last") next = { ...next, order: action === "first" ? Math.min(...entries.map((e) => e.policy.order)) - 1 : Math.max(...entries.map((e) => e.policy.order)) + 1 };
+        if (movedOrder !== undefined) next = { ...next, order: movedOrder };
+        if (action === "hold" || action === "release") next = { ...next, held: action === "hold" };
+        if (action === "remove" || action === "restore") next = { ...next, removed: action === "remove", held: action === "restore" ? true : next.held };
+        if (action === "restore") {
+          const thread = await ctx.store.readThreadRecord(threadId);
+          if (thread?.usagePause?.recoveryTurnId === turnId) {
+            const { error, ...pause } = thread.usagePause;
+            if (error !== undefined || pause.phase !== "waiting") await ctx.store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "waiting" } });
+          }
+        }
+        if (action === "remove" || action === "hold" || next.continuation !== "model") summaryToStop = (await ctx.store.readTurns(threadId)).find((candidate) => candidate.id === turn.handoff?.summaryTurnId && (candidate.status === "queued" || candidate.status === "running"));
+        const protection = (await ctx.store.readThreadRecord(threadId))?.usagePause;
+        if (action === "remove" && !protection?.forced && protection?.recoveryTurnId === turnId) {
+          cancelProtection = true;
+          summaryToStop = openTurn(await ctx.store.readTurns(threadId)) ?? summaryToStop;
+        }
+        const patchedStatus = action === "remove" ? { status: "interrupted" as const, completedAt: ctx.store.nowIso() } : action === "restore" ? { status: "queued" as const, completedAt: null } : {};
+        if (clearStagedTransfer) {
+          // Drop the staging claim itself (updateTurn cannot delete a key):
+          // a restored or removed staged entry reads as ordinary queue
+          // history from here on.
+          const current = await ctx.store.readTurns(threadId);
+          await ctx.store.rewriteLedger(
+            threadId,
+            "turns",
+            current.map((candidate) => {
+              if (candidate.id !== turnId) return candidate;
+              const { handoff: _clearedClaim, ...rest } = candidate;
+              return { ...rest, queue: next, ...patchedStatus };
+            }),
+          );
+        } else {
+          await ctx.store.updateTurn(threadId, turnId, { queue: next, ...patchedStatus });
+        }
+        // Taken back while it waited: record the before-start cancellation so
+        // the transcript drops it instead of showing it as sent (MXN-401). A
+        // restored turn that already ran keeps its history.
+        const removedBeforeStart = action === "remove" && !startedTurn(turn);
+        if (removedBeforeStart) await ctx.store.appendLedger(threadId, "activity", {
+          id: ctx.store.newId(), threadId, turnId, kind: "turn.interrupted", summary: turnId,
+          payload: { beforeStart: true }, createdAt: ctx.store.nowIso(),
+        });
+        ctx.store.emit(threadId, "queue-edited");
+      };
+      if (agent) await ctx.store.withThreadLock("!delegations", editLocked);
+      else await editLocked();
     });
     if (summaryToStop) {
       const thread = await ctx.store.readThreadRecord(threadId);
@@ -1242,6 +1294,72 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     // Putting the entry back re-arms the resume: the task no longer reads cancelled.
     if (action === "restore") await reviveCancelledDelegation(ctx, threadId).catch(() => undefined);
   });
+}
+
+/** One waiting entry an agent queued, as `message_queue_list` reads it. */
+export interface AgentQueuedMessage {
+  readonly turnId: string;
+  readonly threadId: string;
+  readonly threadTitle: string;
+  /** What the agent wrote, without the header that marks it as the agent's. */
+  readonly message: string;
+  readonly status: "queued";
+  readonly scheduledFor: string | null;
+  readonly waitingFor: readonly string[];
+  readonly conditions: readonly QueueCondition[];
+}
+
+/** The waiting entry an agent names by turn id, or the error the tool should read. */
+async function agentQueueEntry(ctx: OperationContext, callerThreadId: string, turnId: string): Promise<WorkQueueEntry> {
+  const entry = (await readWorkQueue(ctx)).find((candidate) => candidate.turnId === turnId);
+  if (!entry) throw new CliError("QUEUE_MESSAGE_NOT_WAITING", "No waiting queue entry has that turnId. It may have started running; a started message cannot be taken back.");
+  if (entry.started === true || entry.status !== "queued" || entry.policy.removed) throw new CliError("QUEUE_MESSAGE_STARTED", "That message has already run; a message that started cannot be taken back.");
+  return entry;
+}
+
+/**
+ * The entries an agent queued that it may still manage: live, authored by
+ * its own chain, on its own thread or on a task it currently owns. The old
+ * parent of a task that continued loses both the list and the mutation.
+ */
+export async function listAgentQueuedMessages(ctx: OperationContext, rawCallerThreadId: string): Promise<AgentQueuedMessage[]> {
+  const callerThreadId = requireThreadId(rawCallerThreadId);
+  const scope = await managementScope(ctx, callerThreadId);
+  return (await readWorkQueue(ctx))
+    .filter((entry) => !entry.started && entry.status === "queued" && !entry.policy.removed && canManageAgentEntry(scope, callerThreadId, entry.agentThreadId, entry.threadId))
+    .map((entry) => ({
+      turnId: entry.turnId,
+      threadId: entry.threadId,
+      threadTitle: entry.title,
+      message: agentMessageBody(entry.prompt),
+      status: "queued" as const,
+      scheduledFor: entry.scheduledFor,
+      waitingFor: entry.blocked,
+      conditions: entry.policy.conditions,
+    }));
+}
+
+/** Replace what an agent's own queued message waits for, under the Work queue's admission lock. */
+export async function editAgentQueuedMessage(ctx: OperationContext, rawCallerThreadId: string, turnId: string, conditions: readonly QueueCondition[]): Promise<{ readonly threadId: string; readonly turnId: string }> {
+  const callerThreadId = requireThreadId(rawCallerThreadId);
+  const entry = await agentQueueEntry(ctx, callerThreadId, turnId);
+  if (conditions.some((condition) => condition.type === "thread" && condition.threadId === entry.threadId)) {
+    throw new CliError(
+      "QUEUE_THREAD_SELF",
+      "A thread condition cannot name the thread the message is queued on: it already waits for that thread's turn, and 'after this turn' is already implied.",
+      { exitCode: 4, details: { threadId: entry.threadId } },
+    );
+  }
+  await editWorkQueue(ctx, entry.threadId, turnId, "edit", undefined, undefined, { callerThreadId, conditions });
+  return { threadId: entry.threadId, turnId };
+}
+
+/** Take back an agent's own queued message, under the Work queue's admission lock. */
+export async function removeAgentQueuedMessage(ctx: OperationContext, rawCallerThreadId: string, turnId: string): Promise<{ readonly threadId: string; readonly turnId: string }> {
+  const callerThreadId = requireThreadId(rawCallerThreadId);
+  const entry = await agentQueueEntry(ctx, callerThreadId, turnId);
+  await editWorkQueue(ctx, entry.threadId, turnId, "remove", undefined, undefined, { callerThreadId });
+  return { threadId: entry.threadId, turnId };
 }
 
 export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snapshot?: readonly QueueRow[]): Promise<void> {
@@ -2447,6 +2565,8 @@ function buildTransferEntry(
     ...(sourceTurn.interactionModeExplicit === true ? { interactionModeExplicit: true as const } : {}),
     modelSelection: sourceTurn.modelSelection ?? destination.modelSelection,
     parentTurnId: sourceTurn.parentTurnId,
+    ...(sourceTurn.origin !== undefined ? { origin: sourceTurn.origin } : {}),
+    ...(sourceTurn.agentThreadId !== undefined ? { agentThreadId: sourceTurn.agentThreadId } : {}),
     ...(sourceTurn.scheduledFor !== undefined && sourceTurn.scheduledFor !== null
       ? {
           scheduledFor: sourceTurn.scheduledFor,
@@ -3516,23 +3636,32 @@ async function carryDelegation(store: ThreadStore, sourceId: string, destination
  * new one. A notification queued and fully delivered just before the
  * transfer still reaches the old thread; the task's next report — and
  * `task_status` on the new parent at any time — cover it.
+ *
+ * @internal Exported for tests: adoption is one delegation transaction,
+ * locked against agent mutations.
  */
-async function adoptTasks(store: ThreadStore, sourceId: string, destinationId: string): Promise<{ taskId: string; title: string }[]> {
-  const rows = (await store.readDelegations().catch(() => [] as StoredDelegation[])).filter(
-    (row) => row.parentThreadId === sourceId,
-  );
+export async function adoptTasks(store: ThreadStore, sourceId: string, destinationId: string): Promise<{ taskId: string; title: string }[]> {
   const moved: { taskId: string; title: string }[] = [];
-  const patches: { id: string; patch: { parentThreadId: string } }[] = [];
-  for (const row of rows) {
-    // A research role's messages go through its run, never through the
-    // delegation row: re-pointing it would only list run traffic as the new
-    // thread's tasks.
-    const child = await store.readThreadRecord(row.childThreadId).catch(() => null);
-    if (child?.researchRole !== undefined) continue;
-    patches.push({ id: row.id, patch: { parentThreadId: destinationId } });
-    moved.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
-  }
-  await store.updateDelegations(patches);
+  // The selection and the atomic rewrite are one transaction: an agent's
+  // authority check takes the same `!delegations` lock, so it sees every row
+  // before the transfer or every row after it. No admission or thread lock is
+  // taken while this one is held.
+  await store.withThreadLock("!delegations", async () => {
+    const rows = (await store.readDelegations().catch(() => [] as StoredDelegation[])).filter(
+      (row) => row.parentThreadId === sourceId,
+    );
+    const patches: { id: string; patch: { parentThreadId: string } }[] = [];
+    for (const row of rows) {
+      // A research role's messages go through its run, never through the
+      // delegation row: re-pointing it would only list run traffic as the new
+      // thread's tasks.
+      const child = await store.readThreadRecord(row.childThreadId).catch(() => null);
+      if (child?.researchRole !== undefined) continue;
+      patches.push({ id: row.id, patch: { parentThreadId: destinationId } });
+      moved.push({ taskId: row.childThreadId, title: child?.title ?? row.childThreadId });
+    }
+    await store.rewriteDelegationsLocked(patches);
+  });
   return moved;
 }
 
@@ -3976,15 +4105,6 @@ export interface RevertOptions {
    * anything changes, when that checkpoint is unavailable.
    */
   readonly restoreFiles?: boolean;
-}
-
-/**
- * Whether a turn reached the provider: a promoted turn records `startedAt`,
- * and a turn that ran at once is not `queued` delivery. A message that never
- * left the queue carries no provider prompts and no checkpoint.
- */
-function startedTurn(turn: StoredTurn): boolean {
-  return turn.delivery !== "queued" || turn.startedAt !== undefined;
 }
 
 /**
@@ -6474,24 +6594,55 @@ async function threadLineage(ctx: OperationContext, threadId: string): Promise<R
   return lineage;
 }
 
+/** The delegations and lineage one authorization check needs, read once for a list of entries. */
+interface ManagementScope {
+  readonly lineage: ReadonlySet<string>;
+  readonly delegations: readonly StoredDelegation[];
+}
+
+async function managementScope(ctx: OperationContext, threadId: string): Promise<ManagementScope> {
+  return { lineage: await threadLineage(ctx, threadId), delegations: await ctx.store.readDelegations() };
+}
+
+/** The delegation this scope holds on `rawTaskId`, following a task that carried on in a new thread. */
+function delegationFor(scope: ManagementScope, rawTaskId: string): StoredDelegation | null {
+  let taskId: string;
+  try {
+    taskId = requireThreadId(rawTaskId);
+  } catch {
+    return null;
+  }
+  const owned = scope.delegations.find((row) => scope.lineage.has(row.parentThreadId) && row.childThreadId === taskId);
+  if (!owned) return null;
+  let row = owned;
+  for (let hops = 0; row.continuedIn !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
+    const next = scope.delegations.find((candidate) => scope.lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
+    if (!next) break;
+    row = next;
+  }
+  return row;
+}
+
+/**
+ * An agent entry is manageable only by the current owner of the destination
+ * and only when its author is in that owner's chain. A thread that delegated
+ * a task keeps managing it after a continuation (the continuation's lineage
+ * names the old parent); the old parent loses it when the task transfers.
+ */
+function canManageAgentEntry(scope: ManagementScope, callerThreadId: string, authorThreadId: string | undefined, destinationId: string): boolean {
+  if (authorThreadId === undefined || !scope.lineage.has(authorThreadId)) return false;
+  return destinationId === callerThreadId || delegationFor(scope, destinationId) !== null;
+}
+
 /**
  * The delegation `parentThreadId` holds on `rawTaskId`, followed to the thread
  * the task carried on in (`continuedIn`). Refuses with `TASK_NOT_FOUND`, the
  * same for a real id and a fake one, when that thread did not delegate it.
  */
 async function ownedDelegation(ctx: OperationContext, parentThreadId: string, rawTaskId: string): Promise<StoredDelegation> {
-  const rows = await ctx.store.readDelegations();
-  const lineage = await threadLineage(ctx, parentThreadId);
-  const owned = rows.find((row) => lineage.has(row.parentThreadId) && row.childThreadId === requireThreadId(rawTaskId));
-  if (!owned) {
+  const row = delegationFor(await managementScope(ctx, parentThreadId), rawTaskId);
+  if (!row) {
     throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${rawTaskId.trim()} for thread ${parentThreadId}.`, { exitCode: 3, details: { taskId: rawTaskId.trim(), parentThreadId } });
-  }
-  // A task that carried on in a new thread is that thread now.
-  let row = owned;
-  for (let hops = 0; row.continuedIn !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
-    const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
-    if (!next) break;
-    row = next;
   }
   return row;
 }
@@ -7195,10 +7346,21 @@ export async function queueAgentMessage(ctx: OperationContext, rawCallerThreadId
   const scheduledFor = input.at === undefined ? undefined : parseScheduledTime(input.at, new Date(), "at");
   const conditions = input.conditions ?? [];
   const queue = conditions.length > 0 ? resolveQueueResetConditions(parseQueuePolicy({ conditions, sequential: ctx.config.usageRecovery === "sequential" }, { deferReset: true }), target.modelSelection) : undefined;
+  // A condition naming the very thread the message runs on can never clear:
+  // the entry itself is queued there. A message queued for its own thread
+  // already waits for that thread's turn, so "after this turn" is implied.
+  if (queue?.conditions.some((condition) => condition.type === "thread" && condition.threadId === targetId)) {
+    throw new CliError(
+      "QUEUE_THREAD_SELF",
+      "A thread condition cannot name the thread the message is queued on: it already waits for that thread's turn, and 'after this turn' is already implied.",
+      { exitCode: 4, details: { threadId: targetId } },
+    );
+  }
   const started = await startTurn(ctx, {
     threadId: targetId,
     prompt: `${self ? SELF_QUEUED_HEADER : TASK_MESSAGE_HEADER}\n\n${message}`,
     origin: "agent-message",
+    agentThreadId: callerId,
     delivery: "queue",
     ...(scheduledFor ? { scheduledFor } : {}),
     ...(queue ? { queue } : {}),
