@@ -1654,7 +1654,7 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
     key: "providers.antigravity.allowUnsupportedUse",
     label: "Allow unsupported Antigravity use",
     description:
-      "Let other threads delegate tasks to Antigravity, let Moxen start prompts you did not write on its threads (task notices, agent messages, continues after a usage limit, handing off), and let Moxen run several Antigravity accounts, each in its own home folder. Google does not support delegation, automatic prompts or multiple accounts on consumer plans and may suspend the Antigravity account.",
+      "Let other threads delegate tasks to Antigravity and let Moxen start prompts you did not write on its threads (task notices, agent messages, continues after a usage limit, handing off). Google does not support delegation or automatic prompts on consumer plans and may suspend the Antigravity account.",
     section: "provider:antigravity",
     group: "Defaults",
     kind: { type: "boolean" },
@@ -2197,6 +2197,8 @@ function extraAccountFieldDescriptor(parsed: ParsedAccountSettingKey): SettingDe
 function accountSettingDescriptor(key: string): SettingDescriptor | undefined {
   const parsed = parseAccountSettingKey(key);
   if (!parsed) return undefined;
+  // `providers.antigravity.allowUnsupportedUse` is provider-wide only, never per-account.
+  if (parsed.kind === "antigravity" && parsed.field === "allowUnsupportedUse") return undefined;
   const template = BY_KEY.get(`providers.${parsed.kind}.${parsed.field}`);
   if (template) {
     return { ...template, key };
@@ -2416,6 +2418,13 @@ function writeSettingValue(config: CliConfig, key: string, value: SettingValue):
     const idx = accounts.findIndex((entry) => entry.id.trim().toLowerCase() === accountKey.id);
     if (idx < 0) {
       throw new CliError("INVALID_CONFIG", `No ${accountKey.kind} profile with id "${accountKey.id}" exists.`);
+    }
+    if (accountKey.kind === "antigravity" && accountKey.field === "homePath" && !clears) {
+      throw new CliError(
+        "ANTIGRAVITY_ACCOUNT_OFF",
+        "Antigravity runs only on the host agy login and does not support an isolated homePath.",
+        { exitCode: 4 },
+      );
     }
     const updated: Record<string, unknown> = { ...(accounts[idx] as unknown as Record<string, unknown>) };
     if (clears) delete updated[accountKey.field];
@@ -2673,6 +2682,18 @@ export function describeAccountSettings(
   };
   const baseDescriptors = SETTINGS.filter((descriptor) => descriptor.section === section);
   return baseDescriptors.map((base) => {
+    // Provider-level settings (such as `providers.antigravity.allowUnsupportedUse`)
+    // stay at their canonical provider key rather than rewriting under `accounts[<id>]`,
+    // so toggling them in the profile page writes where the server actually reads them.
+    if (base.key === "providers.antigravity.allowUnsupportedUse") {
+      const rawVal = config.providers?.antigravity?.allowUnsupportedUse;
+      const value = rawVal === undefined ? base.defaultValue : rawVal;
+      return {
+        descriptor: base,
+        value,
+        explicit: rawVal !== undefined,
+      };
+    }
     const field = base.key.startsWith(prefix) ? base.key.slice(prefix.length) : base.key;
     const key = `providers.${kind}.accounts[${normalizedId}].${field}`;
     const visibleWhen =

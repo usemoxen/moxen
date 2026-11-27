@@ -43,9 +43,9 @@ access controls. When you're unsure whether an integration pattern is allowed
 and orchestration use), check the provider's current terms and official
 guidance before implementing it.
 
-Exception: Antigravity delegation, automatic prompts and multiple accounts
-may exist as a single off-by-default setting that warns that Google doesn't
-support them on consumer plans. Never turn it on for the user.
+Exception: Antigravity delegation and automatic prompts may exist as a single
+off-by-default setting that warns that Google doesn't support them on consumer
+plans. Never turn it on for the user.
 
 ### UI and the design system
 

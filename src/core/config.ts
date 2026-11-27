@@ -855,7 +855,12 @@ function normalizeProviders(raw: unknown, skipped?: SkippedConfigEntry[]): Provi
       normalizeAntigravityAccount,
       skipped,
     );
-    const accounts = normalizeAccountProfiles(rawAccounts, "providers.antigravity.accounts", antigravityFields, skipped);
+    const accounts = normalizeAccountProfiles(rawAccounts, "providers.antigravity.accounts", antigravityFields, skipped)?.map((account) => {
+      if (!("allowUnsupportedUse" in account)) return account;
+      const copy = { ...(account as unknown as Record<string, unknown>) };
+      delete copy.allowUnsupportedUse;
+      return copy as unknown as AntigravityAccountConfig;
+    });
     // allowUnsupportedUse is the one provider-level key for every account: it is
     // not a per-profile field, so the account list above does not take it.
     const antigravity = normalizeSection<AntigravityProviderConfig>(input.antigravity, "providers.antigravity", [...antigravityFields, "allowUnsupportedUse"], skipped);
