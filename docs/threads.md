@@ -200,12 +200,42 @@ the report answers each one first-class. The task notification and
 `task_status` carry the verdict and the review; a finished review with no
 trailing `VERDICT` line is said visibly instead of passed on as finished.
 When the reviewer runs on the same model as the delegating thread, both say so: a
-warning, not a refusal. The comparison reads the models recorded when the
-task was delegated, so a parent that moves on cannot rewrite it. The
-settled verdict is pinned on the delegation: a conversational follow-up
-turn cannot rewrite it, while a follow-up that settles with its own verdict
-re-pins. Continuing a review child starts the new thread in Build, with a
-ledger note saying Review was reset.
+warning, not a refusal. The parent side of that comparison is the model
+recorded when the task was delegated, so a parent that moves on cannot
+rewrite it; the reviewer side is the model that produced the report being
+shown, so a continuation on another model is compared as it actually ran.
+Continuing a review child starts the new thread in Build, with a ledger note
+saying Review was reset. The task stays a review: its notification and
+`task_status` keep the review facts, read from the task's own settled
+outcome rather than the new thread's Build mode.
+
+The outcome is written when a turn settles — on the terminal turn and on the
+delegation — and each hand-off copies it: the newest trailing verdict
+(explicitly none when the report carried none), the report, the model that
+produced it, and the turn it settled in. Until an incarnation settles a
+verdict of its own, a real attempt without one replaces the carried outcome,
+so a later hand-off cannot resurrect an older verdict; after it has its own
+verdict, ordinary verdictless follow-ups leave it pinned, and a newer
+trailing verdict always replaces it. A status read never pins or changes it,
+and a hand-off reconciles a decision recorded on the turn but not yet on the
+row, so a crash cannot lose one. The continued thread's opening prompt says
+how to decline: if it only acknowledges the hand-off and does no review work
+or tool calls, it replies with exactly `MOXEN_REVIEW_HANDOFF_ACK` and nothing
+else; otherwise it does the work and ends with a verdict. Only that exact
+token, as the whole final reply of a completed opening turn that used no tool,
+leaves the carried verdict alone; whitespace around it is ignored. A
+`/compact` turn is not a review attempt and changes nothing. Quoted,
+fenced or translated replies, any reply carrying extra content, empty
+replies, tokens on later turns, and failed or interrupted turns are reports,
+and a report with no trailing verdict is called out as not a finished
+review. A non-English report follows the same rule and ends with either
+unchanged verdict line.
+
+A review row written before outcomes were durable is seeded once from its own
+legacy chain, oldest incarnation first: its newest settled verdict wins over
+the old pin, located by exact report match where possible. Its provenance is
+the pin's recorded model, then the delegation snapshot on the row that held
+the pin, otherwise unknown — never the model of a later continuation.
 
 On the CLI, `moxen threads delegate --thread <id> --prompt <task> --mode research`
 starts one researcher. Adding `--research-size 2,1` supplies the user's size and
@@ -648,8 +678,9 @@ not pending work is capped, every cut or omission names the thread whose
 ledger holds the full text (for `thread_read`), and the rendered context on
 any path stays within a fixed budget. Older records without the carried facts
 read as they are, with nothing carried. Task resolution, live-thread lookup
-and handoff-key retries follow a continuation chain up to 128 hops. Destination
-identity is persisted before creation to avoid duplicate handoffs after restart.
+and handoff-key retries follow a continuation chain to its end, stopping at a
+cycle. Destination identity is persisted before creation to avoid duplicate
+handoffs after restart.
 A delegated task that continues in a new thread stays its parent's task: the
 parent is not told when the source hands off, and is told once when the
 continuation settles, by its new taskId with the original one named. A thread
@@ -676,7 +707,38 @@ contention the queue pass already understands, so the entry stays queued for
 a later pass instead of failing. A crash mid-handoff leaves that record
 behind, and the next start finishes the adoption before it recovers notices,
 so the tasks land on the thread that owns them and not on one that already
-moved on. A continued thread
+moved on. A settle batched for a task that
+has since continued is dropped rather than sent to the parent; when its live
+continuation has already finished, the notice is regenerated for that thread,
+so a lost callback cannot leave the parent with nothing. A report whose parent
+or task moves while it is being built is rechecked before it is sent and goes
+to the owner, with all of that task's waiting notices in one write. Each
+settle the parent is waiting on also records a generation on the delegation
+row: the delegated turn, a continuation's opener, `task_send` (including the
+turn a steer lands in), a queued, scheduled or recovered turn, and any settle
+a pending watch waits for, such as a follow-up after background work. A
+message typed straight into the task is none of these, so neither the running
+server nor a restart reports it. On startup the server replays pending batches
+and then queues a notice for any generation ahead of the last one a notice was
+queued or delivered for (`reportedGeneration` advances when the notice is
+queued, before a parent message records a receipt, and again on delivery). A
+watch that does not survive a restart owes nothing after it. A cancelled
+task replays nothing: cancelling its automatic continue counts its settles so
+far as reported, whether or not the parent is told, and a row that reads
+cancelled is skipped until fresh work revives it. In the JSONL
+store, crash recovery and hand-off races are not transactional: an
+interruption, a hand-off landing during delivery, or a crash between a turn
+and its delegation row can still duplicate or delay a notice. Those paths are
+tracked in MXN-416 and are not guaranteed yet. Task lookup follows the
+hand-off links with no hop cap, so a task answers to its original id however
+many times it continued; a missing link or a cycle reads `TASK_NOT_FOUND`
+rather than answering with a superseded thread. Delegation ledger writes
+assume one writer per store root: the server that holds `server.lock`
+(`docs/overview.md`). That process serializes appends, rewrites and the
+one-step hand-off transfer under one ledger lock; two processes on the same
+root could still lose an append. The ledger lock is taken outside any thread
+lock, never inside one, because a delegation write may take a thread lock
+while it holds the ledger. A continued thread
 starts no new delegations (`THREAD_CONTINUED` names the live thread):
 otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A manual continue needs an idle source: while one of its
@@ -1272,8 +1334,10 @@ later settle added meanwhile for the next flush. The identity of each
 delivered notice is recorded on the message that reports it, in the same
 write that accepts the turn, so a flush whose acknowledgement write
 fails is not replayed as a second message after a restart; the check
-reads the parent's recent notification messages, not an open-ended
-record. A steer the provider refused — or a send that failed after the
+reads every notification message of the parent, so a receipt cannot age
+out while its batch can still be replayed. Notices of one task and kind
+that coalesce while waiting go out as one report with the newest facts,
+and its message records every identity it covers. A steer the provider refused — or a send that failed after the
 message was staged — carries no such record: the failed attempt's
 identities are cleared, and the batch entry keeps the retry. An entry
 whose batch row carried no identity (written before identities existed)

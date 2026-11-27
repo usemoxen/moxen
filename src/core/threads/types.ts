@@ -356,6 +356,17 @@ export type TurnStatus = "queued" | "running" | "completed" | "interrupted" | "f
 /** `background`: a turn the provider started itself, woken by a finished background task or a Monitor event. */
 export type TurnDelivery = "started" | "queued" | "steered" | "restarted" | "injected" | "background";
 
+/**
+ * What a settling turn decided about its review task: the verdict its final
+ * report ended with (explicitly null when the report carried none), the
+ * report, and the model that produced it.
+ */
+export interface StoredReviewDecision {
+  readonly verdict: ReviewVerdict | null;
+  readonly report: string | null;
+  readonly model: string | null;
+}
+
 export interface StoredTurn {
   readonly usagePause?: TurnUsagePause;
   /**
@@ -479,6 +490,25 @@ export interface StoredTurn {
    * The provider never read its prompt, so the next turn on that conversation sends it again.
    */
   readonly unanswered?: true;
+  /**
+   * This turn opened a continued review: it carried the hand-off document and
+   * the acknowledgement instruction. Its exact `MOXEN_REVIEW_HANDOFF_ACK`
+   * reply is the one acknowledgement that leaves the carried verdict alone.
+   */
+  readonly reviewHandoff?: true;
+  /**
+   * The review outcome this terminal turn decided, written with the terminal
+   * update so a crash before the delegation row catches up loses nothing.
+   * Absent when the turn changed nothing (a hand-off acknowledgement, or a
+   * verdictless follow-up after this thread already pinned its own verdict).
+   */
+  readonly reviewDecision?: StoredReviewDecision;
+  /**
+   * The delegating parent waits to hear this turn settle: the delegated turn,
+   * a `task_send`, or a queued, scheduled or recovered turn. A turn typed
+   * straight into the task carries none, so a restart owes no notice for it.
+   */
+  readonly parentNotice?: true;
   /** Tokens spent by the provider run; null when the driver reported none. */
   readonly usage: TurnUsage | null;
   /** Per-turn output when usage itself is a provider session total. */
@@ -633,13 +663,30 @@ export interface StoredDelegation {
    */
   readonly modelSnapshot?: { readonly parent?: string; readonly child?: string };
   /**
-   * A settled review task's pinned outcome: the verdict and report of its
-   * last settled turn. A follow-up turn that settles re-pins. Read paths
-   * prefer this over the latest assistant text, so a conversational
-   * follow-up cannot rewrite the settled verdict. Absent until the task
-   * settles, and on rows written before it existed.
+   * A settled review task's durable outcome: the newest settled verdict
+   * (explicitly null when its report carried none), the report, the model
+   * that produced it, and the thread and turn it settled in. A hand-off
+   * copies it, so a read never replays an earlier transcript. Absent until
+   * the task has produced a report, and on rows written before it existed.
    */
-  readonly review?: { readonly verdict: ReviewVerdict | null; readonly report: string | null };
+  readonly review?: {
+    readonly verdict: ReviewVerdict | null;
+    readonly report: string | null;
+    readonly model?: string | null;
+    readonly threadId?: string;
+    readonly turnId?: string;
+  };
+  /** This task was delegated as a review, or continues one: the parent reads review facts. */
+  readonly reviewTask?: true;
+  /**
+   * The newest settle the parent waits to hear about, counted on the row as
+   * each such turn settles. A notification obligation: when it is ahead of
+   * `reportedGeneration`, a settle happened whose notice was never queued, and
+   * startup recovery sends one.
+   */
+  readonly settleGeneration?: number;
+  /** The newest settle generation a notice was queued (or delivered) for. */
+  readonly reportedGeneration?: number;
   /**
    * The turn an explicit cancel stopped, when one was live. Its own settle
    * lands after the `cancelled` mark is written, so the mark must outlive it;
@@ -729,6 +776,13 @@ export interface SendTurnInput {
   /** Settled threads require an explicit wake before they accept turns. */
   readonly wakeSettled?: boolean;
   readonly handoffNote?: string;
+  /**
+   * This send opens a continued review's first turn: it carries the hand-off
+   * document and the acknowledgement instruction. Internal; never from a client.
+   */
+  readonly reviewHandoff?: boolean;
+  /** The delegating parent waits on the turn this send opens (see `StoredTurn.parentNotice`). Internal; never from a client. */
+  readonly parentNotice?: boolean;
   /** Images sent with the prompt; saved and recorded on the user message. */
   readonly attachments?: readonly ImageAttachmentUpload[];
   /**

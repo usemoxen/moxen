@@ -7,10 +7,11 @@ import { testHarness } from "../../testing/harness.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { createThread, deleteThread, sendTurn, openTurn, completeTurn, interruptTurn, startBackgroundTurn, updateThreadMeta, trackContinuation, untrackContinuation, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
-import { continueThread, continueOwnThread, adoptTasks, editWorkQueue, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, removeAgentQueuedMessage, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { continueThread, continueOwnThread, adoptTasks, cancelTask, delegate, describeTask, editWorkQueue, flushTaskNotifications, prepareQueuedHandoff, queueTaskNotification, queueTaskPauseNotification, recoverTaskNotifications, removeAgentQueuedMessage, runDueScheduledTurn, runWorkQueue, runningTasksNote, type OperationContext } from "../operations.js";
+import { openThreadStore } from "../store.js";
 import { parseQueuePolicy } from "../queue.js";
 import { driverKindOfInstance } from "../../types.js";
-import type { StoredThread } from "../types.js";
+import type { StoredMessage, StoredThread } from "../types.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -1582,4 +1583,503 @@ describe("the queue pass's handoff preparation (MXN-382)", () => {
     expect(after.handoffFailed).toBeUndefined();
     expect((await w.store.readTurns(after.handoff!.destinationThreadId)).map((turn) => turn.queue?.requestId)).toEqual([`handoff:${after.handoff!.requestId}`]);
   });
+});
+
+describe("a task's notices after hand-offs (MXN-389)", () => {
+  it("drops a superseded child's queued settle and reports the successor to the new parent", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d1", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const done = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, done.id, { text: "Done." });
+
+    // The settle is batched for the old parent, durably.
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    // The child hands off, then the orchestrator hands off too, taking both
+    // rows to the new parent.
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    const nextParent = await continueThread(w.ctx, { threadId: parent.id });
+    const successorTurn = (await w.store.readTurns(successor.threadId))[0]!;
+    await completeTurn(w.store, successor.threadId, successorTurn.id, { text: "Done after the handoff." });
+    await queueTaskNotification(w.ctx, nextParent.threadId, successor.threadId);
+
+    // A restart replays both durable batches: the old parent hears nothing
+    // about the superseded child, and the new parent hears the successor once.
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTaskNotifications(w.ctx, nextParent.threadId);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    const heard = await notificationsIn(w, nextParent.threadId);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain(`taskId ${successor.threadId}`);
+    // The successor's own notice names the original task as its origin; no
+    // second notice is delivered for the superseded child itself.
+    expect(heard[0]).not.toContain(`(taskId ${child.id}`);
+  }, 30_000);
+});
+
+describe("a long continuation chain (MXN-389)", () => {
+  it("resolves a task by its original id through more than twenty hand-offs", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const threads = [];
+    for (let index = 0; index <= 20; index += 1) threads.push(await w.make(`link ${index}`));
+    const now = new Date().toISOString();
+    for (let index = 0; index <= 20; index += 1) {
+      await w.store.appendDelegation({
+        id: `d${index}`,
+        parentThreadId: parent.id,
+        childThreadId: threads[index]!.id,
+        prompt: "work",
+        status: "running",
+        ...(index < 20 ? { continuedIn: threads[index + 1]!.id } : {}),
+        ...(index === 0 ? { idempotencyKey: "retry-key" } : {}),
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    // task_status by the original id reads the final child.
+    expect((await describeTask(w.ctx, parent.id, threads[0]!.id)).child.id).toBe(threads[20]!.id);
+    // Task control reaches it too.
+    expect((await cancelTask(w.ctx, parent.id, threads[0]!.id)).child.id).toBe(threads[20]!.id);
+    // An idempotent delegation retry answers with the task as it stands.
+    expect((await delegate(w.ctx, { parentThreadId: parent.id, task: "work", idempotencyKey: "retry-key" })).child.id).toBe(threads[20]!.id);
+
+    // A cycle and a missing successor terminate without exposing an
+    // intermediate, superseded child.
+    await w.store.updateDelegation("d20", { continuedIn: threads[0]!.id });
+    await expect(describeTask(w.ctx, parent.id, threads[0]!.id)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    // Removing the cycle leaves a missing successor, which also terminates.
+    const rows = await w.store.readDelegations();
+    await writeFile(path.join(w.root, "delegations.jsonl"), rows.map((row) => {
+      if (row.id !== "d20") return JSON.stringify(row);
+      const { continuedIn: _cycle, ...rest } = row;
+      return JSON.stringify(rest);
+    }).join("\n") + "\n", "utf8");
+    await w.store.updateDelegation("d19", { continuedIn: "gone-thread" });
+    await expect(describeTask(w.ctx, parent.id, threads[0]!.id)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+  });
+});
+
+describe("a superseded settle and its successor (MXN-389)", () => {
+  async function reviewTaskWithSettle(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    // Batched durably for the parent; the successor's own callback is lost.
+    await queueTaskNotification(w.ctx, parentId, child.id);
+    return child;
+  }
+
+  it.each(["a restart", "a plain flush"] as const)("regenerates the dropped settle for a successor that already finished, on %s", async (path_) => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await reviewTaskWithSettle(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+
+    // No callback queued the successor's notice: replaying the durable batch
+    // must regenerate it instead of dropping the parent's only report. A plain
+    // flush does so without startup's replay of owed settles.
+    if (path_ === "a restart") await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, parent.id);
+    const heard = await notificationsIn(w, parent.id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain(`taskId ${successor.threadId}`);
+    expect(heard[0]).toContain("Review verdict: FIX FIRST");
+  }, 30_000);
+
+  it("leaves a successor that is still running to report its own settle", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await reviewTaskWithSettle(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+
+    // The successor has not settled: dropping the superseded settle is right,
+    // and its own settle brings the report.
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, parent.id, successor.threadId);
+    await flushTaskNotifications(w.ctx, parent.id);
+    const heard = await notificationsIn(w, parent.id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain(`taskId ${successor.threadId}`);
+  }, 30_000);
+});
+
+/**
+ * Wait until a handoff of `parentId` has written its adoption and return the
+ * new owner. A test holding that parent's flush open must not await the whole
+ * handoff: it moves the old parent's notices under the lock the flush holds.
+ */
+async function adopterOf(w: Awaited<ReturnType<typeof world>>, parentId: string): Promise<string> {
+  let owner = parentId;
+  await expect.poll(async () => (owner = (await w.store.readDelegations())[0]!.parentThreadId), { timeout: 10_000 }).not.toBe(parentId);
+  return owner;
+}
+
+describe("durable settle notices across a restart or hand-off (MXN-389)", () => {
+  /** A review task whose settle notice is batched under its parent, with no callback left to run. */
+  async function settledReview(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, parentId, child.id);
+    return child;
+  }
+
+  it("recovers a settle whose notice was never queued, without the predecessor batch", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReview(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    // Flushing while the successor runs drops the predecessor's settle.
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+
+    // The successor persists its verdict; the process dies before the run
+    // callback queues anything. Reopen: the obligation is on the row.
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+    await recoverTaskNotifications(w.ctx);
+    const heard = await notificationsIn(w, parent.id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain(`taskId ${successor.threadId}`);
+    expect(heard[0]).toContain("Review verdict: FIX FIRST");
+    expect((await describeTask(w.ctx, parent.id, child.id)).review).toMatchObject({ verdict: "FIX FIRST" });
+  }, 30_000);
+
+  it.each([["manual", false], ["automatic", true]] as const)("admits a settle to the parent that owns the task when a hand-off lands first (%s)", async (_kind, automatic) => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReview(w, parent.id);
+    const [reviewed] = await w.store.readTurns(child.id);
+
+    // Pause after the final delegation lookup (the flush's last read of the
+    // parent, before admission), continue the parent, then resume.
+    const realTurns = w.store.readTurns.bind(w.store);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    let parentReads = 0;
+    w.store.readTurns = async (threadId: string) => {
+      const turns = await realTurns(threadId);
+      if (threadId === parent.id) {
+        parentReads += 1;
+        if (parentReads === 2) {
+          entered();
+          await gate;
+        }
+      }
+      return turns;
+    };
+    try {
+      const flushing = flushTaskNotifications(w.ctx, parent.id);
+      await paused;
+      const handoff = continueThread(w.ctx, { threadId: parent.id, ...(automatic ? { automatic } : {}) });
+      await adopterOf(w, parent.id);
+      release();
+      await flushing;
+      const nextParent = await handoff;
+      await flushTaskNotifications(w.ctx, parent.id);
+      await flushTaskNotifications(w.ctx, nextParent.threadId);
+      expect(await notificationsIn(w, parent.id)).toEqual([]);
+      const heard = await notificationsIn(w, nextParent.threadId);
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toContain(`taskId ${child.id}`);
+    } finally {
+      w.store.readTurns = realTurns;
+    }
+    expect(reviewed).toBeDefined();
+  }, 30_000);
+
+  it("delivers a successor's verdict once when a stale batch is replayed", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReview(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    const nextParent = await continueThread(w.ctx, { threadId: parent.id });
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "Re-checked the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, nextParent.threadId, successor.threadId);
+    await flushTaskNotifications(w.ctx, nextParent.threadId);
+    expect(await notificationsIn(w, nextParent.threadId)).toHaveLength(1);
+
+    // Replaying the predecessor's stale batch regenerates the successor's
+    // notice; the delivered identity keeps it from posting a second time.
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTaskNotifications(w.ctx, nextParent.threadId);
+    await recoverTaskNotifications(w.ctx);
+    expect(await notificationsIn(w, nextParent.threadId)).toHaveLength(1);
+  }, 30_000);
+});
+
+/** Every notice identity a delivered message recorded, in one stable order. */
+function recordedIdentities(message: StoredMessage | undefined): string[] {
+  return [...(message?.notification?.notices ?? []), ...(message?.notification?.noticeEntries ?? [])].sort();
+}
+
+/** The identities of a task's settles: one per turn it finished. */
+async function settleIdentities(w: Awaited<ReturnType<typeof world>>, childId: string): Promise<string[]> {
+  return (await w.store.readTurns(childId)).map((turn) => `settle:${childId}:${turn.id}`).sort();
+}
+
+describe("notice receipts and identities (MXN-389)", () => {
+  /** A review task whose settle notice is batched under its parent. */
+  async function settledReviewOnce(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, parentId, child.id);
+    return child;
+  }
+
+  it("records every identity a coalesced report consumed", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReviewOnce(w, parent.id);
+    const recheck = (await sendTurn(w.store, child.id, { prompt: "Re-check" })).turn;
+    await completeTurn(w.store, child.id, recheck.id, { text: "Re-checked the login form.\n\nVERDICT: MERGE" });
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+
+    // The pre-acknowledgement batch is what a crash before the acknowledgement
+    // would leave behind.
+    const batchesFile = path.join(w.root, "task-notification-batches.json");
+    const saved = await readFile(batchesFile, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    const delivered = (await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification");
+    expect(delivered).toHaveLength(1);
+    expect(recordedIdentities(delivered[0])).toEqual(await settleIdentities(w, child.id));
+    expect(recordedIdentities(delivered[0])).toHaveLength(2);
+
+    await writeFile(batchesFile, saved, "utf8");
+    const store = await openThreadStore(w.root);
+    await recoverTaskNotifications({ ...w.ctx, store });
+    const after = (await store.readMessages(parent.id)).filter((message) => message.origin === "task-notification");
+    expect(after).toHaveLength(1);
+  }, 30_000);
+
+  it("keeps a delivered receipt past many later notifications", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReviewOnce(w, parent.id);
+    const batchesFile = path.join(w.root, "task-notification-batches.json");
+    const saved = await readFile(batchesFile, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect((await notificationsIn(w, parent.id))).toHaveLength(1);
+
+    // Older receipts must not expire while their batch is still replayable.
+    for (let index = 0; index < 64; index += 1) {
+      await w.store.appendLedger(parent.id, "messages", {
+        id: `later-${index}`,
+        threadId: parent.id,
+        turnId: "later-turn",
+        role: "user",
+        text: "later",
+        origin: "task-notification",
+        notification: { tasks: [], notices: [`other:${index}`] },
+        createdAt: w.store.nowIso(),
+      });
+    }
+    await writeFile(batchesFile, saved, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    const [identity] = await settleIdentities(w, child.id);
+    const receipts = (await w.store.readMessages(parent.id)).filter((message) =>
+      message.notification?.notices?.includes(identity!),
+    );
+    expect(receipts).toHaveLength(1);
+  }, 30_000);
+});
+
+describe("one report for one verdict and one pause (MXN-389)", () => {
+  /** A review task whose first settle notice is batched under its parent. */
+  async function settledReviewOnce(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    await queueTaskNotification(w.ctx, parentId, child.id);
+    return child;
+  }
+
+  it("reroutes a coalesced verdict as one report when the parent is continued mid-delivery", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await settledReviewOnce(w, parent.id);
+    for (const prompt of ["Re-check one", "Re-check two"]) {
+      const turn = (await sendTurn(w.store, child.id, { prompt })).turn;
+      await completeTurn(w.store, child.id, turn.id, { text: "Re-checked the login form.\n\nVERDICT: MERGE" });
+      await queueTaskNotification(w.ctx, parent.id, child.id);
+    }
+
+    // Pause the old parent's flush after its final owner lookup, continue the
+    // parent, then resume: the report is rerouted to the successor.
+    const realTurns = w.store.readTurns.bind(w.store);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    let parentReads = 0;
+    w.store.readTurns = async (threadId: string) => {
+      const turns = await realTurns(threadId);
+      if (threadId === parent.id) {
+        parentReads += 1;
+        if (parentReads === 2) {
+          entered();
+          await gate;
+        }
+      }
+      return turns;
+    };
+    // The destination's second admission is where a partial group could be
+    // flushed: flush it first, as a restart or timer could.
+    const realLock = w.store.withThreadLock.bind(w.store);
+    let destination = "";
+    let destinationLocks = 0;
+    let flushedEarly = false;
+    w.store.withThreadLock = async <T>(key: string, run: () => Promise<T>): Promise<T> => {
+      if (destination !== "" && key === `\0task-notification:${destination}`) {
+        destinationLocks += 1;
+        if (destinationLocks === 2 && !flushedEarly) {
+          flushedEarly = true;
+          await flushTaskNotifications(w.ctx, destination);
+        }
+      }
+      return await realLock(key, run);
+    };
+    try {
+      const flushing = flushTaskNotifications(w.ctx, parent.id);
+      await paused;
+      const handoff = continueThread(w.ctx, { threadId: parent.id });
+      destination = await adopterOf(w, parent.id);
+      release();
+      await flushing;
+      expect((await handoff).threadId).toBe(destination);
+      await flushTaskNotifications(w.ctx, destination);
+      expect(await notificationsIn(w, parent.id)).toEqual([]);
+      const heard = await notificationsIn(w, destination);
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toContain("Review verdict: MERGE");
+      const message = (await w.store.readMessages(destination)).find((entry) => entry.origin === "task-notification");
+      // One report records its own identity and the two it replaced.
+      expect(recordedIdentities(message)).toEqual(await settleIdentities(w, child.id));
+      expect(recordedIdentities(message)).toHaveLength(3);
+    } finally {
+      w.store.readTurns = realTurns;
+      w.store.withThreadLock = realLock;
+    }
+  }, 30_000);
+
+  it("reports the newest pause once and records every pause identity", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d-pause", parentThreadId: parent.id, childThreadId: child.id, prompt: "work", status: "running", notify: true, createdAt: now, updatedAt: now });
+    // Keep the task live so the pause is deliverable.
+    await sendTurn(w.store, child.id, { prompt: "Later", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+    await queueTaskPauseNotification(w.ctx, child.id, "2027-01-01T00:00:00.000Z");
+    const done = (await sendTurn(w.store, child.id, { prompt: "One more step" })).turn;
+    await completeTurn(w.store, child.id, done.id, { text: "One more step done." });
+    await queueTaskPauseNotification(w.ctx, child.id, "2027-02-01T00:00:00.000Z");
+
+    const batches = path.join(w.root, "task-notification-batches.json");
+    const saved = await readFile(batches, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    const heard = await notificationsIn(w, parent.id);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toContain("2027-02-01");
+    expect(heard[0]).not.toContain("2027-01-01");
+
+    // Both pause identities are covered by that one report.
+    await writeFile(batches, saved, "utf8");
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+  }, 30_000);
+});
+
+describe("review facts and owed notices against compaction and withdrawn messages (MXN-389)", () => {
+  async function reviewTask(w: Awaited<ReturnType<typeof world>>, parentId: string) {
+    const child = await createThread(w.store, {
+      projectId: "p",
+      title: "review login",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+      interactionMode: "review",
+    });
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: `d-${child.id}`, parentThreadId: parentId, childThreadId: child.id, prompt: "Review it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const reviewed = (await sendTurn(w.store, child.id, { prompt: "Review it" })).turn;
+    await completeTurn(w.store, child.id, reviewed.id, { text: "One nit in the login form.\n\nVERDICT: FIX FIRST" });
+    return child;
+  }
+
+  it("keeps a carried verdict through a compaction of the continuation", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await reviewTask(w, parent.id);
+    const successor = await continueThread(w.ctx, { threadId: child.id });
+    const [opening] = await w.store.readTurns(successor.threadId);
+    await completeTurn(w.store, successor.threadId, opening!.id, { text: "MOXEN_REVIEW_HANDOFF_ACK" });
+    const compact = (await sendTurn(w.store, successor.threadId, { prompt: "/compact" })).turn;
+    await completeTurn(w.store, successor.threadId, compact.id, { text: "Conversation compacted." });
+
+    expect((await describeTask(w.ctx, parent.id, child.id)).review).toMatchObject({ verdict: "FIX FIRST" });
+  }, 30_000);
+
+  it("owes no notice after restart for a queued message taken back before it ran", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await reviewTask(w, parent.id);
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+
+    const later = (await sendTurn(w.store, child.id, { prompt: "Later", scheduledFor: new Date(Date.now() + 3_600_000).toISOString(), parentNotice: true })).turn;
+    await interruptTurn(w.store, child.id, later.id);
+    await recoverTaskNotifications(w.ctx);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+  }, 30_000);
 });

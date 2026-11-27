@@ -57,10 +57,10 @@ export interface TaskNotification {
   /** True when Moxen could not check for background work, so more may still be running. */
   readonly backgroundUnknown: boolean;
   /**
-   * Review tasks only (a child in Review mode): the verdict the report ends
-   * with, whether the reviewer shares the parent's model, and the report
-   * itself. Absent for every other task, so their notifications read as
-   * they always did.
+   * Review tasks only (a child delegated in Review mode, or a continuation of
+   * one): the verdict the report ends with, whether the reviewer shares the
+   * parent's model, and the report itself. Absent for every other task, so
+   * their notifications read as they always did.
    */
   readonly review?: {
     readonly verdict: ReviewVerdict | null;

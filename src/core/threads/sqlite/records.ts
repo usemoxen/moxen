@@ -386,6 +386,9 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.agentThreadId !== undefined) rest.agentThreadId = turn.agentThreadId;
   if (turn.automatic !== undefined) rest.automatic = turn.automatic;
   if (turn.control !== undefined) rest.control = turn.control;
+  if (turn.reviewHandoff === true) rest.reviewHandoff = true;
+  if (turn.reviewDecision !== undefined) rest.reviewDecision = turn.reviewDecision;
+  if (turn.parentNotice === true) rest.parentNotice = true;
 
   return {
     id: turn.id,
@@ -472,6 +475,9 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     ...(rest.unanswered === undefined ? {} : { unanswered: true as const }),
     ...(rest.generation === undefined ? {} : { generation: rest.generation as NonNullable<StoredTurn["generation"]> }),
     ...(rest.turnOutputTokens === undefined ? {} : { turnOutputTokens: rest.turnOutputTokens as number }),
+    ...(rest.reviewHandoff === true ? { reviewHandoff: true as const } : {}),
+    ...(rest.reviewDecision === undefined ? {} : { reviewDecision: rest.reviewDecision as NonNullable<StoredTurn["reviewDecision"]> }),
+    ...(rest.parentNotice === true ? { parentNotice: true as const } : {}),
   };
 }
 
@@ -580,6 +586,9 @@ export function encodeDelegation(delegation: StoredDelegation): DelegationRow {
   if (delegation.cancelledGeneration !== undefined) rest.cancelledGeneration = delegation.cancelledGeneration;
   if (delegation.lastSettledTurnId !== undefined) rest.lastSettledTurnId = delegation.lastSettledTurnId;
   if (delegation.lastSettledSeq !== undefined) rest.lastSettledSeq = delegation.lastSettledSeq;
+  if (delegation.reviewTask === true) rest.reviewTask = true;
+  if (delegation.settleGeneration !== undefined) rest.settleGeneration = delegation.settleGeneration;
+  if (delegation.reportedGeneration !== undefined) rest.reportedGeneration = delegation.reportedGeneration;
   return {
     id: delegation.id,
     parent_thread_id: delegation.parentThreadId,
@@ -619,5 +628,12 @@ export function decodeDelegation(row: DelegationRow): StoredDelegation {
     ...(rest.cancelledGeneration === undefined ? {} : { cancelledGeneration: rest.cancelledGeneration as number }),
     ...(rest.lastSettledTurnId === undefined ? {} : { lastSettledTurnId: rest.lastSettledTurnId as string }),
     ...(rest.lastSettledSeq === undefined ? {} : { lastSettledSeq: rest.lastSettledSeq as number }),
+    ...(rest.reviewTask === true ? { reviewTask: true as const } : {}),
+    ...(typeof rest.settleGeneration === "number" && Number.isSafeInteger(rest.settleGeneration) && rest.settleGeneration >= 0
+      ? { settleGeneration: rest.settleGeneration }
+      : {}),
+    ...(typeof rest.reportedGeneration === "number" && Number.isSafeInteger(rest.reportedGeneration) && rest.reportedGeneration >= 0
+      ? { reportedGeneration: rest.reportedGeneration }
+      : {}),
   };
 }

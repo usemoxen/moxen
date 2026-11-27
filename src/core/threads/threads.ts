@@ -22,6 +22,8 @@ import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig,
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
 import { ranTurns } from "./project.js";
+import { commitReviewDecision, settleReviewDecision } from "./reviewtask.js";
+import { markDelegationSettle } from "./delegationnotice.js";
 import type {
   CreateThreadInput,
   MessageOrigin,
@@ -456,7 +458,7 @@ export async function sendTurn(
   const automaticPrompt = origin !== undefined || input.scheduleReason === "usage-reset";
   const withOrigin = origin !== undefined ? { origin, ...(input.notification ? { notification: input.notification } : {}) } : {};
 
-  return await store.withThreadLock(threadId, async () => {
+  return await thenDelegationWrites((writes) => store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     let thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotDeleted(thread);
@@ -588,13 +590,13 @@ export async function sendTurn(
       const pause = thread.usagePause!;
       // A user send must be a normal turn, never a steer into wrap-up.
       if (running) {
-        await interruptTurnLocked(store, thread, running, now);
+        await interruptTurnLocked(store, writes, thread, running, now);
         running = null;
         turns = await store.readTurns(threadId);
       }
       const recovery = turns.find((turn) => (turn.id === pause.recoveryTurnId || turn.queue?.requestId === `usage:${pause.order}`) && turn.status === "queued");
       if (recovery) {
-        await interruptTurnLocked(store, thread, recovery, now);
+        await interruptTurnLocked(store, writes, thread, recovery, now);
         if (recovery.queue) await store.updateTurn(threadId, recovery.id, { queue: { ...recovery.queue, removed: true } });
         turns = await store.readTurns(threadId);
       }
@@ -657,7 +659,7 @@ export async function sendTurn(
     }
 
     if (running && delivery === "restart") {
-      await interruptTurnLocked(store, thread, running, now);
+      await interruptTurnLocked(store, writes, thread, running, now);
     }
 
     // One continue after a usage limit at a time: a second request (a double
@@ -747,6 +749,8 @@ export async function sendTurn(
       ...(input.handoffOpen ? { handoffOpen: true as const } : {}),
       ...(input.handoffPending && input.handoffPending.length > 0 ? { handoffPending: input.handoffPending } : {}),
       ...(origin === "usage-continue" ? { usageRecoveryNotice: true as const } : {}),
+      ...(input.reviewHandoff === true ? { reviewHandoff: true as const } : {}),
+      ...(input.parentNotice === true ? { parentNotice: true as const } : {}),
       modelSelection,
       parentTurnId: delivery === "restart" && running ? running.id : null,
       ...(holdUntil !== null
@@ -802,12 +806,50 @@ export async function sendTurn(
     await store.writeThreadRecord(thread);
     store.emit(threadId, status === "queued" ? "turn-queued" : "turn-started");
     return { thread, turn, messageId: turn.messageId, delivery: turn.delivery };
-  });
+  }));
+}
+
+/**
+ * The delegation writes a settled turn owes, run once its thread lock is
+ * released: `!delegations` is only ever taken outside a thread lock, because
+ * a delegation writer may take a thread lock inside it.
+ */
+type DelegationWrites = Array<() => Promise<void>>;
+
+/** Run `locked` under its thread lock or locks, then the delegation writes its settles queued. */
+async function thenDelegationWrites<T>(locked: (writes: DelegationWrites) => Promise<T>): Promise<T> {
+  const writes: DelegationWrites = [];
+  try {
+    return await locked(writes);
+  } finally {
+    // The terminal turn already holds what these copy, so a failed write
+    // never turns a settle that happened into a failed one.
+    for (const write of writes) await write().catch(() => undefined);
+  }
+}
+
+/**
+ * Queue what a settled turn owes its delegation: the review decision it wrote,
+ * and, for `settled`, the notice obligation. Called under the thread lock
+ * before the settle is announced, so a watcher the announcement releases still
+ * counts as waiting on it.
+ */
+function queueDelegationWrites(
+  store: ThreadStore,
+  writes: DelegationWrites,
+  threadId: string,
+  review: { readonly rowId: string } | null,
+  settled: StoredTurn | null,
+): void {
+  const watched = store.hasSettleWatch(threadId);
+  if (review !== null) writes.push(() => commitReviewDecision(store, review.rowId, threadId));
+  if (settled !== null) writes.push(() => markDelegationSettle(store, threadId, settled, watched));
 }
 
 /** Caller must hold the thread lock. */
 async function interruptTurnLocked(
   store: ThreadStore,
+  writes: DelegationWrites,
   thread: StoredThread,
   turn: StoredTurn,
   now: string,
@@ -821,11 +863,23 @@ async function interruptTurnLocked(
   // inside the thread lock, before the interruption event and any queue
   // promotion: rewriting the ledger outside the lock afterwards would erase a
   // turn admitted in between (LOCAL-009).
+  // A running turn interrupted is a real review attempt: a failed or stopped
+  // opening never acknowledges, and a tool-using one is no exception. A
+  // message taken back before it started is not an attempt at all.
+  const review = await settleReviewDecision({
+    store,
+    thread,
+    turn,
+    turns: await store.readTurns(thread.id),
+    status: "interrupted",
+    attempted: turn.status === "running",
+  });
   const updated = await store.updateTurn(thread.id, turn.id, {
     status: "interrupted",
     ...(usagePause ? { usagePause } : {}),
     ...(reason ? { error: reason } : {}),
     ...(usage !== undefined ? { usage } : {}),
+    ...(review !== null ? { reviewDecision: review.decision } : {}),
     updatedAt: now,
     completedAt: now,
   });
@@ -846,6 +900,8 @@ async function interruptTurnLocked(
       details: { threadId: thread.id, turnId: turn.id },
     });
   }
+  // A message taken back before it ran settles nothing the parent waits on.
+  queueDelegationWrites(store, writes, thread.id, review, turn.status === "running" ? turn : null);
   return updated;
 }
 
@@ -1065,16 +1121,25 @@ export async function reconcileOrphanedTurn(
   const threadId = requireThreadId(rawThreadId);
   const peek = openTurn(await store.readTurns(threadId));
   if (!peek || !isOrphaned(store, peek)) return null;
-  return await store.withThreadLock(threadId, async () => {
+  return await thenDelegationWrites((writes) => store.withThreadLock(threadId, async () => {
     const thread = await store.readThreadRecord(threadId);
     const running = openTurn(await store.readTurns(threadId));
     if (!thread || !running || !isOrphaned(store, running)) return null;
     const now = store.nowIso();
     const pid = running.owner?.pid;
+    const review = await settleReviewDecision({
+      store,
+      thread,
+      turn: running,
+      turns: await store.readTurns(threadId),
+      status: "interrupted",
+      attempted: true,
+    });
     const interrupted =
       (await store.updateTurn(threadId, running.id, {
         status: "interrupted",
         error: `The process running this turn (pid ${pid}) exited before it finished.`,
+        ...(review !== null ? { reviewDecision: review.decision } : {}),
         updatedAt: now,
         completedAt: now,
       })) ?? running;
@@ -1086,6 +1151,7 @@ export async function reconcileOrphanedTurn(
       summary: `Turn ${running.id} was interrupted: its process (pid ${pid}) exited mid-turn.`,
       createdAt: now,
     });
+    queueDelegationWrites(store, writes, threadId, review, running);
     // A drain reconciles the orphan but starts nothing: a promotion taken
     // here would leave the lock already `running`, so the caller's runner
     // would dispatch it — around every start path's drain check. The queued
@@ -1100,7 +1166,7 @@ export async function reconcileOrphanedTurn(
     await store.writeThreadRecord({ ...latestThread, updatedAt: now });
     store.emit(threadId, "turn-interrupted");
     return { interrupted, promoted };
-  });
+  }));
 }
 
 /** A steer to send again, as named by a driver (`takeUnconfirmedSteers`) or an orphaned turn's ledger rows. */
@@ -1488,7 +1554,11 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
   if (batch.length === 0) return;
   const folded = new Set(batch.map((turn) => turn.id));
   await store.rewriteLedger(threadId, "messages", messages.map((message) => (folded.has(message.turnId) ? { ...message, turnId: next.id } : message)));
-  await store.rewriteLedger(threadId, "turns", turns.filter((turn) => !folded.has(turn.id)));
+  // The parent still waits on a message folded into this turn.
+  const owed = batch.some((turn) => turn.parentNotice === true || turn.handoffOpen === true);
+  await store.rewriteLedger(threadId, "turns", turns.filter((turn) => !folded.has(turn.id)).map((turn) => (
+    owed && turn.id === next.id ? { ...turn, parentNotice: true as const } : turn
+  )));
   await store.appendLedger(threadId, "activity", {
     id: store.newId(),
     threadId,
@@ -1862,10 +1932,11 @@ async function finishTurn(
   if (!turnId) {
     throw new CliError("TURN_ID_REQUIRED", "A non-empty turn id is required.", { exitCode: 2 });
   }
-  return await store.withThreadLock(threadId, async () => {
+  return await thenDelegationWrites((writes) => store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
-    const turn = (await store.readTurns(threadId)).find((candidate) => candidate.id === turnId);
+    const turns = await store.readTurns(threadId);
+    const turn = turns.find((candidate) => candidate.id === turnId);
     if (!turn) {
       throw new CliError("TURN_NOT_FOUND", `No turn exists with id ${turnId}.`, {
         exitCode: 3,
@@ -1889,12 +1960,23 @@ async function finishTurn(
       });
     }
     store.untrackRunning(turnId);
+    // A review task decides here, before the turn is written: the decision
+    // rides on the terminal turn update, and the delegation row follows it.
+    const review = await settleReviewDecision({
+      store,
+      thread,
+      turn,
+      turns,
+      status,
+      attempted: true,
+    });
     const updated = await store.updateTurn(threadId, turnId, {
       status,
       ...(status === "failed" && input.error !== undefined ? { error: input.error } : {}),
       ...(input.usage !== undefined ? { usage: input.usage } : {}),
       ...(input.turnOutputTokens !== undefined ? { turnOutputTokens: input.turnOutputTokens } : {}),
       ...(input.generation !== undefined ? { generation: input.generation } : {}),
+      ...(review !== null ? { reviewDecision: review.decision } : {}),
       updatedAt: now,
       completedAt: now,
     });
@@ -1912,6 +1994,7 @@ async function finishTurn(
       summary: status === "failed" ? (input.error ?? turnId) : turnId,
       createdAt: now,
     });
+    queueDelegationWrites(store, writes, threadId, review, turn);
     // A settle during a drain promotes nothing: a promoted turn would start on
     // a server that is going away. Held for the admission path, it runs once
     // the next server is up.
@@ -1923,7 +2006,7 @@ async function finishTurn(
     await store.writeThreadRecord(next);
     store.emit(threadId, status === "completed" ? "turn-completed" : "turn-failed");
     return { thread: next, turn: updated, promotedTurnId };
-  });
+  }));
 }
 
 /** Stage 2 drivers call this when the provider run finishes. */
@@ -1993,7 +2076,7 @@ export async function interruptTurn(
 ): Promise<InterruptTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId?.trim() || undefined;
-  return await store.withThreadLock(threadId, async () => {
+  return await thenDelegationWrites((writes) => store.withThreadLock(threadId, async () => {
     const now = store.nowIso();
     const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
     requireNotArchived(thread, "be interrupted");
@@ -2042,7 +2125,7 @@ export async function interruptTurn(
       targetForStop = { ...target, executionSeq: legacySeq };
     }
     const hasRunner = store.isTracked(targetForStop.id);
-    const updated = await interruptTurnLocked(store, threadForStop, targetForStop, now, usagePause, options.reason, options.usage);
+    const updated = await interruptTurnLocked(store, writes, threadForStop, targetForStop, now, usagePause, options.reason, options.usage);
     if (hasRunner && !isDraining()) {
       await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     } else {
@@ -2058,7 +2141,7 @@ export async function interruptTurn(
     await store.writeThreadRecord(next);
     store.emit(threadId, "turn-interrupted");
     return { thread: next, turn: updated, interrupted: true };
-  });
+  }));
 }
 
 /**
@@ -2110,7 +2193,7 @@ export interface SettleOptions {
 export async function settleThread(store: ThreadStore, rawThreadId: string, options: SettleOptions = {}): Promise<StoredThread> {
   const threadId = requireThreadId(rawThreadId);
   const family = await threadFamily(store, threadId);
-  return await withThreadLocks(store, family, async () => {
+  return await thenDelegationWrites((writes) => withThreadLocks(store, family, async () => {
     const now = store.nowIso();
     const members: StoredThread[] = [];
     const blocked: Array<{ id: string; running: boolean; thread: StoredThread }> = [];
@@ -2127,7 +2210,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
         // Every live turn, queued ones included: a queue left behind would start the moment the settled thread woke.
         for (const turn of await store.readTurns(entry.id)) {
           if (turn.status === "running" || turn.status === "queued" || !isKnownTurnStatus(turn.status)) {
-            await interruptTurnLocked(store, entry.thread, turn, now, undefined, "The thread was settled, stopping its work.");
+            await interruptTurnLocked(store, writes, entry.thread, turn, now, undefined, "The thread was settled, stopping its work.");
           }
         }
         const index = members.findIndex((member) => member.id === entry.id);
@@ -2169,7 +2252,7 @@ export async function settleThread(store: ThreadStore, rawThreadId: string, opti
       if (thread.id === threadId) result = next;
     }
     return result ?? members.find((thread) => thread.id === threadId)!;
-  });
+  }));
 }
 
 /** The mirror of `settleThread`: the thread and its descendants are woken; nothing can block it. Returns the requested thread's record. */
