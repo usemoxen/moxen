@@ -1,3 +1,4 @@
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -35,14 +36,33 @@ interface RecordedRpc {
   readonly params?: unknown;
 }
 
+interface FakeVibePeerChannel {
+  closed: boolean;
+  readonly dataHandlers: Set<(chunk: string) => void>;
+  readonly exitHandlers: Set<(code: number | null) => void>;
+  readonly emitLine: (line: string) => void;
+  readonly closeWith: (code: number | null) => void;
+}
+
 class FakeVibeServer {
   readonly received: RecordedRpc[] = [];
-  private dataHandlers = new Set<(chunk: string) => void>();
-  private exitHandlers = new Set<(code: number | null) => void>();
+  private livePeers = new Set<FakeVibePeerChannel>();
+  private createdPeerCount = 0;
   private responseWaiters = new Map<string | number, (msg: Record<string, unknown>) => void>();
   private nextServerReqId = 1000;
   private handlers = new Map<string, (params: unknown) => unknown | Promise<unknown>>();
-  closed = false;
+  /** Real `vibe-app-server` (`server.py`) calls `await self.close()` right after
+   * answering `session/stop`, exiting with code 0. Keep that behavior enabled by
+   * default so tests catch any code that tries to reuse a peer after `session/stop`. */
+  closePeerOnSessionStop = true;
+
+  get closed(): boolean {
+    return this.createdPeerCount > 0 && this.livePeers.size === 0;
+  }
+
+  get peerCount(): number {
+    return this.createdPeerCount;
+  }
 
   on(method: string, handler: (params: unknown) => unknown | Promise<unknown>): void {
     this.handlers.set(method, handler);
@@ -61,13 +81,34 @@ class FakeVibeServer {
   }
 
   private emitLine(line: string): void {
-    for (const h of [...this.dataHandlers]) h(`${line}\n`);
+    for (const peer of [...this.livePeers]) peer.emitLine(line);
   }
 
   createPeer(): JsonRpcPeer {
+    const dataHandlers = new Set<(chunk: string) => void>();
+    const exitHandlers = new Set<(code: number | null) => void>();
+    const channel: FakeVibePeerChannel = {
+      closed: false,
+      dataHandlers,
+      exitHandlers,
+      emitLine: (line: string) => {
+        if (channel.closed) return;
+        for (const h of [...dataHandlers]) h(`${line}\n`);
+      },
+      closeWith: (code: number | null) => {
+        if (channel.closed) return;
+        channel.closed = true;
+        this.livePeers.delete(channel);
+        for (const h of [...exitHandlers]) h(code);
+      },
+    };
+    this.createdPeerCount += 1;
+    this.livePeers.add(channel);
+
     const proc: SpawnedProcess = {
       pid: 4242,
       writeLine: (line: string) => {
+        if (channel.closed) return;
         const msg = JSON.parse(line) as Record<string, unknown>;
         if (typeof msg["method"] === "string") {
           const method = msg["method"];
@@ -77,14 +118,19 @@ class FakeVibeServer {
           if (id === undefined) return;
           const handler = this.handlers.get(method);
           if (!handler) {
-            this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unhandled: ${method}` } }));
+            channel.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unhandled: ${method}` } }));
             return;
           }
           Promise.resolve(handler(params)).then(
-            (result) => this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, result })),
+            (result) => {
+              channel.emitLine(JSON.stringify({ jsonrpc: "2.0", id, result }));
+              if (method === VIBE_METHODS.sessionStop && this.closePeerOnSessionStop) {
+                channel.closeWith(0);
+              }
+            },
             (err) => {
               const message = err instanceof Error ? err.message : String(err);
-              this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }));
+              channel.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }));
             },
           );
         } else if (msg["id"] !== undefined) {
@@ -96,17 +142,15 @@ class FakeVibeServer {
         }
       },
       onData: (handler) => {
-        this.dataHandlers.add(handler);
-        return () => this.dataHandlers.delete(handler);
+        dataHandlers.add(handler);
+        return () => dataHandlers.delete(handler);
       },
       onExit: (handler) => {
-        this.exitHandlers.add(handler);
-        return () => this.exitHandlers.delete(handler);
+        exitHandlers.add(handler);
+        return () => exitHandlers.delete(handler);
       },
       kill: () => {
-        if (this.closed) return;
-        this.closed = true;
-        for (const h of [...this.exitHandlers]) h(0);
+        channel.closeWith(0);
       },
     };
     return new JsonRpcPeer(proc, { forceKillAfterMs: 0 });
@@ -1947,47 +1991,165 @@ describe("VibeDriver lazy MCP gateway (LOCAL-032)", () => {
     }
     // No live session was opened: the preflight failed before the real start.
     expect(await Effect.runPromise(driver.hasSession("th-gw-noread"))).toBe(false);
+    expect(server.closed).toBe(true);
   });
 
-  it("locks the gateway (session survives) when the post-start merge read fails, and says so with the first turn", async () => {
+  it("runs the native-catalog preflight on a separate short-lived peer with sessionOnly so session/stop never kills the main peer (LOCAL-038)", async () => {
+    const mainServer = new FakeVibeServer();
+    const preflightServer = new FakeVibeServer();
+    setupGatewaySession(mainServer, emptyNative());
+    setupGatewaySession(preflightServer, emptyNative());
+    const driver = new VibeDriver({
+      transport: makeTransport([mainServer, preflightServer]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-separate-preflight",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [exaHttp],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+
+    // The preflight peer ran one sessionOnly start, read effective config,
+    // stopped, and closed; the main peer stayed alive and only saw the real start.
+    expect(preflightServer.closed).toBe(true);
+    const preflightStarts = preflightServer.received.filter((r) => r.method === VIBE_METHODS.sessionStart);
+    expect(preflightStarts).toHaveLength(1);
+    expect((preflightStarts[0]?.params as Record<string, unknown>)["sessionOnly"]).toBe(true);
+    expect(preflightServer.received.some((r) => r.method === VIBE_METHODS.sessionStop)).toBe(true);
+
+    expect(mainServer.closed).toBe(false);
+    expect(mainServer.received.filter((r) => r.method === VIBE_METHODS.sessionStart)).toHaveLength(1);
+    expect(mainServer.received.some((r) => r.method === VIBE_METHODS.sessionStop)).toBe(false);
+
+    await Effect.runPromise(driver.stopSession("th-gw-separate-preflight"));
+    expect(mainServer.closed).toBe(true);
+  });
+
+  it("refuses to start (closes gateway and peer) when the post-start merge read fails so a changed native catalog cannot slip through (LOCAL-038)", async () => {
     const server = new FakeVibeServer();
     setupGatewaySession(server, emptyNative(), { postReadFails: true });
     const driver = new VibeDriver({
       transport: makeTransport([server]),
       connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
     });
-    await Effect.runPromise(driver.startSession({
-      threadId: "th-gw-locked",
+    const exit = await Effect.runPromiseExit(driver.startSession({
+      threadId: "th-gw-postfail",
       workingDirectory: "/tmp/repo",
       mcpServers: [exaHttp],
       disabledMcpTools: ["mcp__exa__agent_run"],
     }));
-
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      const cause = exit.cause as { failure?: CliError; reasons?: ReadonlyArray<{ error?: CliError }> };
+      const failure = cause.failure ?? cause.reasons?.[0]?.error;
+      expect(failure?.code).toBe("VIBE_MCP_EXCLUSION_UNENFORCEABLE");
+      expect(failure?.message).toMatch(/could not be read after the session started/);
+    }
+    expect(await Effect.runPromise(driver.hasSession("th-gw-postfail"))).toBe(false);
+    expect(server.closed).toBe(true);
+    // The allocated loopback gateway was also closed on refusal.
     const gw = await gatewaySpec(server);
-    const refused = await callToolViaGateway(gw, "exa", "web_search_exa");
-    expect(refused.isError).toBe(true);
-    expect(refused.content[0]!.text).toContain("not serving tools");
+    await expect(fetch(gw.url, { method: "POST" })).rejects.toThrow();
+  });
 
-    // The session explanation rides the first turn's notices.
-    const events: ProviderRuntimeEvent[] = [];
-    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
-    server.on(VIBE_METHODS.turnStart, () => {
-      setTimeout(() => {
-        server.sendNotification(VIBE_METHODS.historyEntryAdded, {
-          entry: { id: "m1", type: "message", role: "assistant", content: [{ type: "text", text: "Done" }], generationStatus: "completed" },
-        });
-        server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
-      }, 10);
-      return { turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } };
+  it("refuses to start when the preflight peer reports a different version than the main peer (LOCAL-038)", async () => {
+    const mainServer = new FakeVibeServer();
+    const preflightServer = new FakeVibeServer();
+    setupGatewaySession(mainServer, emptyNative());
+    setupGatewaySession(preflightServer, emptyNative());
+    mainServer.on(VIBE_METHODS.initialize, () => ({
+      serverInfo: { name: "vibe-app-server", version: "3.1.5" },
+      processId: 4242,
+      platformCredentials: false,
+    }));
+    preflightServer.on(VIBE_METHODS.initialize, () => ({
+      serverInfo: { name: "vibe-app-server", version: "3.1.4" },
+      processId: 4243,
+      platformCredentials: false,
+    }));
+    const driver = new VibeDriver({
+      transport: makeTransport([mainServer, preflightServer]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
     });
-    const { turnId } = await Effect.runPromise(driver.sendTurn({ threadId: "th-gw-locked", prompt: "Search" }));
-    await driver.awaitTurn("th-gw-locked", turnId);
-    const notices = events.filter((e) => e.type === "session.notice" && e.notice === "mcp") as
-      Array<Extract<ProviderRuntimeEvent, { type: "session.notice" }>>;
-    const lockedNotice = notices.find((e) => e.detail?.includes("effective configuration could not be read"));
-    expect(lockedNotice?.detail).toContain("exa");
-    await Effect.runPromise(Fiber.interrupt(fiber));
-    await Effect.runPromise(driver.stopSession("th-gw-locked"));
+    const exit = await Effect.runPromiseExit(driver.startSession({
+      threadId: "th-gw-version-skew",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [exaHttp],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      const cause = exit.cause as { failure?: CliError; reasons?: ReadonlyArray<{ error?: CliError }> };
+      const failure = cause.failure ?? cause.reasons?.[0]?.error;
+      expect(failure?.code).toBe("VIBE_MCP_EXCLUSION_UNENFORCEABLE");
+    }
+    expect(await Effect.runPromise(driver.hasSession("th-gw-version-skew"))).toBe(false);
+    expect(preflightServer.closed).toBe(true);
+    expect(mainServer.closed).toBe(true);
+  });
+
+  it("closes the main peer before awaiting gateway shutdown so an open gateway request from the peer cannot stall refusal (LOCAL-038)", async () => {
+    const mainServer = new FakeVibeServer();
+    const preflightServer = new FakeVibeServer();
+    setupGatewaySession(mainServer, emptyNative());
+    setupGatewaySession(preflightServer, emptyNative());
+
+    const peerState: { socket: net.Socket | null; closed: boolean } = { socket: null, closed: false };
+    const origCreatePeer = mainServer.createPeer.bind(mainServer);
+    mainServer.createPeer = () => {
+      const peer = origCreatePeer();
+      const origClose = peer.close.bind(peer);
+      peer.close = () => {
+        peerState.closed = true;
+        peerState.socket?.destroy();
+        peerState.socket = null;
+        origClose();
+      };
+      return peer;
+    };
+
+    mainServer.on(VIBE_METHODS.configEffectiveRead, async () => {
+      // Simulate the main peer holding an authenticated, incomplete HTTP
+      // request open against the loopback gateway while post-start
+      // config/effective/read fails.
+      const gw = await gatewaySpec(mainServer);
+      const url = new URL(gw.url);
+      const authHeaders = Object.entries(gw.headers)
+        .map(([k, v]) => `${k}: ${v}\r\n`)
+        .join("");
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.createConnection({ host: url.hostname, port: Number(url.port) }, () => {
+          sock.write(
+            `POST ${url.pathname} HTTP/1.1\r\nHost: ${url.host}\r\n${authHeaders}Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+          );
+          sock.on("error", () => {});
+          setTimeout(resolve, 25);
+        });
+        sock.once("error", reject);
+        peerState.socket = sock;
+      });
+      throw new Error("post-start effective config unreadable");
+    });
+
+    const driver = new VibeDriver({
+      transport: makeTransport([mainServer, preflightServer]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    try {
+      const exit = await Effect.runPromiseExit(driver.startSession({
+        threadId: "th-gw-stalled-req",
+        workingDirectory: "/tmp/repo",
+        mcpServers: [exaHttp],
+        disabledMcpTools: ["mcp__exa__agent_run"],
+      }));
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(peerState.closed).toBe(true);
+      expect(mainServer.closed).toBe(true);
+      expect(peerState.socket).toBeNull();
+    } finally {
+      peerState.socket?.destroy();
+    }
   });
 
   it("does not mistake the gateway's own merged entry for a native collision (arms, not self-locks)", async () => {

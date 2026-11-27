@@ -668,12 +668,15 @@ export class VibeDriver implements ProviderAdapter<CliError> {
           }
           if (useGateway && route !== null) {
             // Inspect the native Vibe catalog BEFORE merging the gateway: a
-            // short tool-free preflight session (no offer, no turn) answers
-            // `config/effective/read` with the user's own merged config, which
-            // is the only verified read path for it (LOCAL-032). Without it we
+            // short tool-free preflight session on its own short-lived peer
+            // answers `config/effective/read` with the user's own merged
+            // config (the only verified read path for it) and then stops that
+            // preflight peer — real `vibe-app-server` closes the whole process
+            // on `session/stop`, so reusing the main session peer would kill
+            // it before `session/start` (LOCAL-032, LOCAL-038). Without it we
             // can neither prove a collision-free gateway identity nor prove the
             // exclusions stay enforced on a surviving native copy, so refuse.
-            const native = await this.readNativeVibeCatalog(peer, input.workingDirectory);
+            const native = await this.readNativeVibeCatalog(input.workingDirectory, serverVersion);
             if (!native) {
               throw new CliError(
                 "VIBE_MCP_EXCLUSION_UNENFORCEABLE",
@@ -852,8 +855,11 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             startedAt: session.startedAt,
           };
         } catch (cause) {
-          void lazyGateway?.close().catch(() => undefined);
+          // Close the peer BEFORE awaiting gateway shutdown so any in-flight
+          // HTTP request the peer holds open against the loopback gateway is
+          // dropped and cannot stall `server.close()` (LOCAL-038).
           peer.close();
+          await lazyGateway?.close().catch(() => undefined);
           throw cause;
         }
       },
@@ -862,36 +868,51 @@ export class VibeDriver implements ProviderAdapter<CliError> {
 
   /**
    * Read Mistral Vibe's native MCP catalog through a short tool-free preflight
-   * session on the same peer: `session/start` with no offer and no turn, then
+   * session on its own passive peer (`withPeer`): `session/start` with
+   * `sessionOnly: true` (no offer, no turn, no persisted history), then
    * `config/effective/read` (the only verified read path for the merged native
-   * config — it needs a live session), then `session/stop`. No tool is ever
-   * called. Returns null when the catalog cannot be proven, so the caller
-   * refuses the gateway route rather than guessing (LOCAL-032).
+   * config — it needs a live session), then `session/stop`. Running on a
+   * separate peer is required because `vibe-app-server` closes the server on
+   * `session/stop` (LOCAL-038). Returns null when the catalog or preflight
+   * peer version cannot be proven, so the caller refuses the gateway route
+   * rather than guessing (LOCAL-032).
    */
-  private async readNativeVibeCatalog(peer: JsonRpcPeer, cwd: string): Promise<VibeEffectiveMcpRestrictions | null> {
-    let preflightId: string | null = null;
+  private async readNativeVibeCatalog(
+    cwd: string,
+    expectedVersion: string,
+  ): Promise<VibeEffectiveMcpRestrictions | null> {
     try {
-      const started = asRecord(
-        await peer.request(
-          VIBE_METHODS.sessionStart,
-          { agentConfig: { cwd, trustWorkspace: true, approvalPolicy: "ask" } },
-          this.requestTimeoutMs,
-        ),
-      );
-      preflightId = asNonEmptyString(asRecord(asRecord(started?.["state"])?.["session"])?.["id"]);
-      if (!preflightId) return null;
-      const raw = await peer.request(
-        VIBE_METHODS.configEffectiveRead,
-        { sessionId: preflightId },
-        GATEWAY_ARM_TIMEOUT_MS,
-      );
-      return parseVibeEffectiveConfig(raw);
+      return await this.withPeer(cwd, async (preflightPeer, preflightVersion) => {
+        if (preflightVersion !== expectedVersion || !GATEWAY_VIBE_VERSIONS.has(preflightVersion)) {
+          return null;
+        }
+        let preflightId: string | null = null;
+        try {
+          const started = asRecord(
+            await preflightPeer.request(
+              VIBE_METHODS.sessionStart,
+              { agentConfig: { cwd, trustWorkspace: true, approvalPolicy: "ask" }, sessionOnly: true },
+              this.requestTimeoutMs,
+            ),
+          );
+          preflightId = asNonEmptyString(asRecord(asRecord(started?.["state"])?.["session"])?.["id"]);
+          if (!preflightId) return null;
+          const raw = await preflightPeer.request(
+            VIBE_METHODS.configEffectiveRead,
+            { sessionId: preflightId },
+            GATEWAY_ARM_TIMEOUT_MS,
+          );
+          return parseVibeEffectiveConfig(raw);
+        } finally {
+          if (preflightId) {
+            await preflightPeer
+              .request(VIBE_METHODS.sessionStop, { sessionId: preflightId }, this.requestTimeoutMs)
+              .catch(() => undefined);
+          }
+        }
+      });
     } catch {
       return null;
-    } finally {
-      if (preflightId) {
-        await peer.request(VIBE_METHODS.sessionStop, { sessionId: preflightId }, this.requestTimeoutMs).catch(() => undefined);
-      }
     }
   }
 
@@ -931,12 +952,12 @@ export class VibeDriver implements ProviderAdapter<CliError> {
    * session. The gateway's own entry is excluded by its exact name and URL so
    * it is never mistaken for a pre-existing native server (LOCAL-032).
    *
-   * Fails closed three ways: an unreadable merge locks the gateway for the
-   * session (the pre-merge native inspection already established enforcement,
-   * and the offer never overrides a routed server's native copy); an
-   * unrecognized shape or a native route that now exposes a routed exclusion
-   * refuses the start; a missing/mismatched gateway entry or a native sibling
-   * sharing its alias locks the gateway. A locked gateway reaches no tool,
+   * Fails closed three ways: an unreadable merge, an unrecognized shape, or a
+   * native route that now exposes a routed exclusion all refuse the start
+   * (locking the gateway alone cannot restrict a native server that appeared
+   * between preflight and `session/start` — LOCAL-038); a missing/mismatched
+   * gateway entry or a native sibling sharing its alias, once native
+   * enforcement is proven, locks the gateway. A locked gateway reaches no tool,
    * which is at least as strict as today's withholding.
    */
   private async armGateway(session: VibeSession, excludedTools: readonly string[]): Promise<void> {
@@ -957,8 +978,10 @@ export class VibeDriver implements ProviderAdapter<CliError> {
       );
       restrictions = parseVibeEffectiveConfig(raw, { name: gateway.name, url: gateway.spec.url });
     } catch {
-      lock("Mistral Vibe's effective configuration could not be read, so the servers' own MCP tool restrictions could not be verified");
-      return;
+      throw new CliError(
+        "VIBE_MCP_EXCLUSION_UNENFORCEABLE",
+        "The MCP tool exclusions cannot be enforced: Mistral Vibe's effective configuration could not be read after the session started, so a surviving native route cannot be ruled out. Try again, or remove the exclusion.",
+      );
     }
     if (!restrictions) {
       throw new CliError(
