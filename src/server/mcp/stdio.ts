@@ -9,7 +9,7 @@ import type { Readable, Writable } from "node:stream";
 import { createInterface } from "node:readline";
 
 import type { ClientApi } from "../api.js";
-import { callMoxenTool, availableMoxenTools, routeMcpSession, type AgentQueueAccess, type MemoryAccess, type MoxenToolOptions } from "./tools.js";
+import { callMoxenTool, availableMoxenTools, routeMcpSession, type AgentQueueAccess, type MemoryAccess, type MoxenToolOptions, type ProjectRegistrationAccess } from "./tools.js";
 
 /** Newest first; an unknown client version is answered with the newest. */
 export const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
@@ -94,6 +94,8 @@ export interface McpSessionOptions {
   readonly memory?: MemoryAccess;
   /** The server-bound agent queue operations for this authenticated session, when the route has them. */
   readonly agentQueue?: AgentQueueAccess;
+  /** The thread-bound registration capability for this authenticated session, when the route has it. */
+  readonly projectRegistration?: ProjectRegistrationAccess;
 }
 
 export interface ServeMcpOptions extends McpSessionOptions {
@@ -132,7 +134,7 @@ export async function answerMcp(options: McpSessionOptions, raw: unknown): Promi
   const params = request.params !== null && typeof request.params === "object" ? (request.params as Record<string, unknown>) : {};
   const fallback: { threadId: string; options: MoxenToolOptions } = {
     threadId: options.parentThreadId,
-    options: { checklist: options.checklist === true, delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write", ...(options.agentQueue ? { agentQueue: options.agentQueue } : {}) },
+    options: { checklist: options.checklist === true, delegated: options.delegated === true, webFetch: options.webFetch !== false, memory: options.memory ?? "write", ...(options.agentQueue ? { agentQueue: options.agentQueue } : {}), ...(options.projectRegistration ? { projectRegistration: options.projectRegistration } : {}) },
   };
   try {
     switch (method) {
@@ -168,6 +170,23 @@ export async function answerMcp(options: McpSessionOptions, raw: unknown): Promi
             : {};
         const routed = await routeMcpSession(options.api, fallback, params, true);
         if ("error" in routed) return fail(-32602, routed.error);
+        // A registry write answers only for the thread the transport
+        // authenticates. Session metadata from the request body selects the
+        // session a read serves, but a caller-supplied native session id
+        // must never move a write onto another thread: a process sharing
+        // this entry could name the orchestrator's session and register as
+        // it. The substitution is refused outright (LOCAL-035).
+        if (name === "project_register" && routed.threadId !== options.parentThreadId) {
+          return reply({
+            content: [{
+              type: "text",
+              text:
+                "project_register never runs through session-metadata routing: the write answers only for the thread this connection is authenticated for. " +
+                "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`, or the thread's own session can call it.",
+            }],
+            isError: true,
+          });
+        }
         const result = await callMoxenTool(options.api, routed.threadId, name, args, routed.options);
         return reply({ content: [{ type: "text", text: result.text }], isError: result.isError });
       }

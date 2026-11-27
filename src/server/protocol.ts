@@ -332,17 +332,6 @@ export type CommandBody =
   | { readonly type: "thread.plan.set"; readonly threadId: string; readonly plan: readonly ChecklistStep[] }
   | ({ readonly type: "project.ensure" } & EnsureProjectRequest)
   /**
-   * An agent's `project_register` (LOCAL-035): the calling thread registers
-   * a folder, authorized inside the server against that thread's live
-   * state — never against the flags its session arrived with. `project.ensure`
-   * stays the user's own command; this one refuses a delegated task, a
-   * research run's lead or role, a provider with orchestration switched
-   * off, and — outside a dry run — any thread not running in Auto or Full
-   * access. The configured `projectPolicy` decides and is honoured; a
-   * caller cannot pass one.
-   */
-  | { readonly type: "project.register"; readonly threadId: string; readonly cwd: string; readonly dryRun?: boolean }
-  /**
    * Moxen memory (`core/memory/`). Addressed by a thread (its project) or a
    * project; with neither, only the global scope is there. Saving and
    * deleting rewrite the scope's index.
@@ -562,7 +551,6 @@ export interface CommandResults {
   "thread.background.stop": { readonly stopped: true; readonly taskId: string };
   "thread.plan.set": RecordedChecklist;
   "project.ensure": EnsuredProject;
-  "project.register": EnsuredProject;
   "model.visibility.set": { readonly hidden: boolean };
   /** `total`: the memories the scope holds afterwards; `before`: what a replace overwrote or a delete removed. */
   "memory.save": { readonly name: string; readonly scope: MemoryScope; readonly replaced: boolean; readonly total: number; readonly before?: MemoryBefore };
@@ -1585,14 +1573,6 @@ export function decodeCommand(value: unknown): Command {
         cwd: requireField(record.cwd, type, "cwd"),
         ...optionalEnum(record, "workspaceMode", ["repo", "folder"] as const, type),
         ...optionalEnum(record, "projectPolicy", ["create", "existing"] as const, type),
-        ...optionalBoolean(record, "dryRun", type),
-      };
-    case "project.register":
-      return {
-        ...meta,
-        type,
-        threadId: threadId(),
-        cwd: requireField(record.cwd, type, "cwd"),
         ...optionalBoolean(record, "dryRun", type),
       };
     case "memory.save":

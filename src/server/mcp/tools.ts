@@ -23,7 +23,7 @@ import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type HarnessPro
 import { isSnoozedThread, type DelegatedTaskStatus } from "../../core/threads/views.js";
 import { formatTaskDuration } from "../../core/threads/notify.js";
 import { isResearchRunActive } from "../../core/threads/operations.js";
-import type { AgentQueuedMessage, QueueAgentMessageInput, QueuedAgentMessage } from "../../core/threads/operations.js";
+import type { AgentQueuedMessage, EnsuredProject, QueueAgentMessageInput, QueuedAgentMessage } from "../../core/threads/operations.js";
 import { parseQueuePolicy, type QueueCondition } from "../../core/threads/queue.js";
 import { usageKeyForInstance } from "../../core/usage/limits.js";
 import { AGENT_SETTINGS_MAX_LIMIT, SETTINGS_READ_TOOL } from "../settingsagent.js";
@@ -785,6 +785,8 @@ export interface MoxenToolOptions {
    * without one the management tools fail closed.
    */
   readonly agentQueue?: AgentQueueAccess;
+  /** The thread-bound registration capability the server hands its authenticated sessions. */
+  readonly projectRegistration?: ProjectRegistrationAccess;
 }
 
 /** The server-bound agent queue operations; never part of the public command protocol. */
@@ -793,6 +795,18 @@ export interface AgentQueueAccess {
   list(callerThreadId: string): Promise<AgentQueuedMessage[]>;
   edit(callerThreadId: string, turnId: string, conditions: readonly QueueCondition[]): Promise<{ readonly threadId: string; readonly turnId: string }>;
   remove(callerThreadId: string, turnId: string): Promise<{ readonly threadId: string; readonly turnId: string }>;
+}
+
+/**
+ * The agent's one registry write, bound like the agent queue: a capability
+ * the authenticated session holds — never a command a client can dispatch
+ * for a thread it names. `callerThreadId` is the thread the transport
+ * authenticates (the session the server itself started, or the loopback
+ * MCP credential a stdio child relays through), and the server authorizes
+ * inside the mutation, against that thread's live state (LOCAL-035).
+ */
+export interface ProjectRegistrationAccess {
+  register(callerThreadId: string, request: { readonly cwd: string; readonly dryRun?: boolean }): Promise<EnsuredProject>;
 }
 
 /** Whether a session with these options may call `name`: hidden tools are refused too, since a client can call a tool it was never shown. */
@@ -911,7 +925,7 @@ export async function routeMcpSession(
   const run = await api.query({ type: "research.run", threadId: routing.threadId }).catch(() => null);
   return {
     threadId: routing.threadId,
-    options: { delegated: routing.delegated, webFetch: routing.webFetch, memory: routing.memory, checklist: routing.checklist, ...(fallback.options.agentQueue ? { agentQueue: fallback.options.agentQueue } : {}), ...forceDelegated(run, routing.threadId, isResearchRunActive(run)) },
+    options: { delegated: routing.delegated, webFetch: routing.webFetch, memory: routing.memory, checklist: routing.checklist, ...(fallback.options.agentQueue ? { agentQueue: fallback.options.agentQueue } : {}), ...(fallback.options.projectRegistration ? { projectRegistration: fallback.options.projectRegistration } : {}), ...forceDelegated(run, routing.threadId, isResearchRunActive(run)) },
   };
 }
 
@@ -1025,12 +1039,16 @@ export async function callMoxenTool(
   parentThreadId: string,
   name: string,
   args: Record<string, unknown>,
-  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number; readonly usageRefreshMs?: number; readonly agentQueue?: AgentQueueAccess } = {},
+  options: { readonly sleep?: (ms: number) => Promise<void>; readonly delegated?: boolean; readonly webFetch?: boolean; readonly memory?: MemoryAccess; readonly web?: () => Promise<WebPolicy>; readonly askTimeoutMs?: number; readonly usageRefreshMs?: number; readonly agentQueue?: AgentQueueAccess; readonly projectRegistration?: ProjectRegistrationAccess } = {},
 ): Promise<ToolResult> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   // In-process callers carry the server's bound gateway; a remote or stdio
   // client has none and the management tools fail closed. Never a payload id.
   const agentQueue = options.agentQueue ?? (api as { readonly agentQueue?: AgentQueueAccess }).agentQueue;
+  // Same binding for the registry write: only the server itself (or a relay
+  // holding a thread's loopback credential) hands this over, so a client
+  // that merely reached the server can never register for any thread.
+  const projectRegistration = options.projectRegistration ?? (api as { readonly projectRegistration?: ProjectRegistrationAccess }).projectRegistration;
   // Hidden from the list, and refused here too: a client can call a tool it was never shown.
   if (options.delegated === true && DELEGATION_TOOLS.has(name)) return { text: `${name} is not available in a delegated task: do the task yourself.`, isError: true };
   if (options.webFetch === false && name === "web_fetch") return { text: "web_fetch is switched off for this provider.", isError: true };
@@ -1121,14 +1139,24 @@ export async function callMoxenTool(
       case "project_register": {
         if (args.dryRun !== undefined && typeof args.dryRun !== "boolean") throw new CliError("INVALID_TOOL_INPUT", "dryRun must be true or false.");
         const dryRun = args.dryRun === true;
-        // The server authorizes inside the mutation (LOCAL-035): the
-        // calling thread's live mode, delegation and research state decide
-        // there, serialized with mode changes, so a transport flag can only
-        // restrict a call, never grant it. No `projectPolicy` of its own: the
-        // server takes the configured setting, so a policy that refuses
-        // creation is honoured, never bypassed (a refusal surfaces as this
-        // tool's error).
-        const ensured = await api.dispatch({ type: "project.register", threadId: parentThreadId, cwd: argFolder(args), ...(dryRun ? { dryRun: true } : {}) });
+        // The write runs through the thread-bound capability the server
+        // hands its authenticated sessions — never a command naming a
+        // thread — and the server authorizes inside the mutation
+        // (LOCAL-035): the calling thread's live mode, delegation and
+        // research state decide there, serialized with mode changes, so a
+        // transport flag can only restrict a call, never grant it. A caller
+        // that reached the server without the binding (a bare client, a
+        // spawned stdio child with no loopback credential) is refused. No
+        // `projectPolicy` of its own: the server takes the configured
+        // setting, so a policy that refuses creation is honoured, never
+        // bypassed (a refusal surfaces as this tool's error).
+        if (projectRegistration === undefined) {
+          throw new CliError(
+            "PROJECT_REGISTER_UNAVAILABLE",
+            "project_register is not available on this connection: registration runs only through the moxen server session authenticated for the calling thread. The user can register the folder themselves with `moxen projects ensure --cwd <folder>`.",
+          );
+        }
+        const ensured = await projectRegistration.register(parentThreadId, { cwd: argFolder(args), ...(dryRun ? { dryRun: true } : {}) });
         return ok({
           project: { id: ensured.project.id, title: ensured.project.title, workspaceRoot: ensured.project.workspaceRoot, createdAt: ensured.project.createdAt },
           workspaceRoot: ensured.workspace.workspaceRoot,

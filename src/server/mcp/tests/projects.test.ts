@@ -9,7 +9,7 @@
  * purpose: the configured `projectPolicy` decides, and these tests pin
  * that it is honoured, never bypassed.
  */
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import { runProcess } from "../../../core/infra/process.js";
 import { testHarness } from "../../../core/testing/harness.js";
 import { DirectConnection } from "../../connection.js";
+import { decodeCommand } from "../../protocol.js";
 import { callMoxenTool, fullyQualifiedFolder, moxenToolsFor, PROJECT_TOOLS } from "../tools.js";
 
 /** Paths meet the registry once canonicalized: on macOS `/var` and `/private/var` are the same folder. */
@@ -420,7 +421,7 @@ describe("project_register: the server authorizes the calling thread, live", () 
       const folder = path.join(harness.root, "repo-gap");
       await mkdir(folder);
       await runProcess("git", ["init", "-b", "main"], { cwd: folder });
-      const registration = connection.dispatch({ type: "project.register", threadId: parentThreadId, cwd: folder });
+      const registration = connection.projectRegistration.register(parentThreadId, { cwd: folder });
       const tightened = connection.dispatch({ type: "thread.runtime-mode.set", threadId: parentThreadId, runtimeMode: "approval-required" });
       let registrationDone = false;
       void registration.then(() => {
@@ -441,6 +442,87 @@ describe("project_register: the server authorizes the calling thread, live", () 
       const refused = await register({ cwd: after }, parentThreadId);
       expect(refused.isError).toBe(true);
       expect(refused.text).toContain("runs in approval-required");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("cannot sneak a write past a model-selection change: the change serializes with the registration", async () => {
+    // The thread runs on a provider that allows orchestration; the
+    // tightening switches it to one that does not, mid-registration.
+    const { harness, connection, work } = await setup({ providers: { opencode: { orchestration: false } } });
+    try {
+      const projectId = (await registered(connection)).find((entry) => entry.workspaceRoot === work)!.id;
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+      });
+      const folder = path.join(harness.root, "model-gap");
+      await mkdir(folder);
+      await runProcess("git", ["init", "-b", "main"], { cwd: folder });
+      const registration = connection.projectRegistration.register(thread.threadId, { cwd: folder });
+      const switched = connection.dispatch({
+        type: "thread.model-selection.set",
+        threadId: thread.threadId,
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      let registrationDone = false;
+      void registration.then(() => {
+        registrationDone = true;
+      }, () => {
+        registrationDone = true;
+      });
+      await switched;
+      // The change landed inside its own chain link, after the registration
+      // had finished — so no write sneaks past the tightened provider.
+      expect(registrationDone).toBe(true);
+      const result = await registration;
+      expect(result.created).toBe(true);
+      // The switch landed: the next registration sees the tightened provider.
+      const after = path.join(harness.root, "after-model-switch");
+      await mkdir(after);
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: after });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("orchestration switched off");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("cannot sneak a write past a provider policy tightening: the settings write serializes with the registration", async () => {
+    // File-backed config, so the settings write is what the gate reads next.
+    const harness = await testHarness({});
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const parent = await connection.dispatch({ type: "thread.create", projectId: ensured.project.id, runtimeMode: "full-access" });
+      const folder = path.join(harness.root, "policy-gap");
+      await mkdir(folder);
+      await runProcess("git", ["init", "-b", "main"], { cwd: folder });
+      const registration = connection.projectRegistration.register(parent.threadId, { cwd: folder });
+      // The harness's installation default is OpenCode, so its section is the thread's provider.
+      const tightened = connection.dispatch({ type: "settings.set", key: "providers.opencode.orchestration", value: "false" });
+      let registrationDone = false;
+      void registration.then(() => {
+        registrationDone = true;
+      }, () => {
+        registrationDone = true;
+      });
+      await tightened;
+      // The policy landed inside its own chain link, after the registration
+      // had finished — so no write sneaks past the tightened policy.
+      expect(registrationDone).toBe(true);
+      const result = await registration;
+      expect(result.created).toBe(true);
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(true);
+      // The policy landed: the next registration is refused under it.
+      const after = path.join(harness.root, "after-policy");
+      await mkdir(after);
+      const refused = await callMoxenTool(connection, parent.threadId, "project_register", { cwd: after });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("orchestration switched off");
     } finally {
       await connection.close();
     }
@@ -506,6 +588,93 @@ describe("project_register: the server authorizes the calling thread, live", () 
       const refused = await register({ cwd: folder });
       expect(refused.isError).toBe(true);
       expect(refused.text).toContain("orchestration switched off");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses the thread's live provider's policy too: a running turn's one-off override decides", async () => {
+    // The thread's saved provider allows orchestration; the turn it is
+    // running was started with a one-off model override onto a provider
+    // that disables it. The calling session arrives mid-turn, so the
+    // override is the provider it actually runs on.
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => ({ ...harness.config, providers: { opencode: { orchestration: false } } }),
+    });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+      });
+      await connection.dispatch({
+        type: "thread.turn.start",
+        threadId: thread.threadId,
+        message: { text: "Register on my behalf" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      const running = (await harness.store.readTurns(thread.threadId)).at(-1);
+      expect(running?.status).toBe("running");
+      const folder = path.join(harness.root, "override-provider");
+      await mkdir(folder);
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("orchestration switched off");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
+describe("project_register: only the authenticated session's thread writes", () => {
+  it("is not a client command a caller can dispatch for any thread it names", () => {
+    // No protocol command exists: a raw frame naming a thread and a folder
+    // is refused before anything runs, so no ordinary local or paired
+    // remote client can register for someone else's thread.
+    expect(() => decodeCommand({ type: "project.register", threadId: "any-thread", cwd: "/abs" })).toThrow(/project\.register/);
+  });
+
+  it("refuses a caller that reached the server without the thread-bound capability", async () => {
+    // A bare client api (a stub like a remote socket would present) carries
+    // no capability, so the write fails closed rather than trusting a name.
+    const refused = await callMoxenTool({} as never, "any-thread", "project_register", { cwd: "/abs" });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toContain("not available on this connection");
+    expect(refused.text).toContain("moxen projects ensure");
+  });
+
+  it("fails closed when the delegations ledger is not fully readable, instead of reading a partial list", async () => {
+    const { harness, connection, register, parentThreadId } = await setup();
+    try {
+      // A real delegated task, with a real delegation row.
+      const delegated = await callMoxenTool(connection, parentThreadId, "delegate", { task: "Write the changelog", title: "changelog" });
+      expect(delegated.isError).toBe(false);
+      const taskId = (JSON.parse(delegated.text) as { taskId: string }).taskId;
+      const folder = path.join(harness.root, "corrupt-row");
+      await mkdir(folder);
+      // Intact rows: the delegated task is still refused by its own row.
+      const intact = await register({ cwd: folder }, taskId);
+      expect(intact.isError).toBe(true);
+      expect(intact.text).toContain("not available in a delegated task");
+      // Corrupt that row in the ledger: the tolerant reader would skip it
+      // and read the task as never delegated, so the authorization read is
+      // strict — any unreadable row refuses the whole decision.
+      const ledger = path.join(harness.root, "delegations.jsonl");
+      const raw = await readFile(ledger, "utf8");
+      const line = raw.split("\n").find((entry) => entry.includes(taskId));
+      expect(line).toBeTruthy();
+      await writeFile(ledger, raw.replace(line!, line!.slice(0, 20)), "utf8");
+      const refused = await register({ cwd: folder }, taskId);
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("could not be read");
+      expect(refused.text).toContain("refused rather than answered as anyone");
       expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
     } finally {
       await connection.close();
