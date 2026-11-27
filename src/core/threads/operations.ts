@@ -4299,21 +4299,32 @@ export async function revertThread(
   // cancellation mark, leaving the cancelled anchor turn back at the tip of
   // this delegated task, restore the cancellation mark under the same
   // delegation-then-thread lock order used by markCancelled/clearCancelledOnSettle.
+  // Always wait on `!delegations` before deciding, so an in-flight mark or
+  // clear cannot commit right after an unlocked precheck skips reconciliation.
   const delegations = await store.readDelegations().catch(() => [] as StoredDelegation[]);
   const activeDelegation = delegations.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
-  if (activeDelegation && activeDelegation.status === "running" && activeDelegation.cancelledTurnId !== undefined) {
+  if (activeDelegation) {
     await store.updateDelegationWith(activeDelegation.id, async (current) => {
-      if (current.status !== "running" || current.cancelledTurnId === undefined) return null;
+      if (current.continuedIn !== undefined || current.status !== "running" || current.cancelledTurnId === undefined) return null;
       return await store.withThreadLock(threadId, async () => {
         const currentTurns = await store.readTurns(threadId).catch(() => [] as StoredTurn[]);
-        if (currentTurns.some((turn) => turn.status === "running" || turn.status === "queued")) return null;
         const remainingRan = ranTurns(currentTurns);
         const anchorAt = remainingRan.findIndex((turn) => turn.id === current.cancelledTurnId);
         if (anchorAt < 0) return null;
-        const hasNewerRetained = current.cancelledAfterSeq !== undefined
-          ? remainingRan.some((turn) => turn.executionSeq !== undefined && turn.executionSeq > current.cancelledAfterSeq!)
-          : anchorAt < remainingRan.length - 1;
-        if (hasNewerRetained) return null;
+        // Restore whenever no newer *settled* execution remains: any live
+        // running or queued turn still masks the mark in projection and will
+        // clear it on settle, while a queued turn that is later withdrawn
+        // without running will leave the cancelled anchor intact.
+        const hasNewerSettled = current.cancelledAfterSeq !== undefined
+          ? remainingRan.some(
+              (turn) =>
+                turn.status !== "running"
+                && turn.status !== "queued"
+                && turn.executionSeq !== undefined
+                && turn.executionSeq > current.cancelledAfterSeq!,
+            )
+          : remainingRan.some((turn, index) => index > anchorAt && turn.status !== "running" && turn.status !== "queued");
+        if (hasNewerSettled) return null;
         return {
           status: "cancelled",
           cancelledGeneration: (current.cancelledGeneration ?? 0) + 1,

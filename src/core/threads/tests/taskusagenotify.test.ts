@@ -1686,6 +1686,116 @@ describe("cancellations that race later work", () => {
     expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
   });
 
+  it("waits on the delegation lock during revert reconciliation when a clear write is still committing", async () => {
+    const aParked = deferred();
+    const bRelease = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Running A") {
+        aParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      await bRelease.promise;
+      return completed("Follow-up B done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Running A" });
+    await aParked.promise;
+    await sendTurn(w.store, child.id, { prompt: "Queued B", delivery: "queue" });
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+
+    // Pause clearCancelledOnSettle AFTER it released the child lock (after readTurns)
+    // and BEFORE updateDelegationWith commits, so revertThread removes B while the
+    // delegation row on disk is still "cancelled" and !delegations is held.
+    const commitPaused = deferred();
+    const releaseCommit = deferred();
+    let armed = true;
+    const origUpdateWith = w.store.updateDelegationWith.bind(w.store);
+    w.store.updateDelegationWith = async (delegationId, build) => {
+      return await origUpdateWith(delegationId, async (current) => {
+        const patch = await build(current);
+        if (armed && patch?.status === "running" && current.status === "cancelled") {
+          armed = false;
+          commitPaused.resolve();
+          await releaseCommit.promise;
+        }
+        return patch;
+      });
+    };
+
+    try {
+      bRelease.resolve();
+      await commitPaused.promise;
+      // Child lock is already free: revertThread rewrites the turns ledger and
+      // then blocks on !delegations until the clear commits, then reconciles.
+      const reverting = revertThread(w.ctx, child.id, 1);
+      await new Promise((r) => setTimeout(r, 40));
+      releaseCommit.resolve();
+      await reverting;
+      await flushTurnRunners();
+    } finally {
+      w.store.updateDelegationWith = origUpdateWith;
+    }
+
+    expect((await w.store.readTurns(child.id)).map((t) => t.id)).toEqual([a.turn.id]);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("restores cancellation on revert even if a future turn is queued during reconciliation and later withdrawn", async () => {
+    const bParked = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Turn B") {
+        bParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed(`${prompt} done.`);
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Turn A" });
+    await a.run;
+    const b = await startTurn(w.ctx, { threadId: child.id, prompt: "Turn B" });
+    await bParked.promise;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await b.run;
+    const c = await startTurn(w.ctx, { threadId: child.id, prompt: "Turn C" });
+    await c.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+
+    // Queue a future scheduled turn D between revertThread's ledger rewrite and reconciliation.
+    let queuedDId: string | null = null;
+    const origUpdateWith = w.store.updateDelegationWith.bind(w.store);
+    let armed = true;
+    w.store.updateDelegationWith = async (delegationId, build) => {
+      if (armed) {
+        armed = false;
+        const d = await sendTurn(w.store, child.id, {
+          prompt: "Future D",
+          delivery: "queue",
+          scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
+        });
+        queuedDId = d.turn.id;
+      }
+      return await origUpdateWith(delegationId, build);
+    };
+    try {
+      await revertThread(w.ctx, child.id, 2);
+    } finally {
+      w.store.updateDelegationWith = origUpdateWith;
+    }
+
+    expect(queuedDId).not.toBeNull();
+    // Withdraw D before it ever runs: B must still report cancelled.
+    await w.store.updateTurn(child.id, queuedDId!, { status: "interrupted", completedAt: w.store.nowIso() });
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
   it("assigns a durable boundary when cancelling and reverting a legacy unsequenced turn", async () => {
     const w = await scriptedWorld(async () => completed("Fresh work done."));
     const parent = await w.make("orchestrator");
