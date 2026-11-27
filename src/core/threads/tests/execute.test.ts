@@ -684,6 +684,11 @@ describe("context usage", () => {
     });
     const { turn } = await (await import("../threads.js")).sendTurn(store, thread.id, { prompt: "go" });
     const observed = { input: 100, cacheRead: 10, cacheCreate: 0, output: 40, thinking: 0, costUsd: 0.42 };
+    // Latch like the event-pump test below: the interrupt must land while the
+    // provider turn is running, not while the prompt is still going out (that
+    // path deliberately keeps no usage).
+    let markAwaiting!: () => void;
+    const awaiting = new Promise<void>((resolve) => { markAwaiting = resolve; });
     const driver: TurnDriver = {
       hasSession: () => Effect.succeed(true),
       startSession: () => Effect.succeed({}),
@@ -692,6 +697,7 @@ describe("context usage", () => {
       awaitTurn: (_threadId, _turnId, signal) =>
         new Promise((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(new CliError("TURN_ABORTED", "Interrupted before result")), { once: true });
+          markAwaiting();
         }),
       liveTurnUsage: () => observed,
       streamEvents: Stream.never,
@@ -700,6 +706,7 @@ describe("context usage", () => {
     // onAbort (capturing the final observed usage before the driver interrupt)
     // and the aborted wait bypasses the normal outcome path.
     const running = executeTurn({ store, driver, threadId: thread.id, storeTurnId: turn.id, prompt: "go" });
+    await awaiting;
     await interruptTurn(store, thread.id, turn.id);
     await running;
     expect((await store.readTurns(thread.id))[0]?.status).toBe("interrupted");

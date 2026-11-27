@@ -339,12 +339,29 @@ async function unansweredPrompts(
     if (turn.id === turnId || driverKey((turn.modelSelection ?? thread.modelSelection).instanceId) !== setup.key) continue;
     if (turn.unanswered) {
       // A usage continue is only a nudge and stays out — but user messages
-      // folded into its turn still need asking.
-      const own = usageNoticeParts(messages, turn)?.prompt ?? turnPrompt(messages, turn)?.text;
+      // folded into its turn still need asking. A continue persisted before
+      // its turn said which message was the nudge is recognized by its
+      // exact text and dropped the same way, never sent on as owed work.
+      const split = usageNoticeParts(messages, turn)?.prompt;
+      const own = split ?? legacyOwedText(messages, turn);
       if (own) owed.push(own);
     } else if (turn.owner && (turn.status === "completed" || turn.status === "failed" || turn.status === "interrupted")) owed = [];
   }
   return owed;
+}
+
+/**
+ * What a usage continue persisted without its `usageRecoveryNotice` marker
+ * still owes: its folded user messages, with the nudge itself — recognized
+ * only by its exact text — left out. Any other primary text is the user's
+ * and goes through unchanged.
+ */
+function legacyOwedText(messages: readonly StoredMessage[], turn: StoredTurn): string | null {
+  if (turn.scheduleReason !== "usage-reset" || turn.usageRecoveryNotice === true) return turnPrompt(messages, turn)?.text ?? null;
+  const primary = messages.find((message) => message.id === turn.messageId && message.turnId === turn.id && message.role === "user");
+  if (primary === undefined || primary.text.trim() !== USAGE_CONTINUE_PROMPT) return turnPrompt(messages, turn)?.text ?? null;
+  const riders = messages.filter((message) => message.turnId === turn.id && message.role === "user" && message.id !== primary.id && message.text.trim().length > 0);
+  return riders.length > 0 ? riders.map((message) => message.text.trim()).join("\n\n") : null;
 }
 
 /**

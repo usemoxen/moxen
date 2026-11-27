@@ -164,9 +164,26 @@ interface ParkedCodex {
 
 /** Unlike history reads, an append may only fall back on a known pre-write refusal. */
 function injectMethodUnavailable(cause: unknown): boolean {
-  return cause instanceof CliError && cause.code === "PEER_REQUEST_FAILED" && (
-    asRecord(cause.details)?.["code"] === -32601 || cause.message === "Request failed: thread/inject_items is not supported yet"
-  );
+  if (!(cause instanceof CliError) || cause.code !== "PEER_REQUEST_FAILED") return false;
+  const details = asRecord(cause.details);
+  if (details?.["code"] === -32601) return true;
+  // The app-server rejects an unknown method with code -32600 and a message
+  // naming the unknown variant (openai/codex#61067); the peer wraps the
+  // message as `Request failed: ...`. Anything else under -32600 — a
+  // malformed request the method did parse — is a real failure.
+  if (details?.["code"] === -32600) {
+    return /(?:^Request failed: )?Invalid request: unknown variant `thread\/inject_items`/u.test(cause.message);
+  }
+  return cause.message === "Request failed: thread/inject_items is not supported yet";
+}
+
+/** An append whose outcome is not yet known: in flight, or written but unacknowledged. */
+interface PendingInjection {
+  readonly state: "in-flight" | "unconfirmed";
+  /** The logical Moxen turn the uncertain write was made for. */
+  readonly storeTurnId: string | undefined;
+  /** Content hash of the notices in that write. */
+  readonly signature: string;
 }
 
 interface CodexSession {
@@ -326,7 +343,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
   /** Acknowledged batches keyed by Codex history and logical Moxen turn. */
   private readonly injectedNotices = new Map<string, Map<string, string>>();
   // Keep uncertain writes against the Codex history, even if its session is reopened.
-  private readonly pendingInjections = new Map<string, "in-flight" | "unconfirmed">();
+  private readonly pendingInjections = new Map<string, PendingInjection>();
   /** Codex thread id per thread, kept past session teardown (see `resumeCursor`). */
   private readonly titleJobs = new Map<string, Promise<string | null>>();
   private readonly titleVersions = new Map<string, number>();
@@ -450,6 +467,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
           this.settleOpenTurn(session, "failed", "The Codex process exited.");
           session.background.clear();
           this.denyParked(session, "Codex exited.");
+          this.clearInjectionState(session);
           this.sessions.delete(session.threadId);
         }
       });
@@ -719,6 +737,10 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     // Settle before the wind-down wait, so a stalled harness close cannot
     // hold the turn's waiters.
     this.settleOpenTurn(session, "interrupted", "Session ended.");
+    // The teardown ends any append in flight and the conversation it was
+    // uncertain about: a resumed session asks the history afresh, so the
+    // delivery records and any unconfirmed mark do not survive it.
+    this.clearInjectionState(session);
     try {
       await this.windDownForClose(session);
     } finally {
@@ -739,6 +761,19 @@ export class CodexDriver implements ProviderAdapter<CliError> {
           state: reason,
         });
       }
+    }
+  }
+
+  /**
+   * Forget a conversation's injection bookkeeping. Called on session
+   * teardown (`stopSession`, `stopAll`, process exit): the delivery records
+   * and pending marks describe one conversation, which ends here, and the
+   * map must not grow with every noticed turn of every thread.
+   */
+  private clearInjectionState(session: CodexSession): void {
+    if (session.codexThreadId !== null) {
+      this.injectedNotices.delete(session.codexThreadId);
+      this.pendingInjections.delete(session.codexThreadId);
     }
   }
 
@@ -776,21 +811,35 @@ export class CodexDriver implements ProviderAdapter<CliError> {
 
   /** Append notices without starting a turn. Return false only for a refusal before any write. */
   private async injectNotices(session: CodexSession, codexThreadId: string, notices: readonly string[], storeTurnId?: string): Promise<boolean> {
+    const signature = createHash("sha256").update(JSON.stringify(notices)).digest("hex");
     const pending = this.pendingInjections.get(codexThreadId);
     if (pending !== undefined) {
-      throw new CliError("CODEX_NOTICE_UNCONFIRMED", pending === "in-flight"
-        ? "Codex is still appending an instruction to this conversation."
-        : "Codex did not confirm its previous instruction update. Continue in a new conversation to avoid appending it twice.");
+      if (pending.state === "in-flight") {
+        throw new CliError("CODEX_NOTICE_UNCONFIRMED", "Codex is still appending an instruction to this conversation.");
+      }
+      // The unacknowledged write may or may not have landed. A retry of the
+      // turn it was made for, with the same notices, must not write again
+      // (the item is in the history already): the turn runs with its prompt,
+      // and the delivery record keeps any later retry of it from writing
+      // either. Any other turn cannot know whether the write landed, so it
+      // is refused once — and the refusal clears the mark, so one lost
+      // acknowledgment never wedges the conversation for good.
+      if (storeTurnId !== undefined && pending.storeTurnId === storeTurnId && pending.signature === signature) {
+        this.recordDelivered(codexThreadId, storeTurnId, signature);
+        this.pendingInjections.delete(codexThreadId);
+        return true;
+      }
+      this.pendingInjections.delete(codexThreadId);
+      throw new CliError("CODEX_NOTICE_UNCONFIRMED", "Codex did not confirm its previous instruction update. Send a new turn to avoid appending it twice.");
     }
     const delivered = this.injectedNotices.get(codexThreadId);
-    const signature = createHash("sha256").update(JSON.stringify(notices)).digest("hex");
     const previous = storeTurnId === undefined ? undefined : delivered?.get(storeTurnId);
     if (previous !== undefined) {
       if (previous !== signature) throw new CliError("CODEX_NOTICE_CHANGED", "The instructions changed after Codex accepted them for this turn. Send a new turn to apply the change.");
       return true;
     }
     if (session.noticesUnavailable) return false;
-    this.pendingInjections.set(codexThreadId, "in-flight");
+    this.pendingInjections.set(codexThreadId, { state: "in-flight", storeTurnId, signature });
     try {
       await session.peer.request(CODEX_METHODS.threadInjectItems, {
         threadId: codexThreadId,
@@ -798,7 +847,9 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       });
     } catch (cause) {
       if (!injectMethodUnavailable(cause)) {
-        this.pendingInjections.set(codexThreadId, "unconfirmed");
+        // The request may have appended the items anyway: keep the store
+        // turn so its retry does not say them twice.
+        this.pendingInjections.set(codexThreadId, { state: "unconfirmed", storeTurnId, signature });
         throw cause;
       }
       this.pendingInjections.delete(codexThreadId);
@@ -806,12 +857,18 @@ export class CodexDriver implements ProviderAdapter<CliError> {
       return false;
     }
     this.pendingInjections.delete(codexThreadId);
-    if (storeTurnId !== undefined) {
-      const deliveries = delivered ?? new Map<string, string>();
-      deliveries.set(storeTurnId, signature);
-      this.injectedNotices.set(codexThreadId, deliveries);
-    }
+    if (storeTurnId !== undefined) this.recordDelivered(codexThreadId, storeTurnId, signature);
     return true;
+  }
+
+  /**
+   * Remember an acknowledged (or assumed-delivered) append for its logical
+   * Moxen turn, keeping only the latest one: a retry is always of the turn
+   * that just failed, so older turns' records are dead weight on a map that
+   * would otherwise grow with every noticed turn of a long session.
+   */
+  private recordDelivered(codexThreadId: string, storeTurnId: string, signature: string): void {
+    this.injectedNotices.set(codexThreadId, new Map([[storeTurnId, signature]]));
   }
 
   // -- turns ---------------------------------------------------------------

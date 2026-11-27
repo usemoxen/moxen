@@ -143,6 +143,57 @@ describe("Moxen's own text on a developer channel", () => {
     expect(turn!.prompt).toContain("port the parser");
   });
 
+  it("drops a pre-upgrade continue's nudge from owed text without promoting it", async () => {
+    const w = await world();
+    const thread = await w.make("legacy continue");
+    // A usage continue persisted before turns said which message was the
+    // nudge: no `usageRecoveryNotice`, no origin — only its exact prompt text.
+    const legacy = (await sendTurn(w.store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, scheduleReason: "usage-reset" })).turn;
+    await failTurn(w.store, thread.id, legacy.id, { error: "Usage limit reached." });
+    await w.store.updateTurn(thread.id, legacy.id, { unanswered: true });
+    const { providerSessions: _sessions, ...withoutSession } = (await w.store.readThreadRecord(thread.id))!;
+    await w.store.writeThreadRecord(withoutSession);
+
+    await startTurn(w.ctx, { threadId: thread.id, prompt: "pick it up" });
+    await settleRuns();
+
+    const turn = w.sent.find((entry) => entry.threadId === thread.id);
+    expect(turn).toBeDefined();
+    // The nudge is not replayed as the user's owed text...
+    expect(turn!.prompt).not.toContain(USAGE_CONTINUE_PROMPT);
+    // ...and it is not promoted to a developer channel either.
+    expect(turn!.notices).toBeUndefined();
+    expect(turn!.prompt).toContain("pick it up");
+  });
+
+  it("keeps a rider the pre-upgrade continue carried as owed user text", async () => {
+    const w = await world();
+    const thread = await w.make("legacy continue with a rider");
+    const legacy = (await sendTurn(w.store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, scheduleReason: "usage-reset" })).turn;
+    await w.store.appendLedger(thread.id, "messages", {
+      id: w.store.newId(),
+      threadId: thread.id,
+      turnId: legacy.id,
+      role: "user",
+      text: "and check the docs",
+      createdAt: w.store.nowIso(),
+    });
+    await failTurn(w.store, thread.id, legacy.id, { error: "Usage limit reached." });
+    await w.store.updateTurn(thread.id, legacy.id, { unanswered: true });
+    const { providerSessions: _sessions, ...withoutSession } = (await w.store.readThreadRecord(thread.id))!;
+    await w.store.writeThreadRecord(withoutSession);
+
+    await startTurn(w.ctx, { threadId: thread.id, prompt: "pick it up" });
+    await settleRuns();
+
+    const turn = w.sent.find((entry) => entry.threadId === thread.id);
+    expect(turn).toBeDefined();
+    // Only the nudge is dropped; the user's message folded into that turn is still asked.
+    expect(turn!.prompt).not.toContain(USAGE_CONTINUE_PROMPT);
+    expect(turn!.prompt).toContain("and check the docs");
+    expect(turn!.prompt).toContain("pick it up");
+  });
+
   it.each([
     { prompt: "client scheduling text", legacy: false },
     { prompt: USAGE_CONTINUE_PROMPT, legacy: false },
