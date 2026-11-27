@@ -59,8 +59,11 @@ exceptions.
   `task_cancel`, `task_settle`, `task_unsettle`, `task_snooze`, `task_send`,
   `task_ask`, `message_queue`,
   `thread_search`, `thread_read`, `image_gen`, `thread_continue`) plus the
-  project registry reads (`project_list`, `project_resolve`, for every
-  session; writing the registry is never an agent's), thread,
+  project tools (`project_list`, `project_resolve`, for every session, and
+  `project_register` — the one registry write an agent has, authorized
+  inside the server against the calling thread's live state: never a
+  delegated task, a research run's lead or role, or a thread outside Auto
+  or Full access), thread,
   memory and utility tools — not every session gets all of them (a delegated
   task gets none of the delegation tools; research, web-fetch, memory,
   image-generation, hand-off and checklist tools are offered per session;

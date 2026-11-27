@@ -419,6 +419,19 @@ export class DirectConnection implements ClientApi {
     },
   };
   private readonly usageProtection = new UsageProtection(() => this.context());
+  /**
+   * The one chain a project registration is authorized and written on,
+   * together with the state changes it must not interleave with: a
+   * runtime-mode change, and a research run starting on the calling
+   * thread. A registration reads the calling thread's live mode,
+   * delegation and research state inside the same critical section that
+   * writes the registry, so a change landing after the read cannot let a
+   * write through, and one landing first is always seen (LOCAL-035). The
+   * other research transitions only relax the gate — a run ends, a role
+   * finishes — or happen to a thread that has no session to call with yet,
+   * so they need no link of their own.
+   */
+  private registryAuthorizationChain: Promise<unknown> = Promise.resolve();
   /** The periodic pass that ends a snooze waiting on conditions (task_snooze). */
   private readonly snoozeWatch = new SnoozeWatch(() => this.context());
   private usageTimer: ReturnType<typeof setInterval> | null = null;
@@ -1062,6 +1075,78 @@ export class DirectConnection implements ClientApi {
   private async store(): Promise<ThreadStore> {
     if (!this.storePromise) this.storePromise = openThreadStore(this.storeRoot);
     return await this.storePromise;
+  }
+
+  /** One link of the registration authorization chain: work runs alone, after every link before it. */
+  private runOnRegistryAuthorizationChain<T>(work: () => Promise<T>): Promise<T> {
+    const prior = this.registryAuthorizationChain;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.registryAuthorizationChain = gate;
+    return (async () => {
+      await prior;
+      try {
+        return await work();
+      } finally {
+        release();
+      }
+    })();
+  }
+
+  /**
+   * Why the thread a `project.register` names may not register a project —
+   * null when it may. The flags a session arrived with are advice, not
+   * authority: a thread that became a delegated task, a research run's
+   * lead or one of its roles mid-life is refused however its session was
+   * started, and so is a provider whose orchestration is switched off,
+   * read from the live config. Every lookup fails closed: a thread that
+   * cannot be read, and a read that throws, refuse rather than answer as
+   * anyone. A dry run changes nothing, so the mode leg never applies to
+   * it; the identity legs do (LOCAL-035).
+   */
+  private async projectRegisterRefusal(threadId: string, dryRun: boolean): Promise<string | null> {
+    const unreadable =
+      "project_register authorises against the calling thread's live state, and it could not be read here, so the registration is refused rather than answered as anyone. " +
+      "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`; dryRun: true still previews what would be registered.";
+    const store = await this.store();
+    let thread: Awaited<ReturnType<ThreadStore["readThreadRecord"]>>;
+    let delegated = false;
+    let orchestration = true;
+    try {
+      thread = await store.readThreadRecord(threadId);
+      if (thread === null) return unreadable;
+      delegated = (await store.readDelegations()).some((row) => row.childThreadId === threadId);
+      orchestration = moxenToolsOf(resolveProfileProviderConfig(await this.loadConfig(), thread.modelSelection.instanceId)).orchestration;
+    } catch {
+      return unreadable;
+    }
+    if (delegated) {
+      return "project_register is not available in a delegated task: registration is the orchestrator's call. Say what needs registering in your report.";
+    }
+    if (thread.researchRole !== undefined) {
+      return "project_register is not available in a research run: its roles register nothing. Name the folder and what it is for in your report.";
+    }
+    if (isResearchRunActive(thread.researchRun)) {
+      return "project_register is not available while a research run is active: the lead registers nothing mid-run. Name the folder and what it is for in the run's report; the user can also register it with `moxen projects ensure --cwd <folder>`.";
+    }
+    if (!orchestration) {
+      return "project_register is not available with orchestration switched off for this thread's provider: registration is the orchestrator's call. Say what needs registering in your report.";
+    }
+    if (dryRun) return null;
+    const mode = thread.runtimeMode;
+    if (mode === "auto" || mode === "full-access") return null;
+    if (mode == null) {
+      return (
+        "project_register needs the thread's permission mode, and it could not be read here, so the registration is refused rather than answered as anyone. " +
+        "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`; dryRun: true still previews what would be registered."
+      );
+    }
+    return (
+      `project_register writes the projects registry with no approval of its own, so the thread must be running in Auto or Full access: this one runs in ${mode}, ` +
+      "where a provider that never asks (OpenCode allows MCP tools by default) would register silently. The user can register the folder themselves (`moxen projects ensure --cwd <folder>`), switch the thread's permission mode, or ask with dryRun: true to preview first."
+    );
   }
 
   /** Whether an update or rollback has landed since this server started. */
@@ -2167,14 +2252,18 @@ export class DirectConnection implements ClientApi {
       case "thread.model-selection.set":
         await updateThreadMeta(await this.store(), command.threadId, { modelSelection: command.modelSelection });
         return accepted;
-      case "thread.runtime-mode.set":
-        await updateThreadMeta(await this.store(), command.threadId, { runtimeMode: command.runtimeMode });
+      case "thread.runtime-mode.set": {
+        const store = await this.store();
+        // On the registration chain: a mode change must not land between a
+        // project registration reading the mode and writing the registry.
+        await this.runOnRegistryAuthorizationChain(() => updateThreadMeta(store, command.threadId, { runtimeMode: command.runtimeMode }));
         // A session that is already open follows it too: a running turn from its next tool call.
         {
-          const thread = await (await this.store()).readThreadRecord(command.threadId).catch(() => null);
+          const thread = await store.readThreadRecord(command.threadId).catch(() => null);
           if (thread) this.driverFor(thread.modelSelection.instanceId).setRuntimeMode?.(command.threadId, command.runtimeMode);
         }
         return accepted;
+      }
       case "thread.interaction-mode.set":
         await updateThreadMeta(await this.store(), command.threadId, { interactionMode: command.interactionMode });
         return accepted;
@@ -2276,6 +2365,19 @@ export class DirectConnection implements ClientApi {
       case "project.ensure": {
         const { type: _type, commandId: _id, ...request } = command;
         return await ensureProject(await this.context(), request);
+      }
+      case "project.register": {
+        // The agent's registration, authorized inside the mutation: the
+        // gate and the registry write share one link of the chain with
+        // runtime-mode changes and research-run starts, so no tightening can
+        // land between the read and the write. The configured
+        // `projectPolicy` decides; a caller never passes one.
+        const { threadId, cwd, dryRun } = command;
+        return await this.runOnRegistryAuthorizationChain(async () => {
+          const refusal = await this.projectRegisterRefusal(threadId, dryRun === true);
+          if (refusal !== null) throw new CliError("PROJECT_REGISTER_REFUSED", refusal, { exitCode: 4 });
+          return await ensureProject(await this.context(), { cwd, ...(dryRun === true ? { dryRun: true } : {}) });
+        });
       }
       case "model.visibility.set":
         return { hidden: await setModelHidden(this.storeRoot, command.instanceId, command.model, command.hidden) };
@@ -3144,7 +3246,10 @@ export class DirectConnection implements ClientApi {
         if (plan) {
           const ctx = await this.context();
           const approved = resolveResearchPlan(command.modelSelection ?? thread!.modelSelection, ctx.config, plan);
-          await beginResearchRun(ctx, threadId, approved);
+          // On the registration chain: a run starting on a thread must not
+          // land between a project registration reading its research state
+          // and writing the registry.
+          await this.runOnRegistryAuthorizationChain(() => beginResearchRun(ctx, threadId, approved));
         }
       }
     } else if (askable && thread?.researchPicker === true) {

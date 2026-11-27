@@ -72,9 +72,9 @@ describe("Moxen's own tools, switched per provider", () => {
     const settings = ["settings_read"];
     const memory = ["memory_append", "memory_delete", "memory_edit", "memory_read", "memory_save", "memory_search"];
     const threads = ["thread_read", "thread_search"];
-    expect(await moxenTools({})).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "message_queue_edit", "message_queue_list", "message_queue_remove", "models", "project_list", "project_resolve", ...settings, "task_ask", "task_cancel", "task_send", "task_settle", "task_snooze", "task_status", "task_unsettle", "thread_continue", ...threads, "usage_status", "web_fetch"]);
+    expect(await moxenTools({})).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "message_queue_edit", "message_queue_list", "message_queue_remove", "models", "project_list", "project_register", "project_resolve", ...settings, "task_ask", "task_cancel", "task_send", "task_settle", "task_snooze", "task_status", "task_unsettle", "thread_continue", ...threads, "usage_status", "web_fetch"]);
     expect(await moxenTools({ orchestration: false })).toEqual(["context_usage", ...knowledge, ...memory, "project_list", "project_resolve", ...settings, "usage_status", "web_fetch"]);
-    expect(await moxenTools({ webFetch: false })).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "message_queue_edit", "message_queue_list", "message_queue_remove", "models", "project_list", "project_resolve", ...settings, "task_ask", "task_cancel", "task_send", "task_settle", "task_snooze", "task_status", "task_unsettle", "thread_continue", ...threads, "usage_status"]);
+    expect(await moxenTools({ webFetch: false })).toEqual(["context_usage", "delegate", ...knowledge, ...memory, "message_queue", "message_queue_edit", "message_queue_list", "message_queue_remove", "models", "project_list", "project_register", "project_resolve", ...settings, "task_ask", "task_cancel", "task_send", "task_settle", "task_snooze", "task_status", "task_unsettle", "thread_continue", ...threads, "usage_status"]);
   });
 
   it("keeps the server for knowledge and settings when both switches and memory are off, and reads the older all-at-once switch as both", async () => {

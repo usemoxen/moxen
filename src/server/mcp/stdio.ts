@@ -26,7 +26,7 @@ export const MOXEN_MCP_INSTRUCTIONS =
   "message_queue queues or schedules a message on your own thread (or a task you delegated) through the user's queue: at takes an ISO time or HH:MM, conditions wait for an allowance reset or another thread; with neither it runs after the current turn. A protected thread keeps it waiting. " +
   "message_queue_list shows the messages you queued that are still waiting; message_queue_edit changes what one waits for and message_queue_remove takes it back before it runs. Never the user's entries, and never one that has started; a continuation that takes over a task inherits its earlier entries. This management is MCP-only through the authenticated session for your thread; a stdio session without the daemon credential is refused. " +
   "thread_search and thread_read find and read other threads, a step at a time. " +
-  "project_list lists Moxen's registered projects and project_resolve resolves a folder to one; registering a folder stays the user's (`moxen projects ensure`), never an agent's. " +
+  "project_list lists Moxen's registered projects and project_resolve resolves a folder to one; project_register registers a folder as a project under the configured projectPolicy setting (never bypassing it), and only the orchestrator's own thread has it — a real registration also needs the thread running in Auto or Full access; a dry run never does. " +
   "The models tool lists the providers, models and efforts you can delegate to. " +
   "usage_status reports the user's current shared provider usage, fresh rather than the hours-old figures models carries: call it before fanning work out. " +
   "context_usage reports how full your own context window is, from the latest reading Moxen recorded. " +

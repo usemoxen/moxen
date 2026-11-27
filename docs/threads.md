@@ -1688,16 +1688,16 @@ A `modelSelection` with `provider`/`model` together is refused.
   the old thread, where the user can hold or remove it. There is no CLI
   surface for this: the palette and `threads continue` stay the user's.
 
-### Listing and resolving projects (`project_list`, `project_resolve`)
+### Listing, resolving and registering projects (`project_list`, `project_resolve`, `project_register`)
 
 The projects registry behind `moxen projects list` and `resolve`, as
-read-only agent tools. `project_list` lists every registered project
+agent tools. `project_list` lists every registered project
 (id, folder and title, one per line; the shared "No project" entry is left
 out, as the CLI's own list leaves it). `project_resolve` resolves one
 folder to the project Moxen keys it by — the Git root in repo workspace
 mode, the canonical folder otherwise, per the server's `workspaceMode`
 setting — with the same workspace read the CLI gives, and reports no
-project plainly when the folder has none. It takes a fully qualified
+project plainly when the folder has none. Both take a fully qualified
 absolute path: the folder lives on the machine Moxen runs on, and a
 relative path is refused rather than resolved against the server's own
 working directory. On Windows the path must name its volume (`C:\folder`)
@@ -1706,10 +1706,29 @@ kept as given, one whose name ends in a space included. A folder that does
 not exist, or is not a directory, is refused the same way the CLI refuses
 it (`WORKSPACE_NOT_FOUND`, `WORKSPACE_NOT_DIRECTORY`).
 
-The reads come with the `moxen` server for every session, delegated
-tasks included. No agent path writes the projects registry: registering a
-folder is the user's — `moxen projects ensure` under the configured
-`projectPolicy` — never an agent's.
+`project_register` is the one registry write an agent has: the
+orchestrator's own thread registers an existing folder as a project under
+the configured `projectPolicy` (never bypassing it), with `dryRun` to
+preview without writing, and a folder registered back after its project
+was removed revives that project with its original id and threads. The
+reads come with the `moxen` server for every session, delegated tasks
+included; the register is authorized inside the server mutation, against
+the calling thread's live state rather than the flags its session was
+started with, and on the same chain as runtime-mode changes and
+research-run starts, so no mode tightening can land between the
+authorization read and the write. A delegated task, a research run's lead
+and every role, and a provider with orchestration switched off are refused,
+whatever their session was told. A real registration — not a `dryRun` —
+also needs the calling thread to be running in Auto or Full access: Moxen
+shows no approval of its own for an MCP tool, and some providers run MCP
+tools without asking anything (OpenCode allows them by default), so a
+lower mode could register silently. Approval-required and
+auto-accept-edits threads, and any thread whose mode cannot be read, are
+refused with the mode named; every refusal says what the user can do
+instead — register the folder themselves (`moxen projects ensure`), switch
+the thread's permission mode, or preview with `dryRun` — and every
+authorization lookup fails closed: an unreadable thread or registry read
+refuses rather than answers as anyone.
 
 ### Continuing in a new thread (palette / `threads continue`)
 
