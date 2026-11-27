@@ -143,12 +143,12 @@ describe("the model-facing usage notice", () => {
     expect(isControlCommand("claude", "/compact focus")).toBe(true);
     expect(isControlCommand("harness", "/compact focus")).toBe(true);
     for (const kind of ["codex", "opencode", "claude", "harness"] as const) {
-      expect(isControlCommand(kind, "/Users/aaron/project needs checking")).toBe(false);
+      expect(isControlCommand(kind, "/Users/dev/project needs checking")).toBe(false);
     }
-    expect(controlPrompt("codex", "/Users/aaron/project needs checking")).toBe(false);
+    expect(controlPrompt("codex", "/Users/dev/project needs checking")).toBe(false);
     const legacy = { turnId: "t", role: "user", text: "/compact", origin: "task-notification" } as never;
     expect(turnKind([legacy], { id: "t", delivery: "queued" }, "codex")).toBe("control");
-    expect(turnKind([{ turnId: "t", role: "user", text: "/Users/aaron/project needs checking" } as never], { id: "t", delivery: "queued" }, "codex")).toBe("message");
+    expect(turnKind([{ turnId: "t", role: "user", text: "/Users/dev/project needs checking" } as never], { id: "t", delivery: "queued" }, "codex")).toBe("message");
     // An explicit flag still wins over text.
     expect(turnKind([{ turnId: "t", role: "user", text: "plain", control: true } as never], { id: "t", delivery: "queued" }, "codex")).toBe("control");
   });
