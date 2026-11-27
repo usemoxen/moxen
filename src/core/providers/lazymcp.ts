@@ -1,19 +1,34 @@
 /**
- * Loopback HTTP lazy MCP gateway for Antigravity (`agy acp`).
+ * Loopback HTTP lazy MCP gateway (`moxen-mcp`).
  *
- * `agy acp` hardcodes `ForceAllToolsEager = true` on every MCP server passed
- * via ACP `session/new` / `session/load` / `session/resume`, and enforces a
- * 20,000-token `defaultCustomizationBudget` that silently evicts the largest
- * MCP tool schemas first (with no `call_mcp_tool` fallback). Large servers
- * like Linear (78 tools, ~30k tokens alone) blow past that budget and wipe out
- * `get_issue`, `list_issues`, `save_issue`, `delegate`, and `brave-search`.
+ * Two providers host external (non-`moxen`) MCP servers behind two compact
+ * tools (`search_tools` and `call_tool`, ~1.3 KB total):
  *
- * This gateway hosts all external (non-`moxen`) MCP servers behind two compact
- * tools (`search_tools` and `call_tool`, ~1.3 KB total) served on loopback
- * HTTP with a per-session Bearer token. Upstream servers connect lazily on
- * first use through Moxen's own `McpClient` (using the host environment and
- * keeping all credentials in-process, never written to disk), and `disabledTools`
- * is enforced here as well.
+ * - Antigravity (`agy acp`) hardcodes `ForceAllToolsEager = true` on every MCP
+ *   server passed via ACP `session/new` / `session/load` / `session/resume`,
+ *   and enforces a 20,000-token `defaultCustomizationBudget` that silently
+ *   evicts the largest MCP tool schemas first (with no `call_mcp_tool`
+ *   fallback). Large servers like Linear (78 tools, ~30k tokens alone) blow
+ *   past that budget and wipe out `get_issue`, `list_issues`, `save_issue`,
+ *   `delegate`, and `brave-search`.
+ * - Mistral Vibe (LOCAL-032) offers no session-scoped way to hide a single
+ *   tool of an external server (`SessionMCPServer` has no per-server
+ *   `disabled_tools`), so an exclusion would have to ride Vibe's global
+ *   `disabledTools` display-name filter — which cannot be done safely for a
+ *   server whose tool list Moxen does not know. The servers that hold excluded
+ *   tools are routed through this gateway instead, keeping Vibe's published
+ *   catalog at two tools and enforcing the exclusions here.
+ *
+ * Upstream servers connect lazily on first use through Moxen's own
+ * `McpClient` (using the host environment and keeping all credentials
+ * in-process, never written to disk), and `disabledTools` (Moxen's
+ * `mcp__<server>__<tool>` exclusions) is enforced here as well: an excluded
+ * tool is neither listed by `search_tools` nor accepted by `call_tool`.
+ *
+ * A fail-closed gateway (Vibe) answers every call with an error until its
+ * owner has read the provider's own effective tool restrictions and calls
+ * `arm(nativeAllows)`; `lock(reason)` closes it permanently for the session —
+ * at least as strict as not offering the routed servers at all.
  *
  * The listener is loopback-only and, as MCP Streamable HTTP requires, validates
  * the `Origin` header (a foreign origin gets 403 — the DNS-rebinding guard) and
@@ -23,10 +38,10 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import { outOfProcess, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../../mcp.js";
-import type { ConnectMcp } from "../harness/mcp.js";
-import { McpClient, McpClosedError, type McpCallResult, type McpToolInfo } from "../harness/mcpclient.js";
-import { freeName } from "../harness/presets.js";
+import { outOfProcess, type McpServerSpec, type OutOfProcessMcpServerSpec } from "../mcp.js";
+import type { ConnectMcp } from "./harness/mcp.js";
+import { McpClient, McpClosedError, type McpCallResult, type McpToolInfo } from "./harness/mcpclient.js";
+import { freeName } from "./harness/presets.js";
 
 export const LAZY_MCP_GATEWAY_BASE_NAME = "moxen-mcp";
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
@@ -34,14 +49,28 @@ const MAX_BODY_BYTES = 1_000_000;
 const MAX_RESTARTS = 3;
 const MAX_FULL_SCHEMA_RESULTS = 15;
 const AUTO_INLINE_SERVER_TOOL_LIMIT = 12;
+/** The fail-closed answer before the owner has established its own restrictions. */
+const NOT_ARMED_REASON = "this session's tool restrictions have not been verified yet";
 
-export interface AcpLazyMcpGatewayOptions {
+export interface LazyMcpGatewayOptions {
   readonly specs: readonly McpServerSpec[];
   readonly cwd: string;
   /** Disabled tools as `mcp__<server>__<tool>`. */
   readonly disabledTools?: readonly string[];
   /** Existing server names to avoid colliding with (e.g. `moxen`). */
   readonly takenNames?: ReadonlySet<string>;
+  /**
+   * The gateway's name. Defaults to `freeName(LAZY_MCP_GATEWAY_BASE_NAME,
+   * taken)`. A caller that cannot know every name it might collide with
+   * (Mistral Vibe's own native MCP servers) passes a random-suffixed name.
+   */
+  readonly name?: string;
+  /**
+   * Start fail-closed: `search_tools` and `call_tool` answer errors until
+   * `arm(nativeAllows)` (or fail permanently via `lock`). Antigravity leaves
+   * this unset — its gateway enforces nothing but `disabledTools`.
+   */
+  readonly failClosed?: boolean;
   /** Swapped out in tests. */
   readonly connect?: ConnectMcp;
 }
@@ -117,7 +146,7 @@ export function antigravityLazyMcpInstruction(gatewayName: string, serverNames: 
   ].join("\n");
 }
 
-export class AcpLazyMcpGateway {
+export class LazyMcpGateway {
   readonly name: string;
   readonly serverNames: readonly string[];
   readonly spec: Extract<OutOfProcessMcpServerSpec, { type: "http" }>;
@@ -134,6 +163,16 @@ export class AcpLazyMcpGateway {
   private readonly abort = new AbortController();
   private closed = false;
   private closingPromise: Promise<void> | null = null;
+  /**
+   * Why a call is refused up front, when nothing is routable at all: null when
+   * serving. A fail-closed gateway starts locked (`NOT_ARMED`), and a caller
+   * that fails to establish its own restrictions locks it again permanently.
+   */
+  private lockReason: string | null;
+  /** Set by `lock()`: an armed gateway can never be reopened by a later `arm()`. */
+  private lockPermanent = false;
+  /** The owner's own per-tool restrictions, once established (Vibe). */
+  private nativeAllows: ((server: string, tool: string) => boolean) | null = null;
 
   private constructor(
     name: string,
@@ -147,6 +186,7 @@ export class AcpLazyMcpGateway {
     connectFn: ConnectMcp,
     authority: string,
     port: number,
+    lockReason: string | null,
   ) {
     this.name = name;
     this.serverNames = serverNames;
@@ -158,6 +198,7 @@ export class AcpLazyMcpGateway {
     this.connectFn = connectFn;
     this.authority = authority;
     this.port = port;
+    this.lockReason = lockReason;
     this.spec = {
       name,
       type: "http",
@@ -167,13 +208,35 @@ export class AcpLazyMcpGateway {
     };
   }
 
-  static async start(options: AcpLazyMcpGatewayOptions): Promise<AcpLazyMcpGateway> {
+  /**
+   * Open a fail-closed gateway for serving: every tool not denied by its own
+   * restrictions (a Moxen `disabledTools` exclusion or the owner's native
+   * restriction) becomes searchable and callable.
+   */
+  arm(nativeAllows: (server: string, tool: string) => boolean): void {
+    if (this.lockPermanent) return;
+    this.nativeAllows = nativeAllows;
+    this.lockReason = null;
+  }
+
+  /** Close the gateway for the rest of the session: no tool is listed or callable. */
+  lock(reason: string): void {
+    this.lockReason = reason;
+    this.lockPermanent = true;
+  }
+
+  /** Whether an owner-side restriction denies this tool (`server` is the routed spec's name). */
+  private nativeDenied(serverName: string, toolName: string): boolean {
+    return this.nativeAllows !== null && !this.nativeAllows(serverName, toolName);
+  }
+
+  static async start(options: LazyMcpGatewayOptions): Promise<LazyMcpGateway> {
     const sorted = [...options.specs]
       .map(outOfProcess)
       .sort((a, b) => a.name.localeCompare(b.name));
     const taken = new Set<string>(options.takenNames ?? []);
     for (const s of sorted) taken.add(s.name);
-    const name = freeName(LAZY_MCP_GATEWAY_BASE_NAME, taken);
+    const name = options.name !== undefined ? freeName(options.name, taken) : freeName(LAZY_MCP_GATEWAY_BASE_NAME, taken);
     const serverNames = sorted.map((s) => s.name);
     const entries = new Map<string, UpstreamEntry>();
     for (const s of sorted) {
@@ -183,7 +246,7 @@ export class AcpLazyMcpGateway {
     const token = randomBytes(24).toString("hex");
     const connectFn: ConnectMcp = options.connect ?? ((spec, cwd) => McpClient.connect(spec, cwd));
 
-    let gateway: AcpLazyMcpGateway | null = null;
+    let gateway: LazyMcpGateway | null = null;
     const server = createServer((request, response) => {
       if (!gateway) {
         response.writeHead(503).end();
@@ -203,7 +266,7 @@ export class AcpLazyMcpGateway {
     const port = typeof address === "object" && address !== null ? address.port : 0;
     const url = `http://127.0.0.1:${port}/mcp`;
 
-    gateway = new AcpLazyMcpGateway(
+    gateway = new LazyMcpGateway(
       name,
       serverNames,
       url,
@@ -215,6 +278,7 @@ export class AcpLazyMcpGateway {
       connectFn,
       `127.0.0.1:${port}`,
       port,
+      options.failClosed === true ? NOT_ARMED_REASON : null,
     );
     return gateway;
   }
@@ -412,10 +476,23 @@ export class AcpLazyMcpGateway {
   }
 
   private enabledToolsOf(serverName: string, client: McpClient): McpToolInfo[] {
-    return client.tools.filter((tool) => !this.disabled.has(`mcp__${serverName}__${tool.name}`));
+    return client.tools.filter(
+      (tool) => !this.disabled.has(`mcp__${serverName}__${tool.name}`) && !this.nativeDenied(serverName, tool.name),
+    );
+  }
+
+  /** The full-gateway refusal when nothing is routable (fail-closed or locked), or null when serving. */
+  private gatewayUnavailable(): { content: Array<Record<string, unknown>>; isError: boolean } | null {
+    if (this.lockReason === null) return null;
+    return {
+      content: [{ type: "text", text: `This gateway is not serving tools this session: ${this.lockReason}.` }],
+      isError: true,
+    };
   }
 
   private async handleSearchTools(args: Record<string, unknown>): Promise<{ content: Array<Record<string, unknown>>; isError: boolean }> {
+    const unavailable = this.gatewayUnavailable();
+    if (unavailable !== null) return unavailable;
     const serverArg = typeof args["server"] === "string" ? args["server"].trim().toLowerCase() : "";
     const queryArg = typeof args["query"] === "string" ? args["query"].trim() : "";
     const toolsArg = Array.isArray(args["tools"])
@@ -543,6 +620,8 @@ export class AcpLazyMcpGateway {
   }
 
   private async handleCallTool(args: Record<string, unknown>): Promise<{ content: Array<Record<string, unknown>>; isError: boolean }> {
+    const unavailable = this.gatewayUnavailable();
+    if (unavailable !== null) return unavailable;
     const serverName = typeof args["server"] === "string" ? args["server"].trim().toLowerCase() : "";
     const toolName = typeof args["tool"] === "string" ? args["tool"].trim() : "";
     const toolArgs = isRecord(args["arguments"]) ? args["arguments"] : {};
@@ -556,7 +635,7 @@ export class AcpLazyMcpGateway {
     if (toolName === "") {
       return { content: [{ type: "text", text: "Parameter `tool` must be a non-empty string." }], isError: true };
     }
-    if (this.disabled.has(`mcp__${serverName}__${toolName}`)) {
+    if (this.disabled.has(`mcp__${serverName}__${toolName}`) || this.nativeDenied(serverName, toolName)) {
       return { content: [{ type: "text", text: `Tool "${toolName}" on MCP server "${serverName}" is disabled.` }], isError: true };
     }
 
