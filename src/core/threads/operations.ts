@@ -1657,17 +1657,16 @@ async function reviveCancelledDelegation(ctx: OperationContext, threadId: string
  * the ledger, with nothing left running or queued. The turn the mark itself
  * stopped never clears it, and neither does an older or reverted one.
  */
-async function onTaskTurnSettled(ctx: OperationContext, threadId: string, settledTurnId: string): Promise<void> {
+async function onTaskTurnSettled(ctx: OperationContext, threadId: string, settledTurnId: string, settledSeq?: number): Promise<void> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   const row = rows.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
   if (!row) return;
-  const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
-  const settledSeq = turns.find((candidate) => candidate.id === settledTurnId)?.executionSeq;
-  await ctx.store.recordDelegationSettle(row.id, settledTurnId, settledSeq).catch(() => undefined);
-  await clearCancelledOnSettle(ctx, threadId, settledTurnId);
+  const seq = settledSeq ?? (await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[])).find((candidate) => candidate.id === settledTurnId)?.executionSeq;
+  await ctx.store.recordDelegationSettle(row.id, settledTurnId, seq).catch(() => undefined);
+  await clearCancelledOnSettle(ctx, threadId, settledTurnId, seq);
 }
 
-async function clearCancelledOnSettle(ctx: OperationContext, threadId: string, settledTurnId: string): Promise<void> {
+async function clearCancelledOnSettle(ctx: OperationContext, threadId: string, settledTurnId: string, settledSeq?: number): Promise<void> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   const row = rows.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
   if (!row || row.status !== "cancelled" || row.cancelledTurnId === settledTurnId) return;
@@ -1686,11 +1685,12 @@ async function clearCancelledOnSettle(ctx: OperationContext, threadId: string, s
     // Reverted, or never ran: not fresh work, and no reason to clear.
     if (settledAt < 0) return null;
     const settledTurn = ran[settledAt]!;
+    const effectiveSeq = settledSeq ?? settledTurn.executionSeq;
     if (current.cancelledAfterSeq !== undefined) {
       // Persisted monotonic execution order survives reverts, same-millisecond
       // clocks, and recovery cancellations: only a turn that started strictly
       // after the cancellation boundary counts as fresh work.
-      if (settledTurn.executionSeq === undefined || settledTurn.executionSeq <= current.cancelledAfterSeq) return null;
+      if (effectiveSeq === undefined || effectiveSeq <= current.cancelledAfterSeq) return null;
     } else if (current.cancelledTurnId !== undefined) {
       // Legacy row predating `cancelledAfterSeq`: require the anchor in the ledger.
       const anchorAt = ran.findIndex((turn) => turn.id === current.cancelledTurnId);
@@ -1797,10 +1797,10 @@ function longThreadHook(
 ): {
   afterSettle: () => Promise<void>;
   onContextReading: (usage: ContextWindowUsage) => void;
-  onTurnSettled: (storeTurnId: string) => Promise<void>;
+  onTurnSettled: (storeTurnId: string, executionSeq?: number) => Promise<void>;
 } {
   return {
-    onTurnSettled: (storeTurnId) => onTaskTurnSettled(ctx, threadId, storeTurnId),
+    onTurnSettled: (storeTurnId, executionSeq) => onTaskTurnSettled(ctx, threadId, storeTurnId, executionSeq),
     afterSettle: async () => {
       const resume = compactingMidTurn.delete(threadId);
       if ((await ctx.store.readThreadRecord(threadId))?.usagePause) return;

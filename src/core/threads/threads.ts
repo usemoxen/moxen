@@ -1024,7 +1024,8 @@ export async function reconcileOrphanedTurn(
     const promoted = (await store.readTurns(threadId)).find(
       (turn) => turn.status === "running" && turn.id !== running.id && !store.isTracked(turn.id),
     ) ?? null;
-    await store.writeThreadRecord({ ...thread, updatedAt: now });
+    const latestThread = (await store.readThreadRecord(threadId)) ?? thread;
+    await store.writeThreadRecord({ ...latestThread, updatedAt: now });
     store.emit(threadId, "turn-interrupted");
     return { interrupted, promoted };
   });
@@ -1818,7 +1819,8 @@ async function finishTurn(
     // the next server is up.
     if (isDraining()) await holdQueuedForAdmission(store, threadId, Date.parse(now));
     else await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
-    const next = { ...thread, updatedAt: now };
+    const latestThread = (await store.readThreadRecord(threadId)) ?? thread;
+    const next = { ...latestThread, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, status === "completed" ? "turn-completed" : "turn-failed");
     return { thread: next, turn: updated };
@@ -1906,8 +1908,20 @@ export async function interruptTurn(
     // stopped turn's own runner, when it settles, or the send still starting
     // it (which claims the turn below before its session starts). Read before
     // the interrupt releases the claim.
-    const hasRunner = store.isTracked(target.id);
-    const updated = await interruptTurnLocked(store, thread, target, now, usagePause, options.reason, options.usage);
+    // A legacy running turn predating `executionSeq` gets a durable boundary
+    // now, under the lock, so cancelling and later reverting it still lets
+    // subsequent sequenced turns clear the cancellation mark.
+    let targetForStop = target;
+    let threadForStop = thread;
+    if (target.status !== "queued" && target.executionSeq === undefined) {
+      const legacySeq = nextTurnSeq(thread, turns);
+      threadForStop = { ...thread, turnSeq: legacySeq };
+      await store.writeThreadRecord(threadForStop);
+      await store.updateTurn(threadId, target.id, { executionSeq: legacySeq });
+      targetForStop = { ...target, executionSeq: legacySeq };
+    }
+    const hasRunner = store.isTracked(targetForStop.id);
+    const updated = await interruptTurnLocked(store, threadForStop, targetForStop, now, usagePause, options.reason, options.usage);
     if (hasRunner && !isDraining()) {
       await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     } else {
@@ -1918,7 +1932,8 @@ export async function interruptTurn(
       // them `running` with an owner but no run.
       await holdQueuedForAdmission(store, threadId, Date.parse(now));
     }
-    const next = { ...thread, updatedAt: now };
+    const latestThread = (await store.readThreadRecord(threadId)) ?? threadForStop;
+    const next = { ...latestThread, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, "turn-interrupted");
     return { thread: next, turn: updated, interrupted: true };

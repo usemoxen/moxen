@@ -61,7 +61,12 @@ function runAt(turn: StoredTurn): number {
  * already seen. Ties keep ledger order.
  */
 export function ranTurns(turns: readonly StoredTurn[]): StoredTurn[] {
-  return turns.filter(turnRan).sort((left, right) => runAt(left) - runAt(right));
+  return turns.filter(turnRan).sort((left, right) => {
+    if (left.executionSeq !== undefined && right.executionSeq !== undefined) {
+      return left.executionSeq - right.executionSeq;
+    }
+    return runAt(left) - runAt(right);
+  });
 }
 
 function latestMeaningfulTurn(turns: StoredTurn[]): StoredTurn | null {
