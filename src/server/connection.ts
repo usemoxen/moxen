@@ -1163,21 +1163,48 @@ export class DirectConnection implements ClientApi {
     let delegated = false;
     let orchestration = true;
     let liveProviderUnreadable = false;
+    let sharedEntry = false;
     try {
       thread = await store.readThreadRecord(threadId);
       if (thread === null) return unreadable;
+      if (typeof thread.modelSelection?.instanceId !== "string" || thread.modelSelection.instanceId.trim() === "") {
+        return unreadable;
+      }
       delegated = (await store.readDelegationsStrict()).some((row) => row.childThreadId === threadId);
-      // The providers the thread is live on: its own, and the running
+      // Every live driver this connection owns is checked for shared-entry
+      // membership, not just the saved provider (switching models while an
+      // OpenCode shared entry stays alive must never appear exclusive) (LOCAL-035).
+      sharedEntry = (await this.entrySessionCountOf(threadId)) > 1;
+      // The providers the thread is live on: its own, and every running
       // turn's — a one-off model override is the provider the calling
-      // session runs on now. A running turn whose model went unrecorded
-      // leaves the live provider impossible to establish, so it refuses.
-      const running = (await store.readTurnsStrict(threadId)).find((turn) => turn.status === "running") ?? null;
-      const instanceIds = [thread.modelSelection.instanceId, ...(running?.modelSelection ? [running.modelSelection.instanceId] : [])];
-      if (running !== null && running.modelSelection === null) liveProviderUnreadable = true;
+      // session runs on now. A running turn whose modelSelection is missing,
+      // null, or malformed leaves the live provider impossible to establish,
+      // so it refuses rather than falling back to the saved provider.
+      const runningTurns = (await store.readTurnsStrict(threadId)).filter((turn) => turn.status === "running");
+      const instanceIds: string[] = [thread.modelSelection.instanceId];
+      for (const running of runningTurns) {
+        if (
+          running.modelSelection === null
+          || running.modelSelection === undefined
+          || typeof running.modelSelection !== "object"
+          || typeof running.modelSelection.instanceId !== "string"
+          || running.modelSelection.instanceId.trim() === ""
+        ) {
+          liveProviderUnreadable = true;
+        } else {
+          instanceIds.push(running.modelSelection.instanceId);
+        }
+      }
       const config = await this.loadConfig();
       orchestration = instanceIds.every((instanceId) => moxenToolsOf(resolveProfileProviderConfig(config, instanceId)).orchestration);
     } catch {
       return unreadable;
+    }
+    if (sharedEntry) {
+      return (
+        "project_register is refused on a shared MCP entry: multiple live sessions share this connection's credential, so the originating thread cannot be independently authenticated. " +
+        "The user can register the folder themselves with `moxen projects ensure --cwd <folder>`."
+      );
     }
     if (liveProviderUnreadable) {
       return (
@@ -1210,6 +1237,27 @@ export class DirectConnection implements ClientApi {
       `project_register writes the projects registry with no approval of its own, so the thread must be running in Auto or Full access: this one runs in ${mode}, ` +
       "where a provider that never asks (OpenCode allows MCP tools by default) would register silently. The user can register the folder themselves (`moxen projects ensure --cwd <folder>`), switch the thread's permission mode, or ask with dryRun: true to preview first."
     );
+  }
+
+  /**
+   * Maximum live session count sharing `threadId`'s MCP entry across every
+   * live driver this connection owns (and the thread's saved driver if not
+   * yet opened). Checking every owned driver ensures a saved-provider switch
+   * cannot hide a still-live shared OpenCode entry (LOCAL-035).
+   */
+  private async entrySessionCountOf(threadId: string): Promise<number> {
+    let max = 1;
+    for (const driver of this.ownedDrivers) {
+      const count = driver.entrySessionCount?.(threadId);
+      if (typeof count === "number" && count > max) max = count;
+    }
+    const record = await (await this.store()).readThreadRecord(threadId).catch(() => null);
+    const instanceId = record?.modelSelection?.instanceId ?? null;
+    if (record && typeof instanceId === "string" && instanceId.trim() !== "") {
+      const count = this.driverFor(instanceId).entrySessionCount?.(threadId);
+      if (typeof count === "number" && count > max) max = count;
+    }
+    return max;
   }
 
   /** Whether an update or rollback has landed since this server started. */
@@ -3531,10 +3579,7 @@ export class DirectConnection implements ClientApi {
     // thread with no record (or no driver) keeps the entry owner's fallback:
     // the entry serves it alone until anything proves otherwise.
     if (query.type === "thread.entry-sessions") {
-      const record = await (await this.store()).readThreadRecord(query.threadId).catch(() => null);
-      const instanceId = record?.modelSelection.instanceId ?? null;
-      if (!record || !instanceId) return { count: 1 };
-      return { count: this.driverFor(instanceId).entrySessionCount?.(query.threadId) ?? 1 };
+      return { count: await this.entrySessionCountOf(query.threadId) };
     }
     // Agent settings calls must map config load failures to a path-free error
     // instead of letting `this.context()` leak the config file path.

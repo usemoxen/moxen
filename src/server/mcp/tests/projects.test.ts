@@ -719,6 +719,85 @@ describe("project_register: only the authenticated session's thread writes", () 
     }
   });
 
+  it("refuses when a valid JSON running turn row omits modelSelection instead of falling back to the saved provider (LOCAL-035)", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => ({ ...harness.config, providers: { opencode: { orchestration: false } } }),
+    });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "claude", model: "claude-opus-5" },
+      });
+      await connection.dispatch({
+        type: "thread.turn.start",
+        threadId: thread.threadId,
+        message: { text: "Hold turn open" },
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      const turnsFile = path.join(harness.root, "threads", thread.threadId, "turns.jsonl");
+      const lines = (await readFile(turnsFile, "utf8")).trim().split("\n");
+      const parsed = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
+      delete parsed["modelSelection"];
+      lines[lines.length - 1] = JSON.stringify(parsed);
+      await writeFile(turnsFile, `${lines.join("\n")}\n`, "utf8");
+
+      const folder = path.join(harness.root, "missing-model-turn");
+      await mkdir(folder);
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("could not be established");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("keeps refusing a still-live shared OpenCode entry even after the thread's saved provider switches away (LOCAL-035)", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const opencodeDriver = harness.drivers.opencode!();
+    let sharedForThread: string | null = null;
+    opencodeDriver.entrySessionCount = (id) => (id === sharedForThread ? 2 : 1);
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: { ...harness.drivers, opencode: () => opencodeDriver },
+      config: async () => harness.config,
+    });
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const thread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+      sharedForThread = thread.threadId;
+      // Touch the OpenCode driver so it is owned and live on this connection.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: thread.threadId })).toEqual({ count: 2 });
+      // Switch the thread's saved provider to Codex while the shared OpenCode entry stays alive.
+      await connection.dispatch({
+        type: "thread.model-selection.set",
+        threadId: thread.threadId,
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      });
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: thread.threadId })).toEqual({ count: 2 });
+
+      const folder = path.join(harness.root, "switched-shared-entry");
+      await mkdir(folder);
+      const refused = await callMoxenTool(connection, thread.threadId, "project_register", { cwd: folder });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain("shared MCP entry");
+      expect((await registered(connection)).some((entry) => entry.workspaceRoot === real(folder))).toBe(false);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("relays registration, dryRun, and revival cleanly through the credentialed stdio relay without double-projecting (LOCAL-035)", async () => {
     const { harness, connection, parentThreadId } = await setup({}, "full-access");
     const http = await startMcpHttpServer(connection, undefined, connection.agentQueue, connection.projectRegistration);
