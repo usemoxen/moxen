@@ -1470,6 +1470,44 @@ describe("cancellations that race later work", () => {
     expect(remainingUserPrompts).toEqual(["L first", "A second"]);
   });
 
+  it("keeps executionSeq order across a backward clock step in a mixed legacy and sequenced ledger", async () => {
+    const w = await scriptedWorld(async () => completed("Done."));
+    let now = "2026-11-27T05:01:00.000Z";
+    w.store.nowIso = () => now;
+    const thread = await w.make("mixed-backward-clock");
+
+    const legacy = await startTurn(w.ctx, { threadId: thread.id, prompt: "L first" });
+    await legacy.run;
+    await flushTurnRunners();
+    await w.store.rewriteLedger(
+      thread.id,
+      "turns",
+      (await w.store.readTurns(thread.id)).map((t) => {
+        if (t.id !== legacy.turn.id) return t;
+        const { executionSeq: _drop, ...rest } = t;
+        return rest;
+      }),
+    );
+
+    now = "2026-11-27T05:10:00.000Z";
+    const a = await startTurn(w.ctx, { threadId: thread.id, prompt: "A second" });
+    await a.run;
+    await flushTurnRunners();
+
+    // Clock steps backward before B runs (seq 3 < A's timestamp, > L's timestamp).
+    now = "2026-11-27T05:05:00.000Z";
+    const b = await startTurn(w.ctx, { threadId: thread.id, prompt: "B third" });
+    await b.run;
+    await flushTurnRunners();
+
+    // Execution order must stay [L, A, B] despite B's earlier wall clock: keeping 2 drops B.
+    await revertThread(w.ctx, thread.id, 2);
+    const remainingUserPrompts = (await w.store.readMessages(thread.id))
+      .filter((m) => m.role === "user")
+      .map((m) => m.text);
+    expect(remainingUserPrompts).toEqual(["L first", "A second"]);
+  });
+
   it("assigns a durable boundary when cancelling and reverting a legacy unsequenced turn", async () => {
     const w = await scriptedWorld(async () => completed("Fresh work done."));
     const parent = await w.make("orchestrator");

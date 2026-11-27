@@ -60,31 +60,44 @@ function runAt(turn: StoredTurn): number {
  * starts after it — so numbering by row would move turns a client has
  * already seen. Ties keep ledger order.
  */
+function finiteRunAt(turn: StoredTurn): number {
+  const at = runAt(turn);
+  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+}
+
 export function ranTurns(turns: readonly StoredTurn[]): StoredTurn[] {
   const ran = turns.filter(turnRan);
-  // Every turn sequenced: monotonic executionSeq is a strict total order even
-  // under a frozen or stepped-back clock.
-  if (ran.every((turn) => turn.executionSeq !== undefined)) {
-    return ran.sort((left, right) => left.executionSeq! - right.executionSeq!);
+  const sequenced: StoredTurn[] = [];
+  const legacy: StoredTurn[] = [];
+  for (const turn of ran) {
+    if (turn.executionSeq !== undefined) sequenced.push(turn);
+    else legacy.push(turn);
   }
-  // Mixed legacy/sequenced ledger: compare one pure tuple per turn
-  // `(validTime, runAt, hasSeq, executionSeq)` so the sort is always
-  // transitive while keeping legacy turns before sequenced turns on the same tick.
-  return ran.sort((left, right) => {
-    const leftAt = runAt(left);
-    const rightAt = runAt(right);
-    const leftValid = Number.isFinite(leftAt);
-    const rightValid = Number.isFinite(rightAt);
-    if (leftValid !== rightValid) return leftValid ? 1 : -1;
-    if (leftValid && leftAt !== rightAt) return leftAt - rightAt;
-    const leftHasSeq = left.executionSeq !== undefined ? 1 : 0;
-    const rightHasSeq = right.executionSeq !== undefined ? 1 : 0;
-    if (leftHasSeq !== rightHasSeq) return leftHasSeq - rightHasSeq;
-    if (left.executionSeq !== undefined && right.executionSeq !== undefined) {
-      return left.executionSeq - right.executionSeq;
-    }
-    return 0;
+  sequenced.sort((left, right) => left.executionSeq! - right.executionSeq!);
+  if (legacy.length === 0) return sequenced;
+  legacy.sort((left, right) => {
+    const leftAt = finiteRunAt(left);
+    const rightAt = finiteRunAt(right);
+    if (leftAt === rightAt) return 0;
+    return leftAt < rightAt ? -1 : 1;
   });
+  if (sequenced.length === 0) return legacy;
+  // Mixed ledger: preserve monotonic executionSeq order among sequenced turns
+  // (even across backward clock jumps), while interleaving legacy turns by
+  // timestamp (legacy before sequenced on the same tick, newer legacy after).
+  const merged: StoredTurn[] = [];
+  let legacyIndex = 0;
+  for (const seqTurn of sequenced) {
+    const seqAt = finiteRunAt(seqTurn);
+    while (legacyIndex < legacy.length && finiteRunAt(legacy[legacyIndex]!) <= seqAt) {
+      merged.push(legacy[legacyIndex++]!);
+    }
+    merged.push(seqTurn);
+  }
+  while (legacyIndex < legacy.length) {
+    merged.push(legacy[legacyIndex++]!);
+  }
+  return merged;
 }
 
 function latestMeaningfulTurn(turns: StoredTurn[]): StoredTurn | null {
