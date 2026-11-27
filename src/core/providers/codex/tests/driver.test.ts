@@ -8,9 +8,11 @@ import { CliError } from "../../../errors.js";
 import type { ProviderRuntimeEvent } from "../../spi.js";
 import { CodexDriver, codexContextUsageOf } from "../driver.js";
 import { codexDisabledToolConfig } from "../../../nativetools.js";
-import { FakeCodexTransport } from "./fakes.js";
+import { FakeCodexTransport, type FakeCodexServer } from "./fakes.js";
 import { McpClient } from "../../harness/mcpclient.js";
 import { CodexHarnessTools, CODEX_HARNESS_SERVER } from "../tools.js";
+import { instructionsUpdateBlock } from "../../../threads/instructions.js";
+import { USAGE_CONTINUE_PROMPT } from "../../../threads/views.js";
 
 async function collectEvents(driver: CodexDriver, count: number): Promise<ProviderRuntimeEvent[]> {
   const chunk = await Effect.runPromise(Stream.runCollect(Stream.take(driver.streamEvents, count)));
@@ -1079,5 +1081,394 @@ describe("Codex lifecycle boundaries", () => {
     await expect(answer).resolves.toEqual({ text: "Because.", withContext: true });
     expect(transport.sessions[0]!.client.closed).toBe(true);
     expect(server.requestsTo("thread/start")).toEqual([]);
+  });
+});
+
+describe("codex runtime notices", () => {
+  // The two kinds Moxen sends as its own instruction: an instructions update,
+  // and the continue after a usage limit. Report data (a task's notice, what
+  // protection stopped) never reaches this channel — it stays user text.
+  const INSTRUCTIONS = instructionsUpdateBlock("Answer in short sentences from now on.");
+  const USAGE = USAGE_CONTINUE_PROMPT;
+
+  /** What arrived in each turn's user half: the text blocks of `turn/start`. */
+  function userInputs(server: FakeCodexServer): string[] {
+    return server.requestsTo("turn/start").map((request) =>
+      ((request.params as { input?: ReadonlyArray<{ type: string; text?: string }> }).input ?? [])
+        .filter((block) => block.type === "text")
+        .map((block) => block.text ?? "")
+        .join(""),
+    );
+  }
+
+  async function settleTurn(driver: CodexDriver, server: FakeCodexServer, sent: { turnId: string }): Promise<void> {
+    server.notify("turn/completed", { threadId: "codex-thread-1", turn: { status: "completed" } });
+    await driver.awaitTurn(START.threadId, sent.turnId);
+  }
+
+  it("sends Moxen's notices as developer items and the user's prompt unchanged", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS] }));
+    await settleTurn(driver, server, first);
+    // A usage continue is a turn of Moxen's own text: the user said nothing in
+    // it, so the prompt is empty and only the notice goes in.
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "", notices: [USAGE] }));
+    await settleTurn(driver, server, second);
+
+    const developer = (text: string) => [{ type: "message", role: "developer", content: [{ type: "input_text", text }] }];
+    expect(server.requestsTo("thread/inject_items").map((request) => request.params)).toEqual([
+      { threadId: "codex-thread-1", items: developer(INSTRUCTIONS) },
+      { threadId: "codex-thread-1", items: developer(USAGE) },
+    ]);
+    // The user's prompt is what it was, with none of Moxen's text in it.
+    expect(userInputs(server)).toEqual(["run the checks", ""]);
+  });
+
+  it("falls back to the tagged text, once, when the app-server has no thread/inject_items", async () => {
+    const transport = new FakeCodexTransport({ failRequests: { "thread/inject_items": "thread/inject_items is not supported yet" } });
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const fallbackPrompt = `${INSTRUCTIONS}\n\nrun the checks\n\n${USAGE}`;
+    const first = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS, USAGE], fallbackPrompt }));
+    await settleTurn(driver, server, first);
+    const second = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "", notices: [USAGE] }));
+    await settleTurn(driver, server, second);
+
+    // In the original text order, and never in both channels: the
+    // refused injection applied nothing, so the notice is not delivered twice.
+    expect(userInputs(server)).toEqual([fallbackPrompt, USAGE]);
+    // Asked once per session: the runtime said it has no such method.
+    expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+    // Nothing failed over it: both turns ran with a prompt of their own.
+    expect(server.requestsTo("turn/start")).toHaveLength(2);
+  });
+
+  it("reads a method-not-found reply as an older runtime, not as a failed turn", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    // A pre-0.169 app-server answers `-32601`, which the peer surfaces as this.
+    const spy = vi.spyOn(client, "request").mockImplementation((method: string, params?: unknown, timeoutMs?: number) =>
+      method === "thread/inject_items"
+        ? Promise.reject(new CliError("PEER_REQUEST_FAILED", "Request failed: Method not found: thread/inject_items", { details: { code: -32601 } }))
+        : request(method, params, timeoutMs),
+    );
+    try {
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS] }));
+      await settleTurn(driver, server, sent);
+      await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "and again", notices: [USAGE] }));
+      expect(userInputs(server)).toEqual([`${INSTRUCTIONS}\n\nrun the checks`, `${USAGE}\n\nand again`]);
+      // Asked, and only once: the refusal is remembered for the session.
+      expect(spy.mock.calls.filter(([method]) => method === "thread/inject_items")).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("reads the real app-server's unknown-variant error as an older runtime", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    // The real app-server rejects an unknown method with JSON-RPC code
+    // `-32600` and a message naming the unknown variant (openai/codex#61067),
+    // which the peer wraps as `Request failed: ...`.
+    const spy = vi.spyOn(client, "request").mockImplementation((method: string, params?: unknown, timeoutMs?: number) =>
+      method === "thread/inject_items"
+        ? Promise.reject(new CliError("PEER_REQUEST_FAILED", "Request failed: Invalid request: unknown variant `thread/inject_items`, expected one of `initialize`, `initialized`, ...", { details: { code: -32600 } }))
+        : request(method, params, timeoutMs),
+    );
+    try {
+      const sent = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS] }));
+      await settleTurn(driver, server, sent);
+      await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "and again", notices: [USAGE] }));
+      expect(userInputs(server)).toEqual([`${INSTRUCTIONS}\n\nrun the checks`, `${USAGE}\n\nand again`]);
+      // Asked, and only once: the refusal is remembered for the session.
+      expect(spy.mock.calls.filter(([method]) => method === "thread/inject_items")).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("does not fall back on an unrelated -32600 refusal", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    const spy = vi.spyOn(client, "request").mockImplementation((method: string, params?: unknown, timeoutMs?: number) =>
+      method === "thread/inject_items"
+        ? Promise.reject(new CliError("PEER_REQUEST_FAILED", "Request failed: Invalid request: threadId must be a string", { details: { code: -32600 } }))
+        : request(method, params, timeoutMs),
+    );
+    try {
+      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "keep going", notices: [INSTRUCTIONS] }))).rejects.toThrow(/threadId must be a string/);
+      expect(server.requestsTo("turn/start")).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("does not fall back on a failure it cannot attribute to the method", async () => {
+    // A timeout may have appended the items: folding them into the prompt as
+    // well would say them twice, so the turn fails instead of guessing.
+    const transport = new FakeCodexTransport({ failRequests: { "thread/inject_items": "request timed out" } });
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: [INSTRUCTIONS] }))).rejects.toThrow(/timed out/);
+    expect(server.requestsTo("turn/start")).toEqual([]);
+    await Effect.runPromise(driver.stopAll());
+  });
+
+  it("does not fall back when an unrelated error says something is not supported yet", async () => {
+    const error = "Writing after compaction is not supported yet";
+    const transport = new FakeCodexTransport({ failRequests: { "thread/inject_items": error } });
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    try {
+      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "keep going", notices: [INSTRUCTIONS] }))).rejects.toThrow(error);
+      expect(transport.sessions[0]!.server.requestsTo("turn/start")).toEqual([]);
+    } finally {
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("does not append again when Codex wrote the notice but its acknowledgment was lost", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    const spy = vi.spyOn(client, "request").mockImplementation(async (method, params, timeoutMs) => {
+      const result = await request(method, params, timeoutMs);
+      if (method === "thread/inject_items") throw new Error("injection acknowledgment lost");
+      return result;
+    });
+    try {
+      const input = { threadId: START.threadId, storeTurnId: "same-turn", prompt: "keep going", notices: [INSTRUCTIONS] };
+      await expect(Effect.runPromise(driver.sendTurn(input))).rejects.toThrow(/acknowledgment lost/);
+      // The runtime accepted the append; the retry must neither write it
+      // again nor fall back to the tagged text — it runs with its prompt.
+      const retry = await Effect.runPromise(driver.sendTurn(input));
+      await settleTurn(driver, server, retry);
+      expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+      expect(userInputs(server)).toEqual(["keep going"]);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("runs the retried turn once its lost-ack notice stays unduplicated, and later turns are not wedged", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    let ackLost = false;
+    const spy = vi.spyOn(client, "request").mockImplementation(async (method, params, timeoutMs) => {
+      const result = await request(method, params, timeoutMs);
+      if (method === "thread/inject_items" && ackLost) throw new Error("injection acknowledgment lost");
+      return result;
+    });
+    try {
+      const input = { threadId: START.threadId, storeTurnId: "t1", prompt: "keep going", notices: [INSTRUCTIONS] };
+      ackLost = true;
+      await expect(Effect.runPromise(driver.sendTurn(input))).rejects.toThrow(/acknowledgment lost/);
+      ackLost = false;
+      // The runtime accepted the append; the retry must not write it again, but
+      // the turn is not wedged either: it runs with its prompt, and the
+      // unconfirmed mark clears once the turn started.
+      const retry = await Effect.runPromise(driver.sendTurn(input));
+      await settleTurn(driver, server, retry);
+      expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+      expect(userInputs(server)).toEqual(["keep going"]);
+
+      // A later turn with its own notice is not held back by the lost ack.
+      const second = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "t2", prompt: "and again", notices: [USAGE] }));
+      await settleTurn(driver, server, second);
+      expect(server.requestsTo("thread/inject_items")).toHaveLength(2);
+      expect(userInputs(server)).toEqual(["keep going", "and again"]);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("refuses a different turn once after a lost acknowledgment, then continues without a wedge", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    let ackLost = false;
+    const spy = vi.spyOn(client, "request").mockImplementation(async (method, params, timeoutMs) => {
+      const result = await request(method, params, timeoutMs);
+      if (method === "thread/inject_items" && ackLost) throw new Error("injection acknowledgment lost");
+      return result;
+    });
+    try {
+      ackLost = true;
+      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "t1", prompt: "first", notices: [INSTRUCTIONS] }))).rejects.toThrow(/acknowledgment lost/);
+      // A different turn's notice cannot know whether the first write landed:
+      // it is refused once, and the refusal clears the unconfirmed mark so
+      // nothing after it is wedged.
+      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "t2", prompt: "second", notices: [USAGE] }))).rejects.toThrow(/did not confirm/);
+      ackLost = false;
+      const third = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "t3", prompt: "third", notices: [USAGE] }));
+      await settleTurn(driver, server, third);
+      // t1's unduplicated write plus t3's own: nothing was sent for t2.
+      expect(server.requestsTo("thread/inject_items")).toHaveLength(2);
+      expect(userInputs(server)).toEqual(["third"]);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("clears an unconfirmed injection when the session stops and resumes", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    let ackLost = false;
+    const spy = vi.spyOn(client, "request").mockImplementation(async (method, params, timeoutMs) => {
+      const result = await request(method, params, timeoutMs);
+      if (method === "thread/inject_items" && ackLost) throw new Error("injection acknowledgment lost");
+      return result;
+    });
+    try {
+      ackLost = true;
+      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "t1", prompt: "first", notices: [INSTRUCTIONS] }))).rejects.toThrow(/acknowledgment lost/);
+      // Stop the session: the unconfirmed mark does not survive the teardown.
+      await Effect.runPromise(driver.stopSession(START.threadId));
+      ackLost = false;
+      // The driver remembers its resume cursor itself; the stopped conversation resumes.
+      await Effect.runPromise(driver.startSession(START));
+      const resumed = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "t2", prompt: "after resume", notices: [USAGE] }));
+      const resumedServer = transport.sessions.at(-1)!.server;
+      resumedServer.notify("turn/completed", { threadId: "codex-thread-1", turn: { status: "completed" } });
+      await driver.awaitTurn(START.threadId, resumed.turnId);
+      expect(resumedServer.requestsTo("thread/inject_items")).toHaveLength(1);
+      expect(userInputs(resumedServer)).toEqual(["after resume"]);
+      expect(server.requestsTo("turn/start")).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("injects the Research procedure again after switching back from Build", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    try {
+      for (const [prompt, notice] of [["research", "Research procedure"], ["build", "Build procedure"], ["research again", "Research procedure"]] as const) {
+        const sent = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: prompt, prompt, notices: [notice] }));
+        await settleTurn(driver, server, sent);
+      }
+      expect(server.requestsTo("thread/inject_items").map(({ params }) => (params as { items: [{ content: [{ text: string }] }] }).items[0].content[0].text)).toEqual(["Research procedure", "Build procedure", "Research procedure"]);
+    } finally {
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("does not append a notice twice when the turn it was injected for never started", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const { client, server } = transport.sessions[0]!;
+    const request = client.request.bind(client);
+    let starts = 0;
+    const spy = vi.spyOn(client, "request").mockImplementation((method: string, params?: unknown, timeoutMs?: number) =>
+      method === "turn/start" && ++starts === 1 ? Promise.reject(new CliError("PEER_REQUEST_FAILED", "Request failed: turn/start timed out")) : request(method, params, timeoutMs),
+    );
+    try {
+      await expect(Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "retried-turn", prompt: "", notices: [USAGE] }))).rejects.toThrow(/timed out/);
+      // The item is in the history already: the retry takes the turn and says it once.
+      const retry = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId: "retried-turn", prompt: "", notices: [USAGE] }));
+      await settleTurn(driver, server, retry);
+      expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+      expect(userInputs(server)).toEqual([""]);
+    } finally {
+      spy.mockRestore();
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("sends a compact rider from an old batch as text instead of running maintenance", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    try {
+      const sent = await Effect.runPromise(driver.sendTurn({
+        threadId: START.threadId,
+        prompt: "/compact",
+        notices: [USAGE],
+        fallbackPrompt: `${USAGE}\n\n/compact`,
+      }));
+      await settleTurn(driver, server, sent);
+      expect(server.requestsTo("thread/compact/start")).toHaveLength(0);
+      expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+      expect(userInputs(server)).toEqual(["/compact"]);
+    } finally {
+      await Effect.runPromise(driver.stopAll());
+    }
+  });
+
+  it("drops blank notices instead of sending empty items", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const sent = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "run the checks", notices: ["", "   \n", INSTRUCTIONS] }));
+    await settleTurn(driver, server, sent);
+    // Only the notice with content goes in, and a blank-only turn is no round trip.
+    expect(server.requestsTo("thread/inject_items").map((request) => (request.params as { items: Array<{ content: Array<{ text: string }> }> }).items.map((item) => item.content[0]!.text))).toEqual([[INSTRUCTIONS]]);
+    expect(userInputs(server)).toEqual(["run the checks"]);
+    const blank = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, prompt: "still here", notices: ["", "  "] }));
+    await settleTurn(driver, server, blank);
+    expect(server.requestsTo("thread/inject_items")).toHaveLength(1);
+    expect(userInputs(server).at(-1)).toBe("still here");
+  });
+
+  it("keeps only the latest delivery record per conversation, and none after a stop", async () => {
+    const transport = new FakeCodexTransport();
+    const driver = new CodexDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const server = transport.sessions[0]!.server;
+    const records = () =>
+      (driver as unknown as { injectedNotices: Map<string, Map<string, string>>; pendingInjections: Map<string, unknown> });
+    try {
+      for (const storeTurnId of ["t1", "t2", "t3"]) {
+        const sent = await Effect.runPromise(driver.sendTurn({ threadId: START.threadId, storeTurnId, prompt: `turn ${storeTurnId}`, notices: [INSTRUCTIONS] }));
+        await settleTurn(driver, server, sent);
+      }
+      // A retry is always of the turn that just failed, so only that turn's
+      // record earns its keep: the map must not grow with every noticed turn.
+      const deliveries = records().injectedNotices.get("codex-thread-1")!;
+      expect([...deliveries.keys()]).toEqual(["t3"]);
+      expect(records().pendingInjections.size).toBe(0);
+    } finally {
+      await Effect.runPromise(driver.stopAll());
+    }
+    // The teardown forgets the conversation's bookkeeping entirely: nothing
+    // outlives the session for a resumed one to trip over.
+    expect(records().injectedNotices.has("codex-thread-1")).toBe(false);
+    expect(records().pendingInjections.has("codex-thread-1")).toBe(false);
   });
 });
