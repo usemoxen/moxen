@@ -1427,6 +1427,49 @@ describe("cancellations that race later work", () => {
     expect(described.task.status).toBe("completed");
   });
 
+  it("keeps the earlier sequenced turn when reverting a mixed legacy and sequenced same-tick ledger", async () => {
+    const fixedNow = "2026-11-27T05:00:00.000Z";
+    const w = await scriptedWorld(async () => completed("Done."));
+    w.store.nowIso = () => fixedNow;
+    const thread = await w.make("mixed-revert");
+
+    // Queue scheduled B first (ledger order will be B, L, A), then complete legacy L
+    // (no executionSeq), then A (seq 2), then promote and complete B (seq 3).
+    const b = (await sendTurn(w.store, thread.id, {
+      prompt: "B last",
+      delivery: "queue",
+      scheduledFor: "2026-11-27T06:00:00.000Z",
+    })).turn;
+    const legacy = await startTurn(w.ctx, { threadId: thread.id, prompt: "L first" });
+    await legacy.run;
+    await flushTurnRunners();
+    // Strip executionSeq from L to simulate a pre-MXN-390 legacy turn while keeping turnSeq.
+    await w.store.rewriteLedger(
+      thread.id,
+      "turns",
+      (await w.store.readTurns(thread.id)).map((t) => {
+        if (t.id !== legacy.turn.id) return t;
+        const { executionSeq: _drop, ...rest } = t;
+        return rest;
+      }),
+    );
+
+    const a = await startTurn(w.ctx, { threadId: thread.id, prompt: "A second" });
+    await a.run;
+    await flushTurnRunners();
+
+    await w.store.updateTurn(thread.id, b.id, { scheduledFor: "2026-11-27T04:00:00.000Z" });
+    await runDueScheduledTurn(w.ctx, thread.id, Date.parse(fixedNow));
+    await flushTurnRunners();
+
+    // Execution order is L (legacy), A (seq 2), B (seq 3): keeping 2 turns drops B.
+    await revertThread(w.ctx, thread.id, 2);
+    const remainingUserPrompts = (await w.store.readMessages(thread.id))
+      .filter((m) => m.role === "user")
+      .map((m) => m.text);
+    expect(remainingUserPrompts).toEqual(["L first", "A second"]);
+  });
+
   it("assigns a durable boundary when cancelling and reverting a legacy unsequenced turn", async () => {
     const w = await scriptedWorld(async () => completed("Fresh work done."));
     const parent = await w.make("orchestrator");

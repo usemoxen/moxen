@@ -61,11 +61,29 @@ function runAt(turn: StoredTurn): number {
  * already seen. Ties keep ledger order.
  */
 export function ranTurns(turns: readonly StoredTurn[]): StoredTurn[] {
-  return turns.filter(turnRan).sort((left, right) => {
+  const ran = turns.filter(turnRan);
+  // Every turn sequenced: monotonic executionSeq is a strict total order even
+  // under a frozen or stepped-back clock.
+  if (ran.every((turn) => turn.executionSeq !== undefined)) {
+    return ran.sort((left, right) => left.executionSeq! - right.executionSeq!);
+  }
+  // Mixed legacy/sequenced ledger: compare one pure tuple per turn
+  // `(validTime, runAt, hasSeq, executionSeq)` so the sort is always
+  // transitive while keeping legacy turns before sequenced turns on the same tick.
+  return ran.sort((left, right) => {
+    const leftAt = runAt(left);
+    const rightAt = runAt(right);
+    const leftValid = Number.isFinite(leftAt);
+    const rightValid = Number.isFinite(rightAt);
+    if (leftValid !== rightValid) return leftValid ? 1 : -1;
+    if (leftValid && leftAt !== rightAt) return leftAt - rightAt;
+    const leftHasSeq = left.executionSeq !== undefined ? 1 : 0;
+    const rightHasSeq = right.executionSeq !== undefined ? 1 : 0;
+    if (leftHasSeq !== rightHasSeq) return leftHasSeq - rightHasSeq;
     if (left.executionSeq !== undefined && right.executionSeq !== undefined) {
       return left.executionSeq - right.executionSeq;
     }
-    return runAt(left) - runAt(right);
+    return 0;
   });
 }
 
