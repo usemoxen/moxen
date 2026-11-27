@@ -1907,6 +1907,61 @@ describe("a manual continue moves pending messages to the new thread's work queu
     },
   );
 
+  it("keeps the alias on retry Continue when an onward transfer is staged on B but has not yet landed on C (LOCAL-023)", async () => {
+    const w = await world();
+    const a = await w.make("staged-a");
+    const follower = await w.make("staged-follower");
+    const blocker = (await sendTurn(w.store, a.id, { prompt: "Running" })).turn;
+    const held = await sendTurn(w.store, a.id, { prompt: "Move down chain", queue: parseQueuePolicy({ conditions: [] }) });
+    const dependent = await sendTurn(w.store, follower.id, {
+      prompt: "Wait for A",
+      queue: parseQueuePolicy({ conditions: [{ type: "entry", threadId: a.id, turnId: held.turn.id }] }),
+    });
+    await completeTurn(w.store, a.id, blocker.id, { text: "Done." });
+
+    // A -> B with a future condition so B's copy stays queued.
+    const ab = await continueThread(w.ctx, { threadId: a.id });
+    await settleRuns();
+    const bMove = (await w.store.readTurns(ab.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${held.turn.id}`)!;
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    await editWorkQueue(w.ctx, ab.threadId, bMove.id, "edit", parseQueuePolicy({ conditions: [{ type: "at", at }] }));
+
+    // Continue B -> C and fail the write of C's transfer turn row right after
+    // B stages the move (leaving B's row queued with queue.removed: true and
+    // handoff.landed: false, with no landed row on C yet).
+    const origAppend = w.store.appendLedger.bind(w.store);
+    let failedOnce = false;
+    w.store.appendLedger = async (threadId, kind, record) => {
+      if (!failedOnce && kind === "turns" && threadId !== a.id && threadId !== ab.threadId && threadId !== follower.id && (record as { queue?: { requestId?: string } }).queue?.requestId === `handoff:transfer:${bMove.id}`) {
+        failedOnce = true;
+        throw new Error("simulated crash before landing C's transfer row");
+      }
+      return await origAppend(threadId, kind, record);
+    };
+    await expect(continueThread(w.ctx, { threadId: ab.threadId })).rejects.toThrow("simulated crash");
+    w.store.appendLedger = origAppend;
+    expect(failedOnce).toBe(true);
+    const stagedOnB = (await w.store.readTurns(ab.threadId)).find((turn) => turn.id === bMove.id)!;
+    expect(stagedOnB.status).toBe("queued");
+    expect(stagedOnB.queue?.removed).toBe(true);
+    expect(stagedOnB.handoff?.landed).not.toBe(true);
+    const cId = stagedOnB.handoff!.destinationThreadId;
+
+    // Retry Continue on A while B's onward transfer is staged but not landed:
+    // B still owns the queued transfer, so A's alias must stay intact.
+    await continueThread(w.ctx, { threadId: a.id });
+    expect((await w.store.readTurns(a.id)).find((turn) => turn.id === held.turn.id)?.handoff?.landed).toBe(true);
+
+    // Once B -> C finishes migrating (retry Continue on B), C holds the queued
+    // work and the follower stays queued.
+    await continueThread(w.ctx, { threadId: ab.threadId });
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const cLeaf = (await w.store.readTurns(cId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${bMove.id}`);
+    expect(cLeaf?.status).toBe("queued");
+    expect((await w.store.readTurns(follower.id)).find((turn) => turn.id === dependent.turn.id)?.status).toBe("queued");
+  });
+
   it("hides the server wait from the projected policy and reattaches it on edit, preserving handoff ordering", async () => {
     const w = await world();
     const source = await w.make("solo");

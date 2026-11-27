@@ -3365,8 +3365,12 @@ async function onwardWorkPending(store: ThreadStore, entry: StoredTurn): Promise
     target = destination;
     followed = true;
   }
-  if (!followed) return false;
+  // A staged onward transfer whose destination has not landed yet still sits
+  // `queued` (or `running`) on this hop even with `queue.removed`, so keep the
+  // alias while the current hop owns queued/running work before concluding an
+  // unfollowed hop is dead (LOCAL-023).
   if (target.status === "queued" || target.status === "running") return true;
+  if (!followed) return false;
   // Match `editWorkQueue`'s restorability rule: any `failed` or `interrupted`
   // queued leaf can still be put back into the queue by the user (even without
   // `queue.removed`), so keep the alias while it can return; a terminal leaf
