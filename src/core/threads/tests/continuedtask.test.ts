@@ -70,6 +70,28 @@ describe("a delegated task continued in a new thread", () => {
     expect(sent[0]).not.toContain(`(taskId ${child.id}`);
   }, 30_000);
 
+  it("notifies the parent automatically after a single continueThread with no retry", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d-single", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const first = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, first.id, { text: "Stopped at the usage limit." });
+
+    const continued = await continueThread(w.ctx, { threadId: child.id, automatic: true });
+    await flushTurnRunners();
+    let sent: string[] = [];
+    for (let waited = 0; waited < 10_000; waited += 200) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await flushTurnRunners();
+      sent = await notificationsIn(w, parent.id);
+      if (sent.length > 0) break;
+    }
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(`taskId ${continued.threadId}, continued from taskId ${child.id}`);
+  }, 30_000);
+
   it("leaves a thread that was not delegated without a delegation row", async () => {
     const w = await world();
     const thread = await w.make("solo");

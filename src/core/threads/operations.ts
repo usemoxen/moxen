@@ -1943,7 +1943,7 @@ const continuationRuns = new Map<string, { manual: boolean; run: Promise<Continu
  * waits for that run to settle and then retries through the normal path, so
  * it always passes its own busy check and writes its own claim.
  */
-export function continueThread(ctx: OperationContext, request: ContinueThreadRequest, recoveryDestinationId?: string): Promise<ContinuedThread> {
+export function continueThread(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
   const manual = isManualContinue(request);
   const ongoing = continuationRuns.get(request.threadId);
   // A manual request joins only an in-flight manual run. Joining an agent's
@@ -1963,11 +1963,11 @@ export function continueThread(ctx: OperationContext, request: ContinueThreadReq
   }
   if (ongoing && (!manual || ongoing.manual)) return ongoing.run;
   if (ongoing) {
-    const retry = (): Promise<ContinuedThread> => continueThread(ctx, request, recoveryDestinationId);
+    const retry = (): Promise<ContinuedThread> => continueThread(ctx, request);
     return ongoing.run.then(retry, retry);
   }
   const entry: { manual: boolean; run: Promise<ContinuedThread> } = { manual, run: null! };
-  entry.run = continueThreadInner(ctx, request, recoveryDestinationId).finally(() => {
+  entry.run = continueThreadInner(ctx, request).finally(() => {
     if (continuationRuns.get(request.threadId) === entry) continuationRuns.delete(request.threadId);
   });
   continuationRuns.set(request.threadId, entry);
@@ -2103,7 +2103,7 @@ async function refuseWhileAdopting(ctx: OperationContext, live: StoredThread): P
  * written — so a failed reserve never leaves a registered token or a
  * blocking record behind. Returns the destination.
  */
-async function reserveContinuation(ctx: OperationContext, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string, claimToken: string | null, recoveryDestinationId?: string): Promise<string> {
+async function reserveContinuation(ctx: OperationContext, source: StoredThread, request: ContinueThreadRequest, title: string, noteSummary: string, claimToken: string | null): Promise<string> {
   const store = ctx.store;
   const manual = claimToken !== null;
   return await store.withThreadLock(source.id, async () => {
@@ -2111,7 +2111,7 @@ async function reserveContinuation(ctx: OperationContext, source: StoredThread, 
     let live = current ?? source;
     live = await refuseWhileAdopting(ctx, live);
     if (!manual) {
-      if (recoveryDestinationId ?? request.destinationThreadId) return (recoveryDestinationId ?? request.destinationThreadId)!;
+      if (request.destinationThreadId) return request.destinationThreadId;
       if (live.usagePause?.continuedThreadId) return live.usagePause.continuedThreadId;
     }
     if (manual) {
@@ -2146,7 +2146,6 @@ async function reserveContinuation(ctx: OperationContext, source: StoredThread, 
         continueClaim: { token: claimToken!, pid: process.pid, host: os.hostname(), at: store.nowIso() },
         updatedAt: store.nowIso(),
       });
-      if (recoveryDestinationId) return recoveryDestinationId;
       if (live.usagePause?.continuedThreadId) return live.usagePause.continuedThreadId;
     }
     const notes = await store.readActivities(source.id);
@@ -3043,7 +3042,7 @@ async function landGatedPending(ctx: OperationContext, destinationId: string, ga
   });
 }
 
-async function continueThreadInner(ctx: OperationContext, request: ContinueThreadRequest, recoveryDestinationId?: string): Promise<ContinuedThread> {
+async function continueThreadInner(ctx: OperationContext, request: ContinueThreadRequest): Promise<ContinuedThread> {
   const { store } = ctx;
   const source = await store.readThreadRecord(request.threadId);
   if (!source) throw new CliError("THREAD_NOT_FOUND", `No thread ${request.threadId}.`, { exitCode: 2 });
@@ -3066,7 +3065,7 @@ async function continueThreadInner(ctx: OperationContext, request: ContinueThrea
   const claimToken = isManualContinue(request) ? store.newId() : null;
   if (claimToken !== null) trackContinuation(claimToken);
   try {
-    const destinationId = await reserveContinuation(ctx, source, request, title, noteSummary, claimToken, recoveryDestinationId);
+    const destinationId = await reserveContinuation(ctx, source, request, title, noteSummary, claimToken);
     return await continueThreadReserved(ctx, request, source, title, interactionMode, noteSummary, destinationId);
   } finally {
     // The handoff landed (or failed): the source takes work again. A later
@@ -3212,7 +3211,7 @@ async function continueThreadReserved(
   const prompt = handoff.document + runningTasksNote(priorTasks) + firstMessageNote(request.firstMessage);
   let opener = (await store.readTurns(created.id)).find((turn) => turn.handoffOpen === true);
   if (!opener) {
-    opener = (await startTurn(ctx, {
+    const started = await startTurn(ctx, {
       threadId: created.id,
       prompt,
       delivery: "queue",
@@ -3223,7 +3222,11 @@ async function continueThreadReserved(
       // it rendered as soon as this opener dispatches (MXN-413).
       handoffOpen: true,
       ...(handoff.facts.pending.length > 0 ? { handoffPending: handoff.facts.pending.map((entry) => entry.messageId) } : {}),
-    })).turn;
+    });
+    opener = started.turn;
+    // A delegated task continued in a new thread reports to its parent when
+    // the new thread settles, the same way the original task did.
+    if (notifyParent && started.run !== null) void started.run.then(() => queueTaskNotification(ctx, notifyParent, created.id));
   } else {
     // The turn and its prompt are two ledger writes. Repair that exact
     // opener after a crash, never a new turn or one unrelated to the handoff.
