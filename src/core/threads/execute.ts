@@ -191,9 +191,13 @@ export interface TurnDriver extends ProviderSessionTitles {
    * than one makes a tool call without session identity ambiguous, so it
    * fails instead of running as the entry owner's thread. One at most (an
    * entry that serves only its own thread) keeps the owner's fallback.
+   * `undefined` means this driver holds no live session or shared entry for
+   * `threadId` (so a caller scanning live drivers knows not to treat an
+   * unrelated driver as evidence of sharing, while a caller querying the
+   * thread's own shared-entry driver still fails closed).
    * Absent where entries are never shared: one.
    */
-  entrySessionCount?(threadId: string): number;
+  entrySessionCount?(threadId: string): number | undefined;
   /**
    * The provider tools to leave off, as the setting says now, for a session already running. OpenCode's are part of
    * its server's config, so it restarts the server once nothing runs on it. Absent where a live session cannot

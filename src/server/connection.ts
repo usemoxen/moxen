@@ -1241,9 +1241,14 @@ export class DirectConnection implements ClientApi {
 
   /**
    * Maximum live session count sharing `threadId`'s MCP entry across every
-   * live driver this connection owns (and the thread's saved driver if not
-   * yet opened). Checking every owned driver ensures a saved-provider switch
-   * cannot hide a still-live shared OpenCode entry (LOCAL-035).
+   * live driver this connection owns that actually holds a session or entry
+   * for `threadId`, plus the thread's own saved and running-turn provider(s).
+   *
+   * Unrelated drivers that return `undefined` (no live session or entry for
+   * `threadId`) never inflate another provider's count. Conversely, when one
+   * of the thread's own providers supports shared entries (`entrySessionCount`
+   * is defined on that driver) yet returns `undefined` (cannot establish
+   * exclusivity), we fail closed to 2 (LOCAL-035).
    */
   private async entrySessionCountOf(threadId: string): Promise<number> {
     let max = 1;
@@ -1251,11 +1256,27 @@ export class DirectConnection implements ClientApi {
       const count = driver.entrySessionCount?.(threadId);
       if (typeof count === "number" && count > max) max = count;
     }
-    const record = await (await this.store()).readThreadRecord(threadId).catch(() => null);
-    const instanceId = record?.modelSelection?.instanceId ?? null;
-    if (record && typeof instanceId === "string" && instanceId.trim() !== "") {
-      const count = this.driverFor(instanceId).entrySessionCount?.(threadId);
-      if (typeof count === "number" && count > max) max = count;
+    const store = await this.store();
+    const record = await store.readThreadRecord(threadId).catch(() => null);
+    const providerIds = new Set<string>();
+    const savedInstanceId = record?.modelSelection?.instanceId ?? null;
+    if (record && typeof savedInstanceId === "string" && savedInstanceId.trim() !== "") {
+      providerIds.add(savedInstanceId);
+    }
+    const turns = await store.readTurns(threadId).catch(() => []);
+    for (const turn of turns) {
+      if (turn.status !== "running") continue;
+      const runInstanceId = turn.modelSelection?.instanceId ?? null;
+      if (typeof runInstanceId === "string" && runInstanceId.trim() !== "") {
+        providerIds.add(runInstanceId);
+      }
+    }
+    for (const instanceId of providerIds) {
+      const driver = this.driverFor(instanceId);
+      if (!driver.entrySessionCount) continue;
+      const count = driver.entrySessionCount(threadId);
+      const resolved = typeof count === "number" ? count : 2;
+      if (resolved > max) max = resolved;
     }
     return max;
   }

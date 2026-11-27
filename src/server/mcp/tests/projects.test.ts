@@ -16,6 +16,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { runProcess } from "../../../core/infra/process.js";
+import { OpenCodeDriver } from "../../../core/providers/opencode/driver.js";
 import { testHarness } from "../../../core/testing/harness.js";
 import { DirectConnection } from "../../connection.js";
 import { decodeCommand } from "../../protocol.js";
@@ -831,6 +832,70 @@ describe("project_register: only the authenticated session's thread writes", () 
         created: false,
         revived: true,
       });
+    } finally {
+      await http.close();
+      await connection.close();
+    }
+  });
+
+  it("does not let an unrelated live OpenCode driver block another provider's MCP calls, while failing closed for an unowned OpenCode thread (LOCAL-035)", async () => {
+    const harness = await testHarness({});
+    const realOpencode = new OpenCodeDriver({
+      settings: { binaryPath: "opencode" },
+    });
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: { ...harness.drivers, opencode: () => realOpencode },
+      config: async () => harness.config,
+    });
+    const http = await startMcpHttpServer(connection, undefined, connection.agentQueue, connection.projectRegistration);
+    try {
+      const ensured = await connection.dispatch({ type: "project.ensure", cwd: harness.work, projectPolicy: "create" });
+      const codexThread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      });
+      const opencodeThread = await connection.dispatch({
+        type: "thread.create",
+        projectId: ensured.project.id,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: "opencode", model: "gpt-5.4" },
+      });
+
+      // Before OpenCode is instantiated, Codex has count 1.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: codexThread.threadId })).toEqual({ count: 1 });
+      // Querying the OpenCode thread instantiates the real OpenCodeDriver in
+      // `ownedDrivers` and fails closed to 2 because OpenCode holds no live
+      // session for that OpenCode thread.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: opencodeThread.threadId })).toEqual({ count: 2 });
+      // The unrelated Codex thread must still count as 1, and ordinary MCP
+      // calls (`project_list` and `project_register`) over loopback HTTP must
+      // succeed without OpenCode session metadata.
+      expect(await connection.query({ type: "thread.entry-sessions", threadId: codexThread.threadId })).toEqual({ count: 1 });
+
+      const endpoint = http.specFor(codexThread.threadId);
+      const mcpCall = async (name: string, args: Record<string, unknown>) => {
+        const res = await fetch(endpoint.url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...endpoint.headers },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+        });
+        expect(res.status).toBe(200);
+        return (await res.json()) as { result?: { content: Array<{ text: string }>; isError?: boolean }; error?: { message: string } };
+      };
+
+      const listed = await mcpCall("project_list", {});
+      expect(listed.error).toBeUndefined();
+      expect(listed.result?.isError).toBe(false);
+
+      const folder = path.join(harness.root, "codex-with-opencode-alive");
+      await mkdir(folder);
+      const registeredRes = await mcpCall("project_register", { cwd: folder });
+      expect(registeredRes.error).toBeUndefined();
+      expect(registeredRes.result?.isError).toBe(false);
+      expect(JSON.parse(registeredRes.result!.content[0]!.text)).toMatchObject({ workspaceRoot: real(folder), created: true });
     } finally {
       await http.close();
       await connection.close();
