@@ -111,6 +111,22 @@ describe("Antigravity single-account enforcement and allowUnsupportedUse scoping
     const updated = upsertProviderAccount(base, { kind: "antigravity", id: "default", label: "Host Antigravity" });
     expect(updated.created).toBe(false);
     expect(updated.account.label).toBe("Host Antigravity");
+
+    // A legacy profile that already has a homePath still allows unrelated edits
+    // (e.g. label) and clearing its homePath, while refusing new non-empty paths.
+    const legacy = normalizeConfig({
+      ...DEFAULT_CONFIG,
+      providers: { antigravity: { accounts: [{ id: "default", label: "Default", homePath: "~/agy-legacy" }] } },
+    });
+    const renamed = upsertProviderAccount(legacy, { kind: "antigravity", id: "default", label: "Renamed" });
+    expect(renamed.account.label).toBe("Renamed");
+    expect(renamed.account.homePath).toBe("~/agy-legacy");
+    expect(summarizeProviderAccounts(renamed.config.providers).find((row) => row.instanceId === "antigravity/default")?.disabledReason).toContain(
+      "moxen config set 'providers.antigravity.accounts[default].homePath' ''",
+    );
+    const repaired = upsertProviderAccount(legacy, { kind: "antigravity", id: "default", homePath: null });
+    expect(repaired.account.homePath).toBeNull();
+    expect(summarizeProviderAccounts(repaired.config.providers).find((row) => row.instanceId === "antigravity/default")?.disabledReason).toBeNull();
   });
 
   it("keeps allowUnsupportedUse at the provider-level key in account profile settings and strips stray account copies", () => {

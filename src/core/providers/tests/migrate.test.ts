@@ -235,6 +235,46 @@ describe("migrateProviderProfiles", () => {
     expect(after.fileConfig.providers?.antigravity?.accounts?.[0]).not.toHaveProperty("allowUnsupportedUse");
   });
 
+  it("reuses an existing host Antigravity profile during migration instead of creating a second default profile", async () => {
+    const root = makeTempDir();
+    const configPath = path.join(root, "config.json");
+    const storeRoot = path.join(root, "threads");
+    const store = await openThreadStore(storeRoot);
+    await saveConfig(
+      configPath,
+      normalizeFileConfig({
+        provider: "antigravity",
+        providers: {
+          antigravity: {
+            allowUnsupportedUse: true,
+            accounts: [{ id: "personal", label: "Personal" }],
+          },
+        },
+      }),
+    );
+    const workspaceRoot = path.join(root, "repo");
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    const { project } = await ensureStoredProject(storeRoot, {
+      workspaceRoot,
+      defaultModelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+    });
+    const thread = await createThread(store, {
+      projectId: project.id,
+      title: "Legacy Antigravity",
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      env: { mode: "local", path: workspaceRoot },
+    });
+
+    const result = await migrateProviderProfiles({ configPath, storeRoot, store });
+    expect(result.migrated).toBe(true);
+    expect(result.createdAccounts).toEqual([]);
+    const migrated = await loadConfig(configPath);
+    expect(migrated.fileConfig.provider).toBe("antigravity/personal");
+    expect(migrated.fileConfig.providers?.antigravity?.accounts?.map((a) => a.id)).toEqual(["personal"]);
+    const updatedThread = await store.readThreadRecord(thread.id);
+    expect(updatedThread?.modelSelection.instanceId).toBe("antigravity/personal");
+  });
+
   it("keeps per-profile settings completely independent and writable via account setting keys", () => {
     const base = normalizeFileConfig({
       providers: {

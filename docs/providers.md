@@ -123,37 +123,27 @@ negotiates any other protocol version is refused loudly
   Stored usage and credits of a gated account are not served, and turning
   the setting off stops that account's live driver and sessions without a
   restart. What you type, queue, schedule or click always runs. Turning it
-  on is your choice: Google does not support delegation, automatic prompts or
-  multiple accounts on consumer plans and may suspend the Antigravity account,
-  and the TUI, desktop and CLI say so when you enable it. A turn the provider
-  starts itself (a reactive wake-up inside `agy`) is not a Moxen prompt and is
-  left alone.
-- **Multiple accounts** (`antigravity/<id>`): an Antigravity account with a
-  `homePath` runs `agy` with `HOME` and `USERPROFILE` pointed at that folder
-  and a synthetic `SSH_CONNECTION`, so `agy` keeps its login in that folder
-  instead of the OS keychain. While `providers.antigravity.allowUnsupportedUse`
-  is off (the default), Moxen runs at most one Antigravity account: the first
-  configured without a `homePath`, which shares the host `agy` login with its
-  environment untouched. Every account with a `homePath` — or whose own `env`
-  or launch args move its login off the host environment — and every account
-  beyond that one, is shown as disabled with the reason
-  (`moxen providers accounts list`, the settings pages; the provider catalog
-  reports the reason before so much as checking whether `agy` is installed in
-  that folder), is never launched,
-  probed for usage or credits, or routed to, and a request that targets it
-  fails with `ANTIGRAVITY_ACCOUNT_OFF`, naming the setting and how to fix it:
-  remove the account's `homePath`, or turn the setting on. Your config is
-  never deleted or rewritten on this path. Signing in an isolated account is
-  refused the same way while the setting is off. Adding an Antigravity account
-  is part of that too: while the setting is off, the TUI wizard's home step
-  starts empty (the account signs in on the host `agy` login), the desktop
-  add form writes no `homePath`, and the server's account login assigns no
-  managed folder — a home you type yourself, or an account that already has
-  one, still meets the same refusal. When an Antigravity account is already
-  configured, the wizard and the desktop form say up front that the extra
-  account stays disabled until you turn the setting on. With the setting on,
-  the add flow behaves exactly as before: every new account gets Moxen's
-  managed isolated folder (`~/.moxen/accounts/antigravity/<id>`).
+  on is your choice: Google does not support delegation or automatic prompts on
+  consumer plans and may suspend the Antigravity account, and the TUI, desktop
+  and CLI say so when you enable it. A turn the provider starts itself (a
+  reactive wake-up inside `agy`) is not a Moxen prompt and is left alone.
+- **Single host account** (`antigravity/default`): Moxen supports at most one
+  Antigravity account — the first configured without a `homePath` or non-host
+  env/`--gemini-dir` override, sharing the host `agy` login with its
+  environment untouched — regardless of
+  `providers.antigravity.allowUnsupportedUse`. Adding Antigravity in the TUI or
+  desktop settings creates `antigravity/default` directly with one click (no
+  multi-account wizard or isolated home folder) and hides Antigravity from the
+  add picker once configured. Any legacy or hand-edited account with a
+  `homePath`, a non-host env/`--gemini-dir` override, or beyond the single host
+  account is shown as disabled with the reason (`moxen providers accounts list`,
+  the settings pages; the provider catalog reports the reason before checking
+  whether `agy` is installed in that folder), is never launched, probed for
+  usage or credits, or routed to, and a request targeting it fails with
+  `ANTIGRAVITY_ACCOUNT_OFF`. Your config is never deleted or rewritten on this
+  path; clear a legacy `homePath` with
+  `moxen config set 'providers.antigravity.accounts[<id>].homePath' ''` (or
+  remove extra accounts).
 - **ACP profiles (`providers.acp.agents`)**: managed like Moxen Harness
   profiles (`providers.harness.profiles`). Add as many ACP agents as you want
   — either picked from the pinned v1 ACP Registry

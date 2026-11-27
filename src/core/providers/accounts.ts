@@ -784,14 +784,14 @@ export function upsertProviderAccount(
         { exitCode: 4, details: { instanceId: `antigravity/${normalizedId}` } },
       );
     }
-    const nextHome = applyOptionalPatch(existing?.homePath, input.homePath);
-    if (nextHome?.trim()) {
+    if (typeof input.homePath === "string" && input.homePath.trim().length > 0) {
       throw new CliError(
         "ANTIGRAVITY_ACCOUNT_OFF",
         "Antigravity runs only on the host agy login and does not support an isolated homePath.",
         { exitCode: 4, details: { instanceId: `antigravity/${normalizedId}` } },
       );
     }
+    const nextHome = applyOptionalPatch(existing?.homePath, input.homePath);
     const launchArgsString =
       input.launchArgs === undefined
         ? existing?.launchArgs

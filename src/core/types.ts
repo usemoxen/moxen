@@ -1115,7 +1115,7 @@ export function antigravityAccountBlockedReason(
   const account = accounts.find((entry) => entry.id.trim().toLowerCase() === parsed.accountId);
   if (account === undefined) return null;
   if (account.homePath?.trim()) {
-    return `Moxen supports at most one Antigravity account, sharing the host agy login with no homePath. Google does not support multiple consumer accounts and may suspend them. Remove account "${parsed.accountId}" homePath so it uses the host agy login.`;
+    return `Moxen supports at most one Antigravity account, sharing the host agy login with no homePath. Google does not support multiple consumer accounts and may suspend them. Remove account "${parsed.accountId}" homePath with: moxen config set 'providers.antigravity.accounts[${parsed.accountId}].homePath' ''`;
   }
   const launch = antigravityOffUseLaunchBlockedReason(config, { env: account.env, launchArgs: account.launchArgs ?? config?.launchArgs });
   if (launch !== null) return launch;
