@@ -164,6 +164,7 @@ export function queuedTurn(threadId = "thread-1"): StoredTurn {
     heldAtSettle: true,
     heldBySnooze: true,
     automatic: true,
+    consent: "replayed",
     control: true,
     queue: {
       conditions: [{ type: "usage", provider: "claude", window: "session", minimum: 5 }],

@@ -3048,6 +3048,10 @@ function buildTransferEntry(
     ...(sourceTurn.interactionModeExplicit === true ? { interactionModeExplicit: true as const } : {}),
     ...(sourceTurn.automatic !== undefined ? { automatic: sourceTurn.automatic } : {}),
     ...(sourceTurn.control !== undefined ? { control: sourceTurn.control } : {}),
+    // A copy a continue carried is the user's text, never a new submission
+    // here: it cannot vouch as fresh consent for a held automatic entry on
+    // the destination (LOCAL-023).
+    consent: "replayed" as const,
     modelSelection: sourceTurn.modelSelection ?? destination.modelSelection,
     parentTurnId: sourceTurn.parentTurnId,
     ...(sourceTurn.origin !== undefined ? { origin: sourceTurn.origin } : {}),
@@ -3311,6 +3315,32 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
 }
 
 /**
+ * Whether a landed move's destination entry carried its work onward into a
+ * thread that still owns it: a manual transfer row of its own (A→B→C), or a
+ * queue-selected model/stored handoff the destination's pass prepared. Both
+ * shapes are followed through the onward turn's own reservation, so the alias
+ * a cross-thread dependent follows is kept only while real work waits on the
+ * far side — a chain whose last handoff has settled owns nothing, and keeping
+ * the marker then would leave it dangling (LOCAL-023). An unreadable ledger is
+ * unknown, not finished, so the alias stays.
+ */
+async function onwardWorkPending(store: ThreadStore, entry: StoredTurn): Promise<boolean> {
+  const seen = new Set<string>();
+  let target: StoredTurn | undefined = entry;
+  while (target !== undefined && target.handoff !== undefined) {
+    if (seen.has(target.id)) return true;
+    seen.add(target.id);
+    const handoff: HandoffRecord = target.handoff;
+    const turns: readonly StoredTurn[] | null = await store.readTurns(handoff.destinationThreadId).catch(() => null);
+    if (turns === null) return true;
+    const destination: StoredTurn | undefined = turns.find((turn) => turn.queue?.requestId === `handoff:${handoff.requestId}`);
+    if (destination === undefined) break;
+    target = destination;
+  }
+  return target === undefined || target.status === "queued" || target.status === "running";
+}
+
+/**
  * The migration body; the caller holds the queue admission lock. The manual
  * continue reaches here through `migrateQueuedMessages`, which takes the
  * lock, and the queue pass — already inside it — calls it directly after a
@@ -3420,15 +3450,17 @@ async function migrateStagedMessages(ctx: OperationContext, sourceId: string, de
         // stands: unmarking now would release cross-thread dependents
         // early, while the move is still queued ahead of them — so its
         // marker stays until the entry settles. The same goes for an
-        // entry that carried the work onward (A→B→C): it is a transfer
-        // row of its own now, and the marker here is the durable alias a
-        // cross-thread dependent still follows — unmarking would let the
-        // dependent run while the work is still pending (a retry continue
-        // on A rejoins B and reads B's interrupted transfer row as
-        // terminal) and would also resurrect the moved text in this
-        // thread's handoff projection. Everything else reads as ordinary
-        // removed history from here on, and a partial entry, which can
-        // never complete now, is taken back too.
+        // entry that carried the work onward, in either shape: a transfer
+        // row of its own (A→B→C), or a queue-selected model/stored handoff
+        // the destination's pass prepared. Its marker here is the durable
+        // alias a cross-thread dependent still follows — unmarking would
+        // let the dependent run while the work is still pending (a retry
+        // continue on A rejoins B and reads B's settled row as terminal) and
+        // would also resurrect the moved text in this thread's handoff
+        // projection. Only onward work that genuinely finished drops the
+        // alias. Everything else reads as ordinary removed history from
+        // here on, and a partial entry, which can never complete now, is
+        // taken back too.
         const sources = transferMessagesOf(messages, sourceTurn);
         const requestId = transferDestinationRequestId(sourceTurn.id);
         const entry = existing.find((turn) => turn.queue?.requestId === requestId) ?? null;
@@ -3439,7 +3471,7 @@ async function migrateStagedMessages(ctx: OperationContext, sourceId: string, de
           ? transferEntryComplete(entry, destinationMessages, sources)
           : destinationMessages.some((message) => message.id === entry.messageId));
         const live = entry !== null && (entry.status === "running" || (entry.status === "queued" && entry.queue !== undefined && entry.queue.removed !== true));
-        const movedOnward = entry !== null && isTransferredTurn(entry);
+        const movedOnward = entry !== null && (await onwardWorkPending(store, entry));
         if (whole && (live || movedOnward)) continue;
         const current = await store.readTurns(sourceId);
         await store.rewriteLedger(
@@ -3544,6 +3576,9 @@ async function landGatedPending(ctx: OperationContext, destinationId: string, ga
         error: null,
         usage: null,
         queue,
+        // A request the hand-off carried over, not a submission here: it never
+        // vouches as fresh consent on the destination (LOCAL-023).
+        consent: "replayed" as const,
         ...(scheduled ? { scheduledFor: primary.scheduledFor!, scheduleReason: "user" as const } : {}),
         createdAt: now,
         updatedAt: now,

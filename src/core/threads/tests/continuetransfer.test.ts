@@ -1709,6 +1709,61 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect(await buildHandoff(w.store, source.id, {})).not.toContain("Still to do");
   });
 
+  it("keeps the landed transfer marker while the moved entry's own queued handoff still owns pending work (LOCAL-023)", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const follower = await w.make("follower");
+    const held = await sendTurn(w.store, source.id, {
+      prompt: "Still to do",
+      queue: { ...parseQueuePolicy({ conditions: [] }), held: true },
+    });
+    const dependent = await sendTurn(w.store, follower.id, {
+      prompt: "Follows the move",
+      queue: parseQueuePolicy({ conditions: [{ type: "entry", threadId: source.id, turnId: held.turn.id }] }),
+    });
+
+    // A -> B: the held work moves, and the follower waits on the moved copy.
+    const ab = await continueThread(w.ctx, { threadId: source.id });
+    await settleRuns();
+    const moved = (await w.store.readTurns(ab.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${held.turn.id}`)!;
+    expect(moved).toBeDefined();
+
+    // On B the user releases the entry onto a stored continuation whose time
+    // has not come: its handoff prepares — a destination of its own — while
+    // the entry's work still waits there.
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    await editWorkQueue(w.ctx, ab.threadId, moved.id, "edit", parseQueuePolicy({ conditions: [{ type: "at", at }], continuation: "stored" }));
+    await editWorkQueue(w.ctx, ab.threadId, moved.id, "release");
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const onward = (await w.store.readTurns(ab.threadId)).find((turn) => turn.id === moved.id)!;
+    expect(onward.status).toBe("completed");
+    // An ordinary queued handoff, not a transfer: the marker rule used to
+    // recognise only the latter.
+    expect(onward.handoff?.requestId.startsWith("transfer:")).toBe(false);
+    const nextThreadId = onward.handoff!.destinationThreadId;
+    const reserved = (await w.store.readTurns(nextThreadId)).find((turn) => turn.queue?.requestId === `handoff:${onward.handoff!.requestId}`)!;
+    expect(reserved?.status).toBe("queued");
+
+    // A retry Continue on A rejoins B. The marker on A is a durable alias
+    // while the onward handoff owns pending work: the follower stays blocked.
+    const rejoined = await continueThread(w.ctx, { threadId: source.id });
+    expect(rejoined.threadId).toBe(ab.threadId);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(follower.id)).find((turn) => turn.id === dependent.turn.id)?.status).toBe("queued");
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === held.turn.id)?.handoff?.landed).toBe(true);
+
+    // Once the onward work genuinely finishes, a further retry drops the
+    // alias instead of leaving it dangling.
+    await editWorkQueue(w.ctx, nextThreadId, reserved.id, "edit", parseQueuePolicy({ conditions: [] }));
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(nextThreadId)).find((turn) => turn.id === reserved.id)?.status).toBe("completed");
+    await continueThread(w.ctx, { threadId: source.id });
+    expect((await w.store.readTurns(source.id)).find((turn) => turn.id === held.turn.id)?.handoff).toBeUndefined();
+  });
+
   it("hides the server wait from the projected policy and reattaches it on edit, preserving handoff ordering", async () => {
     const w = await world();
     const source = await w.make("solo");

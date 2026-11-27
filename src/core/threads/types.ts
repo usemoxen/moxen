@@ -357,6 +357,18 @@ export type TurnStatus = "queued" | "running" | "completed" | "interrupted" | "f
 export type TurnDelivery = "started" | "queued" | "steered" | "restarted" | "injected" | "background";
 
 /**
+ * What the writer of a turn recorded about its prompt, where the row cannot
+ * say it alone: `fresh` for a new local submission the user sent here, and
+ * `replayed` for anything Moxen carried over or generated — a copy a continue
+ * or hand-off moved, the generated opener, a provider-native background turn.
+ * Fresh user consent is read from this record, never inferred from an absent
+ * origin: a replayed row must not vouch for a held automatic prompt. Absent on
+ * rows written before the field existed, which keep the older inference so a
+ * real local send still counts.
+ */
+export type TurnConsent = "fresh" | "replayed";
+
+/**
  * What a settling turn decided about its review task: the verdict its final
  * report ended with (explicitly null when the report carried none), the
  * report, and the model that produced it.
@@ -446,6 +458,8 @@ export interface StoredTurn {
   readonly maintenance?: true;
   /** True for an input Moxen dispatched itself (compaction, handoff, a background wake), never the user's. */
   readonly automatic?: boolean;
+  /** What the writer recorded about this prompt's consent (see `TurnConsent`); absent on rows written before it. */
+  readonly consent?: TurnConsent;
   /** A provider control command (`/compact`) or a usage-control prompt: not an ordinary message. */
   readonly control?: boolean;
   readonly messageId: string;

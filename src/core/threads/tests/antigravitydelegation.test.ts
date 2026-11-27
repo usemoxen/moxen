@@ -454,6 +454,94 @@ describe("Antigravity automatic prompts held while off", () => {
     await settleRuns();
     expect((await w.store.readTurns(destination)).find((turn) => turn.id === moved.id)?.status).toBe("completed");
   });
+
+  it("never reads the user's own message moved by a continue as fresh consent for the entry beside it (LOCAL-023)", async () => {
+    const w = await world();
+    // Queued with the setting on, an agent message is ordinary traffic; while
+    // off it queues as a held wake-up, which a move never carries (LOCAL-023).
+    w.allow(true);
+    const source = await w.make("antigravity", "gemini-4-neon");
+    const idle = await w.make("codex");
+    const first = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, first.id, { text: "Done." });
+    const held = await queueAgentMessage(w.ctx, source.id, { message: "Check the logs", conditions: [{ type: "thread", threadId: idle.id }] });
+    expect(held.status).toBe("queued");
+    // The user's own queued message behind it, which the move copies after it.
+    const mine = (await sendTurn(w.store, source.id, {
+      prompt: "Go on",
+      queue: parseQueuePolicy({ conditions: [{ type: "thread", threadId: idle.id }] }),
+    }, w.config)).turn;
+    expect(mine.status).toBe("queued");
+
+    // The gate goes off, then the user continues: both copies land, the
+    // user's message after the entry it moved beside.
+    w.allow(false);
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    const destination = continued.threadId;
+    const turns = await w.store.readTurns(destination);
+    const movedHeld = turns.find((turn) => turn.queue?.requestId === `handoff:transfer:${held.turnId}`)!;
+    const movedMine = turns.find((turn) => turn.queue?.requestId === `handoff:transfer:${mine.id}`)!;
+    expect(movedHeld).toBeDefined();
+    expect(movedMine).toBeDefined();
+    expect(turns.indexOf(movedHeld)).toBeLessThan(turns.indexOf(movedMine));
+
+    // The handoff and the moved user message run; the moved entry stays held:
+    // a copy a continue carried is not a new submission on this thread.
+    for (let pass = 0; pass < 3; pass += 1) {
+      await runWorkQueue(w.ctx);
+      await settleRuns();
+    }
+    const afterMove = await w.store.readTurns(destination);
+    expect(afterMove.find((turn) => turn.id === movedMine.id)?.status).toBe("completed");
+    expect(afterMove.find((turn) => turn.id === movedHeld.id)?.status).toBe("queued");
+    expect((await readWorkQueue(w.ctx)).find((entry) => entry.turnId === movedHeld.id)!.blocked.join(" "))
+      .toContain("providers.antigravity.allowUnsupportedUse");
+
+    // A genuine submission on the destination still releases it.
+    const fresh = (await sendTurn(w.store, destination, { prompt: "Carry on" }, w.config)).turn;
+    expect(fresh.status).toBe("running");
+    await completeTurn(w.store, destination, fresh.id, { text: "Done." }, w.config.providers);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(destination)).find((turn) => turn.id === movedHeld.id)?.status).toBe("completed");
+  });
+
+  it("never reads a provider's originless background turn as fresh user consent (LOCAL-023)", async () => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    const queued = await queueAgentMessage(w.ctx, thread.id, { message: "Check the logs" });
+    const statusOf = async () => (await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turnId)?.status;
+
+    // A native background row as a store written before the field recorded
+    // `automatic` keeps it: `delivery` alone says the provider started it,
+    // so it is Moxen's own turn and never the user speaking.
+    const now = w.store.nowIso();
+    await w.store.appendLedger(thread.id, "turns", {
+      id: "native-background-turn",
+      threadId: thread.id,
+      messageId: "native-background-message",
+      status: "completed",
+      delivery: "background",
+      runtimeMode: "auto",
+      interactionMode: "default",
+      modelSelection: null,
+      parentTurnId: null,
+      error: null,
+      usage: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: now,
+    });
+    const background = (await w.store.readTurns(thread.id)).find((turn) => turn.id === "native-background-turn")!;
+    expect(background.origin).toBeUndefined();
+    expect(background.automatic).toBeUndefined();
+
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect(await statusOf()).toBe("queued");
+    expect((await readWorkQueue(w.ctx)).find((entry) => entry.turnId === queued.turnId)!.blocked.join(" "))
+      .toContain("providers.antigravity.allowUnsupportedUse");
+  });
 });
 
 describe("Antigravity usage recovery and compaction held while off", () => {

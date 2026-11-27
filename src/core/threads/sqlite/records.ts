@@ -385,6 +385,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.heldBySnooze !== undefined) rest.heldBySnooze = turn.heldBySnooze;
   if (turn.agentThreadId !== undefined) rest.agentThreadId = turn.agentThreadId;
   if (turn.automatic !== undefined) rest.automatic = turn.automatic;
+  if (turn.consent !== undefined) rest.consent = turn.consent;
   if (turn.control !== undefined) rest.control = turn.control;
   if (turn.reviewHandoff === true) rest.reviewHandoff = true;
   if (turn.reviewDecision !== undefined) rest.reviewDecision = turn.reviewDecision;
@@ -456,6 +457,9 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     ...(rest.interactionModeExplicit === undefined ? {} : { interactionModeExplicit: true as const }),
     ...(rest.heldBySnooze === undefined ? {} : { heldBySnooze: true }),
     ...(rest.automatic === undefined ? {} : { automatic: rest.automatic as boolean }),
+    // Anything but a recorded fresh submission reads as replayed: an
+    // unreadable value must never widen consent (LOCAL-023).
+    ...(rest.consent === undefined ? {} : { consent: rest.consent === "fresh" ? "fresh" as const : "replayed" as const }),
     ...(rest.control === undefined ? {} : { control: rest.control as boolean }),
     modelSelection: (rest.modelSelection ?? null) as ModelSelection | null,
     parentTurnId: (rest.parentTurnId ?? null) as string | null,

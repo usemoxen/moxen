@@ -315,14 +315,18 @@ export function automaticDispatchPrompt(turn: StoredTurn, origin: MessageOrigin 
 /**
  * Whether a turn is one the user wrote: no origin, not marked as Moxen's own
  * dispatch, none of the queue's automatic flags, none of the usage
- * schedules, and not the generated hand-off opener. Moxen-written prompts never count, whatever their kind —
+ * schedules, not a provider-native background turn, and not the generated
+ * hand-off opener. Moxen-written prompts never count, whatever their kind —
  * the one predicate every exception that needs "the user's own turn" shares.
  * A hand-off opener is a document Moxen authored, so it can never vouch for
- * an automatic entry as the user's own turn (LOCAL-034).
+ * an automatic entry as the user's own turn (LOCAL-034); a background turn is
+ * one the provider started by itself, whatever a row written before `automatic`
+ * recorded there (LOCAL-023).
  */
 export function userAuthoredTurn(turn: StoredTurn): boolean {
   return turn.origin === undefined
     && turn.automatic !== true
+    && turn.delivery !== "background"
     && turn.handoffOpen !== true
     && turn.queue?.automatic !== true && turn.queue?.wakeUp !== true
     && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold";
@@ -334,8 +338,17 @@ export function userAuthoredTurn(turn: StoredTurn): boolean {
  * message that fires late authorizes nothing queued behind its timer.
  * `origin` is the turn's, made whole with the message ledger for turns written
  * before the row carried one.
+ *
+ * Consent is the writer's own record (`StoredTurn.consent`) when the row
+ * carries one: a copy a continue or hand-off moved, a generated opener and a
+ * provider-native background turn were never submitted here, so they vouch for
+ * nothing even with no origin of their own (LOCAL-023). Rows written before
+ * that record keep the inference below, which still reads a real local send as
+ * consent.
  */
 export function userConsentTurn(turn: StoredTurn, origin: MessageOrigin | undefined): boolean {
+  if (turn.consent === "replayed") return false;
+  if (turn.consent === "fresh") return origin === undefined && !turn.scheduledFor;
   return origin === undefined && userAuthoredTurn(turn) && !turn.scheduledFor;
 }
 
