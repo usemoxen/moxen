@@ -14,9 +14,10 @@
 import { copyFile } from "node:fs/promises";
 import fs from "node:fs";
 
-import { loadConfig, normalizeFileConfig, saveConfig } from "../config.js";
+import { loadConfig, normalizeFileConfig, saveConfig, type SkippedConfigEntry } from "../config.js";
 import { listStoredProjects, rewriteStoredProjects } from "../projects/projects.js";
 import type { ThreadStore } from "../threads/store.js";
+import { normalizeAntigravityAccount } from "./accounts.js";
 import {
   antigravityAccountBlockedReason,
   type AntigravityAccountConfig,
@@ -179,6 +180,7 @@ export async function migrateProviderProfiles(
   }
 
   const createdAccounts: string[] = [];
+  const extraSkipped: SkippedConfigEntry[] = [];
   const nextProviders: Record<string, unknown> = {
     ...(fileConfig.providers ?? {}),
     profilesMigrated: true,
@@ -204,10 +206,28 @@ export async function migrateProviderProfiles(
     // the migrated account entries. Moxen supports at most one host-login
     // Antigravity profile, so reuse existing profiles instead of adding a
     // second `default` entry that would disable the user's configured one,
-    // carrying legacy top-level fields into each reused profile where it has
-    // no explicit override so working launch settings survive and isolation
-    // args stay visibly blocked for repair.
+    // carrying valid legacy top-level fields into each reused profile where it
+    // has no explicit override so working launch settings survive and isolation
+    // args stay visibly blocked for repair. Malformed legacy fields are kept
+    // as skipped diagnostics rather than aborting migration.
     const { accounts: existingAccounts = [], allowUnsupportedUse, ...legacyFields } = fileConfig.providers?.antigravity ?? {};
+    const safeLegacyFields: Record<string, unknown> = {};
+    for (const [fieldKey, fieldValue] of Object.entries(legacyFields)) {
+      if (fieldValue === undefined) continue;
+      const fieldPath = `providers.antigravity.${fieldKey}`;
+      try {
+        normalizeAntigravityAccount({ id: "default", [fieldKey]: fieldValue }, fieldPath);
+        safeLegacyFields[fieldKey] = fieldValue;
+      } catch (cause) {
+        if (!loaded.skipped.some((entry) => entry.path === fieldPath)) {
+          extraSkipped.push({
+            path: fieldPath,
+            message: cause instanceof Error ? cause.message : String(cause),
+            value: fieldValue,
+          });
+        }
+      }
+    }
     let accounts: AntigravityAccountConfig[];
     if (existingAccounts.length > 0) {
       accounts = existingAccounts.map((entry) => {
@@ -215,13 +235,13 @@ export async function migrateProviderProfiles(
           Object.entries(entry).filter(([, value]) => value !== undefined),
         ) as AntigravityAccountConfig;
         return {
-          ...legacyFields,
+          ...safeLegacyFields,
           ...definedEntry,
         };
       });
     } else {
       const migratedDefault: AntigravityAccountConfig = {
-        ...legacyFields,
+        ...safeLegacyFields,
         id: "default",
         label: "Default",
       };
@@ -232,12 +252,16 @@ export async function migrateProviderProfiles(
       accounts,
       ...(allowUnsupportedUse !== undefined ? { allowUnsupportedUse } : {}),
     };
-    // Select the target against the final migrated config using the same
-    // eligibility rule as runtime so rewritten references are never displaced.
-    const eligible = accounts.find(
-      (entry) => antigravityAccountBlockedReason(nextAntigravity, `antigravity/${entry.id.trim().toLowerCase()}`) === null,
+    // Select the target against the normalized config that will be saved using
+    // the same eligibility rule as runtime so rewritten references stay valid.
+    const normalizedAntigravity = normalizeFileConfig({
+      providers: { antigravity: nextAntigravity },
+    }).providers?.antigravity;
+    const normalizedAccounts = normalizedAntigravity?.accounts ?? accounts;
+    const eligible = normalizedAccounts.find(
+      (entry) => antigravityAccountBlockedReason(normalizedAntigravity, `antigravity/${entry.id.trim().toLowerCase()}`) === null,
     );
-    const chosen = eligible ?? accounts[0]!;
+    const chosen = eligible ?? normalizedAccounts[0]!;
     antigravityTarget = `antigravity/${chosen.id.trim().toLowerCase()}`;
     nextProviders.antigravity = nextAntigravity;
   }
@@ -273,7 +297,7 @@ export async function migrateProviderProfiles(
     ...(nextPromptImprover !== undefined ? { promptImprover: nextPromptImprover } : {}),
     providers: nextProviders as ProvidersConfig,
   });
-  await saveConfig(loaded.path, nextConfig, loaded.skipped);
+  await saveConfig(loaded.path, nextConfig, [...loaded.skipped, ...extraSkipped]);
 
   const migratedProjects = await rewriteStoredProjects(input.storeRoot, (project) => {
     const updated = rewriteModelSelection(project.defaultModelSelection, legacyClaude, antigravityTarget);
