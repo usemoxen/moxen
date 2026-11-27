@@ -114,10 +114,18 @@ export function openStoreDatabase(root: string, options: OpenStoreDatabaseOption
 
   const existingBeforeGate = isNonEmptyFile(file);
   if (existingBeforeGate) {
-    withReadOnlyDatabase(file, busyTimeoutMs, (db) => {
-      assertMoxenFile(db, file);
-      refuseNewerSchema(readSchemaVersion(db));
-    });
+    try {
+      withReadOnlyDatabase(file, busyTimeoutMs, (db) => {
+        assertMoxenFile(db, file);
+        refuseNewerSchema(readSchemaVersion(db));
+      });
+    } catch (error) {
+      // A read-only open of a WAL database while another opener is creating or
+      // clearing its `-shm` file returns SQLITE_CANTOPEN. Fall through to the
+      // gated read-only check below, which waits for the other opener and still
+      // validates before opening writable (or fails closed if truly unreadable).
+      if ((error as { code?: unknown } | null)?.code !== "SQLITE_CANTOPEN") throw error;
+    }
   }
   options.onPreflight?.("before-gate");
 
