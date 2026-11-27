@@ -926,11 +926,16 @@ async function seedLegacyExecutionSeqsLocked(
   }
   const seeded = new Map<string, number>();
   const unsequenced = ranTurns(turns).filter((turn) => turn.executionSeq === undefined);
+  if (unsequenced.length === 0) return { highest, seeded };
   for (const legacy of unsequenced) {
     highest += 1;
-    await store.updateTurn(thread.id, legacy.id, { executionSeq: highest });
     seeded.set(legacy.id, highest);
   }
+  const rewritten = turns.map((turn) => {
+    const seq = seeded.get(turn.id);
+    return seq === undefined ? turn : { ...turn, executionSeq: seq };
+  });
+  await store.rewriteLedger(thread.id, "turns", rewritten);
   return { highest, seeded };
 }
 

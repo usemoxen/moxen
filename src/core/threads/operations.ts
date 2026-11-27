@@ -1674,30 +1674,34 @@ async function clearCancelledOnSettle(ctx: OperationContext, threadId: string, s
   // written before the check below (a recovery cancel keeps the same turn id)
   // is newer than this settle and must survive it.
   const generation = row.cancelledGeneration;
+  // Lock order: delegation lock outer, child thread lock inner (matches
+  // markCancelled and reconcileRevertedDelegation).
   await ctx.store.updateDelegationWith(row.id, async (current) => {
     if (current.status !== "cancelled" || current.cancelledGeneration !== generation) return null;
     if (current.cancelledTurnId === settledTurnId) return null;
-    const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
-    // Execution order, not ledger order: a message queued first can run after
-    // the turn it queued behind (`ranTurns`, the order readers number by).
-    const ran = ranTurns(turns);
-    const settledAt = ran.findIndex((turn) => turn.id === settledTurnId);
-    // Reverted, or never ran: not fresh work, and no reason to clear.
-    if (settledAt < 0) return null;
-    const settledTurn = ran[settledAt]!;
-    const effectiveSeq = settledSeq ?? settledTurn.executionSeq;
-    if (current.cancelledAfterSeq !== undefined) {
-      // Persisted monotonic execution order survives reverts, same-millisecond
-      // clocks, and recovery cancellations: only a turn that started strictly
-      // after the cancellation boundary counts as fresh work.
-      if (effectiveSeq === undefined || effectiveSeq <= current.cancelledAfterSeq) return null;
-    } else if (current.cancelledTurnId !== undefined) {
-      // Legacy row predating `cancelledAfterSeq`: require the anchor in the ledger.
-      const anchorAt = ran.findIndex((turn) => turn.id === current.cancelledTurnId);
-      if (anchorAt < 0 || settledAt <= anchorAt) return null;
-    }
-    if (turns.some((turn) => turn.status === "running" || turn.status === "queued")) return null;
-    return { status: "running" };
+    return await ctx.store.withThreadLock(threadId, async () => {
+      const turns = await ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]);
+      // Execution order, not ledger order: a message queued first can run after
+      // the turn it queued behind (`ranTurns`, the order readers number by).
+      const ran = ranTurns(turns);
+      const settledAt = ran.findIndex((turn) => turn.id === settledTurnId);
+      // Reverted, or never ran: not fresh work, and no reason to clear.
+      if (settledAt < 0) return null;
+      const settledTurn = ran[settledAt]!;
+      const effectiveSeq = settledSeq ?? settledTurn.executionSeq;
+      if (current.cancelledAfterSeq !== undefined) {
+        // Persisted monotonic execution order survives reverts, same-millisecond
+        // clocks, and recovery cancellations: only a turn that started strictly
+        // after the cancellation boundary counts as fresh work.
+        if (effectiveSeq === undefined || effectiveSeq <= current.cancelledAfterSeq) return null;
+      } else if (current.cancelledTurnId !== undefined) {
+        // Legacy row predating `cancelledAfterSeq`: require the anchor in the ledger.
+        const anchorAt = ran.findIndex((turn) => turn.id === current.cancelledTurnId);
+        if (anchorAt < 0 || settledAt <= anchorAt) return null;
+      }
+      if (turns.some((turn) => turn.status === "running" || turn.status === "queued")) return null;
+      return { status: "running" };
+    });
   }).catch(() => null);
 }
 
@@ -1705,10 +1709,12 @@ async function clearCancelledOnSettle(ctx: OperationContext, threadId: string, s
  * Mark a delegated task cancelled with a new generation and monotonic
  * execution-sequence boundary. With an anchor turn (the one an explicit cancel
  * stopped), the mark is not written when work with a higher execution sequence
- * has already settled: that work finished before this mark could land and its
- * own settle already ran, so the cancellation lost. Without an anchor (a
- * recovery cancel), the boundary covers every turn started up to now so a
- * delayed settle from earlier work cannot erase the newer cancellation.
+ * has already settled and remains in the ledger: that work finished before this
+ * mark could land and its own settle already ran, so the cancellation lost
+ * (though its boundary metadata is retained so reverting that newer work later
+ * restores the cancellation). Without an anchor (a recovery cancel), the
+ * boundary covers every turn started up to now so a delayed settle from earlier
+ * work cannot erase the newer cancellation.
  */
 async function markCancelled(
   ctx: OperationContext,
@@ -1717,55 +1723,73 @@ async function markCancelled(
   anchorTurnId?: string,
   anchorSeq?: number,
 ): Promise<StoredDelegation | null> {
-  return await ctx.store.updateDelegationWith(rowId, async (current) => {
-    const [turns, thread] = await Promise.all([
-      ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]),
-      ctx.store.readThreadRecord(threadId).catch(() => null),
-    ]);
-    const ran = ranTurns(turns);
-    if (anchorTurnId !== undefined) {
-      const resolvedSeq = anchorSeq ?? turns.find((turn) => turn.id === anchorTurnId)?.executionSeq;
-      if (resolvedSeq !== undefined && current.lastSettledSeq !== undefined) {
-        if (current.lastSettledSeq > resolvedSeq) {
-          // A newer execution settled before this mark could land, but it only
-          // supersedes the cancellation when a newer settled turn is still
-          // retained in the current ledger (a reverted follow-up must not
-          // suppress a valid cancellation mark).
-          const retainedNewerSettled = ran.some(
-            (turn) =>
-              turn.status !== "running"
-              && turn.status !== "queued"
-              && turn.executionSeq !== undefined
-              && turn.executionSeq > resolvedSeq
-              && turn.executionSeq <= current.lastSettledSeq!,
-          );
-          if (retainedNewerSettled) return null;
+  // Lock order: delegation lock outer, child thread lock inner (matches
+  // clearCancelledOnSettle and reconcileRevertedDelegation).
+  let superseded = false;
+  const updated = await ctx.store.updateDelegationWith(rowId, async (current) => {
+    return await ctx.store.withThreadLock(threadId, async () => {
+      const [turns, thread] = await Promise.all([
+        ctx.store.readTurns(threadId).catch(() => [] as StoredTurn[]),
+        ctx.store.readThreadRecord(threadId).catch(() => null),
+      ]);
+      const ran = ranTurns(turns);
+      if (anchorTurnId !== undefined) {
+        const resolvedSeq = anchorSeq ?? turns.find((turn) => turn.id === anchorTurnId)?.executionSeq;
+        const boundary = resolvedSeq !== undefined
+          ? Math.max(resolvedSeq, current.cancelledAfterSeq ?? 0)
+          : current.cancelledAfterSeq;
+        if (resolvedSeq !== undefined && current.lastSettledSeq !== undefined) {
+          if (current.lastSettledSeq > resolvedSeq) {
+            // A newer execution settled before this mark could land, but it only
+            // supersedes the cancellation when a newer settled turn is still
+            // retained in the current ledger (a reverted follow-up must not
+            // suppress a valid cancellation mark).
+            const retainedNewerSettled = ran.some(
+              (turn) =>
+                turn.status !== "running"
+                && turn.status !== "queued"
+                && turn.executionSeq !== undefined
+                && turn.executionSeq > resolvedSeq
+                && turn.executionSeq <= current.lastSettledSeq!,
+            );
+            if (retainedNewerSettled) {
+              superseded = true;
+              return {
+                cancelledTurnId: anchorTurnId,
+                ...(boundary === undefined ? {} : { cancelledAfterSeq: boundary }),
+              };
+            }
+          }
+        } else {
+          const anchorAt = ran.findIndex((turn) => turn.id === anchorTurnId);
+          const lastAt = current.lastSettledTurnId === undefined ? -1 : ran.findIndex((turn) => turn.id === current.lastSettledTurnId);
+          if (anchorAt >= 0 && lastAt > anchorAt) {
+            superseded = true;
+            return {
+              cancelledTurnId: anchorTurnId,
+              ...(boundary === undefined ? {} : { cancelledAfterSeq: boundary }),
+            };
+          }
         }
-      } else {
-        const anchorAt = ran.findIndex((turn) => turn.id === anchorTurnId);
-        const lastAt = current.lastSettledTurnId === undefined ? -1 : ran.findIndex((turn) => turn.id === current.lastSettledTurnId);
-        if (anchorAt >= 0 && lastAt > anchorAt) return null;
+        return {
+          status: "cancelled",
+          cancelledGeneration: (current.cancelledGeneration ?? 0) + 1,
+          cancelledTurnId: anchorTurnId,
+          ...(boundary === undefined ? {} : { cancelledAfterSeq: boundary }),
+        };
       }
-      const boundary = resolvedSeq !== undefined
-        ? Math.max(resolvedSeq, current.cancelledAfterSeq ?? 0)
-        : current.cancelledAfterSeq;
+      let boundary = Math.max(thread?.turnSeq ?? 0, current.lastSettledSeq ?? 0, current.cancelledAfterSeq ?? 0);
+      for (const turn of turns) {
+        if (turn.executionSeq !== undefined && turn.executionSeq > boundary) boundary = turn.executionSeq;
+      }
       return {
         status: "cancelled",
         cancelledGeneration: (current.cancelledGeneration ?? 0) + 1,
-        cancelledTurnId: anchorTurnId,
-        ...(boundary === undefined ? {} : { cancelledAfterSeq: boundary }),
+        ...(boundary > 0 ? { cancelledAfterSeq: boundary } : {}),
       };
-    }
-    let boundary = Math.max(thread?.turnSeq ?? 0, current.lastSettledSeq ?? 0, current.cancelledAfterSeq ?? 0);
-    for (const turn of turns) {
-      if (turn.executionSeq !== undefined && turn.executionSeq > boundary) boundary = turn.executionSeq;
-    }
-    return {
-      status: "cancelled",
-      cancelledGeneration: (current.cancelledGeneration ?? 0) + 1,
-      ...(boundary > 0 ? { cancelledAfterSeq: boundary } : {}),
-    };
+    });
   }).catch(() => null);
+  return superseded ? null : updated;
 }
 
 /**
@@ -4271,6 +4295,32 @@ export async function revertThread(
     const record = await store.readThreadRecord(threadId);
     if (record) await store.writeThreadRecord({ ...record, updatedAt: store.nowIso() });
   });
+  // If reverting dropped the follow-up work that had superseded or cleared a
+  // cancellation mark, leaving the cancelled anchor turn back at the tip of
+  // this delegated task, restore the cancellation mark under the same
+  // delegation-then-thread lock order used by markCancelled/clearCancelledOnSettle.
+  const delegations = await store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const activeDelegation = delegations.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
+  if (activeDelegation && activeDelegation.status === "running" && activeDelegation.cancelledTurnId !== undefined) {
+    await store.updateDelegationWith(activeDelegation.id, async (current) => {
+      if (current.status !== "running" || current.cancelledTurnId === undefined) return null;
+      return await store.withThreadLock(threadId, async () => {
+        const currentTurns = await store.readTurns(threadId).catch(() => [] as StoredTurn[]);
+        if (currentTurns.some((turn) => turn.status === "running" || turn.status === "queued")) return null;
+        const remainingRan = ranTurns(currentTurns);
+        const anchorAt = remainingRan.findIndex((turn) => turn.id === current.cancelledTurnId);
+        if (anchorAt < 0) return null;
+        const hasNewerRetained = current.cancelledAfterSeq !== undefined
+          ? remainingRan.some((turn) => turn.executionSeq !== undefined && turn.executionSeq > current.cancelledAfterSeq!)
+          : anchorAt < remainingRan.length - 1;
+        if (hasNewerRetained) return null;
+        return {
+          status: "cancelled",
+          cancelledGeneration: (current.cancelledGeneration ?? 0) + 1,
+        };
+      });
+    }).catch(() => null);
+  }
   store.emit(threadId, "reverted");
   return {
     threadId,

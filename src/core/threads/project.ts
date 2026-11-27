@@ -54,6 +54,11 @@ function runAt(turn: StoredTurn): number {
   return Date.parse(turn.startedAt ?? turn.createdAt);
 }
 
+function finiteRunAt(turn: StoredTurn): number {
+  const at = runAt(turn);
+  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+}
+
 /**
  * The thread's turns in the order they ran: the numbering every reader shows.
  * Ledger row order is not that order — a message queued before a later turn
@@ -64,14 +69,9 @@ function runAt(turn: StoredTurn): number {
  * turns sort strictly by monotonic `executionSeq`; legacy unsequenced turns
  * sort by finite start/create timestamp (invalid timestamps sort earliest)
  * with ties preserving ledger order. Live writes seed pre-upgrade legacy turns
- * before allocating new sequences, so active ledgers order purely by
- * `executionSeq`.
+ * atomically before allocating new sequences, so active ledgers order purely
+ * by `executionSeq`.
  */
-function finiteRunAt(turn: StoredTurn): number {
-  const at = runAt(turn);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-
 export function ranTurns(turns: readonly StoredTurn[]): StoredTurn[] {
   const ran = turns.filter(turnRan);
   const sequenced: StoredTurn[] = [];

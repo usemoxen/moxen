@@ -1567,6 +1567,125 @@ describe("cancellations that race later work", () => {
     expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
   });
 
+  it("seeds pre-upgrade legacy turns atomically so a failed seed cannot swap tied legacy turns on revert", async () => {
+    const fixedNow = "2026-11-27T05:11:00.000Z";
+    const w = await scriptedWorld(async () => completed("Done."));
+    let now = fixedNow;
+    w.store.nowIso = () => now;
+    const thread = await w.make("atomic-seed");
+
+    const l1 = await startTurn(w.ctx, { threadId: thread.id, prompt: "L1" });
+    await l1.run;
+    const l2 = await startTurn(w.ctx, { threadId: thread.id, prompt: "L2" });
+    await l2.run;
+    await flushTurnRunners();
+
+    // Strip turnSeq + executionSeq to simulate two pre-upgrade same-timestamp legacy turns.
+    const rawThread = (await w.store.readThreadRecord(thread.id))!;
+    const { turnSeq: _dropThreadSeq, ...legacyThread } = rawThread;
+    await w.store.writeThreadRecord(legacyThread);
+    await w.store.rewriteLedger(
+      thread.id,
+      "turns",
+      (await w.store.readTurns(thread.id)).map((t) => {
+        const { executionSeq: _drop, ...rest } = t;
+        return rest;
+      }),
+    );
+
+    // Move clock backward and fail the atomic turns-ledger rewrite during seeding.
+    now = "2026-11-27T05:05:00.000Z";
+    const failingStore = new Proxy(w.ctx.store, {
+      get(target, property) {
+        if (property === "rewriteLedger") {
+          return async (...args: Parameters<typeof target.rewriteLedger>) => {
+            if (args[1] === "turns") throw new Error("simulated seed rewrite failure");
+            return await target.rewriteLedger(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof w.ctx.store;
+    await expect(startTurn({ ...w.ctx, store: failingStore }, { threadId: thread.id, prompt: "New turn" })).rejects.toThrow("simulated seed rewrite failure");
+
+    // Neither legacy turn was partially seeded, so reverting to 1 keeps L1 (never L2).
+    expect((await w.store.readTurns(thread.id)).map((t) => t.executionSeq)).toEqual([undefined, undefined]);
+    await revertThread(w.ctx, thread.id, 1);
+    const remainingUserPrompts = (await w.store.readMessages(thread.id))
+      .filter((m) => m.role === "user")
+      .map((m) => m.text);
+    expect(remainingUserPrompts).toEqual(["L1"]);
+  });
+
+  it("keeps cancellation intact when revert races either the markCancelled or clearCancelledOnSettle retention read", async () => {
+    const aParked = deferred();
+    const bRelease = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Running A") {
+        aParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      await bRelease.promise;
+      return completed("Follow-up B done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Running A" });
+    await aParked.promise;
+    await sendTurn(w.store, child.id, { prompt: "Queued B", delivery: "queue" });
+
+    // Cancel A immediately so status becomes cancelled while B is still running.
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+
+    // Now pause B's settle retention read inside clearCancelledOnSettle while revertThread runs.
+    const readEntered = deferred();
+    const releaseRead = deferred();
+    let interceptRead = true;
+    const origReadTurns = w.store.readTurns.bind(w.store);
+    const origWithLock = w.store.withThreadLock.bind(w.store);
+    let insideDelegationClear = false;
+    w.store.withThreadLock = async <T>(lockId: string, fn: () => Promise<T>): Promise<T> => {
+      if (lockId === "!delegations" && interceptRead) {
+        insideDelegationClear = true;
+        try {
+          return await origWithLock(lockId, fn);
+        } finally {
+          insideDelegationClear = false;
+        }
+      }
+      return await origWithLock(lockId, fn);
+    };
+    w.store.readTurns = async (threadId: string) => {
+      const result = await origReadTurns(threadId);
+      if (insideDelegationClear && threadId === child.id && interceptRead) {
+        interceptRead = false;
+        readEntered.resolve();
+        await releaseRead.promise;
+      }
+      return result;
+    };
+
+    try {
+      bRelease.resolve();
+      await readEntered.promise;
+      // Start reverting B while clearCancelledOnSettle is paused after reading turns containing B.
+      const reverting = revertThread(w.ctx, child.id, 1);
+      releaseRead.resolve();
+      await reverting;
+      await flushTurnRunners();
+    } finally {
+      w.store.readTurns = origReadTurns;
+      w.store.withThreadLock = origWithLock;
+    }
+
+    expect((await w.store.readTurns(child.id)).map((t) => t.id)).toEqual([a.turn.id]);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
   it("assigns a durable boundary when cancelling and reverting a legacy unsequenced turn", async () => {
     const w = await scriptedWorld(async () => completed("Fresh work done."));
     const parent = await w.make("orchestrator");
