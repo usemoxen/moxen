@@ -2025,45 +2025,67 @@ describe("VibeDriver lazy MCP gateway (LOCAL-032)", () => {
     expect(mainServer.closed).toBe(true);
   });
 
-  it("locks the gateway (session survives) when the post-start merge read fails, and says so with the first turn", async () => {
+  it("refuses to start (closes gateway and peer) when the post-start merge read fails so a changed native catalog cannot slip through (LOCAL-038)", async () => {
     const server = new FakeVibeServer();
     setupGatewaySession(server, emptyNative(), { postReadFails: true });
     const driver = new VibeDriver({
       transport: makeTransport([server]),
       connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
     });
-    await Effect.runPromise(driver.startSession({
-      threadId: "th-gw-locked",
+    const exit = await Effect.runPromiseExit(driver.startSession({
+      threadId: "th-gw-postfail",
       workingDirectory: "/tmp/repo",
       mcpServers: [exaHttp],
       disabledMcpTools: ["mcp__exa__agent_run"],
     }));
-
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      const cause = exit.cause as { failure?: CliError; reasons?: ReadonlyArray<{ error?: CliError }> };
+      const failure = cause.failure ?? cause.reasons?.[0]?.error;
+      expect(failure?.code).toBe("VIBE_MCP_EXCLUSION_UNENFORCEABLE");
+      expect(failure?.message).toMatch(/could not be read after the session started/);
+    }
+    expect(await Effect.runPromise(driver.hasSession("th-gw-postfail"))).toBe(false);
+    expect(server.closed).toBe(true);
+    // The allocated loopback gateway was also closed on refusal.
     const gw = await gatewaySpec(server);
-    const refused = await callToolViaGateway(gw, "exa", "web_search_exa");
-    expect(refused.isError).toBe(true);
-    expect(refused.content[0]!.text).toContain("not serving tools");
+    await expect(fetch(gw.url, { method: "POST" })).rejects.toThrow();
+  });
 
-    // The session explanation rides the first turn's notices.
-    const events: ProviderRuntimeEvent[] = [];
-    const fiber = Effect.runFork(Stream.runForEach(driver.streamEvents, (ev) => Effect.sync(() => { events.push(ev); })));
-    server.on(VIBE_METHODS.turnStart, () => {
-      setTimeout(() => {
-        server.sendNotification(VIBE_METHODS.historyEntryAdded, {
-          entry: { id: "m1", type: "message", role: "assistant", content: [{ type: "text", text: "Done" }], generationStatus: "completed" },
-        });
-        server.sendNotification(VIBE_METHODS.turnCompleted, { turn: { id: "t1", status: "completed" } });
-      }, 10);
-      return { turn: { id: "t1", inputEntryId: "u1", status: "in_progress" } };
+  it("refuses to start when the preflight peer reports a different version than the main peer (LOCAL-038)", async () => {
+    const mainServer = new FakeVibeServer();
+    const preflightServer = new FakeVibeServer();
+    setupGatewaySession(mainServer, emptyNative());
+    setupGatewaySession(preflightServer, emptyNative());
+    mainServer.on(VIBE_METHODS.initialize, () => ({
+      serverInfo: { name: "vibe-app-server", version: "3.1.5" },
+      processId: 4242,
+      platformCredentials: false,
+    }));
+    preflightServer.on(VIBE_METHODS.initialize, () => ({
+      serverInfo: { name: "vibe-app-server", version: "3.1.4" },
+      processId: 4243,
+      platformCredentials: false,
+    }));
+    const driver = new VibeDriver({
+      transport: makeTransport([mainServer, preflightServer]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
     });
-    const { turnId } = await Effect.runPromise(driver.sendTurn({ threadId: "th-gw-locked", prompt: "Search" }));
-    await driver.awaitTurn("th-gw-locked", turnId);
-    const notices = events.filter((e) => e.type === "session.notice" && e.notice === "mcp") as
-      Array<Extract<ProviderRuntimeEvent, { type: "session.notice" }>>;
-    const lockedNotice = notices.find((e) => e.detail?.includes("effective configuration could not be read"));
-    expect(lockedNotice?.detail).toContain("exa");
-    await Effect.runPromise(Fiber.interrupt(fiber));
-    await Effect.runPromise(driver.stopSession("th-gw-locked"));
+    const exit = await Effect.runPromiseExit(driver.startSession({
+      threadId: "th-gw-version-skew",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [exaHttp],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      const cause = exit.cause as { failure?: CliError; reasons?: ReadonlyArray<{ error?: CliError }> };
+      const failure = cause.failure ?? cause.reasons?.[0]?.error;
+      expect(failure?.code).toBe("VIBE_MCP_EXCLUSION_UNENFORCEABLE");
+    }
+    expect(await Effect.runPromise(driver.hasSession("th-gw-version-skew"))).toBe(false);
+    expect(preflightServer.closed).toBe(true);
+    expect(mainServer.closed).toBe(true);
   });
 
   it("does not mistake the gateway's own merged entry for a native collision (arms, not self-locks)", async () => {
