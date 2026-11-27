@@ -1269,7 +1269,26 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
       if (turn.status !== "queued" || !turn.queue) continue;
       const admission = queueAdmission(row, turn, rows, ctx.config, now, origins);
       if (JSON.stringify(admission.latched) === JSON.stringify(turn.queue.latched ?? []) && JSON.stringify(admission.conditions) === JSON.stringify(turn.queue.conditions)) continue;
-      await ctx.store.withThreadLock(row.thread.id, () => ctx.store.updateTurn(row.thread.id, turn.id, { queue: { ...turn.queue!, latched: admission.latched, conditions: admission.conditions } }));
+      await ctx.store.withThreadLock(row.thread.id, async () => {
+        // The snapshot the scheduler passed may predate an edit or a latch:
+        // read the policy on disk and never write the snapshot's copy back
+        // over it.
+        const turns = await ctx.store.readTurns(row.thread.id);
+        const current = turns.find((candidate) => candidate.id === turn.id);
+        if (current?.queue === undefined || current.status !== "queued") return;
+        // A condition edit since the snapshot is newer than this admission:
+        // leave it for the next pass rather than persisting stale conditions.
+        if (JSON.stringify(current.queue.conditions) !== JSON.stringify(turn.queue?.conditions)) return;
+        // Equal conditions are not proof the admission is fresh: `eventAfter`
+        // and the provider signals move with telemetry, and the snapshot's
+        // latch list predates anything a pass committed since it was taken.
+        // Recompute from the locked policy — which seeds latched from disk, so
+        // a latched event stays latched even after its signal ages out — and
+        // from the row as it is now.
+        const fresh = queueAdmission({ thread: (await ctx.store.readThreadRecord(row.thread.id)) ?? row.thread, turns }, current, rows, ctx.config, now, origins);
+        if (JSON.stringify(fresh.latched) === JSON.stringify(current.queue.latched ?? []) && JSON.stringify(fresh.conditions) === JSON.stringify(current.queue.conditions)) return;
+        await ctx.store.updateTurn(row.thread.id, turn.id, { queue: { ...current.queue, latched: fresh.latched, conditions: fresh.conditions } });
+      });
     }
     const entries = await readWorkQueue(ctx, rows);
     for (const entry of entries) if (entry.status === "queued" && !entry.policy.removed) {
@@ -1289,11 +1308,44 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
           // after the entry completed (a crash in the follow-up migration it
           // stages) leaves the durable truth alone — the entry prepared,
           // its claims staged, the queue pass resuming the move.
-          const current = (await ctx.store.readTurns(entry.threadId)).find((turn) => turn.id === entry.turnId);
-          if (current && current.status !== "completed") {
-            await ctx.store.withThreadLock(entry.threadId, () => ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", error: cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.", completedAt: ctx.store.nowIso() }));
+          const failure = cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.";
+          let finalized = false;
+          await ctx.store.withThreadLock(entry.threadId, async () => {
+            const current = (await ctx.store.readTurns(entry.threadId)).find((turn) => turn.id === entry.turnId);
+            if (current === undefined) return;
+            const handoff = current.handoff;
+            // The completion write landed and something after it (the
+            // activity, or the migration it stages) threw: finish the
+            // settlement rather than leave a completed handoff without the
+            // notes its readers follow. The staged claims stay for the queue
+            // pass to resume.
+            if (current.status === "completed") {
+              if (handoff !== undefined) {
+                await finalizeHandoffLocked(ctx, entry.threadId, entry.turnId, handoff).catch(() => undefined);
+                finalized = true;
+              }
+              return;
+            }
+            // Nothing to fail: another pass got there first.
+            if (current.status !== "queued") return;
+            // Delivered means the destination turn *and* its prompt: the turn
+            // row alone only proves a reservation (threads.ts writes it before
+            // the prompt), and completing on it claimed a delivery that never
+            // happened.
+            if (handoff !== undefined && (await handoffDelivered(ctx.store, handoff))) {
+              await finalizeHandoffLocked(ctx, entry.threadId, entry.turnId, handoff);
+              finalized = true;
+              return;
+            }
+            // A reserved destination whose prompt has not landed is a partial
+            // write from a start that never finished: leave the entry queued
+            // so the next pass repairs the same reservation instead of failing
+            // a handoff that can still land.
+            if (handoff !== undefined && (await reservedHandoffTurn(ctx.store, handoff)) !== undefined) return;
+            await ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", handoffFailed: true, error: failure, completedAt: ctx.store.nowIso() });
             ctx.store.emit(entry.threadId, "handoff-failed");
-          }
+          });
+          if (finalized) await flushTaskNotifications(ctx, entry.threadId).catch(() => undefined);
           continue;
         }
         const handoff = (await ctx.store.readTurns(entry.threadId)).find((turn) => turn.id === entry.turnId)?.handoff;
@@ -1340,6 +1392,101 @@ const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
  */
 const CONTINUATION_FOLLOW_HOPS = 128;
 
+type HandoffRecord = NonNullable<StoredTurn["handoff"]>;
+
+/** The destination turn a handoff reserved, if its row exists. A reservation, not delivery. */
+async function reservedHandoffTurn(store: ThreadStore, handoff: HandoffRecord): Promise<StoredTurn | undefined> {
+  return (await store.readTurns(handoff.destinationThreadId)).find((turn) => turn.queue?.requestId === `handoff:${handoff.requestId}`);
+}
+
+/**
+ * Whether the handoff was delivered, not merely reserved: `startTurn` writes
+ * the destination's turn row before its prompt (threads.ts), so a turn with
+ * no matching user message is a start that never finished. Completing the
+ * source on the row alone claimed delivery for a reservation.
+ */
+async function handoffDelivered(store: ThreadStore, handoff: HandoffRecord): Promise<boolean> {
+  const turn = await reservedHandoffTurn(store, handoff);
+  if (turn === undefined) return false;
+  return (await store.readMessages(handoff.destinationThreadId)).some((message) => message.turnId === turn.id && message.role === "user");
+}
+
+/**
+ * Settle the source of a handoff that landed: completed, its recovery hold
+ * released, and the two notes readers follow — `handoff.prepared`, which the
+ * queue panel shows, and `thread.continued`, which the transcript and the
+ * continuation chain read — present. Idempotent: a retry after a failed write
+ * adds only what is missing, so the pass can finalize again from its catch.
+ * The caller must hold the source's thread lock.
+ */
+async function finalizeHandoffLocked(ctx: OperationContext, threadId: string, turnId: string, handoff: HandoffRecord): Promise<void> {
+  const { store } = ctx;
+  const [turns, thread, activities] = await Promise.all([
+    store.readTurns(threadId),
+    store.readThreadRecord(threadId),
+    store.readActivities(threadId),
+  ]);
+  const source = turns.find((turn) => turn.id === turnId);
+  if (source !== undefined && source.status !== "completed") {
+    await store.updateTurn(threadId, turnId, { status: "completed", completedAt: store.nowIso() });
+  }
+  if (thread?.usagePause?.recoveryTurnId === turnId) {
+    await store.writeThreadRecord({ ...thread, usagePause: null });
+  }
+  if (!activities.some((activity) => activity.kind === "handoff.prepared" && activity.turnId === turnId)) {
+    await store.appendLedger(threadId, "activity", {
+      id: store.newId(),
+      threadId,
+      turnId,
+      kind: "handoff.prepared",
+      summary: handoff.fallback ? "Model summary unavailable; used stored handoff" : handoff.summary ? "Model handoff accepted" : "Stored handoff prepared",
+      payload: { destinationThreadId: handoff.destinationThreadId, fallback: handoff.fallback === true },
+      createdAt: store.nowIso(),
+    });
+  }
+  const destination = await store.readThreadRecord(handoff.destinationThreadId).catch(() => null);
+  if (destination !== null && !activities.some((activity) => activity.kind === "thread.continued" && activity.payload?.threadId === destination.id)) {
+    await store.appendLedger(threadId, "activity", {
+      id: store.newId(),
+      threadId,
+      turnId: null,
+      kind: "thread.continued",
+      summary: `Continued in "${destination.title}"`,
+      payload: { threadId: destination.id, title: destination.title, scheduledFor: null, automatic: source?.queue?.automatic === true },
+      createdAt: store.nowIso(),
+    });
+    store.emit(threadId, "thread-continued");
+  }
+  store.emit(threadId, "handoff-prepared");
+}
+
+/**
+ * Finish a start that died between the destination's turn row and its prompt:
+ * the row is the reservation, so a retry on the same handoff appends the
+ * missing user message instead of creating another turn (which the queued
+ * turn would then run with nothing to say).
+ */
+async function repairCarriedTurnPrompt(store: ThreadStore, destinationId: string, requestId: string | undefined, prompt: string): Promise<void> {
+  if (requestId === undefined) return;
+  const turn = (await store.readTurns(destinationId)).find((candidate) => candidate.queue?.requestId === requestId);
+  if (turn === undefined) return;
+  const hasPrompt = (messages: readonly StoredMessage[]): boolean => messages.some((message) => message.turnId === turn.id && message.role === "user");
+  if (hasPrompt(await store.readMessages(destinationId))) return;
+  await store.withThreadLock(destinationId, async () => {
+    const current = (await store.readTurns(destinationId)).find((candidate) => candidate.id === turn.id);
+    if (current === undefined) return;
+    if ((await store.readMessages(destinationId)).some((message) => message.turnId === current.id && message.role === "user")) return;
+    await store.appendLedger(destinationId, "messages", {
+      id: current.messageId,
+      threadId: destinationId,
+      turnId: current.id,
+      role: "user",
+      text: prompt,
+      createdAt: store.nowIso(),
+    });
+  });
+}
+
 /** @internal Exported for tests: the queue pass prepares one entry's handoff. */
 export async function prepareQueuedHandoff(ctx: OperationContext, threadId: string, turnId: string, now: number): Promise<void> {
   const store = ctx.store;
@@ -1349,7 +1496,10 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   // A snooze takes the thread out of the active set: preparing the handoff
   // would start a summary turn and queue a destination for work the snooze
   // holds. The live snooze is what holds it, so a passed time does not.
-  if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || source.archivedAt || source.deletedAt || source.settledAt || snoozeActive(source, now)) return;
+  // The persisted policy decides, not any snapshot the pass was given: the
+  // user may have edited this entry back to `same-thread` after the snapshot
+  // was taken, and such an entry must never be handed off.
+  if (!source || source.usagePause?.forced || !turn?.queue || turn.status !== "queued" || turn.queue.held || turn.queue.removed || (turn.queue.continuation ?? "same-thread") === "same-thread" || source.archivedAt || source.deletedAt || source.settledAt || snoozeActive(source, now)) return;
   // A moved entry's own onward handoff waits like its dispatch does: no
   // summary turn and no next destination until the destination's first
   // turn settles and the entry's message reads durable. The admission
@@ -1506,10 +1656,11 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
       }
       if (stageable.length > 0) store.emit(threadId, "queue-changed");
     }
-    await store.updateTurn(threadId, turnId, { status: "completed", completedAt: store.nowIso() });
-    if (current?.usagePause?.recoveryTurnId === turnId) await store.writeThreadRecord({ ...current, usagePause: null });
-    await store.appendLedger(threadId, "activity", { id: store.newId(), threadId, turnId, kind: "handoff.prepared", summary: handoff.fallback ? "Model summary unavailable; used stored handoff" : handoff.summary ? "Model handoff accepted" : "Stored handoff prepared", payload: { destinationThreadId: handoff.destinationThreadId, fallback: handoff.fallback === true }, createdAt: store.nowIso() });
-    store.emit(threadId, "handoff-prepared");
+    // Settle in the same critical section that staged the follow-ups: the
+    // completion, the released recovery hold and the notes readers follow
+    // (`handoff.prepared`, `thread.continued`) land together, idempotently, so
+    // a retry after a failed write adds only what is missing.
+    await finalizeHandoffLocked(ctx, threadId, turnId, handoff);
   });
   // The staged claims land now, as Work queue entries on the destination
   // waiting on its hand-off turn — the same durable move and wait model a
@@ -3124,10 +3275,11 @@ async function continueThreadReserved(
   const notifyParent = await carryDelegation(store, source.id, created.id);
   await endContinuedSession(ctx, source);
   const adopted = await adoptTasks(store, source.id, created.id);
+  const openingPrompt = handoff.document + runningTasksNote(adopted) + firstMessageNote(request.firstMessage);
   if ((await store.readTurns(created.id)).length === 0) {
     const started = await startTurn(ctx, {
       threadId: created.id,
-      prompt: handoff.document + runningTasksNote(adopted) + firstMessageNote(request.firstMessage),
+      prompt: openingPrompt,
       // While a drain stops the server, the first turn must not run now:
       // with a `queue` delivery the drain holds it as queued work, so the
       // continuation lands complete and starts once the next server is up
@@ -3155,6 +3307,10 @@ async function continueThreadReserved(
       if (parent) await watchContinuation(ctx, parent, created.id);
     }
   } else if (existing !== null) {
+    // A retry on the same reservation: finish a start that died between the
+    // destination's turn row and its prompt, so the entry can settle instead
+    // of the pass failing a handoff that can still land.
+    await repairCarriedTurnPrompt(store, created.id, request.queue?.requestId, openingPrompt);
     // A retry after the first turn was already started: make sure the parent
     // still hears when the continuation settles.
     const parent = notifyParent ?? (await continuationNotifier(store, created.id));

@@ -170,6 +170,34 @@ describe("conditional work queue", () => {
     expect(w.sent.map((t) => t.threadId)).toEqual([thread.id]);
   });
 
+  /**
+   * MXN-382: a pass given a scheduler snapshot recomputed admission from the
+   * snapshot's policy. With equal conditions it could not tell that a latch
+   * committed since the snapshot was missing, or that `eventAfter`'s baseline
+   * had moved, and wrote the snapshot's latches over the persisted ones.
+   */
+  it("does not drop a persisted latch when a stale snapshot sees another event", async () => {
+    const w = await world(); const thread = await w.make();
+    const queued = await sendTurn(w.store, thread.id, {
+      prompt: "after both providers stop",
+      queue: parseQueuePolicy({ conditions: [
+        { type: "provider", provider: "claude", state: "exhausted", mode: "after" },
+        { type: "provider", provider: "codex", state: "exhausted", mode: "after" },
+      ] }),
+    });
+    const snapshot = [{ thread: (await w.store.readThreadRecord(thread.id))!, turns: await w.store.readTurns(thread.id) }];
+    const now = Date.now();
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 3_600_000).toISOString() }], now);
+    await runWorkQueue(w.ctx, now);
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.queue?.latched).toEqual([0]);
+    // Claude's event ages out of telemetry and Codex's lands: the old
+    // snapshot no longer sees the first event at all.
+    resetUsageLimitsForTests();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 100, exhausted: true, resetsAt: new Date(now + 3_600_000).toISOString() }], now + 1000);
+    await runWorkQueue(w.ctx, now + 1000, snapshot);
+    expect((await w.store.readTurns(thread.id)).find((t) => t.id === queued.turn.id)?.queue?.latched).toEqual([0, 1]);
+  });
+
   it("blocks a provider lane without blocking another provider, and respects removal/restoration", async () => {
     const w = await world(); const first = await w.make(); const second = await w.make(); const other = await w.make("claudeAgent");
     const policy = parseQueuePolicy({ conditions: [], order: 1 });

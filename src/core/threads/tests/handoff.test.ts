@@ -5,8 +5,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildHandoff, continuedTitle } from "../handoff.js";
+import { parseQueuePolicy } from "../queue.js";
 import { openThreadStore } from "../store.js";
-import { completeTurn, createThread, failTurn, interruptTurn, sendTurn } from "../threads.js";
+import { completeTurn, createThread, failTurn, interruptTurn, promoteDueScheduledTurn, sendTurn } from "../threads.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -177,6 +178,73 @@ describe("buildHandoff", () => {
   it("says so for a thread that never ran", async () => {
     const { store, threadId } = await thread();
     expect(await buildHandoff(store, threadId)).toContain("had not run a turn yet");
+  });
+
+  /**
+   * MXN-382: a handoff entry never ran here. It must not take a number from a
+   * turn that did (the numbering thread_read and revert use), and its request
+   * must not read as a prompt the thread delivered.
+   */
+  it("numbers only the turns that ran and keeps handed-off requests out of the history", async () => {
+    const { store, threadId } = await thread();
+    const first = await sendTurn(store, threadId, { prompt: "first real" });
+    await completeTurn(store, threadId, first.turn.id, { text: "done one" });
+
+    // Prepared: completed without a start, the work moved to a new thread.
+    const prepared = await sendTurn(store, threadId, { prompt: "carry on elsewhere", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) });
+    await store.updateTurn(threadId, prepared.turn.id, { status: "completed", completedAt: store.nowIso(), handoff: { requestId: "r1", destinationThreadId: "dest-1" } });
+
+    // Failed preparing, then edited back to this thread but never restored.
+    const failed = await sendTurn(store, threadId, { prompt: "failed then edited", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) });
+    await store.updateTurn(threadId, failed.turn.id, {
+      status: "failed",
+      completedAt: store.nowIso(),
+      handoff: { requestId: "r2", destinationThreadId: "dest-2" },
+      handoffFailed: true,
+      queue: parseQueuePolicy({ conditions: [], continuation: "same-thread" }),
+    });
+
+    const second = await sendTurn(store, threadId, { prompt: "second real" });
+    await completeTurn(store, threadId, second.turn.id, { text: "done two" });
+
+    const doc = await buildHandoff(store, threadId);
+    expect(doc).toContain("Turns so far: 2");
+    expect(doc).toContain("### Turn 1");
+    expect(doc).toContain("### Turn 2");
+    expect(doc).not.toContain("### Turn 3");
+    expect(doc).not.toContain("### Turn 4");
+    expect(doc).not.toContain("carry on elsewhere");
+    expect(doc).not.toContain("failed then edited");
+    expect(doc).toContain("### Turn 1\n\n**User:**\n\nfirst real");
+    expect(doc).toContain("### Turn 2\n\n**User:**\n\nsecond real");
+  });
+
+  /**
+   * MXN-382: the handoff drops its own model-summary turn from the document.
+   * It filtered before numbering, so a real turn after the summary took the
+   * summary's place (ordinal 3 shown as 2) while thread_read counted three.
+   */
+  it("keeps the canonical ordinal of a turn after the model-summary turn", async () => {
+    const { store, threadId } = await thread();
+    const first = await sendTurn(store, threadId, { prompt: "first real" });
+    await completeTurn(store, threadId, first.turn.id, { text: "done one" });
+    // A completed handoff-summary turn: it ran (and numbers), but is plumbing
+    // for the handoff, not conversation.
+    const summary = await sendTurn(store, threadId, {
+      prompt: "write a handoff summary",
+      queue: { ...parseQueuePolicy({ conditions: [], sequential: false }), requestId: "summary:r1", summaryFor: first.turn.id },
+    });
+    await promoteDueScheduledTurn(store, threadId, summary.turn.id, true);
+    await completeTurn(store, threadId, summary.turn.id, { text: "the summary" });
+    const third = await sendTurn(store, threadId, { prompt: "third real" });
+    await completeTurn(store, threadId, third.turn.id, { text: "done three" });
+
+    const doc = await buildHandoff(store, threadId);
+    expect(doc).toContain("### Turn 1\n\n**User:**\n\nfirst real");
+    expect(doc).toContain("### Turn 3\n\n**User:**\n\nthird real");
+    expect(doc).not.toContain("### Turn 2");
+    // The run count is the thread's, not the number of blocks shown.
+    expect(doc).toContain("- Turns so far: 3 (2 in this record)");
   });
 });
 

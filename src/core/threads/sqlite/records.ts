@@ -362,6 +362,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.usagePause !== undefined) rest.usagePause = turn.usagePause;
   if (turn.handoffOpen !== undefined) rest.handoffOpen = turn.handoffOpen;
   if (turn.handoffPending !== undefined) rest.handoffPending = turn.handoffPending;
+  if (turn.handoffFailed === true) rest.handoffFailed = true;
   if (turn.interactionModeExplicit !== undefined) rest.interactionModeExplicit = turn.interactionModeExplicit;
   if (turn.usageRecoveryNotice === true) rest.usageRecoveryNotice = true;
   if (turn.unanswered !== undefined) rest.unanswered = turn.unanswered;
@@ -446,6 +447,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     ...(rest.usagePause === undefined ? {} : { usagePause: rest.usagePause as NonNullable<StoredTurn["usagePause"]> }),
     ...(rest.handoffOpen === undefined ? {} : { handoffOpen: true as const }),
     ...(rest.handoffPending === undefined ? {} : { handoffPending: rest.handoffPending as readonly string[] }),
+    ...(rest.handoffFailed === true ? { handoffFailed: true as const } : {}),
     ...(rest.usageRecoveryNotice === true ? { usageRecoveryNotice: true as const } : {}),
     ...(rest.unanswered === undefined ? {} : { unanswered: true as const }),
     ...(rest.generation === undefined ? {} : { generation: rest.generation as NonNullable<StoredTurn["generation"]> }),

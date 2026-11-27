@@ -364,6 +364,14 @@ export interface StoredTurn {
      */
     readonly landed?: boolean;
   };
+  /**
+   * The queue pass failed this entry's handoff preparation: it never ran here
+   * and never reached a destination. Set with the pass's terminal `failed`
+   * write, so it is durable even when the failure came before a `handoff`
+   * record could be reserved. Readers keep the row out of turn numbering even
+   * after its queue policy is edited back to `same-thread`.
+   */
+  readonly handoffFailed?: true;
   readonly id: string;
   readonly threadId: string;
   readonly status: TurnStatus;

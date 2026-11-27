@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { defaultExportFilename, exportToolLine, formatThreadExport } from "../export.js";
+import { countExportedTurns, defaultExportFilename, exportToolLine, formatThreadExport, turnOrdinalResolver } from "../export.js";
 import type { TimelineEntry } from "../thread.js";
 import type { TurnGroup } from "../turns.js";
 import type { ThreadEnvelope } from "../../../core/types.js";
@@ -104,6 +104,10 @@ const thread = {
   interactionMode: "default",
   createdAt: "2026-09-16T01:00:00.000Z",
   updatedAt: "2026-09-16T02:00:00.000Z",
+  checkpoints: [
+    { turnId: "turn-1", status: "available", checkpointTurnCount: 1, ref: "a", baseRef: "b", files: [] },
+    { turnId: "turn-2", status: "available", checkpointTurnCount: 2, ref: "c", baseRef: "d", files: [] },
+  ],
 } as unknown as ThreadEnvelope;
 
 describe("exportToolLine", () => {
@@ -178,7 +182,7 @@ describe("formatThreadExport", () => {
           activity: null,
           checkpoint: {
             turnId: "turn-1",
-            checkpointTurnCount: 5,
+            checkpointTurnCount: 1,
             status: "ready",
             files: [{ path: "src/auth.ts", kind: "modified", additions: 10, deletions: 2 }],
           },
@@ -219,6 +223,83 @@ describe("formatThreadExport", () => {
     expect(markdown).toContain("Files: src/auth.ts (+10 −2)");
     expect(markdown).toContain("## T2 · Also update the docs · turn-2");
     expect(markdown).toContain("_(no reply)_");
+  });
+
+  /**
+   * MXN-382: export numbered every transcript group, so a handoff entry that
+   * never ran took a turn number from a real one and a system-only group was
+   * counted as a turn. Ordinals come from the checkpoint sequence every reader
+   * uses; a group without one is shown unnumbered.
+   */
+  it("numbers turns by the canonical ordinals and leaves never-run entries unnumbered", () => {
+    const groups = [
+      group({ id: "turn-1", turnId: "turn-1", prompts: [userEntry("m1", "turn-1", "first real")], reply: assistantEntry("m2", "turn-1", "done one") }),
+      group({ id: "turn-failed", turnId: "turn-failed", prompts: [userEntry("m3", "turn-failed", "failed, then edited")] }),
+      group({ id: "turn-prepared", turnId: "turn-prepared", prompts: [userEntry("m4", "turn-prepared", "prepared elsewhere")] }),
+      group({ id: "turn-2", turnId: "turn-2", prompts: [userEntry("m5", "turn-2", "second real")], reply: assistantEntry("m6", "turn-2", "done two") }),
+      group({ id: "turn-system", turnId: "turn-system", work: [toolEntry("a1", "turn-system", "tool.completed", commandPayload("true", ""))] }),
+    ];
+    const markdown = formatThreadExport({
+      thread,
+      threadId: thread.id,
+      project: null,
+      groups,
+      plan: null,
+      pending: [],
+      contextUsage: null,
+      exportedAt: "2026-09-16T03:00:00.000Z",
+    });
+    expect(markdown).toContain("## T1 · first real · turn-1");
+    expect(markdown).toContain("## T2 · second real · turn-2");
+    expect(markdown).toContain("## · failed, then edited · turn-failed");
+    expect(markdown).toContain("## · prepared elsewhere · turn-prepared");
+    expect(markdown).toContain("## · (no prompt) · turn-system");
+    expect(markdown).not.toContain("## T3 ·");
+    expect(markdown).not.toContain("## T4 ·");
+    expect(markdown).toContain("- turns: 2 ·");
+  });
+
+  /**
+   * MXN-382: a completed turn whose checkpoint row is missing (legacy data, or
+   * the checkpoint append failure execute.ts swallows) still ran. Export used
+   * checkpoint rows alone, so it left that turn unnumbered and numbered the
+   * running turn as T1 while thread_read counted two.
+   */
+  it("numbers a turn that ran from the server's ordinals even without a checkpoint row", () => {
+    const detail = {
+      ...thread,
+      checkpoints: [],
+      turnOrdinals: { "turn-1": 1, "turn-2": 2 },
+      session: { status: "running", activeTurnId: "turn-2" },
+    } as unknown as ThreadEnvelope;
+    const groups = [
+      group({ id: "turn-1", turnId: "turn-1", prompts: [userEntry("m1", "turn-1", "first real")], reply: assistantEntry("m2", "turn-1", "done one") }),
+      group({ id: "turn-2", turnId: "turn-2", prompts: [userEntry("m3", "turn-2", "second real")], live: assistantEntry("m4", "turn-2", "working") }),
+    ];
+    const markdown = formatThreadExport({
+      thread: detail,
+      threadId: detail.id,
+      project: null,
+      groups,
+      plan: null,
+      pending: [],
+      contextUsage: null,
+      exportedAt: "2026-09-16T03:00:00.000Z",
+    });
+    expect(markdown).toContain("## T1 · first real · turn-1");
+    expect(markdown).toContain("## T2 · second real · turn-2");
+    expect(markdown).toContain("- turns: 2 ·");
+  });
+
+  it("counts canonical turns for the export's toast, not transcript groups", () => {
+    const detail = { ...thread, turnOrdinals: { "turn-1": 1, "turn-2": 2 } } as unknown as ThreadEnvelope;
+    const groups = [
+      group({ id: "turn-1", turnId: "turn-1" }),
+      group({ id: "turn-2", turnId: "turn-2" }),
+      group({ id: "turn-failed", turnId: "turn-failed" }),
+      group({ id: "turn-system", turnId: "turn-system" }),
+    ];
+    expect(countExportedTurns(groups, turnOrdinalResolver(detail, detail.turnOrdinals))).toBe(2);
   });
 
   it("never truncates message bodies — long replies stay complete", () => {
