@@ -4,11 +4,11 @@
  *
  * A setting's descriptor is static and safe to show. Its live value is not:
  * the config can hold keychain references, MCP server env and header values,
- * Harness profile endpoints, paths and free-form instructions. So every key
- * is redacted unless it is on an explicit allowlist of reviewed keys (enums,
- * booleans, integers, plus reviewed model, provider, effort and
- * duration/threshold strings). A new setting is therefore hidden until someone
- * adds it to the list.
+ * Harness profile endpoints, custom profile or model identifiers, paths and
+ * free-form instructions. So every key is redacted unless it is on an explicit
+ * allowlist of reviewed non-free-form keys (enums, booleans, integers, and
+ * validated duration/threshold lines). A new setting is therefore hidden until
+ * someone adds it to the list.
  */
 import { SETTING_SECTIONS, type SettingAppliesAt, type SettingDescriptor, type SettingEffective, type SettingKind, type SettingValue, type SettingView } from "../core/configschema.js";
 import { CliError } from "../core/errors.js";
@@ -21,16 +21,14 @@ export const AGENT_SETTINGS_MAX_LIMIT = 100;
 const PROVIDER_KINDS = ["claude", "codex", "opencode", "harness"] as const;
 
 /**
- * Keys whose live value is safe for an agent to read: booleans, integers and
- * enums, plus reviewed model, provider and effort identifiers and
- * duration/threshold lines (never free-form text, paths or endpoints).
+ * Keys whose live value is safe for an agent to read: booleans, integers,
+ * enums, and validated duration/threshold lines (never free-form strings,
+ * user-defined provider/profile/model identifiers, paths or endpoints).
  * Deliberately explicit: a setting added later stays redacted until it is
  * reviewed here.
  */
 const COMMON_PROVIDER_KEYS = [
   "runtimeMode",
-  "model",
-  "thinkingEffort",
   "memory",
   "orchestration",
   "moxenSkills",
@@ -77,12 +75,7 @@ const GLOBAL_KEYS = [
   "branchPruneDays",
   "skills.moxen",
   "installSkills",
-  "provider",
-  "model",
   "speedMode",
-  "thinkingEffort",
-  "promptImprover.provider",
-  "promptImprover.model",
   "memory",
   "memoryEmbeddings",
   "memoryEmbeddingLoading",
@@ -217,12 +210,34 @@ function baseOf(descriptor: SettingDescriptor): AgentSettingBase {
   };
 }
 
+const SAFE_LINE_VALUE = /^[a-z0-9.% ]{1,32}$/i;
+
+function safeLiveValue(kind: SettingKind, value: SettingValue): boolean {
+  if (value === undefined) return true;
+  switch (kind.type) {
+    case "boolean":
+      return typeof value === "boolean";
+    case "integer":
+      return typeof value === "number" && Number.isFinite(value);
+    case "enum":
+      return typeof value === "string" && kind.choices.some((choice) => choice.value === value);
+    case "duration":
+    case "line":
+      return typeof value === "string" && SAFE_LINE_VALUE.test(value.trim());
+    default:
+      return false;
+  }
+}
+
 function projectView(view: SettingView): AgentSetting {
   const descriptor = view.descriptor;
   if (!agentSettingLiveAllowed(descriptor.key)) {
     return { ...baseOf(descriptor), redacted: redactionOf(descriptor) };
   }
   const value = view.value === "" ? undefined : view.value;
+  if (!safeLiveValue(descriptor.kind, value) || (view.effective !== undefined && !safeLiveValue(descriptor.kind, view.effective.value))) {
+    return { ...baseOf(descriptor), redacted: "free-form" };
+  }
   const source: AgentSettingValue["source"] = view.explicit
     ? "config"
     : view.effective !== undefined

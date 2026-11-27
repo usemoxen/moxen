@@ -435,12 +435,25 @@ async function sessionSetup(
     // Moxen ships no skills now: copies an older Moxen made in this checkout (`.moxen-skill.json`) come out.
     thread.env.path.trim() === "" ? Promise.resolve([]) : removeProjectSkills(thread.env.path),
   ]);
-  // A built-in server the config left as it was keeps everything its
-  // config-shaped entry dropped: in-process hosting, `alwaysLoad`. One the
-  // config replaced (or removed, with `null`) is the config's.
+  // A built-in server the config left on the same endpoint keeps its
+  // in-process hosting and `alwaysLoad`, while preserving any routing flags
+  // (`disabled`, `providers`, `disabledTools`) that config or project layered
+  // onto it. One the config replaced (or removed, with `null`) is the config's.
+  const builtinMerged = new Set<McpServerSpec>();
   const merged = resolved.map((spec) => {
     const built = builtin.find((candidate) => candidate.name === spec.name);
-    return built !== undefined && sameEndpoint(outOfProcess(built), spec) ? built : spec;
+    if (built === undefined || !sameEndpoint(outOfProcess(built), spec)) return spec;
+    const withRouting: McpServerSpec =
+      spec.disabled === undefined && spec.providers === undefined && spec.disabledTools === undefined
+        ? built
+        : {
+            ...built,
+            ...(spec.disabled !== undefined ? { disabled: spec.disabled } : {}),
+            ...(spec.providers !== undefined ? { providers: spec.providers } : {}),
+            ...(spec.disabledTools !== undefined ? { disabledTools: spec.disabledTools } : {}),
+          };
+    builtinMerged.add(withRouting);
+    return withRouting;
   });
   // Servers switched off, or not offered to this provider, drop out; tools switched off are hidden by the driver.
   const { servers: mcpServers, disabledTools: disabledMcpTools } = kind === null ? { servers: merged, disabledTools: [] } : routeMcpServers(merged, kind, providerConfig?.mcpExclude);
@@ -474,9 +487,9 @@ async function sessionSetup(
     userInstructions: user,
     checklist: providerConfig?.todos !== false,
     delegationTools: !isResearchRunActive(thread.researchRun) && reach.orchestration && builtin.some((server) => server.name === "moxen"),
-    knowledge: mcpServers.some((server) => server.name === "moxen" && builtin.includes(server)) &&
+    knowledge: mcpServers.some((server) => server.name === "moxen" && builtinMerged.has(server)) &&
       !disabledMcpTools.includes("mcp__moxen__knowledge_search") && !disabledMcpTools.includes("mcp__moxen__knowledge_read"),
-    settings: mcpServers.some((server) => server.name === "moxen" && builtin.includes(server)) &&
+    settings: mcpServers.some((server) => server.name === "moxen" && builtinMerged.has(server)) &&
       !disabledMcpTools.includes("mcp__moxen__settings_read"),
     ...(memoryAccess === null ? {} : { memory: memoryAccess }),
     ...(nativeKind === null ? {} : { web: { provider: nativeKind, disabledNativeTools: nativeConfig?.disabledNativeTools, searchOrder: parseNameList(nativeConfig?.webSearchOrder), fetchOrder: parseNameList(nativeConfig?.webFetchOrder), servers: mcpServers } }),

@@ -283,6 +283,104 @@ describe("settings_read", () => {
       await profileWorld.connection.close();
     }
   });
+
+  it("redacts user-defined provider, profile, and model identifiers (even path-shaped ones)", async () => {
+    const { connection, threadId } = await world((base) => ({
+      ...base,
+      provider: `harness/${SYNTHETIC_PROFILE}`,
+      model: "/private/synthetic/model-path",
+      promptImprover: { provider: `harness/${SYNTHETIC_PROFILE}`, model: "/private/synthetic/improver-model" },
+      providers: {
+        ...(base.providers as Record<string, unknown>),
+        claude: { ...(base.providers as Record<string, Record<string, unknown>>).claude, model: "/private/synthetic/claude-model" },
+      },
+    }));
+    try {
+      for (const key of ["provider", "model", "promptImprover.provider", "promptImprover.model", "providers.claude.model"]) {
+        const result = await connection.query({ type: "settings.agent-read", threadId, key });
+        expect(result.settings[0]).toMatchObject({ key, redacted: "free-form" });
+        expect(JSON.stringify(result)).not.toContain(SYNTHETIC_PROFILE);
+        expect(JSON.stringify(result)).not.toContain("/private/synthetic/");
+      }
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("maps config read errors to a path-free SETTINGS_UNAVAILABLE response", async () => {
+    const harness = await testHarness();
+    let failLoad = false;
+    const config = syntheticConfig(harness.config as unknown as Record<string, unknown>) as unknown as CliConfig;
+    const connection = new DirectConnection({
+      storeRoot: harness.root,
+      drivers: harness.drivers,
+      config: async () => {
+        if (failLoad) throw new Error("Could not parse config at /private/secret/config.json (backup /private/secret/config.json.bak.1)");
+        return config;
+      },
+    });
+    try {
+      const created = await connection.dispatch({
+        type: "thread.handover",
+        cwd: harness.work,
+        prompt: "one",
+        wait: true,
+        threadEnvMode: "local",
+        provider: "claudeAgent",
+        model: "synthetic-model",
+      });
+      failLoad = true;
+      await expect(connection.query({ type: "settings.agent-read", threadId: created.threadId })).rejects.toMatchObject({
+        code: "SETTINGS_UNAVAILABLE",
+      });
+      try {
+        await connection.query({ type: "settings.agent-read", threadId: created.threadId });
+      } catch (err) {
+        expect(String(err)).not.toContain("/private/secret/");
+      }
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("authorizes against the active running turn's account even after next-turn model selection switches to an excluding account", async () => {
+    const harness = await testHarness({ leaveTurnsRunning: true });
+    const config = {
+      ...syntheticConfig(harness.config as unknown as Record<string, unknown>),
+      providers: {
+        ...(syntheticConfig(harness.config as unknown as Record<string, unknown>).providers as Record<string, unknown>),
+        claude: {
+          ...((syntheticConfig(harness.config as unknown as Record<string, unknown>).providers as Record<string, Record<string, unknown>>).claude),
+          accounts: [
+            { id: "work", label: "Work" },
+            { id: "locked", label: "Locked", mcpExclude: "moxen" },
+          ],
+        },
+      },
+    } as unknown as CliConfig;
+    const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => config });
+    try {
+      const created = await connection.dispatch({
+        type: "thread.handover",
+        cwd: harness.work,
+        prompt: "running on work",
+        wait: false,
+        threadEnvMode: "local",
+        provider: "claude/work",
+        model: "synthetic-model",
+      });
+      await expect(connection.query({ type: "settings.agent-read", threadId: created.threadId, limit: 1 })).resolves.toMatchObject({ limit: 1 });
+      await connection.dispatch({
+        type: "thread.model-selection.set",
+        threadId: created.threadId,
+        modelSelection: { instanceId: "claude/locked", model: "synthetic-model" },
+      });
+      // Still running on claude/work, so the active session remains authorized.
+      await expect(connection.query({ type: "settings.agent-read", threadId: created.threadId, limit: 1 })).resolves.toMatchObject({ limit: 1 });
+    } finally {
+      await connection.close();
+    }
+  });
 });
 
 describe("settings_read fail-closed projection", () => {

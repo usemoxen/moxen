@@ -974,13 +974,23 @@ export class DirectConnection implements ClientApi {
    * this tool, so it fails plainly instead of pretending the settings are gone.
    */
   private async agentSettingsRead(query: Extract<Query, { readonly type: "settings.agent-read" }>): Promise<AgentSettingsResult> {
-    const store = await this.store();
+    let store: ThreadStore;
+    let config: CliConfig;
+    try {
+      store = await this.store();
+      config = await this.loadConfig();
+    } catch {
+      throw new CliError("SETTINGS_UNAVAILABLE", "Moxen's configuration could not be read, so agent settings are unavailable.", { exitCode: 2 });
+    }
     const thread = await store.readThreadRecord(query.threadId);
     if (!thread) throw new CliError("THREAD_NOT_FOUND", `Thread ${query.threadId} was not found.`, { exitCode: 4, details: { threadId: query.threadId } });
-    const config = await this.loadConfig();
     const project = (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === thread.projectId);
     const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() === "" ? null : thread.env.path);
-    await this.assertAgentSettingsAllowed(config, thread.modelSelection.instanceId, workspaceRoot);
+    // Authorize against the provider instance serving the active turn when one
+    // is running, so switching the thread's next-turn account cannot revoke
+    // access mid-turn on an already-attached session.
+    const activeInstanceId = openTurn(await store.readTurns(thread.id))?.modelSelection?.instanceId ?? thread.modelSelection.instanceId;
+    await this.assertAgentSettingsAllowed(config, activeInstanceId, workspaceRoot);
     return projectAgentSettings(describeSettings(config), query);
   }
 
@@ -3340,6 +3350,9 @@ export class DirectConnection implements ClientApi {
       if (!record || !instanceId) return { count: 1 };
       return { count: this.driverFor(instanceId).entrySessionCount?.(query.threadId) ?? 1 };
     }
+    // Agent settings calls must map config load failures to a path-free error
+    // instead of letting `this.context()` leak the config file path.
+    if (query.type === "settings.agent-read") return await this.agentSettingsRead(query);
     const ctx = await this.context();
     switch (query.type) {
       case "projects.list":
@@ -3569,8 +3582,6 @@ export class DirectConnection implements ClientApi {
       }
       case "experience.read":
         return await readExperience(this.storeRoot);
-      case "settings.agent-read":
-        return await this.agentSettingsRead(query);
       case "settings.read":
         return await this.settingsSnapshot();
       case "config.read": {
