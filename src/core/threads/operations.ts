@@ -743,8 +743,8 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       await requeueHeldDispatch(store, threadId, turn.id, RESTART_HELD_SUMMARY).catch(() => undefined);
       return;
     }
-    // Turns queued behind this one if it settles below with no runner to take
-    // a promotion: settled without promoting, held for admission instead.
+    // Turns queued behind this one before the gate below: one left running
+    // with no runner when the gate holds this turn goes back for admission.
     const queuedBefore = new Set((await store.readTurns(threadId)).filter((candidate) => candidate.status === "queued").map((candidate) => candidate.id));
     // The dispatch boundary itself, not a caller's say-so: admission and
     // promotion both decide with this same check, and the defense holds a
@@ -779,9 +779,8 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
         }
         return;
       }
-      await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }, ctx.config.providers).catch(() => undefined);
+      await failUnstartedTurn(store, threadId, turn.id, { error: "Its queued message is missing." }, ctx.config.providers).catch(() => undefined);
       store.untrackRunning(turn.id);
-      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
       return;
     }
     const selection = turn.modelSelection ?? thread.modelSelection;
@@ -802,11 +801,10 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       await driver.updateNativeTools?.(threadId, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
     } catch (cause) {
       const error = cause instanceof Error ? cause.message : String(cause);
-      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
-      store.untrackRunning(turn.id);
       // The failed start settled nothing that runs: a promotion it made has no
-      // runner to take it, so hand those turns back to the admission path.
-      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      // runner to take it, so it goes back to the admission path.
+      await failUnstartedTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
+      store.untrackRunning(turn.id);
       return;
     }
     // Rule files edited while the session lived: a patch ahead of the prompt, like a fresh send.
@@ -825,9 +823,10 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       });
     } catch (cause) {
       const error = cause instanceof Error ? cause.message : String(cause);
-      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
+      // The exact turn this failure promoted is handed back: one queued while
+      // the reconciliation was in flight is in no snapshot taken before it.
+      await failUnstartedTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
       store.untrackRunning(turn.id);
-      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
       return;
     }
     const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
@@ -2380,6 +2379,8 @@ interface TransferMessage {
   readonly attachments?: StoredMessage["attachments"];
   readonly origin?: StoredMessage["origin"];
   readonly notification?: StoredMessage["notification"];
+  readonly automatic?: StoredMessage["automatic"];
+  readonly control?: StoredMessage["control"];
 }
 
 /**
@@ -2402,6 +2403,10 @@ function transferMessagesOf(messages: readonly StoredMessage[], turn: StoredTurn
     ...(message.attachments ? { attachments: message.attachments } : {}),
     ...(message.origin !== undefined ? { origin: message.origin } : {}),
     ...(message.notification ? { notification: message.notification } : {}),
+    // Provenance travels with the row: without it an originless automatic
+    // input reads as the user speaking on the destination.
+    ...(message.automatic !== undefined ? { automatic: message.automatic } : {}),
+    ...(message.control !== undefined ? { control: message.control } : {}),
   }));
 }
 
@@ -2482,6 +2487,8 @@ function buildTransferEntry(
     runtimeMode: sourceTurn.runtimeMode,
     interactionMode: sourceTurn.interactionMode,
     ...(sourceTurn.interactionModeExplicit === true ? { interactionModeExplicit: true as const } : {}),
+    ...(sourceTurn.automatic !== undefined ? { automatic: sourceTurn.automatic } : {}),
+    ...(sourceTurn.control !== undefined ? { control: sourceTurn.control } : {}),
     modelSelection: sourceTurn.modelSelection ?? destination.modelSelection,
     parentTurnId: sourceTurn.parentTurnId,
     ...(sourceTurn.scheduledFor !== undefined && sourceTurn.scheduledFor !== null
@@ -2507,6 +2514,8 @@ function buildTransferEntry(
     ...(source.attachments ? { attachments: source.attachments } : {}),
     ...(source.origin !== undefined ? { origin: source.origin } : {}),
     ...(source.notification ? { notification: source.notification } : {}),
+    ...(source.automatic !== undefined ? { automatic: source.automatic } : {}),
+    ...(source.control !== undefined ? { control: source.control } : {}),
   }));
   const activity: StoredActivity = {
     id: store.newId(),
@@ -2569,6 +2578,8 @@ async function repairTransferEntry(
       ...(source.attachments ? { attachments: source.attachments } : {}),
       ...(source.origin !== undefined ? { origin: source.origin } : {}),
       ...(source.notification ? { notification: source.notification } : {}),
+      ...(source.automatic !== undefined ? { automatic: source.automatic } : {}),
+      ...(source.control !== undefined ? { control: source.control } : {}),
     };
     await store.appendLedger(destinationId, "messages", repaired);
     destinationMessages.push(repaired);
@@ -3804,8 +3815,15 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
       onArrival: () => { confirmation = recordSteer("steer.confirmed").catch(() => undefined); },
     } : undefined;
     // A side question is the user's own; other origins are automatic prompts.
-    const delivery = await deliverSteer(ctx, driver, thread.id, await notice.revalidate(), providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
-    await notice.finish(delivery === "accepted");
+    // The reservation is finished on every way out: one left behind would hold
+    // every later send on this thread.
+    let delivery: Awaited<ReturnType<typeof deliverSteer>> | undefined;
+    try {
+      const checked = await notice.revalidate();
+      delivery = await deliverSteer(ctx, driver, thread.id, checked.prompt, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
+    } finally {
+      await notice.finish(delivery === "accepted");
+    }
     if (noticeSteer && (delivery === "gated" || delivery === "gone")) {
       // The steer never left: nothing was sent and nothing arrived. The
       // recorded steer row goes with it — only the durable batch stays.
@@ -3867,12 +3885,10 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
     // Nothing will ever run this turn: settle it now, with the reason,
     // rather than leaving it `running` for the next send to trip over.
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
-    const queuedBefore = new Set((await store.readTurns(thread.id)).filter((turn) => turn.status === "queued").map((turn) => turn.id));
     if (claimed) store.untrackRunning(sent.turn.id);
-    await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
     // The failed start settled nothing that runs: a promotion it made has no
-    // runner to take it, so hand those turns back to the admission path.
-    await holdStrandedPromotions(store, thread.id, queuedBefore).catch(() => undefined);
+    // runner to take it, so it goes back to the admission path.
+    await failUnstartedTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
     return { ...sent, run: Promise.resolve() };
   }
   // A stop that landed while the session was starting already settled the

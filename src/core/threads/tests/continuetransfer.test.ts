@@ -5,6 +5,7 @@ import { driverKindOfInstance } from "../../types.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { openThreadStore } from "../store.js";
 import { buildHandoff } from "../handoff.js";
+import { turnKind, turnProvenance } from "../../usage/notice.js";
 import { createThread, sendTurn, completeTurn, interruptTurn, holdPromotedTurn, openTurn, trackContinuation, untrackContinuation } from "../threads.js";
 import { queueAdmission, parseQueuePolicy } from "../queue.js";
 import { armedScheduleCount, armScheduledTurn, onScheduledTurnDue } from "../schedule.js";
@@ -863,6 +864,67 @@ describe("a manual continue moves pending messages to the new thread's work queu
     await runWorkQueue(w.ctx);
     await settleRuns();
     expect(w.sent.filter((turn) => turn.threadId === destId)).toHaveLength(2);
+  });
+
+  it.each(["moved", "repaired"] as const)("keeps automatic and control provenance on %s entries, which never speak for the user", async (path_) => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    const source = await w.make("solo");
+    const done = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    // No origin: only the flags say these are not the user speaking.
+    await sendTurn(w.store, source.id, { prompt: "automatic follow-up", automatic: true, queue: parseQueuePolicy({ conditions: [], order: 1 }) });
+    await sendTurn(w.store, source.id, { prompt: "/compact", automatic: true, control: true, queue: parseQueuePolicy({ conditions: [], order: 2 }) });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(source.id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+
+    if (path_ === "repaired") {
+      // Both entries land a turn row and lose their message write.
+      const append = w.store.appendLedger.bind(w.store);
+      let failed = false;
+      const spy = vi.spyOn(w.store, "appendLedger").mockImplementation((threadId, name, row) => {
+        if (!failed && name === "messages" && threadId !== source.id && (row as { text?: unknown }).text === "automatic follow-up") {
+          failed = true;
+          throw new Error("injected ledger failure");
+        }
+        return append(threadId, name, row);
+      });
+      await expect(continueThread(w.ctx, { threadId: source.id })).rejects.toThrow("injected ledger failure");
+      spy.mockRestore();
+    } else {
+      await continueThread(w.ctx, { threadId: source.id });
+    }
+    const destId = (await w.store.readActivities(source.id)).find((activity) => activity.kind === "thread.continued")?.payload?.threadId as string;
+    for (let pass = 0; pass < 5; pass += 1) {
+      await settleRuns();
+      await runWorkQueue(w.ctx);
+    }
+    await settleRuns();
+
+    const turns = (await w.store.readTurns(destId)).filter((turn) => turn.queue?.requestId?.startsWith("handoff:transfer:"));
+    expect(turns.map((turn) => turn.status)).toEqual(["completed", "completed"]);
+    const messages = await w.store.readMessages(destId);
+    const moved = (text: string) => {
+      const message = messages.find((candidate) => candidate.role === "user" && candidate.text === text)!;
+      return { message, turn: turns.find((turn) => turn.id === message.turnId)! };
+    };
+    const plain = moved("automatic follow-up");
+    expect(plain.message).toMatchObject({ automatic: true });
+    expect(plain.turn).toMatchObject({ automatic: true });
+    expect(plain.message.control).toBeUndefined();
+    const control = moved("/compact");
+    expect(control.message).toMatchObject({ automatic: true, control: true });
+    expect(control.turn).toMatchObject({ automatic: true, control: true });
+    for (const entry of [plain, control]) expect(turnProvenance(messages, entry.turn)).toBe("automatic");
+    expect(turnKind(messages, control.turn, "codex")).toBe("control");
+    // Both were dispatched, and neither ended the usage wait.
+    const dispatched = w.sent.filter((turn) => turn.threadId === destId).map((turn) => turn.prompt);
+    expect(dispatched.find((prompt) => prompt.includes("automatic follow-up"))).toContain("<moxen-usage-notice>");
+    expect(dispatched).toContain("/compact");
+    expect((await w.store.readThreadRecord(destId))?.usageNotices?.codex).toMatchObject({ waiting: true });
   });
 
   it("migrate skips an unreadable destination snapshot without appending or marking", async () => {

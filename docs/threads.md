@@ -91,8 +91,9 @@ batched, in either direction: folded into an ordinary follow-up it would send
 the command as text no provider runs, and would carry the maintenance marker
 over a turn that did real work. It is also a batching boundary — only messages
 queued on the same side of it travel together, so nothing queued after a
-`/compact` overtakes it — and it keeps its own turn. It never starts
-while the
+`/compact` overtakes it — and it keeps its own turn. Any other control in the
+provider's own grammar, such as Claude's `/compact <focus>`, batches the same
+way. A due held turn never starts while the
 limit still stands, while usage protection holds the thread, or while the
 thread is snoozed or settled: those wait for the reset, the release, or the
 thread becoming active again. An automatic continue whose time came while
@@ -425,7 +426,11 @@ already been issued when Moxen learns of it and cannot be changed; its next
 controllable boundary carries the reminder instead. Provider notice operations
 are bounded to two seconds; aborting an HTTP call cannot prove a mutation
 OpenCode already received did not execute, so local bookkeeping is fenced and
-the next controllable request reconciles the entry again.
+the next controllable request reconciles the entry again. A prepared warning is
+checked again just before the send: a mode change, another window, a reset that
+has passed or a wait that has ended drops it from the prompt or clears the
+provider's slot. On Codex it is part of the user input whether or not Moxen's
+developer items for the same turn are accepted.
 
 Only an explicit message from the user ends the wait: a turn the user sent with
 no internal origin, not a usage-control, compaction, handoff or background
@@ -1564,8 +1569,9 @@ its original order, each waiting for the new thread's handoff turn first — so
 a scheduled continuation still runs its handoff before anything that moved.
 An entry keeps its scheduled time, conditions (and latched state), user hold,
 per-turn model, runtime and interaction-mode overrides, origin and
-notification facts, and attachments — and when the source turn carried
-several messages (a settle's promotion batches queued ones into a single
+notification facts, its automatic and control flags (so a moved internal input
+never counts as the user speaking), and attachments — and when the source turn
+carried several messages (a settle's promotion batches queued ones into a single
 turn), the entry carries all of them, in order, each identified by its own
 source id, and their count is what holds a half-written entry out of
 admission until the move is whole. An entry condition elsewhere that names

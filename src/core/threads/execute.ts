@@ -35,6 +35,8 @@ import {
   turnKind,
   turnProvenance,
   usageNoticeFor,
+  usageNoticeStale,
+  usageNoticeText,
   withUsageNotice,
   type UsageNoticeChannel,
   type UsageNoticeKind,
@@ -636,7 +638,7 @@ export interface ExecuteTurnArgs {
    */
   readonly onNoticeDispatch?: (accepted: boolean) => Promise<void>;
   /** Revalidate the prepared notice at the final send boundary (mode/window may have changed). */
-  readonly revalidateNotice?: () => Promise<string>;
+  readonly revalidateNotice?: () => Promise<RevalidatedPrompt>;
 }
 
 export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -685,11 +687,23 @@ export interface UsageNoticeDispatchResult {
    */
   readonly finish: (accepted: boolean) => Promise<void>;
   /**
-   * Revalidate at the final controllable send boundary. A mode switch or a
-   * replaced window discards the prepared text and removes a runtime entry
-   * before the request goes out; returns the bare prompt in that case.
+   * Revalidate at the final controllable send boundary. A mode switch, or a
+   * window that was replaced, reset or answered since preparation, discards
+   * the prepared text and removes a runtime entry before the request goes
+   * out; returns the bare prompt in that case.
    */
-  readonly revalidate: () => Promise<string>;
+  readonly revalidate: () => Promise<RevalidatedPrompt>;
+}
+
+/** What survived revalidation at the send boundary. */
+export interface RevalidatedPrompt {
+  readonly prompt: string;
+  /**
+   * The text-channel block `prompt` carries ahead of it, or null. A driver
+   * with a developer channel may send a different prompt than this one, and
+   * has to carry the block there too.
+   */
+  readonly warning: string | null;
 }
 
 /** A short-lived reservation from preparation through provider acceptance, keyed by thread. */
@@ -749,7 +763,7 @@ export async function dispatchUsageNotice(input: {
         if (holder) return { wait: holder.done };
       }
       const unchanged: UsageNoticeDispatchResult = {
-        prompt: input.prompt, finish: async () => undefined, revalidate: async () => input.prompt,
+        prompt: input.prompt, finish: async () => undefined, revalidate: async () => ({ prompt: input.prompt, warning: null }),
       };
       if (input.trigger !== "dispatch" && noticeReservations.has(input.threadId)) return unchanged;
       const mode = await input.mode().catch(() => undefined);
@@ -839,20 +853,27 @@ export async function dispatchUsageNotice(input: {
           }
         }
         if (input.trigger !== "dispatch") return unchanged;
-        const preparedPrompt = plan.delivery === "text" && plan.prefix !== null && record !== null
+        const warning = plan.delivery === "text" && plan.prefix !== null && record !== null
+          ? usageNoticeText(record, { automatic: true })
+          : null;
+        const preparedPrompt = warning !== null && record !== null
           ? withUsageNotice(input.prompt, record, { automatic: true })
           : input.prompt;
-        const revalidate = async (): Promise<string> => await serializeUsageDispatch(input.threadId, async () => {
+        const carriesWarning = plan.delivery === "text" || plan.delivery === "runtime";
+        const revalidate = async (): Promise<RevalidatedPrompt> => await serializeUsageDispatch(input.threadId, async () => {
           const currentMode = await input.mode().catch(() => undefined);
           const currentThread = await input.store.readThreadRecord(input.threadId);
           const currentRecord = currentThread ? usageNoticeFor(currentThread, input.instanceId) : null;
-          const same = currentMode === "notify" && record !== null && currentRecord?.key === record.key;
-          if (same) return preparedPrompt;
+          // The same key is not enough: its reset may have passed, or its wait
+          // ended, since the plan was made.
+          const same = currentMode === "notify" && record !== null && currentRecord?.key === record.key
+            && (!carriesWarning || (currentRecord.waiting !== false && !usageNoticeStale(currentRecord)));
+          if (same) return { prompt: preparedPrompt, warning };
           discarded = true;
           if (input.driver.reconcileNotice) {
             await reconcileNoticeWithin(input.driver, input.threadId, { kind: "clear", conditional: false });
           }
-          return input.prompt;
+          return { prompt: input.prompt, warning: null };
         });
         return { prompt: preparedPrompt, finish, revalidate };
       } catch (cause) {
@@ -1072,7 +1093,10 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       onNoticeDispatch: notice.finish,
       // The rules block is applied after the notice prompt here, so revalidation
       // composes it again rather than dropping it with a discarded notice.
-      revalidateNotice: async () => promptWithNotices(await notice.revalidate(), blocks),
+      revalidateNotice: async () => {
+        const checked = await notice.revalidate();
+        return { ...checked, prompt: promptWithNotices(checked.prompt, blocks) };
+      },
       usageNoticeMode: mode,
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
@@ -2073,11 +2097,15 @@ async function runExecuteTurnInner(args: ExecuteTurnArgs): Promise<void> {
     // reservation must not keep the next dispatch waiting behind it.
     const abortNotice = (): void => { void args.onNoticeDispatch?.(false).catch(() => undefined); };
     if (!args.driverTurnId) controller.signal.addEventListener("abort", abortNotice, { once: true });
-    // The final controllable boundary (MXN-385): a mode switch or a replaced
-    // window between preparation and here discards the prepared text and
-    // removes a runtime entry before the request goes out.
-    const revalidated = !args.driverTurnId && args.revalidateNotice ? await args.revalidateNotice() : args.prompt;
-    const dispatchPrompt = args.driverTurnId ? args.prompt : await withResumeHandoff(args, revalidated);
+    // The final controllable boundary (MXN-385): a mode switch, or a window
+    // replaced, reset or answered between preparation and here, discards the
+    // prepared text and removes a runtime entry before the request goes out.
+    const revalidated = !args.driverTurnId && args.revalidateNotice ? await args.revalidateNotice() : { prompt: args.prompt, warning: null };
+    const dispatchPrompt = args.driverTurnId ? args.prompt : await withResumeHandoff(args, revalidated.prompt);
+    // A developer-channel driver sends this in place of `dispatchPrompt` when
+    // its items land: the warning is ordinary text there, so it rides this
+    // prompt as well, never the developer items.
+    const developerText = developer && revalidated.warning !== null ? promptWithNotices(developer.prompt, [revalidated.warning]) : developer?.prompt;
     if (!args.driverTurnId && controller.signal.aborted) {
       interrupted = true;
       return;
@@ -2117,7 +2145,7 @@ async function runExecuteTurnInner(args: ExecuteTurnArgs): Promise<void> {
         : await Effect.runPromise(
             driver.sendTurn({
               threadId,
-              prompt: developer?.prompt ?? dispatchPrompt,
+              prompt: developerText ?? dispatchPrompt,
               ...(developer ? { notices: developer.notices, fallbackPrompt: dispatchPrompt, storeTurnId } : {}),
               ...(args.images?.length ? { images: args.images } : {}),
               ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),

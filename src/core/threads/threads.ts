@@ -1340,9 +1340,10 @@ export type GateProviders = Pick<CliConfig, "providers">["providers"];
  * A maintenance turn (`/compact`) never folds either way: folded into an
  * ordinary follow-up it keeps the marker and hides the real reply, and an
  * ordinary message folded into it would send `/compact` as text no provider
- * runs as a compaction. It is also a batching boundary: only messages queued
- * on the same side of it travel with `next`, so nothing queued after a
- * `/compact` overtakes it. Each keeps its own turn.
+ * runs as a compaction. The same goes for any control in the provider's own
+ * grammar (Claude's `/compact <focus>`). Each is also a batching boundary:
+ * only messages queued on the same side of it travel with `next`, so nothing
+ * queued after it overtakes it. Each keeps its own turn.
  */
 async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode, gated: ReadonlySet<string>, antigravity = false, baseModel: ModelSelection): Promise<void> {
   if (next.queue && next.scheduleReason !== "usage-reset") return;
@@ -1380,8 +1381,9 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
   // and runs after the user's message, alone.
   const automaticOf = (turn: StoredTurn): boolean =>
     automaticDispatchPrompt(turn, turn.origin ?? messages.find((message) => message.turnId === turn.id && message.origin !== undefined)?.origin, turns);
-  // Everything after the first queued maintenance turn is on its far side.
-  const boundary = onwards.findIndex((turn) => turn.status === "queued" && isMaintenanceTurn(turn, messages));
+  // Everything after the first queued maintenance turn or provider control
+  // (a focused `/compact` included) is on its far side.
+  const boundary = onwards.findIndex((turn) => turn.status === "queued" && (isMaintenanceTurn(turn, messages) || isControl(turn)));
   const side = new Set((boundary < 0 ? onwards : onwards.slice(0, boundary)).map((turn) => turn.id));
   const batch = candidates.filter((turn) => side.has(turn.id) && !isMaintenanceTurn(turn, messages) && !isControl(turn) && (!antigravity || automaticOf(turn) === automaticOf(next)));
   if (batch.length === 0) return;

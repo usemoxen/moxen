@@ -20,6 +20,9 @@ import { UsageProtection, USAGE_CANDIDATE_RESCAN_MS, WRAP_UP_PROMPT } from "../p
 import { UsageForecaster } from "../forecast.js";
 import { modelPriceFor, usageCost } from "../prices.js";
 import { buildHandoff } from "../../threads/handoff.js";
+import { USAGE_CONTINUE_PROMPT } from "../../threads/views.js";
+import { CodexDriver } from "../../providers/codex/driver.js";
+import { FakeCodexTransport } from "../../providers/codex/tests/fakes.js";
 
 afterEach(resetUsageLimitsForTests);
 
@@ -1197,7 +1200,7 @@ describe("usage protection", () => {
     });
     expect(notice.prompt).toContain("<moxen-usage-notice>");
     mode = "notify-user";
-    expect(await notice.revalidate()).toBe("task text");
+    expect(await notice.revalidate()).toEqual({ prompt: "task text", warning: null });
     await notice.finish(false);
     await flushTurnRunners();
     w.guard.close();
@@ -1320,6 +1323,219 @@ describe("usage protection", () => {
       await flushTurnRunners();
       w.guard.close();
     }
+  });
+
+  it("releases the steer's reservation when the final notice clear fails, so later sends still go out", async () => {
+    let failClear = false;
+    let armed = false;
+    const steers: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true, steering: { codex: "delivers" }, notices: { codex: "delivered" },
+      onSteer: (_threadId, text) => steers.push(text),
+      noticeGate: async (_threadId, request) => {
+        if (request.kind === "arm" && !armed) {
+          armed = true;
+          // The mode changes between preparation and the send, and the clear
+          // that revalidation then owes fails.
+          w.ctx.config.usageProtection = "off";
+          failClear = true;
+        } else if (request.kind === "clear" && failClear) {
+          failClear = false;
+          throw new Error("clear failed");
+        }
+      },
+    });
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "steer clear fails", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
+      w.ctx.config.usageProtection = "notify";
+      const reset = new Date(Date.now() + 3_600_000).toISOString();
+      await w.store.writeThreadRecord({
+        ...(await w.store.readThreadRecord(thread.id))!,
+        usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+      });
+      await expect(startTurn(w.ctx, { threadId: thread.id, prompt: "task report", automatic: true, delivery: "steer" }))
+        .rejects.toMatchObject({ code: "NOTICE_FAILED" });
+      expect(steers).toEqual([]);
+      expect(usageNoticeReserved(thread.id)).toBe(false);
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+      const next = await startTurn(w.ctx, { threadId: thread.id, prompt: "Keep going", delivery: "steer" });
+      expect(next.steerDelivered).toBe(true);
+      expect(steers).toEqual(["Keep going"]);
+    } finally {
+      await interruptTurn(w.store, thread.id, running.turn.id).catch(() => undefined);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("hands back a follower queued while a recovered turn's notice reconciliation was failing", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    let failing = false;
+    const w = await world("codex", undefined, {
+      notices: { codex: "delivered" },
+      noticeGate: async () => {
+        if (!failing) return;
+        failing = false;
+        entered.resolve();
+        await gate.promise;
+        throw new Error("reconcile failed");
+      },
+    });
+    const id = await w.make("recovered failure");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const recovered = (await sendTurn(w.store, id, { prompt: "recovered", queue: parseQueuePolicy({ conditions: [] }) })).turn;
+    try {
+      failing = true;
+      const admitted = runDueScheduledTurn(w.ctx, id);
+      await entered.promise;
+      const follower = (await sendTurn(w.store, id, { prompt: "follower", delivery: "queue" })).turn;
+      expect(follower.status).toBe("queued");
+      gate.resolve();
+      await admitted;
+      const turns = await w.store.readTurns(id);
+      expect(turns.find((turn) => turn.id === recovered.id)).toMatchObject({ status: "failed" });
+      // Not left `running` with no runner: back in the queue for admission.
+      expect(turns.find((turn) => turn.id === follower.id)).toMatchObject({ status: "queued", heldAtSettle: true, owner: null });
+      await runWorkQueue(w.ctx);
+      await expect.poll(async () => (await w.store.readTurns(id)).find((turn) => turn.id === follower.id)?.status, { timeout: 10_000, interval: 10 }).toBe("completed");
+      expect(w.prompts.filter((prompt) => prompt === "follower")).toHaveLength(1);
+    } finally {
+      gate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it.each([
+    ["text", "reset"], ["text", "answered"], ["runtime", "reset"], ["runtime", "answered"],
+  ] as const)("drops a prepared %s warning when its wait ends before the send (%s)", async (channel, ending) => {
+    const clears: string[] = [];
+    const w = await world("codex", undefined, channel === "runtime"
+      ? { notices: { codex: "delivered" }, onNoticeCleared: (threadId) => clears.push(threadId) }
+      : {});
+    const id = await w.make("expiring");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    // Only the clock is faked: the reset passes exactly when the test says.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const now = Date.parse("2026-03-01T12:00:00.000Z");
+      vi.setSystemTime(now);
+      const reset = new Date(now + 1000).toISOString();
+      const key = `codex:session@${reset}`;
+      await w.store.writeThreadRecord({
+        ...(await w.store.readThreadRecord(id))!,
+        usageNotices: { codex: { key, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+      });
+      const notice = await dispatchUsageNotice({
+        store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
+        prompt: "task text", provenance: "automatic", kind: "message", trigger: "dispatch",
+        mode: async () => "notify",
+      });
+      if (channel === "text") expect(notice.prompt).toContain("<moxen-usage-notice>");
+      expect(clears).toEqual([]);
+      if (ending === "reset") {
+        vi.setSystemTime(now + 2000);
+      } else {
+        const thread = (await w.store.readThreadRecord(id))!;
+        await w.store.writeThreadRecord({ ...thread, usageNotices: { codex: { ...thread.usageNotices!.codex!, waiting: false } } });
+      }
+      // The record still has the key the plan was made for.
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex?.key).toBe(key);
+      expect(await notice.revalidate()).toEqual({ prompt: "task text", warning: null });
+      if (channel === "runtime") expect(clears).toEqual([id]);
+      await notice.finish(true);
+      // A stripped text warning was never delivered.
+      if (channel === "text") expect((await w.store.readThreadRecord(id))?.usageNotices?.codex?.delivered).toBeNull();
+      expect(usageNoticeReserved(id)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it.each([
+    ["fresh", "injects"], ["fresh", "refuses injection"], ["promoted", "injects"], ["promoted", "refuses injection"],
+  ] as const)("sends the warning in the prompt Codex really sends: %s dispatch, the app-server %s", async (path_, runtime) => {
+    const injects = runtime === "injects";
+    const transport = new FakeCodexTransport(injects ? {} : { failRequests: { "thread/inject_items": "thread/inject_items is not supported yet" } });
+    const driver = new CodexDriver({ transport });
+    const w = await world("codex", driver);
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "codex warning", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    // The conversation's own turns: a title request runs on a fork beside them.
+    const turnStarts = () => transport.sessions.flatMap((session) => session.server.requestsTo("turn/start"))
+      .filter((request) => (request.params as { threadId?: string }).threadId === "codex-thread-1");
+    const complete = () => transport.sessions[0]!.server.notify("turn/completed", { threadId: "codex-thread-1", turn: { status: "completed" } });
+    // A title the user chose is not synced, which the fake would leave waiting.
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(thread.id))!, titleSource: "user" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    const warn = async () => w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(thread.id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      if (path_ === "fresh") {
+        await warn();
+        await startTurn(w.ctx, { threadId: thread.id, prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue" });
+      } else {
+        await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+        await expect.poll(() => turnStarts().length, { timeout: 10_000 }).toBe(1);
+        await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
+        await sendTurn(w.store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue", delivery: "queue" });
+        await warn();
+        complete();
+      }
+      const expected = path_ === "fresh" ? 1 : 2;
+      await expect.poll(() => turnStarts().length, { timeout: 10_000 }).toBe(expected);
+      const input = ((turnStarts().at(-1)!.params as { input: ReadonlyArray<{ type: string; text?: string }> }).input)
+        .map((block) => block.text ?? "").join("");
+      const injected = transport.sessions.flatMap((session) => session.server.requestsTo("thread/inject_items"))
+        .map((request) => JSON.stringify(request.params)).join("");
+      // Exactly once, as ordinary text, on whichever prompt went out.
+      expect(input.split("<moxen-usage-notice>")).toHaveLength(2);
+      expect(injected).not.toContain("<moxen-usage-notice>");
+      expect(input.includes(USAGE_CONTINUE_PROMPT)).toBe(!injects);
+      if (injects) expect(injected).toContain(JSON.stringify(USAGE_CONTINUE_PROMPT).slice(1, -1));
+      await expect.poll(async () => (await w.store.readThreadRecord(thread.id))?.usageNotices?.codex?.delivered, { timeout: 10_000 }).toBe("text");
+      complete();
+      await expect.poll(async () => openTurn(await w.store.readTurns(thread.id)), { timeout: 10_000 }).toBeNull();
+    } finally {
+      // Stopping first ends the title request the fake never answers.
+      await Effect.runPromise(driver.stopSession(thread.id)).catch(() => undefined);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  }, 30_000);
+
+  it("does not fold input queued after a focused /compact in ahead of it", async () => {
+    const w = await world("claude");
+    const id = await w.make("focused control");
+    const first = openTurn(await w.store.readTurns(id))!;
+    const before = (await sendTurn(w.store, id, { prompt: "before control", delivery: "queue" })).turn;
+    const control = (await sendTurn(w.store, id, { prompt: "/compact keep details", delivery: "queue" })).turn;
+    const after = (await sendTurn(w.store, id, { prompt: "after control", delivery: "queue" })).turn;
+    const dispatched: string[] = [];
+    let current = first;
+    for (let at = 0; at < 3; at += 1) {
+      await completeTurn(w.store, id, current.id, { text: "done" });
+      current = openTurn(await w.store.readTurns(id))!;
+      dispatched.push((await w.store.readMessages(id)).filter((message) => message.turnId === current.id && message.role === "user").map((message) => message.text).join(" + "));
+    }
+    expect(dispatched).toEqual(["before control", "/compact keep details", "after control"]);
+    expect((await w.store.readTurns(id)).slice(1).map((turn) => turn.id)).toEqual([before.id, control.id, after.id]);
+    await completeTurn(w.store, id, current.id, { text: "done" });
+    w.guard.close();
   });
 
   it("keeps a legacy queued /compact standalone from an ordinary automatic batch, and does not authorize", async () => {
