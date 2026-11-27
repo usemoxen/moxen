@@ -601,6 +601,13 @@ export interface ExecuteTurnArgs {
   readonly freshConversation?: boolean;
   /** A usage limit stopped this turn (`resetsAt` when the provider said): the automatic continue hooks in here. */
   readonly onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void;
+  /**
+   * This one turn's settle, with its ledger id, before a queued turn it
+   * promoted is taken: a cancellation check must read the turn that actually
+   * settled, and never clear a mark for a turn it did not. Runs from the
+   * turn runner itself, so every path that runs a turn gets it.
+   */
+  readonly onTurnSettled?: (storeTurnId: string) => Promise<void>;
   /** Once the turn has settled and any queued turn is under way: where the server hands off or compacts a long thread unasked. */
   readonly afterSettle?: () => Promise<void>;
   /** Each live context reading the turn records while it runs: where the server compacts a thread that crosses its line mid-turn. */
@@ -801,6 +808,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       workingDirectory: thread.env.path,
       ...(args.onEvent ? { onEvent: args.onEvent } : {}),
       ...(args.onUsageLimit ? { onUsageLimit: args.onUsageLimit } : {}),
+      ...(args.onTurnSettled ? { onTurnSettled: args.onTurnSettled } : {}),
       ...(args.afterSettle ? { afterSettle: args.afterSettle } : {}),
     });
   } catch {
@@ -847,6 +855,8 @@ export async function ensureDriverSession(
     readonly afterSettle?: () => Promise<void>;
     /** Called when a background turn hits a usage limit (`ExecuteTurnArgs.onUsageLimit`). */
     readonly onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void;
+    /** Each turn's own settle, a turn the provider starts itself included (`ExecuteTurnArgs.onTurnSettled`). */
+    readonly onTurnSettled?: (storeTurnId: string) => Promise<void>;
     /** End the session after this long with nothing happening on it (`idle.ts`); null or absent: never. */
     readonly idleTtlMs?: number | null;
   } = {},
@@ -892,7 +902,7 @@ export async function ensureDriverSession(
   if (options.store && !resumeLost) await persistResumeCursor(options.store, driver, thread.id);
   // What a provider loaded when it started (or resumed) is what its rules were then: a later edit is news to it.
   await captureRuleBaseline(driver, thread.id, driverKindOfInstance(selection.instanceId) ?? driverKey(selection.instanceId), cwd);
-  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onUsageLimit, options.config);
+  if (options.store) watchDriverSession(options.store, driver, thread.id, cwd, options.afterSettle, options.idleTtlMs ?? null, options.onUsageLimit, options.config, options.onTurnSettled);
 }
 
 const watching = new WeakMap<TurnDriver, Map<string, () => void>>();
@@ -977,6 +987,7 @@ export function watchDriverSession(
   idleTtlMs: number | null = null,
   onUsageLimit?: (storeTurnId: string, resetsAt: string | null) => void,
   config?: Pick<CliConfig, "providers">,
+  onTurnSettled?: (storeTurnId: string) => Promise<void>,
 ): void {
   let byThread = watching.get(driver);
   if (!byThread) {
@@ -1059,6 +1070,7 @@ export function watchDriverSession(
             workingDirectory: cwd,
             ...(onUsageLimit ? { onUsageLimit } : {}),
             ...(afterSettle ? { afterSettle } : {}),
+            ...(onTurnSettled ? { onTurnSettled } : {}),
           }).catch(() => undefined);
         }
       }).catch(() => undefined);
@@ -1906,6 +1918,9 @@ async function runExecuteTurn(args: ExecuteTurnArgs): Promise<void> {
     if (args.freshConversation && !answered && !interrupted) await forgetUnansweredSession(store, args, threadId, storeTurnId);
     else await persistResumeCursor(store, driver, threadId);
     await syncProviderTitle(store, driver, threadId, cwd);
+    // This turn's own settle, whichever path started it (a send, a promoted
+    // queued turn, the recovery path, a turn the provider started itself).
+    await args.onTurnSettled?.(storeTurnId).catch(() => undefined);
   }
 }
 
