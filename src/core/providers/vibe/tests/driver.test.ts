@@ -35,14 +35,33 @@ interface RecordedRpc {
   readonly params?: unknown;
 }
 
+interface FakeVibePeerChannel {
+  closed: boolean;
+  readonly dataHandlers: Set<(chunk: string) => void>;
+  readonly exitHandlers: Set<(code: number | null) => void>;
+  readonly emitLine: (line: string) => void;
+  readonly closeWith: (code: number | null) => void;
+}
+
 class FakeVibeServer {
   readonly received: RecordedRpc[] = [];
-  private dataHandlers = new Set<(chunk: string) => void>();
-  private exitHandlers = new Set<(code: number | null) => void>();
+  private livePeers = new Set<FakeVibePeerChannel>();
+  private createdPeerCount = 0;
   private responseWaiters = new Map<string | number, (msg: Record<string, unknown>) => void>();
   private nextServerReqId = 1000;
   private handlers = new Map<string, (params: unknown) => unknown | Promise<unknown>>();
-  closed = false;
+  /** Real `vibe-app-server` (`server.py`) calls `await self.close()` right after
+   * answering `session/stop`, exiting with code 0. Keep that behavior enabled by
+   * default so tests catch any code that tries to reuse a peer after `session/stop`. */
+  closePeerOnSessionStop = true;
+
+  get closed(): boolean {
+    return this.createdPeerCount > 0 && this.livePeers.size === 0;
+  }
+
+  get peerCount(): number {
+    return this.createdPeerCount;
+  }
 
   on(method: string, handler: (params: unknown) => unknown | Promise<unknown>): void {
     this.handlers.set(method, handler);
@@ -61,13 +80,34 @@ class FakeVibeServer {
   }
 
   private emitLine(line: string): void {
-    for (const h of [...this.dataHandlers]) h(`${line}\n`);
+    for (const peer of [...this.livePeers]) peer.emitLine(line);
   }
 
   createPeer(): JsonRpcPeer {
+    const dataHandlers = new Set<(chunk: string) => void>();
+    const exitHandlers = new Set<(code: number | null) => void>();
+    const channel: FakeVibePeerChannel = {
+      closed: false,
+      dataHandlers,
+      exitHandlers,
+      emitLine: (line: string) => {
+        if (channel.closed) return;
+        for (const h of [...dataHandlers]) h(`${line}\n`);
+      },
+      closeWith: (code: number | null) => {
+        if (channel.closed) return;
+        channel.closed = true;
+        this.livePeers.delete(channel);
+        for (const h of [...exitHandlers]) h(code);
+      },
+    };
+    this.createdPeerCount += 1;
+    this.livePeers.add(channel);
+
     const proc: SpawnedProcess = {
       pid: 4242,
       writeLine: (line: string) => {
+        if (channel.closed) return;
         const msg = JSON.parse(line) as Record<string, unknown>;
         if (typeof msg["method"] === "string") {
           const method = msg["method"];
@@ -77,14 +117,19 @@ class FakeVibeServer {
           if (id === undefined) return;
           const handler = this.handlers.get(method);
           if (!handler) {
-            this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unhandled: ${method}` } }));
+            channel.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unhandled: ${method}` } }));
             return;
           }
           Promise.resolve(handler(params)).then(
-            (result) => this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, result })),
+            (result) => {
+              channel.emitLine(JSON.stringify({ jsonrpc: "2.0", id, result }));
+              if (method === VIBE_METHODS.sessionStop && this.closePeerOnSessionStop) {
+                channel.closeWith(0);
+              }
+            },
             (err) => {
               const message = err instanceof Error ? err.message : String(err);
-              this.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }));
+              channel.emitLine(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }));
             },
           );
         } else if (msg["id"] !== undefined) {
@@ -96,17 +141,15 @@ class FakeVibeServer {
         }
       },
       onData: (handler) => {
-        this.dataHandlers.add(handler);
-        return () => this.dataHandlers.delete(handler);
+        dataHandlers.add(handler);
+        return () => dataHandlers.delete(handler);
       },
       onExit: (handler) => {
-        this.exitHandlers.add(handler);
-        return () => this.exitHandlers.delete(handler);
+        exitHandlers.add(handler);
+        return () => exitHandlers.delete(handler);
       },
       kill: () => {
-        if (this.closed) return;
-        this.closed = true;
-        for (const h of [...this.exitHandlers]) h(0);
+        channel.closeWith(0);
       },
     };
     return new JsonRpcPeer(proc, { forceKillAfterMs: 0 });
@@ -1947,6 +1990,39 @@ describe("VibeDriver lazy MCP gateway (LOCAL-032)", () => {
     }
     // No live session was opened: the preflight failed before the real start.
     expect(await Effect.runPromise(driver.hasSession("th-gw-noread"))).toBe(false);
+    expect(server.closed).toBe(true);
+  });
+
+  it("runs the native-catalog preflight on a separate short-lived peer with sessionOnly so session/stop never kills the main peer (LOCAL-038)", async () => {
+    const mainServer = new FakeVibeServer();
+    const preflightServer = new FakeVibeServer();
+    setupGatewaySession(mainServer, emptyNative());
+    setupGatewaySession(preflightServer, emptyNative());
+    const driver = new VibeDriver({
+      transport: makeTransport([mainServer, preflightServer]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    await Effect.runPromise(driver.startSession({
+      threadId: "th-gw-separate-preflight",
+      workingDirectory: "/tmp/repo",
+      mcpServers: [exaHttp],
+      disabledMcpTools: ["mcp__exa__agent_run"],
+    }));
+
+    // The preflight peer ran one sessionOnly start, read effective config,
+    // stopped, and closed; the main peer stayed alive and only saw the real start.
+    expect(preflightServer.closed).toBe(true);
+    const preflightStarts = preflightServer.received.filter((r) => r.method === VIBE_METHODS.sessionStart);
+    expect(preflightStarts).toHaveLength(1);
+    expect((preflightStarts[0]?.params as Record<string, unknown>)["sessionOnly"]).toBe(true);
+    expect(preflightServer.received.some((r) => r.method === VIBE_METHODS.sessionStop)).toBe(true);
+
+    expect(mainServer.closed).toBe(false);
+    expect(mainServer.received.filter((r) => r.method === VIBE_METHODS.sessionStart)).toHaveLength(1);
+    expect(mainServer.received.some((r) => r.method === VIBE_METHODS.sessionStop)).toBe(false);
+
+    await Effect.runPromise(driver.stopSession("th-gw-separate-preflight"));
+    expect(mainServer.closed).toBe(true);
   });
 
   it("locks the gateway (session survives) when the post-start merge read fails, and says so with the first turn", async () => {

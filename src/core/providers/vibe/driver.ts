@@ -668,12 +668,15 @@ export class VibeDriver implements ProviderAdapter<CliError> {
           }
           if (useGateway && route !== null) {
             // Inspect the native Vibe catalog BEFORE merging the gateway: a
-            // short tool-free preflight session (no offer, no turn) answers
-            // `config/effective/read` with the user's own merged config, which
-            // is the only verified read path for it (LOCAL-032). Without it we
+            // short tool-free preflight session on its own short-lived peer
+            // answers `config/effective/read` with the user's own merged
+            // config (the only verified read path for it) and then stops that
+            // preflight peer — real `vibe-app-server` closes the whole process
+            // on `session/stop`, so reusing the main session peer would kill
+            // it before `session/start` (LOCAL-032, LOCAL-038). Without it we
             // can neither prove a collision-free gateway identity nor prove the
             // exclusions stay enforced on a surviving native copy, so refuse.
-            const native = await this.readNativeVibeCatalog(peer, input.workingDirectory);
+            const native = await this.readNativeVibeCatalog(input.workingDirectory);
             if (!native) {
               throw new CliError(
                 "VIBE_MCP_EXCLUSION_UNENFORCEABLE",
@@ -862,36 +865,48 @@ export class VibeDriver implements ProviderAdapter<CliError> {
 
   /**
    * Read Mistral Vibe's native MCP catalog through a short tool-free preflight
-   * session on the same peer: `session/start` with no offer and no turn, then
+   * session on its own passive peer (`withPeer`): `session/start` with
+   * `sessionOnly: true` (no offer, no turn, no persisted history), then
    * `config/effective/read` (the only verified read path for the merged native
-   * config — it needs a live session), then `session/stop`. No tool is ever
-   * called. Returns null when the catalog cannot be proven, so the caller
-   * refuses the gateway route rather than guessing (LOCAL-032).
+   * config — it needs a live session), then `session/stop`. Running on a
+   * separate peer is required because `vibe-app-server` closes the server on
+   * `session/stop` (LOCAL-038). Returns null when the catalog or preflight
+   * peer version cannot be proven, so the caller refuses the gateway route
+   * rather than guessing (LOCAL-032).
    */
-  private async readNativeVibeCatalog(peer: JsonRpcPeer, cwd: string): Promise<VibeEffectiveMcpRestrictions | null> {
-    let preflightId: string | null = null;
+  private async readNativeVibeCatalog(cwd: string): Promise<VibeEffectiveMcpRestrictions | null> {
     try {
-      const started = asRecord(
-        await peer.request(
-          VIBE_METHODS.sessionStart,
-          { agentConfig: { cwd, trustWorkspace: true, approvalPolicy: "ask" } },
-          this.requestTimeoutMs,
-        ),
-      );
-      preflightId = asNonEmptyString(asRecord(asRecord(started?.["state"])?.["session"])?.["id"]);
-      if (!preflightId) return null;
-      const raw = await peer.request(
-        VIBE_METHODS.configEffectiveRead,
-        { sessionId: preflightId },
-        GATEWAY_ARM_TIMEOUT_MS,
-      );
-      return parseVibeEffectiveConfig(raw);
+      return await this.withPeer(cwd, async (preflightPeer, preflightVersion) => {
+        if (preflightVersion === null || !GATEWAY_VIBE_VERSIONS.has(preflightVersion)) {
+          return null;
+        }
+        let preflightId: string | null = null;
+        try {
+          const started = asRecord(
+            await preflightPeer.request(
+              VIBE_METHODS.sessionStart,
+              { agentConfig: { cwd, trustWorkspace: true, approvalPolicy: "ask" }, sessionOnly: true },
+              this.requestTimeoutMs,
+            ),
+          );
+          preflightId = asNonEmptyString(asRecord(asRecord(started?.["state"])?.["session"])?.["id"]);
+          if (!preflightId) return null;
+          const raw = await preflightPeer.request(
+            VIBE_METHODS.configEffectiveRead,
+            { sessionId: preflightId },
+            GATEWAY_ARM_TIMEOUT_MS,
+          );
+          return parseVibeEffectiveConfig(raw);
+        } finally {
+          if (preflightId) {
+            await preflightPeer
+              .request(VIBE_METHODS.sessionStop, { sessionId: preflightId }, this.requestTimeoutMs)
+              .catch(() => undefined);
+          }
+        }
+      });
     } catch {
       return null;
-    } finally {
-      if (preflightId) {
-        await peer.request(VIBE_METHODS.sessionStop, { sessionId: preflightId }, this.requestTimeoutMs).catch(() => undefined);
-      }
     }
   }
 
