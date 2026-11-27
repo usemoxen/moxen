@@ -27,7 +27,7 @@ import { assessCommandLine, classifyPath } from "../harness/commandsafety.js";
 import type { ConnectMcp } from "../harness/mcp.js";
 import { parseSkillFile } from "../harness/skills.js";
 import { JsonRpcPeer } from "../stdio.js";
-import { AcpLazyMcpGateway, antigravityLazyMcpInstruction } from "./lazymcp.js";
+import { LazyMcpGateway, antigravityLazyMcpInstruction } from "../lazymcp.js";
 import {
   isCompactCommand,
   type ApprovalRequestId,
@@ -144,7 +144,7 @@ export interface AcpDriverOptions {
   readonly supportsSteering?: boolean;
   /** Route external (non-`moxen`) MCP servers through Moxen's compact loopback lazy gateway so `agy`'s 20k eager schema budget never evicts tools. Defaults to `provider === "antigravity"`. */
   readonly lazyMcp?: boolean;
-  /** Test seam for upstream MCP connections inside `AcpLazyMcpGateway`. */
+  /** Test seam for upstream MCP connections inside `LazyMcpGateway`. */
   readonly connectMcp?: ConnectMcp;
   /** Override home directory for local skill discovery (test seam). */
   readonly skillHome?: string;
@@ -315,7 +315,7 @@ interface AcpSession {
   readonly agent: AcpAgentLaunchSpec;
   readonly peer: JsonRpcPeer;
   readonly clientHandlers: AcpClientHandlers;
-  readonly lazyMcp: AcpLazyMcpGateway | null;
+  readonly lazyMcp: LazyMcpGateway | null;
   readonly workingDirectory: string;
   readonly startedAt: string;
   readonly capabilities: AcpAgentCapabilities;
@@ -1288,7 +1288,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
         );
       });
 
-      let lazyMcp: AcpLazyMcpGateway | null = null;
+      let lazyMcp: LazyMcpGateway | null = null;
       try {
         const initRaw = await peer.request(
           ACP_METHODS.initialize,
@@ -1316,7 +1316,7 @@ export class AcpDriver implements ProviderAdapter<CliError> {
           init.agentCapabilities.mcpCapabilities.http &&
           externalServers.length > 0;
         if (useLazyGateway) {
-          lazyMcp = await AcpLazyMcpGateway.start({
+          lazyMcp = await LazyMcpGateway.start({
             specs: externalServers,
             cwd: input.workingDirectory,
             ...(input.disabledMcpTools ? { disabledTools: input.disabledMcpTools } : {}),
