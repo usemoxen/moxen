@@ -86,6 +86,7 @@ import type {
 } from "../core/forge/forge.js";
 import type { Diagnosis } from "../core/diagnostics/doctor.js";
 import type { StoreProblem } from "../core/threads/problems.js";
+import type { StoreImportReport } from "../core/threads/sqlite/import.js";
 import type { ConfigProblem } from "../core/config.js";
 import type { ExperienceSnapshot } from "../core/experience/experience.js";
 import type { EmbeddingStatus } from "../core/memory/embedding-runtime.js";
@@ -295,6 +296,13 @@ export type CommandBody =
    * can never name an arbitrary path.
    */
   | { readonly type: "store.quarantine"; readonly id: string }
+  /**
+   * Copy the JSONL thread store into the server's `store.db`, replacing what
+   * an earlier run imported (`core/threads/sqlite/import.ts`). The JSONL
+   * ledgers are only read and stay what the server runs on. A request while
+   * one runs gets that run's report.
+   */
+  | { readonly type: "store.import" }
   | { readonly type: "thread.task.cancel"; readonly parentThreadId: string; readonly taskId: string; readonly notifyParent?: boolean }
   /**
    * Settle a task the caller delegated (moxen's `task_settle`), through the
@@ -542,6 +550,7 @@ export interface CommandResults {
   "skills.providers.set": Accepted;
   "skills.remove": { readonly movedTo: string };
   "store.quarantine": { readonly movedTo: string };
+  "store.import": StoreImportReport;
   "thread.task.cancel": CancelledTask;
   "thread.task.settle": SettledTask;
   "thread.task.send": SentTaskMessage;
@@ -1472,6 +1481,8 @@ export function decodeCommand(value: unknown): Command {
       return { ...meta, type, ...decodeSkillAddress(record, type) };
     case "store.quarantine":
       return { ...meta, type, id: requireField(record.id, type, "id") };
+    case "store.import":
+      return { ...meta, type };
     case "thread.image.generate":
       return { ...meta, type, parentThreadId: requireThreadId(record.parentThreadId), prompt: requireField(record.prompt, type, "prompt"), ...(record.references === undefined ? {} : { references: requireStrings(record.references, type, "references") }) };
     case "research.role.start":

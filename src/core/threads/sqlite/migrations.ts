@@ -32,6 +32,11 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     name: "message usage-notice provenance flags (MXN-385)",
     up: (db) => db.exec("ALTER TABLE messages ADD COLUMN automatic INTEGER; ALTER TABLE messages ADD COLUMN control INTEGER;"),
   },
+  {
+    version: 3,
+    name: "queued task notice flag on messages (MXN-393)",
+    up: (db) => db.exec("ALTER TABLE messages ADD COLUMN queued_task_notice INTEGER;"),
+  },
 ];
 
 /** The schema version this build reads and writes: the last registered step. */

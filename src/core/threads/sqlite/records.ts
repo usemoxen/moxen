@@ -39,8 +39,11 @@
  * `usagePause` is the exception: it is a JSON column, so absent (SQL NULL) and
  * an explicit `null` (the JSON text `null`) stay distinct.
  *
- * Nothing inserts through these yet: the importer and readers land next (see
- * docs/sqlite-store.md).
+ * Only the JSONL importer (`import.ts`) writes through these so far: the
+ * readers land next (see docs/sqlite-store.md). A field the codecs do not
+ * name is lost on the way through, so `tests/records.test.ts` round-trips a
+ * `Required<…>` record of every type: a new field fails typecheck there until
+ * it is added here too.
  */
 import { CliError } from "../../errors.js";
 import type { InteractionMode, ModelSelection, RuntimeMode } from "../../types.js";
@@ -125,6 +128,8 @@ export interface MessageRow {
   automatic: number | null;
   /** A provider control command (MXN-385); NULL on rows written before the flag. */
   control: number | null;
+  /** Filed as a turn prompt, even if later folded into another queued turn; NULL when absent. */
+  queued_task_notice: number | null;
 }
 
 export interface ActivityRow {
@@ -389,6 +394,8 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.reviewHandoff === true) rest.reviewHandoff = true;
   if (turn.reviewDecision !== undefined) rest.reviewDecision = turn.reviewDecision;
   if (turn.parentNotice === true) rest.parentNotice = true;
+  if (turn.maintenance !== undefined) rest.maintenance = turn.maintenance;
+  if (turn.origin !== undefined) rest.origin = turn.origin;
 
   return {
     id: turn.id,
@@ -478,6 +485,8 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     ...(rest.reviewHandoff === true ? { reviewHandoff: true as const } : {}),
     ...(rest.reviewDecision === undefined ? {} : { reviewDecision: rest.reviewDecision as NonNullable<StoredTurn["reviewDecision"]> }),
     ...(rest.parentNotice === true ? { parentNotice: true as const } : {}),
+    ...(rest.maintenance === true ? { maintenance: true as const } : {}),
+    ...(rest.origin === undefined ? {} : { origin: rest.origin as NonNullable<StoredTurn["origin"]> }),
   };
 }
 
@@ -496,6 +505,7 @@ export function encodeMessage(message: StoredMessage): MessageRow {
     notification: jsonText(message.notification),
     automatic: flag(message.automatic),
     control: flag(message.control),
+    queued_task_notice: flag(message.queuedTaskNotice),
   };
 }
 
@@ -514,6 +524,7 @@ export function decodeMessage(row: MessageRow): StoredMessage {
     ...(notification === undefined || notification === null ? {} : { notification }),
     ...(row.automatic === null || row.automatic === undefined ? {} : { automatic: row.automatic !== 0 }),
     ...(row.control === null || row.control === undefined ? {} : { control: row.control !== 0 }),
+    ...(row.queued_task_notice === 1 ? { queuedTaskNotice: true as const } : {}),
   };
 }
 

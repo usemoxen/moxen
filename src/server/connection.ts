@@ -193,6 +193,7 @@ import {
 import { ranTurns, toThreadEnvelope } from "../core/threads/project.js";
 import { backfillNativeSubagents, subagentTranscript } from "../core/threads/subagents.js";
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
+import { importJsonlStore, type StoreImportReport } from "../core/threads/sqlite/import.js";
 import { isKnownTurnStatus } from "../core/threads/problems.js";
 import type { ContextBreakdown, ContextWindowUsage, ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { isCompactCommand } from "../core/providers/spi.js";
@@ -467,6 +468,9 @@ export class DirectConnection implements ClientApi {
   /** Profiles with a probe running: two at once would fight over a single-slot server. */
   private readonly probing = new Set<string>();
   private storePromise: Promise<ThreadStore> | null = null;
+  /** The JSONL import in flight, if any: two at once would replace each other's rows. */
+  private storeImport: Promise<StoreImportReport> | null = null;
+  private readonly storeImportAbort = new AbortController();
   private migrationPromise: Promise<void> | null = null;
   /** Set once an update or rollback has landed: the running code is stale. */
   private restartPending = false;
@@ -1062,6 +1066,16 @@ export class DirectConnection implements ClientApi {
   private async store(): Promise<ThreadStore> {
     if (!this.storePromise) this.storePromise = openThreadStore(this.storeRoot);
     return await this.storePromise;
+  }
+
+  private async importStore(): Promise<StoreImportReport> {
+    // Opened first, so the root carries the store's own marker and gate.
+    await this.store();
+    if (this.closed) throw new CliError("CONNECTION_CLOSED", "The direct connection is closed.");
+    this.storeImport ??= importJsonlStore(this.storeRoot, { signal: this.storeImportAbort.signal }).finally(() => {
+      this.storeImport = null;
+    });
+    return await this.storeImport;
   }
 
   /** Whether an update or rollback has landed since this server started. */
@@ -2118,6 +2132,8 @@ export class DirectConnection implements ClientApi {
       }
       case "store.quarantine":
         return await (await this.store()).quarantineProblem(command.id);
+      case "store.import":
+        return await this.importStore();
       case "usage.wrap":
         await this.usageProtection.wrap(command.provider);
         return accepted;
@@ -3790,6 +3806,10 @@ export class DirectConnection implements ClientApi {
     }
     this.accountLogins.clear();
     this.ownedDrivers.clear();
+    // An import stops between threads and closes its database before the store
+    // is handed on; it stays marked unfinished, and running it again completes it.
+    this.storeImportAbort.abort();
+    await this.storeImport?.catch(() => undefined);
     // The store is free for the next server: without this a fast restart
     // would meet this process's own lock and have to take it over.
     await this.releaseStore().catch(() => undefined);

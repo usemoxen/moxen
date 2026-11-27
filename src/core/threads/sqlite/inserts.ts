@@ -1,11 +1,8 @@
 /**
- * Explicit inserts for the schema tests (MXN-392). Every column is named in
- * the SQL, and the values come from the record encoders by name, so a changed
- * column has to be changed here on purpose. Named parameters (`$column`) bind
- * from the row objects `records.ts` returns.
- *
- * Nothing in production inserts through these: they pin the schema and the
- * column/rest split until the importer lands.
+ * Explicit inserts for schema rows (MXN-392, MXN-393). Every column is named
+ * in the SQL and bound by name (`$column`) from the row objects `records.ts`
+ * returns, so a changed column has to be changed here on purpose. The JSONL
+ * importer writes through these, and the schema tests pin them.
  */
 export const INSERT_THREAD = `INSERT INTO threads (
   id, project_id, title, title_source, hidden, interaction_mode, runtime_mode,
@@ -34,9 +31,11 @@ export const INSERT_TURN = `INSERT INTO turns (
 )`;
 
 export const INSERT_MESSAGE = `INSERT INTO messages (
-  id, thread_id, turn_id, role, origin, created_at, text, original_text, attachments, notification, automatic, control
+  id, thread_id, turn_id, role, origin, created_at, text, original_text, attachments, notification, automatic, control,
+  queued_task_notice
 ) VALUES (
-  $id, $thread_id, $turn_id, $role, $origin, $created_at, $text, $original_text, $attachments, $notification, $automatic, $control
+  $id, $thread_id, $turn_id, $role, $origin, $created_at, $text, $original_text, $attachments, $notification, $automatic, $control,
+  $queued_task_notice
 )`;
 
 export const INSERT_ACTIVITY = `INSERT INTO activities (
@@ -60,3 +59,5 @@ export const INSERT_DELEGATION = `INSERT INTO delegations (
 )`;
 
 export const INSERT_META = "INSERT INTO meta (key, value) VALUES ($key, $value)";
+
+export const INSERT_QUARANTINE = "INSERT INTO quarantine (at, reason, table_name, row_json) VALUES ($at, $reason, $table_name, $row_json)";

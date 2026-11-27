@@ -67,7 +67,7 @@ function storeVersionFile(root: string): string {
  * none — today's stores predate markers. Newer than this build refuses;
  * anything else unreadable fails loudly rather than guessing.
  */
-async function readStoreVersion(root: string): Promise<number> {
+export async function readStoreVersion(root: string): Promise<number> {
   const file = storeVersionFile(root);
   let raw: string;
   try {
@@ -107,8 +107,13 @@ type LedgerName = "turns" | "messages" | "activity" | "checkpoints";
  */
 const THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/** Whether a name can be a thread's folder: the SQLite importer quarantines the rest. */
+export function isThreadId(threadId: string): boolean {
+  return THREAD_ID.test(threadId);
+}
+
 function checkThreadId(threadId: string): void {
-  if (!THREAD_ID.test(threadId)) {
+  if (!isThreadId(threadId)) {
     throw new CliError("INVALID_THREAD_ID", `Invalid thread id: ${JSON.stringify(threadId)}.`, {
       exitCode: 2,
       details: { threadId },
@@ -134,17 +139,25 @@ function ledgerProblem(kind: "ledger-line" | "delegation-line", file: string, li
   };
 }
 
-/** One verdict on a raw ledger line, shared by readers, rewrites and quarantine. */
-function classifyLedgerLine(line: string): "row" | "bad-json" | "bad-row" {
+export type ParsedLedgerLine =
+  | { readonly kind: "row"; readonly row: Record<string, unknown> }
+  | { readonly kind: "bad-json" | "bad-row" };
+
+/** One verdict on a raw ledger line, shared by readers, rewrites, quarantine and the SQLite importer. */
+export function parseLedgerLine(line: string): ParsedLedgerLine {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    return "bad-json";
+    return { kind: "bad-json" };
   }
   return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && typeof (parsed as { id?: unknown }).id === "string"
-    ? "row"
-    : "bad-row";
+    ? { kind: "row", row: parsed as Record<string, unknown> }
+    : { kind: "bad-row" };
+}
+
+function classifyLedgerLine(line: string): ParsedLedgerLine["kind"] {
+  return parseLedgerLine(line).kind;
 }
 
 /** Canonical JSON for comparing rows: object keys sorted, so key order never matters. */

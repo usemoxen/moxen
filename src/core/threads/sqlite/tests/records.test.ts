@@ -38,13 +38,16 @@ import {
   INSERT_META,
   INSERT_THREAD,
   INSERT_TURN,
-} from "./inserts.js";
+} from "../inserts.js";
 import {
   AT,
   MODEL,
   activityWithPayload,
   activityWithoutPayload,
   completedTurn,
+  everyActivity,
+  everyMessage,
+  everyTurn,
   fullCheckpoint,
   fullDelegation,
   fullMessage,
@@ -70,6 +73,16 @@ function storeWithThreads(): Database {
 }
 
 describe.skipIf(!underBun)("row round trip", () => {
+  it("loses no field a turn, message or activity can carry (MXN-393: origin, maintenance and queuedTaskNotice were dropped)", () => {
+    const db = storeWithThreads();
+    insertRow(db, INSERT_TURN, encodeTurn(everyTurn()));
+    insertRow(db, INSERT_MESSAGE, encodeMessage(everyMessage()));
+    insertRow(db, INSERT_ACTIVITY, encodeActivity(everyActivity()));
+    expect(decodeTurn(db.query<TurnRow, []>("SELECT * FROM turns").get()!)).toEqual(everyTurn());
+    expect(decodeMessage(db.query<MessageRow, []>("SELECT * FROM messages").get()!)).toEqual(everyMessage());
+    expect(decodeActivity(db.query<ActivityRow, []>("SELECT * FROM activities").get()!)).toEqual(everyActivity());
+  });
+
   it("reads a thread back with every field set, and one with none of the optional ones", () => {
     const db = storeWithThreads();
     const full = fullThread();

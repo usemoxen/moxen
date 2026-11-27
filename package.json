@@ -32,7 +32,7 @@
     "tui": "bun scripts/build.ts && bun scripts/tui.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "test:sqlite": "bun --bun x vitest run src/core/threads/sqlite/tests",
+    "test:sqlite": "bun --bun x vitest run src/core/threads/sqlite/tests src/cli/tests/storeimport.test.ts",
     "test:watch": "vitest",
     "check": "bun run typecheck && bun run test && bun run test:sqlite",
     "check:tui": "bun src/tui/render-check.tsx",

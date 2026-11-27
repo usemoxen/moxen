@@ -370,6 +370,7 @@ moxen remote pair <address> <code>
 moxen --server <name> <command>
 moxen --json doctor
 moxen config path|show|set|get|list
+moxen store import
 moxen projects list
 moxen projects resolve --cwd .
 moxen projects ensure --cwd . --project-policy create
@@ -400,6 +401,20 @@ moxen threads task-status --thread <parent-id> --task <child-thread-id>
 moxen threads task-cancel --thread <parent-id> --task <child-thread-id>
 moxen handover --stdin
 ```
+
+## The thread store
+
+`moxen store import` copies the server's JSONL thread store into the SQLite
+`store.db` beside it. Moxen does not read that database yet
+([The SQLite thread store](sqlite-store.md)); the JSONL files are only read and
+stay what it runs on. The command is safe to run again, including after an
+interrupted run: it replaces what was imported. It reports, per table, how many
+records the JSONL store holds, how many were imported and how many were kept in
+the database's `quarantine` table because they could not be. `--json` carries
+the same as `data.tables.<table>.{source,imported,quarantined}`, with
+`data.storeRoot`, `data.database`, `data.importedAt`, `data.durationMs` and the
+total `data.quarantined`. With `--server <name>` it imports the paired
+machine's store.
 
 ## Providers, models, and efforts
 
