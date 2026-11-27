@@ -99,6 +99,7 @@ describe("moxen MCP server", () => {
       expect((listed.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name)).toEqual([
         "knowledge_search",
         "knowledge_read",
+        "settings_read",
         "delegate",
         "task_status",
         "models",
@@ -153,8 +154,8 @@ describe("moxen MCP server", () => {
       // Both sessions carry Moxen's tools, but the subagent's has none that delegate (it does not delegate again).
       const moxen = (input: Record<string, unknown> | undefined) =>
         ((input?.mcpServers as Array<{ name: string; tools?: Array<{ name: string }> }> | undefined) ?? []).find((server) => server.name === "moxen");
-      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_unsettle", "task_snooze", "task_send", "task_ask", "message_queue", "message_queue_list", "message_queue_edit", "message_queue_remove", "thread_continue", "project_list", "project_resolve", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
-      expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "usage_status", "web_fetch", "project_list", "project_resolve", "memory_read", "memory_search"]);
+      expect(moxen(starts.find((input) => input.threadId === parentThreadId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "settings_read", "delegate", "task_status", "models", "context_usage", "usage_status", "web_fetch", "task_cancel", "task_settle", "task_unsettle", "task_snooze", "task_send", "task_ask", "message_queue", "message_queue_list", "message_queue_edit", "message_queue_remove", "thread_continue", "project_list", "project_resolve", "thread_search", "thread_read", "memory_read", "memory_search", "memory_save", "memory_edit", "memory_append", "memory_delete"]);
+      expect(moxen(starts.find((input) => input.threadId === delegated.taskId))?.tools?.map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "settings_read", "context_usage", "usage_status", "web_fetch", "project_list", "project_resolve", "memory_read", "memory_search"]);
     } finally {
       await mcp.close();
       await connection.close();
@@ -771,7 +772,7 @@ describe("moxen web_fetch", () => {
     const result = await callMoxenTool(api, "t1", "delegate", { task: "x" }, { delegated: true });
     expect(result).toMatchObject({ isError: true });
     expect(result.text).toContain("not available in a delegated task");
-    expect(moxenToolsFor({ delegated: true, checklist: true, memory: "read" }).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "context_usage", "usage_status", "web_fetch", "project_list", "project_resolve", "memory_read", "memory_search", "todos"]);
+    expect(moxenToolsFor({ delegated: true, checklist: true, memory: "read" }).map((tool) => tool.name)).toEqual(["knowledge_search", "knowledge_read", "settings_read", "context_usage", "usage_status", "web_fetch", "project_list", "project_resolve", "memory_read", "memory_search", "todos"]);
   });
 
   it("gives a delegated task memory to read, and refuses it the memory writes it is never shown", async () => {

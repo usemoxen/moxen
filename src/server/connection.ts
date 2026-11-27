@@ -89,7 +89,8 @@ import { callMoxenTool, moxenToolsFor, type AgentQueueAccess, type MemoryAccess 
 import { isVisibleThread, noteMessageId } from "../core/threads/views.js";
 import { respondToAsyncInput } from "../core/threads/asyncinput.js";
 import { chatgptHarnessConfigFor, driverProviders } from "../core/threads/longthreads.js";
-import { redactMcpServers, type McpServerSpec } from "../core/mcp.js";
+import { redactMcpServers, mcpServerEntryFor, parseNameList, type McpServerSpec } from "../core/mcp.js";
+import { projectAgentSettings, SETTINGS_READ_TOOL, type AgentSettingsResult } from "./settingsagent.js";
 import { ensureStoredProject, listStoredProjects, removeStoredProject, renameStoredProject, workspaceRootsEqual } from "../core/projects/projects.js";
 import { agentReadBudget, readThreadForAgent, type CallerContext } from "../core/threads/agentread.js";
 import { appendMemory, claudeMemoryDir, deleteMemory, editMemory, importClaudeMemories, listMemories, MAX_MEMORIES, memoryIndexText, readMemory, saveMemory, searchMemories, type MemoryLocation } from "../core/memory/memory.js";
@@ -989,6 +990,52 @@ export class DirectConnection implements ClientApi {
       accountSettings: describeAllAccountSettings(config),
       accounts: summarizeProviderAccounts(config.providers, this.probeCliAccountAuth(config.providers)),
     };
+  }
+
+  /**
+   * The agent-safe settings view. The live values come from the same snapshot
+   * the settings page reads; `projectAgentSettings` is what decides which of
+   * them may leave the server. An explicit server removal, exclusion or hidden
+   * tool is a denial, not a redacted value: the agent has been told not to use
+   * this tool, so it fails plainly instead of pretending the settings are gone.
+   */
+  private async agentSettingsRead(query: Extract<Query, { readonly type: "settings.agent-read" }>): Promise<AgentSettingsResult> {
+    let store: ThreadStore;
+    let config: CliConfig;
+    try {
+      store = await this.store();
+      config = await this.loadConfig();
+    } catch {
+      throw new CliError("SETTINGS_UNAVAILABLE", "Moxen's configuration could not be read, so agent settings are unavailable.", { exitCode: 2 });
+    }
+    const thread = await store.readThreadRecord(query.threadId);
+    if (!thread) throw new CliError("THREAD_NOT_FOUND", `Thread ${query.threadId} was not found.`, { exitCode: 4, details: { threadId: query.threadId } });
+    const project = (await listStoredProjects(this.storeRoot)).find((entry) => entry.id === thread.projectId);
+    const workspaceRoot = project?.workspaceRoot ?? (thread.env.path.trim() === "" ? null : thread.env.path);
+    // Authorize against the provider instance serving the active turn when one
+    // is running, so switching the thread's next-turn account cannot revoke
+    // access mid-turn on an already-attached session.
+    const activeInstanceId = openTurn(await store.readTurns(thread.id))?.modelSelection?.instanceId ?? thread.modelSelection.instanceId;
+    await this.assertAgentSettingsAllowed(config, activeInstanceId, workspaceRoot);
+    return projectAgentSettings(describeSettings(config), query);
+  }
+
+  /** Whether `settings_read` may run for a thread: its `moxen` server must not be removed, excluded or hiding this tool. */
+  private async assertAgentSettingsAllowed(config: CliConfig, instanceId: string, workspaceRoot: string | null): Promise<void> {
+    const kind = driverKindOfInstance(instanceId);
+    const providerConfig = resolveProfileProviderConfig(config, instanceId);
+    const excluded = kind !== null && parseNameList(providerConfig?.mcpExclude).some((name) => name.toLowerCase() === MOXEN_MCP_SERVER_NAME);
+    let entry;
+    try {
+      entry = await mcpServerEntryFor(config.mcpServers, workspaceRoot, MOXEN_MCP_SERVER_NAME);
+    } catch {
+      throw new CliError("SETTINGS_UNAVAILABLE", "Moxen's MCP server configuration could not be read, so agent settings are unavailable.", { exitCode: 2 });
+    }
+    const hidden = (entry?.disabledTools ?? []).some((name) => name.toLowerCase() === SETTINGS_READ_TOOL);
+    const offeredToOtherProviders = kind !== null && entry?.providers !== undefined && entry.providers.length > 0 && !entry.providers.includes(kind);
+    if (entry === null || entry?.disabled === true || excluded || hidden || offeredToOtherProviders) {
+      throw new CliError("SETTINGS_TOOL_DISABLED", `Moxen's settings tool is switched off for this thread: its server is removed, excluded, or has ${SETTINGS_READ_TOOL} hidden.`, { exitCode: 2 });
+    }
   }
 
   /**
@@ -3335,6 +3382,9 @@ export class DirectConnection implements ClientApi {
       if (!record || !instanceId) return { count: 1 };
       return { count: this.driverFor(instanceId).entrySessionCount?.(query.threadId) ?? 1 };
     }
+    // Agent settings calls must map config load failures to a path-free error
+    // instead of letting `this.context()` leak the config file path.
+    if (query.type === "settings.agent-read") return await this.agentSettingsRead(query);
     const ctx = await this.context();
     switch (query.type) {
       case "projects.list":

@@ -75,6 +75,8 @@ export interface RuntimeInstructionsInput {
   readonly criticLens?: ResearchLens | "all";
   /** True only while the built-in Moxen MCP server reaches this session. */
   readonly knowledge?: boolean;
+  /** True only while the Moxen MCP server reaches this session with its `settings_read` tool. */
+  readonly settings?: boolean;
   /** The web tools the session has (Claude and OpenCode only): which to prefer and how to use each well. */
   readonly web?: WebGuidanceInput;
   /** The shells this machine has, and its platform. Detected when absent; tests and `scripts/system-prompt.ts` pin it. */
@@ -336,6 +338,18 @@ export const BACKGROUND_WAIT_GUIDANCE =
   "When background work will notify and resume this thread on completion, do any independent work, then end your turn if nothing else can proceed. " +
   "Do not poll, sleep, or keep the turn open just to wait. Say what is still pending, then read the result and continue when the notification arrives.";
 
+/**
+ * What a session with `settings_read` is told about the redacted half of it.
+ * The instruction shapes what the model does; it cannot constrain another
+ * process the user may run, and says so rather than claiming an enforcement
+ * the prompt does not have.
+ */
+export const AGENT_SETTINGS_GUIDANCE =
+  "The settings_read tool lists Moxen's settings and, for reviewed keys, the live value, where it comes from and when a change applies. " +
+  "A setting it marks redacted stays hidden: do not look for it another way — not with shell commands or Moxen's CLI, not by reading config, store or key files, not through another API, and not by guessing from nearby values or any other workaround. " +
+  "Tell the user which setting they need and that they can change it themselves; use knowledge_search and knowledge_read for how. " +
+  "This is guidance for what you do, not a rule enforced against other programs on the machine.";
+
 /** "Claude Code", "OpenCode", "Moxen Harness": the harness a provider instance runs in, as its users call it. */
 export function harnessName(instanceId: string): string {
   const key = instanceId.trim().toLowerCase();
@@ -374,6 +388,7 @@ export function buildRuntimeInstructions(input: RuntimeInstructionsInput): strin
   add("Environment", environment.join("\n\n"));
   add("Look it up", LOOKUP_GUIDANCE);
   if (input.knowledge === true) add("Moxen knowledge base", KNOWLEDGE_GUIDANCE);
+  if (input.settings === true) add("Agent settings", AGENT_SETTINGS_GUIDANCE);
   const kind = driverKindOfInstance(input.instanceId);
   add(
     "Progress notes",

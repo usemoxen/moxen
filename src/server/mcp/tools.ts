@@ -26,6 +26,7 @@ import { isResearchRunActive } from "../../core/threads/operations.js";
 import type { AgentQueuedMessage, QueueAgentMessageInput, QueuedAgentMessage } from "../../core/threads/operations.js";
 import { parseQueuePolicy, type QueueCondition } from "../../core/threads/queue.js";
 import { usageKeyForInstance } from "../../core/usage/limits.js";
+import { AGENT_SETTINGS_MAX_LIMIT, SETTINGS_READ_TOOL } from "../settingsagent.js";
 import type { ClientApi } from "../api.js";
 import { decodeResearchPlan, type CommandResult } from "../protocol.js";
 
@@ -123,6 +124,24 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
     description: "Read a page or section from this Moxen server's shipped knowledge base. Pass an id from knowledge_search and optionally its section ID. Large pages return a section outline instead of truncating content. Reference defaults are not current settings; use the documented inspection commands to check live state. Reading grants no permission to change anything.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: { id: { type: "string", minLength: 1, maxLength: KNOWLEDGE_LIMITS.id }, section: { type: "string", minLength: 1, maxLength: KNOWLEDGE_LIMITS.section } }, required: ["id"], additionalProperties: false },
+  },
+  {
+    name: SETTINGS_READ_TOOL,
+    description:
+      "Read Moxen's settings schema and, where reviewed, their live global config values. With no key: a paged catalog of every setting's exact key, label, description, choices and when a change applies. With key: that one exact setting (never an alias or a nested list field). " +
+      "A live global config value, whether it comes from the config, what applies instead and when, are returned only for reviewed settings (project moxen.json and per-account profile overrides are not layered in); secrets, free-form text, MCP servers, Harness profiles, paths, endpoints and other complex values are redacted. Read-only. " +
+      "Treat a redacted setting as unavailable another way: do not use shell commands, the Moxen CLI, config or store files, another API, or inference from nearby values to find it. Tell the user which setting they need and that they can change it themselves; use knowledge_search and knowledge_read for how.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", minLength: 1, description: "An exact setting key, for example longThreads.handoff. Omit for the catalog." },
+        section: { type: "string", minLength: 1, description: "Only settings in this section, for example mcp or providers." },
+        limit: { type: "integer", minimum: 1, maximum: AGENT_SETTINGS_MAX_LIMIT, description: "Catalog entries per page (default 40, at most 100)." },
+        offset: { type: "integer", minimum: 0, description: "Catalog entries to skip." },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "delegate",
@@ -1012,6 +1031,26 @@ export async function callMoxenTool(
         return { text: JSON.stringify(await api.query({ type: "knowledge.search", query: knowledgeInput(args.query, "query") })), isError: false };
       case "knowledge_read":
         return { text: JSON.stringify(await api.query({ type: "knowledge.read", id: knowledgeInput(args.id, "id"), ...(args.section === undefined ? {} : { section: knowledgeInput(args.section, "section") }) })), isError: false };
+      case SETTINGS_READ_TOOL: {
+        const numberArg = (key: string): number | undefined => {
+          const value = args[key];
+          if (value === undefined) return undefined;
+          if (typeof value !== "number" || !Number.isFinite(value)) throw new CliError("INVALID_TOOL_INPUT", `${key} must be a number.`);
+          return value;
+        };
+        const key = args.key === undefined ? undefined : argString(args, "key", true)!;
+        const section = args.section === undefined ? undefined : argString(args, "section", true)!;
+        const limit = numberArg("limit");
+        const offset = numberArg("offset");
+        return ok(await api.query({
+          type: "settings.agent-read",
+          threadId: parentThreadId,
+          ...(key === undefined ? {} : { key }),
+          ...(section === undefined ? {} : { section }),
+          ...(limit === undefined ? {} : { limit }),
+          ...(offset === undefined ? {} : { offset }),
+        }));
+      }
       case "image_gen": {
         const result = await imageGenerationTool(api, parentThreadId, args, sleep);
         return { ...ok(result), isError: "error" in result };
