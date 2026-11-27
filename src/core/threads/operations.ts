@@ -67,7 +67,8 @@ import { isCompactCommand, promptWithNotices, type BackgroundTaskSummary, type C
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance } from "../types.js";
 import { prefersColdHandoff } from "../usage/coldresume.js";
 import { usageKeyForInstance } from "../usage/limits.js";
-import { driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
+import { controlPrompt, turnKind, turnProvenance } from "../usage/notice.js";
+import { dispatchUsageNotice, driverKey, ensureDriverSession, executeTurn, imagesOf, runPromotedTurn, type TurnDriver } from "./execute.js";
 import { pendingRuleUpdate, ruleUpdateBlock, withRuleUpdate, type PendingRuleUpdate } from "./rulefiles.js";
 import { SELF_QUEUED_HEADER, TASK_MESSAGE_HEADER, USAGE_CONTINUE_GRACE_MS, USAGE_CONTINUE_PROMPT, agentMessageBody, startedTurn } from "./views.js";
 import { buildRuntimeInstructions, describeInstructionsChange, instructionMetaOf, instructionsUpdateBlock, planInstructions, projectInstructions, projectMemorySetting, runningModelOf, withInstructionsUpdate, type InstructionState, type InstructionsUpdateChanges } from "./instructions.js";
@@ -86,12 +87,13 @@ import {
   deleteThread,
   delegationForChild,
   failTurn,
+  failUnstartedTurn,
   hiddenTurnsProblem,
   hiddenLedgerProblem,
+  holdStrandedPromotions,
   isContinuationBusy,
   isStaleContinueTurn,
   reconcileOrphanedTurn,
-  holdStrandedPromotions,
   inspectThread,
   interruptTurn,
   listThreads,
@@ -172,6 +174,12 @@ export interface OperationContext {
    * Absent (tests, CLI): `config` is the setting in force.
    */
   readonly providersInForce?: () => CliConfig["providers"];
+  /**
+   * The current usage-protection mode, reloaded at dispatch. The server
+   * supplies a live reader so a queued turn promoted after a config switch
+   * sees the new value; contexts without one use their config snapshot.
+   */
+  readonly usageProtectionMode?: () => Promise<CliConfig["usageProtection"] | undefined>;
   /** The driver for a model-selection instance id, shared per context. */
   readonly driverFor: (instanceId: string) => TurnDriver;
   /**
@@ -310,6 +318,11 @@ async function composeTurnPrompt(
   if (notices.length === 0) return { prompt };
   const user = usage?.prompt ?? typed;
   return { prompt, developerPrompt: { prompt: [...owed, ...(user ? [user] : [])].join("\n\n") + protection, notices } };
+}
+
+/** The live mode reader for a dispatch, falling back to the context's snapshot. */
+function liveUsageMode(ctx: OperationContext): () => Promise<CliConfig["usageProtection"] | undefined> {
+  return ctx.usageProtectionMode ?? (async () => ctx.config.usageProtection);
 }
 
 /** What to record once the provider answered a prompt the notice blocks were sent with. */
@@ -745,8 +758,8 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       await requeueHeldDispatch(store, threadId, turn.id, RESTART_HELD_SUMMARY).catch(() => undefined);
       return;
     }
-    // Turns queued behind this one if it settles below with no runner to take
-    // a promotion: settled without promoting, held for admission instead.
+    // Turns queued behind this one before the gate below: one left running
+    // with no runner when the gate holds this turn goes back for admission.
     const queuedBefore = new Set((await store.readTurns(threadId)).filter((candidate) => candidate.status === "queued").map((candidate) => candidate.id));
     // The dispatch boundary itself, not a caller's say-so: admission and
     // promotion both decide with this same check, and the defense holds a
@@ -784,13 +797,13 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
         }
         return;
       }
-      await failTurn(store, threadId, turn.id, { error: "Its queued message is missing." }, ctx.config.providers).catch(() => undefined);
+      await failUnstartedTurn(store, threadId, turn.id, { error: "Its queued message is missing." }, ctx.config.providers).catch(() => undefined);
       store.untrackRunning(turn.id);
-      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
       return;
     }
     const selection = turn.modelSelection ?? thread.modelSelection;
     const turnThread: StoredThread = { ...thread, modelSelection: selection, interactionMode: turn.interactionMode };
+    const mode = liveUsageMode(ctx);
     let driver: TurnDriver;
     let setup: Awaited<ReturnType<typeof sessionSetup>>;
     try {
@@ -799,42 +812,66 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // same provider conversation with the request-scoped submission tool.
       if (turn.queue?.summaryFor && driver.stopSession) await Effect.runPromise(driver.stopSession(threadId));
       setup = await sessionSetup(ctx, turnThread, selection.instanceId, turn.id);
-      await ensureDriverSession(driver, turnThread, { modelSelection: selection, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, threadId), ...usageLimitHook(ctx, threadId, selection.instanceId) });
+      await ensureDriverSession(driver, turnThread, { modelSelection: selection, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, threadId), ...usageLimitHook(ctx, threadId, selection.instanceId), usageNoticeMode: mode });
       await driver.updateMcpServers?.(threadId, setup.mcpServers).catch(() => undefined);
       // Config or rule files changed while the session sat idle: a live session
       // takes them now, like a fresh send does — never a reason to fail the resume.
       await driver.updateNativeTools?.(threadId, setup.disabledNativeTools, setup.moxenPrompt).catch(() => undefined);
     } catch (cause) {
       const error = cause instanceof Error ? cause.message : String(cause);
-      await failTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
-      store.untrackRunning(turn.id);
       // The failed start settled nothing that runs: a promotion it made has no
-      // runner to take it, so hand those turns back to the admission path.
-      await holdStrandedPromotions(store, threadId, queuedBefore).catch(() => undefined);
+      // runner to take it, so it goes back to the admission path.
+      await failUnstartedTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
+      store.untrackRunning(turn.id);
       return;
     }
     // Rule files edited while the session lived: a patch ahead of the prompt, like a fresh send.
     const rules = await pendingRuleUpdate(driver, threadId, driverKey(selection.instanceId), thread.env.path).catch(() => null);
     const images = await imagesOf(message.attachments);
-    const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
+    // The cold session is attached; compose the prompt (rule/instruction/mode
+    // notices and the developer split), then reconcile its warning slot before
+    // the first prompt and decide provenance from every message in the batch.
+    const prompt = await composeTurnPrompt(ctx, thread, turn.id, setup, message.text, rules?.text ?? null, usageNoticeParts(messages, turn));
     // Decided now, before the run: a notice the batch already holds for this
     // task owns its settle, and the completion callback below only wakes it.
+    // Read before the notice reservation exists, so nothing awaited between
+    // taking it and handing it to the runner can leave it behind.
     const coveredParent = await heldNoticeParent(ctx, threadId);
+    let notice;
+    try {
+      notice = await dispatchUsageNotice({
+        store, driver, threadId, instanceId: selection.instanceId,
+        provenance: turnProvenance(messages, turn), kind: turnKind(messages, turn, selection.instanceId), trigger: "dispatch", mode,
+      });
+    } catch (cause) {
+      const error = cause instanceof Error ? cause.message : String(cause);
+      // The exact turn this failure promoted is handed back: one queued while
+      // the reconciliation was in flight is in no snapshot taken before it.
+      await failUnstartedTurn(store, threadId, turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
+      store.untrackRunning(turn.id);
+      return;
+    }
+    const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
     // Checked again once the session start and the reads above are done: they
     // take real time, and a drain can begin inside it. Nothing is sent; the
-    // turn waits as queued work for the next server.
+    // turn waits as queued work for the next server. The notice reservation is
+    // released so the next server's dispatch is not held behind it.
     if (isDraining()) {
+      await notice.finish(false).catch(() => undefined);
       await requeueHeldDispatch(store, threadId, turn.id, RESTART_HELD_SUMMARY).catch(() => undefined);
       return;
     }
-    const prompt = await composeTurnPrompt(ctx, thread, turn.id, setup, message.text, rules?.text ?? null, usageNoticeParts(messages, turn));
     void executeTurn({
       store,
       driver,
       threadId,
       storeTurnId: turn.id,
-      ...prompt,
+      prompt: prompt.prompt,
+      ...(prompt.developerPrompt ? { developerPrompt: prompt.developerPrompt } : {}),
+      onNoticeDispatch: notice.finish,
+      revalidateNotice: notice.revalidate,
       ...(steps.length > 0 && !isCompactCommand(message.text) ? { afterAnswer: async () => void (await Promise.all(steps.map((step) => step()))) } : {}),
+      usageNoticeMode: mode,
       ...(setup.fresh ? { freshConversation: true } : {}),
       interactionMode: turn.interactionMode,
       ...(images.length > 0 ? { images } : {}),
@@ -1719,7 +1756,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   // one even when its turn predates the origin column.
   const origins = await loadTurnOrigins(store, [{ thread: source, turns }], ctx.config);
   const origin = turn.origin ?? origins.get(turnOriginKey(threadId, turn.id));
-  const userAuthorized = origin === undefined && turn.queue.automatic !== true && turn.queue.wakeUp !== true
+  const userAuthorized = origin === undefined && turn.automatic !== true && turn.queue.automatic !== true && turn.queue.wakeUp !== true
     && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold";
   // A handoff into a held Antigravity is one of the automatic prompts off
   // forbids: an automatic entry of any continuation (model or stored) is
@@ -2227,7 +2264,7 @@ export async function compactMidTurn(ctx: OperationContext, threadId: string, us
 async function resumeAfterCompaction(ctx: OperationContext, threadId: string, action: LongThreadAction | null): Promise<void> {
   // A hand-off in its place moved the work to a new thread: nothing to resume here.
   if (action?.kind === "handoff") return;
-  await startTurn(ctx, { threadId, prompt: COMPACTED_CONTINUE_PROMPT, origin: "compaction", onEvent: () => undefined });
+  await startTurn(ctx, { threadId, prompt: COMPACTED_CONTINUE_PROMPT, origin: "compaction", automatic: true, onEvent: () => undefined });
 }
 
 /**
@@ -2285,7 +2322,7 @@ export async function actOnLongThread(ctx: OperationContext, threadId: string, o
     });
     ctx.store.emit(threadId, "activity");
   }
-  const started = await startTurn(ctx, { threadId, prompt: COMPACT_PROMPT, origin: "compaction", onEvent: () => undefined });
+  const started = await startTurn(ctx, { threadId, prompt: COMPACT_PROMPT, origin: "compaction", automatic: true, onEvent: () => undefined });
   // A turn waiting to go on after it needs the compaction done first.
   if (options.wait === true) await started.run;
   return action;
@@ -2872,6 +2909,8 @@ interface TransferMessage {
   readonly attachments?: StoredMessage["attachments"];
   readonly origin?: StoredMessage["origin"];
   readonly notification?: StoredMessage["notification"];
+  readonly automatic?: StoredMessage["automatic"];
+  readonly control?: StoredMessage["control"];
 }
 
 /**
@@ -2894,6 +2933,10 @@ function transferMessagesOf(messages: readonly StoredMessage[], turn: StoredTurn
     ...(message.attachments ? { attachments: message.attachments } : {}),
     ...(message.origin !== undefined ? { origin: message.origin } : {}),
     ...(message.notification ? { notification: message.notification } : {}),
+    // Provenance travels with the row: without it an originless automatic
+    // input reads as the user speaking on the destination.
+    ...(message.automatic !== undefined ? { automatic: message.automatic } : {}),
+    ...(message.control !== undefined ? { control: message.control } : {}),
   }));
 }
 
@@ -2974,6 +3017,8 @@ function buildTransferEntry(
     runtimeMode: sourceTurn.runtimeMode,
     interactionMode: sourceTurn.interactionMode,
     ...(sourceTurn.interactionModeExplicit === true ? { interactionModeExplicit: true as const } : {}),
+    ...(sourceTurn.automatic !== undefined ? { automatic: sourceTurn.automatic } : {}),
+    ...(sourceTurn.control !== undefined ? { control: sourceTurn.control } : {}),
     modelSelection: sourceTurn.modelSelection ?? destination.modelSelection,
     parentTurnId: sourceTurn.parentTurnId,
     ...(sourceTurn.origin !== undefined ? { origin: sourceTurn.origin } : {}),
@@ -3001,6 +3046,8 @@ function buildTransferEntry(
     ...(source.attachments ? { attachments: source.attachments } : {}),
     ...(source.origin !== undefined ? { origin: source.origin } : {}),
     ...(source.notification ? { notification: source.notification } : {}),
+    ...(source.automatic !== undefined ? { automatic: source.automatic } : {}),
+    ...(source.control !== undefined ? { control: source.control } : {}),
   }));
   const activity: StoredActivity = {
     id: store.newId(),
@@ -3063,6 +3110,8 @@ async function repairTransferEntry(
       ...(source.attachments ? { attachments: source.attachments } : {}),
       ...(source.origin !== undefined ? { origin: source.origin } : {}),
       ...(source.notification ? { notification: source.notification } : {}),
+      ...(source.automatic !== undefined ? { automatic: source.automatic } : {}),
+      ...(source.control !== undefined ? { control: source.control } : {}),
     };
     await store.appendLedger(destinationId, "messages", repaired);
     destinationMessages.push(repaired);
@@ -3610,6 +3659,18 @@ async function continueThreadReserved(
     });
   }
   const live = await store.readThreadRecord(source.id);
+  // A continuation on the same account inherits the warning history, so the
+  // same window does not warn it again; entries the destination already has
+  // (a retry) win.
+  if (live !== null && Object.keys(live.usageNotices ?? {}).length > 0) {
+    await store.withThreadLock(created.id, async () => {
+      const current = await store.readThreadRecord(created.id);
+      if (!current) return;
+      const merged = { ...live.usageNotices, ...current.usageNotices };
+      if (JSON.stringify(merged) === JSON.stringify(current.usageNotices ?? {})) return;
+      await store.writeThreadRecord({ ...current, usageNotices: merged, updatedAt: store.nowIso() });
+    });
+  }
   // A continuation held for the reset inherits the hold; one starting now does not.
   // The hold has to apply to the destination: same account, limit still standing.
   const scheduledHold = request.scheduledFor !== undefined && !request.destinationThreadId
@@ -3672,6 +3733,7 @@ async function continueThreadReserved(
     const started = await startTurn(ctx, {
       threadId: created.id,
       prompt,
+      automatic: true,
       delivery: "queue",
       ...(origin ? { origin } : {}),
       ...(request.queue ? { queue: request.queue } : {}),
@@ -3698,7 +3760,10 @@ async function continueThreadReserved(
       if (!(await store.readMessages(created.id)).some((message) => message.id === current.messageId)) {
         await store.appendLedger(created.id, "messages", {
           id: current.messageId, threadId: created.id, turnId: current.id, role: "user",
-          text: prompt.trim(), createdAt: current.createdAt, ...(current.origin ? { origin: current.origin } : {}),
+          text: prompt.trim(), createdAt: current.createdAt,
+          ...(current.origin ? { origin: current.origin } : {}),
+          ...(current.automatic === true ? { automatic: true } : {}),
+          ...(current.control === true ? { control: true } : {}),
         });
       }
       if (isCarriedReservation && (current.status === "failed" || current.status === "interrupted")) {
@@ -4310,12 +4375,17 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
   await recoverOrphanedTurn(ctx, input.threadId);
   await syncResearchRun(ctx, input.threadId);
   const thread = await inspectThread(store, input.threadId);
+  const sendSelection = input.modelSelection ?? thread.modelSelection;
   // Resolved before the ledger is touched: an unknown provider fails
   // without recording a turn.
-  const turnSelection = input.modelSelection ?? thread.modelSelection;
-  const driver = ctx.driverFor(turnSelection.instanceId);
+  const driver = ctx.driverFor(sendSelection.instanceId);
+  // Only a user's own message ends a usage wait: an internal origin, a
+  // usage-control turn, a reset continuation, a provider control or an
+  // explicitly marked dispatch is automatic.
+  const automatic = input.automatic === true || input.origin !== undefined || input.usageControl === true || input.scheduleReason === "usage-reset";
+  const control = input.control === true || input.usageControl === true || controlPrompt(sendSelection.instanceId, input.prompt);
   const { threadId: _threadId, driverPrompt, onEvent, ...send } = input;
-  const resolvedQueue = input.queue ? resolveQueueResetConditions(input.queue, turnSelection) : undefined;
+  const resolvedQueue = input.queue ? resolveQueueResetConditions(input.queue, sendSelection) : undefined;
   const automaticQueue = input.scheduleReason === "usage-reset" ? { ...(resolvedQueue ?? parseQueuePolicy({ conditions: [], sequential: ctx.config.usageRecovery === "sequential" })), automatic: true } : resolvedQueue;
   const noticeSteer = input.origin === "task-notification" && input.delivery === "steer";
   const target = noticeSteer ? openTurn(await store.readTurns(thread.id)) : null;
@@ -4334,13 +4404,13 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
   let sent: SendTurnResult;
   try {
     sent = await sendTurn(
-      store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) }, ctx.config,
+      store, thread.id, { ...send, automatic, control, ...(automaticQueue ? { queue: automaticQueue } : {}) }, ctx.config,
       target === null ? undefined : (running) => {
         // The same split under the send's own lock, where the target is read
         // last: a target that left is the race above; a target still running
         // but not the user's own is policy.
         if (running.id !== target.id) throw noticeSteerTargetGone();
-        if (!userAuthoredTurn(running) && antigravityAutoPromptsHeld(liveProvidersOf(ctx), (running.modelSelection ?? turnSelection).instanceId)) {
+        if (!userAuthoredTurn(running) && antigravityAutoPromptsHeld(liveProvidersOf(ctx), (running.modelSelection ?? sendSelection).instanceId)) {
           throw noticeSteerGated();
         }
         return noticeAttempt?.messageId;
@@ -4352,10 +4422,17 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
     if (noticeSteer && error instanceof CliError && error.code === "THREAD_NOT_STEERABLE") throw noticeSteerTargetGone();
     throw error;
   }
+  const mode = liveUsageMode(ctx);
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
     const text = imageMention(input.driverPrompt ?? input.prompt.trim(), uploads.map((upload) => upload.name));
+    // MXN-385: plan the usage warning for this steer and revalidate it at the
+    // acceptance boundary; the reservation commits only once the steer lands.
+    const notice = await dispatchUsageNotice({
+      store, driver, threadId: thread.id, instanceId: sendSelection.instanceId,
+      provenance: automatic ? "automatic" : "explicit", kind: control ? "control" : "message", trigger: "dispatch", mode,
+    });
     const recordSteer = (kind: "steer.accepted" | "steer.confirmed") => store.appendLedger(thread.id, "activity", {
       id: store.newId(), threadId: thread.id, turnId: sent.turn.id, kind, summary: "", payload: { messageId: sent.messageId }, createdAt: store.nowIso(),
     });
@@ -4365,7 +4442,15 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
       onArrival: () => { confirmation = recordSteer("steer.confirmed").catch(() => undefined); },
     } : undefined;
     // A side question is the user's own; other origins are automatic prompts.
-    const delivery = await deliverSteer(ctx, driver, thread.id, text, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
+    // The reservation is finished on every way out: one left behind would hold
+    // every later send on this thread.
+    let delivery: Awaited<ReturnType<typeof deliverSteer>> | undefined;
+    try {
+      const warning = await notice.revalidate();
+      delivery = await deliverSteer(ctx, driver, thread.id, warning === null ? text : promptWithNotices(text, [warning]), providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
+    } finally {
+      await notice.finish(delivery === "accepted");
+    }
     if (noticeSteer && (delivery === "gated" || delivery === "gone")) {
       // The steer never left: nothing was sent and nothing arrived. The
       // recorded steer row goes with it — only the durable batch stays.
@@ -4419,7 +4504,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
   let startFailure: unknown = null;
   try {
     setup = await sessionSetup(ctx, turnThread, turnModel.instanceId, sent.turn.id);
-    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id), ...usageLimitHook(ctx, sent.thread.id, turnModel.instanceId) });
+    await ensureDriverSession(driver, turnThread, { modelSelection: turnModel, config: ctx.config, ...sessionStart(setup), ...longThreadHook(ctx, sent.thread.id), ...usageLimitHook(ctx, sent.thread.id, turnModel.instanceId), usageNoticeMode: mode });
   } catch (cause) {
     startFailure = cause;
   }
@@ -4427,12 +4512,10 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
     // Nothing will ever run this turn: settle it now, with the reason,
     // rather than leaving it `running` for the next send to trip over.
     const message = startFailure instanceof Error ? startFailure.message : String(startFailure ?? "no session setup");
-    const queuedBefore = new Set((await store.readTurns(thread.id)).filter((turn) => turn.status === "queued").map((turn) => turn.id));
     if (claimed) store.untrackRunning(sent.turn.id);
-    await failTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
     // The failed start settled nothing that runs: a promotion it made has no
-    // runner to take it, so hand those turns back to the admission path.
-    await holdStrandedPromotions(store, thread.id, queuedBefore).catch(() => undefined);
+    // runner to take it, so it goes back to the admission path.
+    await failUnstartedTurn(store, thread.id, sent.turn.id, { error: message.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
     return { ...sent, run: Promise.resolve() };
   }
   // A stop that landed while the session was starting already settled the
@@ -4465,6 +4548,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
       runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
+      usageNoticeMode: mode,
       ...(onEvent ? { onEvent } : {}),
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       ...longThreadHook(ctx, thread.id),
@@ -4482,17 +4566,27 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
   const delivered = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
   const typed = driverPrompt ?? input.prompt.trim();
   let run: Promise<void>;
+  let notice: Awaited<ReturnType<typeof dispatchUsageNotice>> | undefined;
   try {
     // Composed inside the try: every ledger read a prompt needs runs while the
     // claim is held, so a failure frees it instead of leaking a runner nobody owns.
     const usage = sent.turn.usageRecoveryNotice === true ? { prompt: "", notices: [typed] } : undefined;
     const prompt = await composeTurnPrompt(ctx, thread, sent.turn.id, setup, typed, rules?.text ?? null, usage);
+    // The cold session is attached; reconcile its warning slot before the first
+    // prompt, with provenance decided from the send's own automatic/control flags.
+    notice = await dispatchUsageNotice({
+      store, driver, threadId: sent.thread.id, instanceId: turnModel.instanceId,
+      provenance: automatic ? "automatic" : "explicit", kind: control ? "control" : "message", trigger: "dispatch", mode,
+    });
     run = executeTurn({
       store,
       driver,
       threadId: thread.id,
       storeTurnId: sent.turn.id,
-      ...prompt,
+      prompt: prompt.prompt,
+      ...(prompt.developerPrompt ? { developerPrompt: prompt.developerPrompt } : {}),
+      onNoticeDispatch: notice.finish,
+      revalidateNotice: notice.revalidate,
       ...(delivered.length > 0 && !isCompactCommand(typed) ? { afterAnswer: async () => void (await Promise.all(delivered.map((step) => step()))) } : {}),
       ...(setup.fresh ? { freshConversation: true } : {}),
       ...(images.length > 0 ? { images } : {}),
@@ -4504,6 +4598,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
       runtimeMode: sent.thread.runtimeMode,
       interactionMode: sent.turn.interactionMode,
       workingDirectory: sent.thread.env.path,
+      usageNoticeMode: mode,
       ...(onEvent ? { onEvent } : {}),
       ...usageLimitHook(ctx, thread.id, turnModel.instanceId),
       // Per turn, with its own id: a queued turn this one promotes settles
@@ -4511,9 +4606,14 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, no
       ...longThreadHook(ctx, thread.id),
     }).then(() => syncResearchRun(ctx, thread.id).catch(() => undefined)).catch(() => undefined);
   } catch (cause) {
-    // The prompt never reached a runner (a ledger read failed while building
-    // it): release the claim rather than leaving the turn tracked forever.
+    // The prompt never reached a runner (a ledger read or notice preparation
+    // failed while building it): release the claim and any reservation, and
+    // settle the unstarted turn so a promotion it made is held for admission
+    // rather than stranded.
     if (claimed) store.untrackRunning(sent.turn.id);
+    await notice?.finish(false).catch(() => undefined);
+    const error = cause instanceof Error ? cause.message : String(cause);
+    await failUnstartedTurn(store, thread.id, sent.turn.id, { error: error.slice(0, 500) }, ctx.config.providers).catch(() => undefined);
     throw cause;
   }
   // The user's own message spends fresh allowance and ends a usage hold, so

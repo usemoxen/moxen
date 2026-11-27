@@ -143,6 +143,66 @@ describe("opencode driver", () => {
     expect(await Effect.runPromise(driver.hasSession("thread-1"))).toBe(true);
   });
 
+  it("injects a usage warning as a session instruction entry, not a user prompt, and clears it", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    const result = await Effect.runPromise(driver.reconcileNotice("thread-1", {
+      kind: "arm", account: "codex", key: "codex:session@x", attemptId: "a1",
+      text: "<moxen-usage-notice>stop safely</moxen-usage-notice>",
+    }));
+    expect(result).toBe("issued");
+    expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({
+      sessionID: "opencode-session-1", key: "moxen-usage-notice", value: "<moxen-usage-notice>stop safely</moxen-usage-notice>",
+    });
+    // A runtime instruction entry, never the conversation's user messages.
+    expect(server.callsTo("session.prompt")).toEqual([]);
+    await Effect.runPromise(driver.reconcileNotice("thread-1", { kind: "clear", conditional: false }));
+    expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({ key: "moxen-usage-notice", value: null });
+  });
+
+  it("keeps two accounts sharing one session slot from clearing each other's warning", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    const arm = (account: string, key: string) => Effect.runPromise(driver.reconcileNotice("thread-1", {
+      kind: "arm", account, key, attemptId: `a-${key}`, text: `<moxen-usage-notice>${account}</moxen-usage-notice>`,
+    }));
+    const clear = (account: string, key: string) => Effect.runPromise(driver.reconcileNotice("thread-1", {
+      kind: "clear", conditional: true, account, key,
+    }));
+    expect(await arm("codex", "k1")).toBe("issued");
+    expect(await arm("claude", "k2")).toBe("issued");
+    const removes = server.callsTo("session.instructions").filter((call) => (call.args as { value?: unknown }).value === null).length;
+    expect(await clear("codex", "k1")).toBe("skipped");
+    expect(server.callsTo("session.instructions").filter((call) => (call.args as { value?: unknown }).value === null)).toHaveLength(removes);
+    // The surviving owner is the one whose reset clears it.
+    expect(await clear("claude", "k2")).toBe("cleared");
+    expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({ key: "moxen-usage-notice", value: null });
+  });
+
+  it("ignores an already-aborted notice reconciliation before any HTTP", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const signal = AbortSignal.abort();
+    await expect(Effect.runPromise(driver.reconcileNotice("thread-1", {
+      kind: "arm", account: "codex", key: "k", attemptId: "a", text: "text",
+    }, signal))).rejects.toMatchObject({ code: "NOTICE_ABORTED" });
+    expect(transport.servers[0]!.callsTo("session.instructions")).toEqual([]);
+  });
+
+  it("clears a stale notice entry on a cold attach before the resumed prompt", async () => {
+    const { transport, driver } = start();
+    await startSession(driver);
+    const server = transport.servers[0]!;
+    await Effect.runPromise(driver.reconcileNotice("thread-1", { kind: "clear", conditional: false }));
+    await Effect.runPromise(driver.sendTurn({ threadId: "thread-1", prompt: "resume" }));
+    const methods = server.calls.map((call) => call.method);
+    expect(methods.indexOf("session.instructions")).toBeGreaterThanOrEqual(0);
+    expect(methods.indexOf("session.instructions")).toBeLessThan(methods.indexOf("session.prompt"));
+    expect(server.callsTo("session.instructions").at(-1)?.args).toMatchObject({ key: "moxen-usage-notice", value: null });
+  });
+
   it("starts its server with the tools the setting switches off, and restarts it once nothing runs when the setting changes", async () => {
     const transport = new FakeOpencodeTransport({ messages: assistantMessages() });
     const driver = new OpenCodeDriver({ transport, env: {}, reconcileDelayMs: 5 });

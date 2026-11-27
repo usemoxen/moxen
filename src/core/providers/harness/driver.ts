@@ -57,7 +57,7 @@ import type {
   ThreadId,
   TurnId,
 } from "../spi.js";
-import { dropTurnWaiter } from "../spi.js";
+import { dropTurnWaiter, isManualCompactionCommand } from "../spi.js";
 import { BackgroundShells, type BackgroundEvent, type BackgroundTask } from "./background.js";
 import { compact, leadLength, MAX_CONSECUTIVE_FAILURES, type CompactReason, type Summarise } from "./compact.js";
 import { autoCompactThreshold, loopCompactThreshold } from "./compactsettings.js";
@@ -1748,9 +1748,9 @@ export class HarnessDriver implements ProviderAdapter<CliError> {
 
 /** `/compact`, alone or with what the summary should pay attention to. */
 function manualCompaction(prompt: string): { focus: string | undefined } | null {
+  if (!isManualCompactionCommand(prompt)) return null;
   const match = /^\/compact(?:\s+([\s\S]*))?$/.exec(prompt.trim());
-  if (!match) return null;
-  const focus = match[1]?.trim();
+  const focus = match?.[1]?.trim();
   return { focus: focus ? focus : undefined };
 }
 

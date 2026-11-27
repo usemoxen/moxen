@@ -820,6 +820,9 @@ export class DirectConnection implements ClientApi {
       // snapshot of the operation that started the turn: `lastProviders` is
       // refreshed as each new operation reads the config.
       providersInForce: () => this.lastProviders ?? config.providers,
+      // A dispatch serializes behind a queued turn: reload the setting so the
+      // mode at promotion is today's, not the one captured when the turn queued.
+      usageProtectionMode: async () => (await this.loadConfig()).usageProtection,
       driverFor: (instanceId: string) => this.driverFor(instanceId),
       ...(this.builtinMcpServers ? { builtinMcpServers: this.builtinMcpServers } : {}),
     };
@@ -1406,6 +1409,7 @@ export class DirectConnection implements ClientApi {
 
   private observeDriverEvent(driver: TurnDriver, event: ProviderRuntimeEvent): void {
     this.usageProtection.observe(event);
+    if (event.type === "usage.notice.issued") void this.usageProtection.persistNoticeIssued(event);
     if (event.type !== "turn.completed" && event.type !== "turn.failed" && event.type !== "turn.interrupted") return;
     const instanceId = this.driverInstanceIds.get(driver);
     const parsed = instanceId ? parseAccountInstanceId(instanceId) : null;

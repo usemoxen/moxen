@@ -27,6 +27,11 @@ export interface SchemaMigration {
 /** Every step this build knows, oldest first. */
 export const MIGRATIONS: readonly SchemaMigration[] = [
   { version: 1, name: "create schema v1", up: (db) => db.exec(SCHEMA_V1) },
+  {
+    version: 2,
+    name: "message usage-notice provenance flags (MXN-385)",
+    up: (db) => db.exec("ALTER TABLE messages ADD COLUMN automatic INTEGER; ALTER TABLE messages ADD COLUMN control INTEGER;"),
+  },
 ];
 
 /** The schema version this build reads and writes: the last registered step. */

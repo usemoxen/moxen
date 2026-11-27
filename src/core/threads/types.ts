@@ -12,6 +12,7 @@ import type { ModelRequest } from "../catalog/selection.js";
 import type { ReviewVerdict, TaskNotification } from "./notify.js";
 import type { QueueCondition, QueuePolicy } from "./queue.js";
 import type { UsageProtectionOverride } from "../usage/limits.js";
+import type { UsageNoticeState } from "../usage/notice.js";
 import type {
   InteractionMode,
   ModelSelection,
@@ -217,6 +218,8 @@ export interface StoredThread {
   /** Durable account-quota queue. Only its coordinator may run while held. */
   readonly usagePause?: UsagePause | null;
   readonly usageProtectionOverride?: UsageProtectionOverride | null;
+  /** Model-facing usage warnings by account (`usage/notice.ts`): what each conversation was told, and whether it still waits. */
+  readonly usageNotices?: Readonly<Record<string, UsageNoticeState>>;
   readonly id: string;
   /** Internal tool tasks stay addressable by id but do not appear in thread lists. */
   readonly hidden?: boolean;
@@ -430,6 +433,10 @@ export interface StoredTurn {
    * written before this field existed are recognised by their prompt.
    */
   readonly maintenance?: true;
+  /** True for an input Moxen dispatched itself (compaction, handoff, a background wake), never the user's. */
+  readonly automatic?: boolean;
+  /** A provider control command (`/compact`) or a usage-control prompt: not an ordinary message. */
+  readonly control?: boolean;
   readonly messageId: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: InteractionMode;
@@ -537,6 +544,10 @@ export interface StoredMessage {
   readonly attachments?: readonly StoredAttachment[];
   /** A message moxen wrote into the thread rather than the user (see `MessageOrigin`). */
   readonly origin?: MessageOrigin;
+  /** Moxen's own dispatch, not the user's: used for notice provenance in a batch. */
+  readonly automatic?: boolean;
+  /** A provider control command (`/compact`): never decorated with a usage prefix and never an authorization. */
+  readonly control?: boolean;
   /** The origin's structured facts (`task-notification`: the tasks), for a client to draw. */
   readonly notification?: {
     readonly tasks: readonly TaskNotification[];
@@ -701,6 +712,14 @@ export interface SendTurnInput {
   readonly usageControl?: boolean;
   /** The agent thread that queued this message with `message_queue`; only it may list or change the entry (MXN-401). */
   readonly agentThreadId?: string;
+  /**
+   * The dispatcher's own work (compaction, a handoff, a background wake),
+   * never the user speaking. Persisted on the turn so a later promotion still
+   * knows an automatic input from an explicit one.
+   */
+  readonly automatic?: boolean;
+  /** A provider control command or usage-control prompt: never decorated, never an authorization. */
+  readonly control?: boolean;
   readonly prompt: string;
   readonly ifBusy?: SendIfBusy;
   readonly delivery?: SendDelivery;

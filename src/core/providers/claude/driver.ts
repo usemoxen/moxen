@@ -42,6 +42,8 @@ import type {
   BackgroundTaskSummary,
   ContextBreakdown,
   ContextWindowUsage,
+  NoticeReconcileOutcome,
+  NoticeReconcileRequest,
   ProviderImage,
   ProviderAdapter,
   ProviderAdapterCapabilities,
@@ -222,6 +224,14 @@ interface ClaudeSession {
   query: ClaudeQuery;
   input: PromptQueue;
   closed: boolean;
+  /**
+   * A usage warning waiting to reach the next request through a hook's
+   * `additionalContext`, keyed by its delivery attempt. Replaced by a newer
+   * warning and cleared when the user authorizes continuing.
+   */
+  runtimeNotice: { account: string; key: string; attemptId: string; text: string } | null;
+  /** Attempts this session already issued: a retry of the same attempt must not deliver twice. */
+  consumedNoticeAttempts: Set<string>;
   resumeSessionId: string | null;
   account: { subscriptionType?: string; tokenSource?: string; apiProvider?: string } | null;
   model: string | null;
@@ -570,6 +580,8 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
         query: undefined as unknown as ClaudeQuery,
         input: new PromptQueue(),
         closed: false,
+        runtimeNotice: null,
+        consumedNoticeAttempts: new Set(),
         resumeSessionId: null,
         account: null,
         model: input.modelSelection?.model ?? null,
@@ -675,6 +687,38 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
 
   /** Threads whose CLI proved it echoes what it consumed (kept past a settle, which clears `steerTracking`). */
   private readonly arrivalProven = new Set<ThreadId>();
+
+  /**
+   * A usage warning into the runtime context: the next parent
+   * `UserPromptSubmit` or `PostToolBatch` hook returns it as
+   * `additionalContext`. It is never pushed into `session.input`, so it
+   * cannot be mistaken for a user turn or become an unconfirmed steer. An
+   * attempt the session already issued is not armed again.
+   */
+  readonly reconcileNotice = (
+    threadId: ThreadId,
+    request: NoticeReconcileRequest,
+    signal?: AbortSignal,
+  ): Effect.Effect<NoticeReconcileOutcome, CliError> =>
+    this.attempt("CLAUDE_NOTICE_FAILED", `Could not reconcile a usage notice on thread ${threadId}`, async () => {
+      const session = this.requireSession(threadId);
+      if (session.closed) throw new CliError("CLAUDE_NOT_STARTED", `No live Claude session exists for thread ${threadId}.`, { details: { threadId } });
+      if (signal?.aborted === true) throw new CliError("NOTICE_ABORTED", "The usage notice was cancelled.");
+      if (request.kind === "clear") {
+        if (request.conditional && session.runtimeNotice !== null
+          && (request.account !== undefined || request.key !== undefined)
+          && (session.runtimeNotice.account !== request.account || session.runtimeNotice.key !== request.key)) return "skipped" as const;
+        session.runtimeNotice = null;
+        return "cleared" as const;
+      }
+      const composite = `${request.key}\0${request.attemptId}`;
+      if (session.consumedNoticeAttempts.has(composite)) {
+        session.runtimeNotice = null;
+        return "issued" as const;
+      }
+      session.runtimeNotice = { account: request.account, key: request.key, attemptId: request.attemptId, text: request.text };
+      return "armed" as const;
+    });
 
   /**
    * Steers pushed to the running turn that no reply frame or result ever
@@ -2336,7 +2380,37 @@ export class ClaudeDriver implements ProviderAdapter<CliError> {
     ];
     const text = (value: unknown): string | null => (typeof value === "string" && value.trim() ? value.trim() : null);
     const openTurnId = (): TurnId | null => session.transcript.find((turn) => turn.status === "running")?.id ?? null;
+    /**
+     * A usage warning queued by `injectNotice`, handed to the next request as
+     * hook context and confirmed once. Both a submitted prompt and a tool
+     * batch are request boundaries, so a running turn and the next input are
+     * both covered; anything left at settle waits for the next one.
+     */
+    const runtimeNotice = (event: "UserPromptSubmit" | "PostToolBatch"): HookCallbackMatcher[] => [
+      {
+        hooks: [
+          async (input) => {
+            // A subagent's request is not the parent conversation: never let
+            // a child's callback consume the parent's warning.
+            const agentId = (input as unknown as { agent_id?: unknown }).agent_id;
+            if (typeof agentId === "string" && agentId.length > 0) return {};
+            const notice = session.runtimeNotice;
+            if (notice === null) return {};
+            session.runtimeNotice = null;
+            if (session.consumedNoticeAttempts.has(`${notice.key}\0${notice.attemptId}`)) return {};
+            session.consumedNoticeAttempts.add(`${notice.key}\0${notice.attemptId}`);
+            this.publish({
+              type: "usage.notice.issued", provider: "claude", threadId: session.threadId,
+              key: notice.key, attemptId: notice.attemptId,
+            });
+            return { hookSpecificOutput: { hookEventName: event, additionalContext: notice.text } };
+          },
+        ],
+      },
+    ];
     const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {
+      UserPromptSubmit: runtimeNotice("UserPromptSubmit"),
+      PostToolBatch: runtimeNotice("PostToolBatch"),
       PostCompact: observe((input) => {
         this.publish({
           type: "session.notice",

@@ -73,6 +73,40 @@ describe("claude driver turns", () => {
     ]);
   });
 
+  it("injects a usage warning through hook context, never the user message stream or a redelivered steer", async () => {
+    const transport = new FakeTransport([[initMessage()]]);
+    const driver = new ClaudeDriver({ transport });
+    await Effect.runPromise(driver.startSession(START));
+    const arm = (key: string, attemptId: string, text: string) =>
+      Effect.runPromise(driver.reconcileNotice(START.threadId, { kind: "arm", account: "codex", key, attemptId, text }));
+    const clear = () => Effect.runPromise(driver.reconcileNotice(START.threadId, { kind: "clear", conditional: false }));
+    const result = await arm("codex:session@x", "a1", "<moxen-usage-notice>stop safely</moxen-usage-notice>");
+    expect(result).toBe("armed");
+    // Nothing entered the conversation as a user message, so there is no unconfirmed steer to turn into a warning-only turn.
+    expect(transport.created[0]!.prompts).toEqual([]);
+    expect(driver.takeUnconfirmedSteers(START.threadId)).toEqual([]);
+    const hook = transport.created[0]!.options.hooks?.UserPromptSubmit?.[0]?.hooks?.[0] as unknown as ((input: unknown) => Promise<unknown>) | undefined;
+    expect(hook).toBeDefined();
+    const hookInput = { hook_event_name: "UserPromptSubmit", session_id: "s", transcript_path: "", cwd: "/repo" };
+    // A subagent's callback is not the parent conversation: it takes nothing.
+    expect(await hook!({ ...hookInput, agent_id: "child-1" })).toEqual({});
+    expect(await hook!(hookInput)).toMatchObject({
+      hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "<moxen-usage-notice>stop safely</moxen-usage-notice>" },
+    });
+    // The composite (key, attempt) is the consume identity: the same key and
+    // attempt is never issued twice, but a new key on the same attempt is.
+    expect(await arm("codex:session@x", "a1", "again")).toBe("issued");
+    expect(await hook!(hookInput)).toEqual({});
+    expect(await arm("codex:session@k2", "a1", "k2")).toBe("armed");
+    expect(await hook!(hookInput)).toMatchObject({ hookSpecificOutput: { additionalContext: "k2" } });
+    expect(await arm("codex:session@k2", "a1", "k2 replay")).toBe("issued");
+    expect(await hook!(hookInput)).toEqual({});
+    // A cleared warning never reaches a request either.
+    await arm("codex:session@y", "a3", "third");
+    await clear();
+    expect(await hook!(hookInput)).toEqual({});
+  });
+
   it("always runs on Claude Code's own system prompt, appending runtime instructions when given", async () => {
     const transport = new FakeTransport([[initMessage()], [initMessage()]]);
     const driver = new ClaudeDriver({ transport });

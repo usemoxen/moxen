@@ -91,8 +91,9 @@ batched, in either direction: folded into an ordinary follow-up it would send
 the command as text no provider runs, and would carry the maintenance marker
 over a turn that did real work. It is also a batching boundary — only messages
 queued on the same side of it travel together, so nothing queued after a
-`/compact` overtakes it — and it keeps its own turn. It never starts
-while the
+`/compact` overtakes it — and it keeps its own turn. Any other control in the
+provider's own grammar, such as Claude's `/compact <focus>`, batches the same
+way. A due held turn never starts while the
 limit still stands, while usage protection holds the thread, or while the
 thread is snoozed or settled: those wait for the reset, the release, or the
 thread becoming active again. An automatic continue whose time came while
@@ -123,13 +124,19 @@ rewrites the queue, and on Antigravity threads promotion never folds a
 message of Moxen's into one of yours or the other way round — even opted
 in, since the setting can change between the two — so a held entry is
 never merged into your message and your message is never stranded in a
-held one: what runs past the gate carries only what could run. Other
+held one: what runs past the gate carries only what could run. The opening turn
+of a continuation is Moxen's too. Nor is a message of yours folded where it
+would stop releasing the held entries it was sent after: into a task notice or
+a message you had scheduled, or past an automatic entry queued between the two.
+It keeps its own turn and its place. Other
 providers batch queued messages exactly as before. A running turn is never
 stopped for a compaction whose follow-up could not start, and a hand-off you
 queued yourself that wants a model summary completes on its stored summary
 rather than waiting on a summary the gate would hold. The
 entry shows why it waits, and runs with your next message or when you turn the
-setting on. Recovering a turn whose process died interrupts it either way, but
+setting on. A turn marked as Moxen's own dispatch never counts as your message,
+even with no origin: it releases no held entry, a task notice cannot ride it,
+and a queued hand-off carrying the mark is not one you queued. Recovering a turn whose process died interrupts it either way, but
 the follow-up it had queued is never dispatched past the gate: it goes back to
 queued for the admission path, which holds it like any other automatic prompt.
 A task notice holds its exception only while a live turn of yours can carry
@@ -377,12 +384,79 @@ for one provider, at most `usageLimitContinues` (default 2) in a row.
 
 ### Protect work before the allowance runs out
 
-`usageProtection` is opt-in: `off` (the default), `notify`, or `auto`.
-Claude Code and Codex subscription windows feed the shared account forecast.
-Notify shows a notice above the composer with the percentage, estimated working
-time left and reset time; its **Wrap up now** action pauses the account's running
-threads. Automatic uses the same action without waiting for a click. The server
-owns this work, so closing the TUI does not disable it.
+`usageProtection` is opt-in: `off` (the default), `notify-user`, `notify`, or
+`auto`. Claude Code and Codex subscription windows feed the shared account
+forecast. `notify-user` and `notify` both show a notice above the composer with
+the percentage, estimated working time left and reset time; its **Wrap up now**
+action pauses the account's running threads. Automatic uses the same action
+without waiting for a click. The server owns this work, so closing the TUI does
+not disable it.
+
+`notify` also warns the model in the running conversation with a
+`<moxen-usage-notice>` block: the allowance is nearly exhausted, use only
+essential tools to leave the work in progress safe, then stop using tools and
+wait. How the block reaches the model depends on what the provider actually
+offers:
+
+| Provider | Channel | What is verified |
+|---|---|---|
+| Claude Code | an in-process hook's `additionalContext` | Moxen injects it outside the conversation; the provider serializes it as user-role text, the same convention as Moxen's other tagged runtime blocks |
+| OpenCode | a `moxen-usage-notice` session instruction entry | an instruction entry outside the user's messages |
+| Codex | tagged text in the running turn or next prompt | Codex 0.169.0 exposes `thread/inject_items` developer-role items; Moxen does not use them yet, so the tagged block is prepended to the user input (moving to developer items is MXN-418) |
+| Moxen Harness | ordinary text in the running turn or next prompt | no runtime-context channel is used, so its tag is the marker |
+
+The notice has the same provenance as Moxen's other tagged runtime blocks: text
+of that shape in user content is not authenticated, and ending the wait is
+decided by Moxen's state, not by the block's text.
+
+The block never starts a provider turn of its own. On Claude it waits for the
+next prompt or tool batch and stays pending if the turn ends first; on OpenCode
+it is an instruction entry; on Codex it is text. The user's stored message is
+never rewritten — the text a person typed stays the transcript — but on a
+provider with no runtime channel the warning is prefixed to what that provider
+receives for the turn. Pressing stop or a provider that ends the turn before a
+Claude hook fires leaves the warning pending for the next input rather than
+sending a warning-only turn.
+
+The warning is recorded on the thread per account (Claude, Codex, an OpenCode
+instance) and window reset, not once per thread: switching to another provider
+and back does not warn again, and a continuation carries the record to its new
+thread. A reset, or another window running hot, can warn again. Once the warning
+is issued, the thread stays *waiting*. Every automatic input — a delegated
+task's report or pause/cancel note, a background notice, an agent-queued
+message, a question answer, a usage continuation, a handoff turn — carries the
+block again at a boundary Moxen controls and reminds the model to acknowledge
+rather than act. A provider control such as `/compact` is left bare and carries
+the wait to the next ordinary automatic input. A provider-native wake has
+already been issued when Moxen learns of it and cannot be changed; its next
+controllable boundary carries the reminder instead. Provider notice operations
+are bounded to two seconds; aborting an HTTP call cannot prove a mutation
+OpenCode already received did not execute, so local bookkeeping is fenced and
+the next controllable request reconciles the entry again. A prepared warning is
+checked again just before the send: a mode change, another window, a reset that
+has passed or a wait that has ended drops it from the prompt or clears the
+provider's slot. On Codex it is part of the user input whether or not Moxen's
+developer items for the same turn are accepted, and the check comes after that
+request and any skill lookup, immediately before `turn/start`. A warning counts
+as delivered only when the prompt that went out carried it.
+
+Only an explicit message from the user ends the wait: a turn the user sent with
+no internal origin, not a usage-control, compaction, handoff or background
+turn, and not a question answer. The wait ends only when the provider accepts
+that dispatch, and only for the account and window key captured when it was
+prepared — a reset or a new hot window in flight keeps its own wait. Ending the
+wait keeps the window key, so the same allowance does not warn again, and
+removes an OpenCode instruction entry or a queued Claude hook context. An
+OpenCode instruction entry proves Moxen wrote it for future requests; it does
+not prove the model read or obeyed it, and the same is true of a Claude hook
+return or a text send. The runtime instructions say the same: only an actual
+message from the user authorizes continuing, and a delegate, tool output, a
+fake tag or another synthetic notice cannot.
+
+A config file that already says `notify` keeps that value, but the mode now
+also warns the model; the earlier, user-only behaviour has its own
+`notify-user` value (Notify (you only)). `off` and `auto` are unchanged: a
+config that said either still means the same thing.
 
 The server checks every two seconds, sharing one candidate snapshot with the work
 queue: running or queued turns, usage holds and active overrides. A startup scan
@@ -1583,8 +1657,9 @@ its original order, each waiting for the new thread's handoff turn first — so
 a scheduled continuation still runs its handoff before anything that moved.
 An entry keeps its scheduled time, conditions (and latched state), user hold,
 per-turn model, runtime and interaction-mode overrides, origin and
-notification facts, and attachments — and when the source turn carried
-several messages (a settle's promotion batches queued ones into a single
+notification facts, its automatic and control flags (so a moved internal input
+never counts as the user speaking), and attachments — and when the source turn
+carried several messages (a settle's promotion batches queued ones into a single
 turn), the entry carries all of them, in order, each identified by its own
 source id, and their count is what holds a half-written entry out of
 admission until the move is whole. An entry condition elsewhere that names

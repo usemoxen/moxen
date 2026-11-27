@@ -34,9 +34,9 @@ export const INSERT_TURN = `INSERT INTO turns (
 )`;
 
 export const INSERT_MESSAGE = `INSERT INTO messages (
-  id, thread_id, turn_id, role, origin, created_at, text, original_text, attachments, notification
+  id, thread_id, turn_id, role, origin, created_at, text, original_text, attachments, notification, automatic, control
 ) VALUES (
-  $id, $thread_id, $turn_id, $role, $origin, $created_at, $text, $original_text, $attachments, $notification
+  $id, $thread_id, $turn_id, $role, $origin, $created_at, $text, $original_text, $attachments, $notification, $automatic, $control
 )`;
 
 export const INSERT_ACTIVITY = `INSERT INTO activities (

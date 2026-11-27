@@ -22,7 +22,7 @@ import * as Stream from "effect/Stream";
 import { DEFAULT_CONFIG } from "../config.js";
 import { CliError } from "../errors.js";
 import type { McpServerSpec } from "../mcp.js";
-import type { ProviderAdapterCapabilities, ProviderRuntimeEvent, SideAnswer, SideQuestionInput } from "../providers/spi.js";
+import type { NoticeReconcileOutcome, NoticeReconcileRequest, ProviderAdapterCapabilities, ProviderRuntimeEvent, SideAnswer, SideQuestionInput } from "../providers/spi.js";
 import { runProcess } from "../infra/process.js";
 import { rmTempAsync } from "./tmp.js";
 import { openThreadStore, type ThreadStore } from "../threads/store.js";
@@ -65,6 +65,17 @@ class HarnessDriver implements TurnDriver {
     private readonly onStopSession?: (threadId: string) => void,
     /** Stand in for a driver that takes Moxen's notices as developer items (Codex). */
     capabilities?: ProviderAdapterCapabilities,
+    notice?: {
+      readonly mode: "delivered" | "queued" | "fails" | "hangs";
+      readonly onNotice?: (threadId: string, text: string) => void;
+      readonly onClear?: (threadId: string) => void;
+      readonly onSignal?: (threadId: string, signal?: AbortSignal) => void;
+      readonly gate?: (threadId: string, request: NoticeReconcileRequest) => Promise<void>;
+    },
+    private readonly gates?: {
+      readonly send?: (input: SentTurn) => Promise<void>;
+      readonly answer?: (input: SentTurn) => Promise<void>;
+    },
   ) {
     if (capabilities) this.capabilities = capabilities;
     // Only a driver whose provider takes mid-turn input has the method, as with the real ones.
@@ -93,6 +104,29 @@ class HarnessDriver implements TurnDriver {
       }
     }
     if (sideQuestion) this.sideQuestion = sideQuestion;
+    if (notice) {
+      this.reconcileNotice = (threadId, request, signal) => {
+        notice.onSignal?.(threadId, signal);
+        if (notice.mode === "fails") return Effect.fail(new CliError("NOTICE_FAILED", "Harness driver could not reconcile the notice."));
+        if (notice.mode === "hangs") {
+          if (request.kind === "arm") notice.onNotice?.(threadId, request.text);
+          return Effect.never;
+        }
+        return Effect.tryPromise({
+          try: async () => {
+            await notice.gate?.(threadId, request);
+            if (signal?.aborted === true) return "skipped" as const;
+            if (request.kind === "clear") {
+              notice.onClear?.(threadId);
+              return "cleared" as const;
+            }
+            notice.onNotice?.(threadId, request.text);
+            return notice.mode === "queued" ? "armed" as const : "issued" as const;
+          },
+          catch: (cause) => new CliError("NOTICE_FAILED", "Harness driver could not reconcile the notice.", { cause }),
+        });
+      };
+    }
   }
 
   steerTurn?: NonNullable<TurnDriver["steerTurn"]>;
@@ -103,6 +137,8 @@ class HarnessDriver implements TurnDriver {
 
   /** Only where the test gave the driver one, as the Codex driver does for Moxen's notices. */
   readonly capabilities?: ProviderAdapterCapabilities;
+
+  reconcileNotice?: (threadId: string, request: NoticeReconcileRequest, signal?: AbortSignal) => Effect.Effect<NoticeReconcileOutcome, CliError>;
 
   /** Only where the test gave the provider one, as with the real drivers that can copy a session. */
   sideQuestion?: (input: SideQuestionInput) => Promise<SideAnswer>;
@@ -148,6 +184,7 @@ class HarnessDriver implements TurnDriver {
       try: async () => {
         if (this.behavior === "failing") throw new Error("harness driver cannot start turns");
         this.onSendTurn?.({ threadId: input.threadId, prompt: input.prompt, ...(input.notices ? { notices: input.notices } : {}), ...(input.images ? { images: input.images } : {}) });
+        await this.gates?.send?.({ threadId: input.threadId, prompt: input.prompt, ...(input.notices ? { notices: input.notices } : {}), ...(input.images ? { images: input.images } : {}) });
         this.turn += 1;
         const turnId = `driver-turn-${this.turn}`;
         this.prompts.set(turnId, input.prompt);
@@ -177,6 +214,7 @@ class HarnessDriver implements TurnDriver {
       });
     }
     const prompt = this.prompts.get(turnId) ?? "";
+    await this.gates?.answer?.({ threadId, prompt });
     return {
       status: "completed",
       text: `Completed: ${prompt}`,
@@ -233,8 +271,22 @@ export interface TestHarnessOptions {
    * Off by default, so the prompt the other tests read stays one text.
    */
   readonly developerNotices?: boolean;
+  /** Which providers' drivers have a runtime-context notice channel, and how it answers. The others have none. */
+  readonly notices?: Partial<Record<"claude" | "codex" | "opencode" | "harness" | "antigravity", "delivered" | "queued" | "fails" | "hangs">>;
+  /** Sees each notice a runtime-context channel took. */
+  readonly onNotice?: (threadId: string, text: string) => void;
+  /** Sees each notice clear. */
+  readonly onNoticeCleared?: (threadId: string) => void;
+  /** Sees the abort signal handed to a provider notice reconciliation. */
+  readonly onNoticeSignal?: (threadId: string, signal?: AbortSignal) => void;
+  /** Holds a provider notice reconciliation before it returns. */
+  readonly noticeGate?: (threadId: string, request: NoticeReconcileRequest) => Promise<void>;
   /** Answers `/btw` for these providers; the others have no `sideQuestion`, so they are `SIDE_QUESTION_UNSUPPORTED`. */
   readonly sideQuestions?: Partial<Record<"claude" | "codex" | "opencode" | "harness" | "antigravity", (input: SideQuestionInput) => Promise<SideAnswer>>>;
+  /** Holds a provider send before it resolves (the acceptance boundary). */
+  readonly sendGate?: (input: SentTurn) => Promise<void>;
+  /** Holds a provider answer after the prompt was accepted. */
+  readonly answerGate?: (input: SentTurn) => Promise<void>;
 }
 
 function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
@@ -243,7 +295,14 @@ function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
     const mode = kind === undefined ? undefined : options.steering?.[kind];
     const sideQuestion = kind === undefined ? undefined : options.sideQuestions?.[kind];
     const capabilities = options.developerNotices ? { sessionModelSwitch: "in-session", developerNotices: true } as const : undefined;
-    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion, options.onStopSession, capabilities);
+    const noticeMode = kind === undefined ? undefined : options.notices?.[kind];
+    const notice = noticeMode
+      ? { mode: noticeMode, ...(options.onNotice ? { onNotice: options.onNotice } : {}), ...(options.onNoticeCleared ? { onClear: options.onNoticeCleared } : {}), ...(options.onNoticeSignal ? { onSignal: options.onNoticeSignal } : {}), ...(options.noticeGate ? { gate: options.noticeGate } : {}) }
+      : undefined;
+    const gates = options.sendGate || options.answerGate
+      ? { ...(options.sendGate ? { send: options.sendGate } : {}), ...(options.answerGate ? { answer: options.answerGate } : {}) }
+      : undefined;
+    return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion, options.onStopSession, capabilities, notice, gates);
   };
   return {
     claude: factory("claude"), codex: factory("codex"), opencode: factory("opencode"),

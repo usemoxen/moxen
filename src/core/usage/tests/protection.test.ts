@@ -8,9 +8,9 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeDriver } from "../../providers/claude/driver.js";
 import { FakeTransport, initMessage, successResult } from "../../providers/claude/tests/fakes.js";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, holdPromotedTurn, startBackgroundTurn, settleThread, updateThreadMeta, trackContinuation, untrackContinuation } from "../../threads/threads.js";
-import { flushTurnRunners, type TurnDriver } from "../../threads/execute.js";
-import { continueThread, editWorkQueue, flushTaskNotifications, queueTaskNotification, recoverTaskNotifications, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
+import { createThread, sendTurn, openTurn, completeTurn, interruptTurn, failUnstartedTurn, holdPromotedTurn, startBackgroundTurn, settleThread, updateThreadMeta, trackContinuation, untrackContinuation } from "../../threads/threads.js";
+import { dispatchUsageNotice, flushTurnRunners, usageNoticeReserved, type TurnDriver } from "../../threads/execute.js";
+import { continueThread, editWorkQueue, flushTaskNotifications, queueTaskNotification, recoverTaskNotifications, runDueScheduledTurn, runWorkQueue, scheduleUsageContinue, startTurn, type OperationContext } from "../../threads/operations.js";
 import { parseQueuePolicy } from "../../threads/queue.js";
 import { openThreadStore } from "../../threads/store.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -20,6 +20,9 @@ import { UsageProtection, USAGE_CANDIDATE_RESCAN_MS, WRAP_UP_PROMPT } from "../p
 import { UsageForecaster } from "../forecast.js";
 import { modelPriceFor, usageCost } from "../prices.js";
 import { buildHandoff } from "../../threads/handoff.js";
+import { USAGE_CONTINUE_PROMPT } from "../../threads/views.js";
+import { CodexDriver } from "../../providers/codex/driver.js";
+import { FakeCodexTransport } from "../../providers/codex/tests/fakes.js";
 
 afterEach(resetUsageLimitsForTests);
 
@@ -29,10 +32,20 @@ async function noticeBatches(root: string): Promise<Record<string, unknown>> {
   return Object.fromEntries(Object.entries(raw).map(([parent, entries]) => [parent, entries.map(({ id: _id, ...rest }) => rest)]));
 }
 
-async function world(provider: "claude" | "codex" = "codex", driverOverride?: TurnDriver) {
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function world(provider: "claude" | "codex" = "codex", driverOverride?: TurnDriver, options: Parameters<typeof testHarness>[0] = {}) {
   const sent: string[] = [];
   const prompts: string[] = [];
-  const harness = await testHarness({ onSendTurn: (turn) => { sent.push(turn.threadId); prompts.push(turn.prompt); } });
+  const harness = await testHarness({ ...options, onSendTurn: (turn) => {
+    sent.push(turn.threadId);
+    prompts.push(turn.prompt);
+    options.onSendTurn?.(turn);
+  } });
   const drivers = new Map<string, TurnDriver>();
   const ctx: OperationContext = { store: harness.store, storeRoot: harness.root, config: { ...harness.config, usageProtection: "auto", usageRecovery: "sequential" }, driverFor: (id) => {
     if (driverOverride) return driverOverride;
@@ -61,6 +74,14 @@ async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId
   const turns = await w.store.readTurns(threadId);
   for (const turn of started) expect(turns.find((settled) => settled.id === turn.id)?.status).toBe("completed");
   expect(openTurn(turns)).toBeNull();
+}
+
+/** A waiting Codex warning, written under the thread lock: a run in flight rewrites the record too, from the copy it read. */
+async function writeWarningBesideRun(store: OperationContext["store"], threadId: string, reset: string): Promise<void> {
+  await store.withThreadLock(threadId, async () => store.writeThreadRecord({
+    ...(await store.readThreadRecord(threadId))!,
+    usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+  }));
 }
 
 describe("usage protection", () => {
@@ -950,9 +971,9 @@ describe("usage protection", () => {
     w.guard.close();
   });
 
-  it("notify mode leaves work running until requested, and cancellation keeps queued messages unsent", async () => {
+  it("notify (you only) leaves work running until requested, and cancellation keeps queued messages unsent", async () => {
     const w = await world();
-    w.ctx.config.usageProtection = "notify";
+    w.ctx.config.usageProtection = "notify-user";
     const id = await w.make("notify");
     recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: null }]);
     await w.guard.tick();
@@ -967,6 +988,987 @@ describe("usage protection", () => {
     expect(w.guard.read().queue).toEqual([]);
     expect(openTurn(await w.store.readTurns(id))).toBeNull();
     expect((await w.store.readTurns(id)).find((turn) => turn.id === queued.turn.id)?.status).toBe("queued");
+  });
+
+  it("Notify hands the warning to a runtime-context channel, never a user steer, and confirms it once", async () => {
+    const notices: string[] = [];
+    const steers: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true,
+      steering: { codex: "delivers" },
+      onSteer: (_threadId, text) => steers.push(text),
+      notices: { codex: "queued" },
+      onNotice: (_threadId, text) => notices.push(text),
+    });
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "warned", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "Finish the feature" });
+    const now = Date.now();
+    const firstReset = new Date(now + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: firstReset }]);
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      await w.guard.tick(now);
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain("<moxen-usage-notice>");
+      expect(notices[0]).toContain("Session: 96% used");
+      // The runtime channel is the only delivery: no user steer, no user turn.
+      expect(steers).toEqual([]);
+      expect(w.prompts).toEqual(["Finish the feature"]);
+      const record = (await w.store.readThreadRecord(thread.id))!;
+      expect(record.usageNotices?.codex).toMatchObject({ provider: "codex", delivered: null, waiting: true, windows: [{ id: "session", resetsAt: firstReset }] });
+      // The provider confirms when the hook actually puts it into a request.
+      w.guard.observe({ type: "usage.notice.issued", provider: "codex", threadId: thread.id, key: record.usageNotices!.codex!.key, attemptId: record.usageNotices!.codex!.attemptId! });
+      await w.guard.tick(now + 2000);
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ delivered: "runtime", waiting: true });
+      expect(notices).toHaveLength(1);
+      expect(steers).toEqual([]);
+      // A reconnected coordinator reads the same record and stays quiet.
+      w.guard.close();
+      const restarted = new UsageProtection(async () => w.ctx);
+      try {
+        await restarted.tick(now + 4000);
+        expect(notices).toHaveLength(1);
+        // The window really reset: the old record is dropped, then a new hot window warns again.
+        recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 10, exhausted: false, resetsAt: new Date(now + 7200_000).toISOString() }]);
+        await restarted.tick(now + 6000);
+        expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex ?? null).toBeNull();
+        recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 97, exhausted: false, resetsAt: new Date(now + 10_800_000).toISOString() }]);
+        await restarted.tick(now + 8000);
+        expect(notices).toHaveLength(2);
+      } finally {
+        restarted.close();
+      }
+    } finally {
+      await interruptTurn(w.store, thread.id, running.turn.id);
+      await flushTurnRunners();
+    }
+  });
+
+  it("Notify leaves a warning pending when the provider has neither a runtime channel nor mid-turn input", async () => {
+    const w = await world("codex", undefined, { leaveTurnsRunning: true });
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "owed", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "Finish the feature" });
+    const now = Date.now();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: new Date(now + 3600_000).toISOString() }]);
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      await w.guard.tick(now);
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ provider: "codex", delivered: null, waiting: true });
+      expect(w.prompts).toHaveLength(1);
+      await w.guard.tick(now + 2000);
+      expect(w.prompts).toHaveLength(1);
+    } finally {
+      await interruptTurn(w.store, thread.id, running.turn.id);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("Notify keeps automatic inputs acknowledgement-only, and only the user's own message ends the wait", async () => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("next input");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: {
+        codex: {
+          key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true,
+          windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }],
+        },
+      },
+    });
+    try {
+      const automatic = await startTurn(w.ctx, { threadId: id, prompt: "A task you delegated has settled.", origin: "task-notification" });
+      await automatic.run;
+      expect(w.prompts.at(-1)).toContain("<moxen-usage-notice>");
+      expect(w.prompts.at(-1)).toContain("runtime notice from Moxen");
+      expect(w.prompts.at(-1)).toContain("The input this warning accompanies is automatic");
+      expect(w.prompts.at(-1)).toContain("A task you delegated has settled.");
+      const explicit = await startTurn(w.ctx, { threadId: id, prompt: "Keep working" });
+      await explicit.run;
+      expect(w.prompts.at(-1)).toBe("Keep working");
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: false });
+      const after = await startTurn(w.ctx, { threadId: id, prompt: "Another task settled.", origin: "task-notification" });
+      await after.run;
+      expect(w.prompts.at(-1)).toBe("Another task settled.");
+    } finally {
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("persists a Claude issue receipt at the boundary, before a restart can reissue it", async () => {
+    const w = await world("codex", undefined, { notices: { codex: "queued" } });
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("receipt");
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, attemptId: "a1", windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    const event = { type: "usage.notice.issued" as const, provider: "codex" as const, threadId: id, key: `codex:session@${reset}`, attemptId: "a1" };
+    await w.guard.persistNoticeIssued(event);
+    expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ delivered: "runtime", waiting: true });
+    // A restarted coordinator sees the persisted receipt without a tick.
+    w.guard.close();
+    const restarted = new UsageProtection(async () => w.ctx);
+    try {
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ delivered: "runtime" });
+      await restarted.tick();
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ delivered: "runtime", attemptId: "a1" });
+    } finally {
+      restarted.close();
+    }
+  });
+
+  it("never lets a competing dispatch overwrite and then delete another reservation", async () => {
+    const w = await world();
+    const id = await w.make("reservation owner");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const entered = deferred();
+    const gate = deferred();
+    const base = {
+      store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
+      provenance: "automatic" as const, kind: "message" as const, trigger: "dispatch" as const,
+    };
+    try {
+      const a = dispatchUsageNotice({
+        ...base,
+        mode: async () => { entered.resolve(); await gate.promise; return "notify"; },
+      });
+      await entered.promise;
+      const b = dispatchUsageNotice({ ...base, mode: async () => "notify" });
+      gate.resolve();
+      const first = await a;
+      await first.finish(false);
+      const second = await b;
+      // B owns its own reservation; A's rejection must not have removed it.
+      expect(usageNoticeReserved(id)).toBe(true);
+      await second.finish(false);
+      expect(usageNoticeReserved(id)).toBe(false);
+    } finally {
+      gate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("discards a prepared runtime notice when the mode changes before send", async () => {
+    const noticeGate = deferred();
+    const noticeEntered = deferred();
+    const clears: string[] = [];
+    const w = await world("codex", undefined, {
+      notices: { codex: "delivered" },
+      onNoticeCleared: (threadId) => clears.push(threadId),
+      noticeGate: async () => { noticeEntered.resolve(); await noticeGate.promise; },
+    });
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("mode switch");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const started = startTurn(w.ctx, { threadId: id, prompt: "task text", origin: "task-notification" });
+      await noticeEntered.promise;
+      w.ctx.config.usageProtection = "notify-user";
+      noticeGate.resolve();
+      await started;
+      await expect.poll(() => clears, { timeout: 10_000 }).not.toHaveLength(0);
+      await expect.poll(() => usageNoticeReserved(id), { timeout: 10_000 }).toBe(false);
+      expect(w.prompts.at(-1)).toBe("task text");
+    } finally {
+      noticeGate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("discards a prepared text prefix when the mode changes before send", async () => {
+    const w = await world();
+    let mode: "notify" | "notify-user" = "notify";
+    const id = await w.make("text mode switch");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    const notice = await dispatchUsageNotice({
+      store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
+      provenance: "automatic", kind: "message", trigger: "dispatch",
+      mode: async () => mode,
+    });
+    expect(notice.warning).toContain("<moxen-usage-notice>");
+    mode = "notify-user";
+    expect(await notice.revalidate()).toBeNull();
+    await notice.finish(false);
+    await flushTurnRunners();
+    w.guard.close();
+  });
+
+  it("holds a follow-up promoted by an unstarted failure, and admission sends it once", async () => {
+    const w = await world();
+    const id = await w.make("unstarted");
+    const first = openTurn(await w.store.readTurns(id))!;
+    const follow = await sendTurn(w.store, id, { prompt: "follow-up", delivery: "queue" });
+    await failUnstartedTurn(w.store, id, first.id, { error: "required notice removal failed" });
+    const held = (await w.store.readTurns(id)).find((turn) => turn.id === follow.turn.id);
+    expect(held).toMatchObject({ status: "queued", heldAtSettle: true, owner: null });
+    const before = w.prompts.length;
+    await runWorkQueue(w.ctx);
+    await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(before + 1);
+    expect(w.prompts.at(-1)).toBe("follow-up");
+    await flushTurnRunners();
+    w.guard.close();
+  });
+
+  it("holds a follow-up promoted by a failed promoted turn", async () => {
+    const w = await world();
+    const id = await w.make("promoted failure");
+    const first = openTurn(await w.store.readTurns(id))!;
+    const second = await sendTurn(w.store, id, { prompt: "second", delivery: "queue" });
+    await completeTurn(w.store, id, first.id, { text: "done" });
+    const promoted = (await w.store.readTurns(id)).find((turn) => turn.id === second.turn.id)!;
+    expect(promoted.status).toBe("running");
+    const third = await sendTurn(w.store, id, { prompt: "third", delivery: "queue" });
+    await failUnstartedTurn(w.store, id, promoted.id, { error: "preparation failed" });
+    const held = (await w.store.readTurns(id)).find((turn) => turn.id === third.turn.id);
+    expect(held).toMatchObject({ status: "queued", heldAtSettle: true, owner: null });
+    await flushTurnRunners();
+    w.guard.close();
+  });
+
+  it("bounds a stalled notice reconciliation while other threads keep moving", async () => {
+    const signals: AbortSignal[] = [];
+    const notices: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true, notices: { codex: "delivered", claude: "hangs" },
+      onNotice: (_threadId, text) => notices.push(text),
+      onNoticeSignal: (_threadId, signal) => { if (signal) signals.push(signal); },
+    });
+    w.ctx.config.usageProtection = "notify";
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    const codex = await w.make("codex row");
+    const claude = (await createThread(w.store, {
+      projectId: "p", title: "claude row", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" },
+    })).id;
+    const claudeTurn = await sendTurn(w.store, claude, { prompt: "claude work" });
+    w.ctx.config.usageProtection = "notify";
+    try {
+      const tick = w.guard.tick();
+      await expect.poll(() => notices.length, { timeout: 1_000 }).toBeGreaterThanOrEqual(1);
+      await tick;
+      expect(signals.some((signal) => signal.aborted)).toBe(true);
+    } finally {
+      await interruptTurn(w.store, codex).catch(() => undefined);
+      await interruptTurn(w.store, claude, claudeTurn.turn.id).catch(() => undefined);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  }, 30_000);
+
+  it("a required clear timeout sends no prompt and leaves the wait intact", async () => {
+    const w = await world("codex", undefined, { notices: { codex: "hangs" } });
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("clear timeout");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "runtime", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const started = startTurn(w.ctx, { threadId: id, prompt: "Keep going" });
+      const rejected = expect(started).rejects.toMatchObject({ code: "NOTICE_RECONCILE_TIMEOUT" });
+      await rejected;
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+      expect(w.prompts).not.toContain("Keep going");
+    } finally {
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  }, 30_000);
+
+  it("a held explicit dispatch blocks a forecast re-arm and ends only the captured wait", async () => {
+    const gate = deferred();
+    const notices: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true, notices: { codex: "delivered" },
+      onNotice: (_threadId, text) => notices.push(text),
+      sendGate: async () => gate.promise,
+    });
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("held explicit");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const started = await startTurn(w.ctx, { threadId: id, prompt: "Keep going" });
+      await expect.poll(() => w.prompts.includes("Keep going"), { timeout: 10_000 }).toBe(true);
+      await w.guard.tick();
+      expect(notices).toEqual([]);
+      gate.resolve();
+      await expect.poll(() => usageNoticeReserved(id), { timeout: 10_000 }).toBe(false);
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: false });
+    } finally {
+      gate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("releases the steer's reservation when the final notice clear fails, so later sends still go out", async () => {
+    let failClear = false;
+    let armed = false;
+    const steers: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true, steering: { codex: "delivers" }, notices: { codex: "delivered" },
+      onSteer: (_threadId, text) => steers.push(text),
+      noticeGate: async (_threadId, request) => {
+        if (request.kind === "arm" && !armed) {
+          armed = true;
+          // The mode changes between preparation and the send, and the clear
+          // that revalidation then owes fails.
+          w.ctx.config.usageProtection = "off";
+          failClear = true;
+        } else if (request.kind === "clear" && failClear) {
+          failClear = false;
+          throw new Error("clear failed");
+        }
+      },
+    });
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "steer clear fails", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
+      w.ctx.config.usageProtection = "notify";
+      await writeWarningBesideRun(w.store, thread.id, new Date(Date.now() + 3_600_000).toISOString());
+      await expect(startTurn(w.ctx, { threadId: thread.id, prompt: "task report", automatic: true, delivery: "steer" }))
+        .rejects.toMatchObject({ code: "NOTICE_FAILED" });
+      expect(steers).toEqual([]);
+      expect(usageNoticeReserved(thread.id)).toBe(false);
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+      const next = await startTurn(w.ctx, { threadId: thread.id, prompt: "Keep going", delivery: "steer" });
+      expect(next.steerDelivered).toBe(true);
+      expect(steers).toEqual(["Keep going"]);
+    } finally {
+      await interruptTurn(w.store, thread.id, running.turn.id).catch(() => undefined);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("hands back a follower queued while a recovered turn's notice reconciliation was failing", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    let failing = false;
+    const w = await world("codex", undefined, {
+      notices: { codex: "delivered" },
+      noticeGate: async () => {
+        if (!failing) return;
+        failing = false;
+        entered.resolve();
+        await gate.promise;
+        throw new Error("reconcile failed");
+      },
+    });
+    const id = await w.make("recovered failure");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const recovered = (await sendTurn(w.store, id, { prompt: "recovered", queue: parseQueuePolicy({ conditions: [] }) })).turn;
+    try {
+      failing = true;
+      const admitted = runDueScheduledTurn(w.ctx, id);
+      await entered.promise;
+      const follower = (await sendTurn(w.store, id, { prompt: "follower", delivery: "queue" })).turn;
+      expect(follower.status).toBe("queued");
+      gate.resolve();
+      await admitted;
+      const turns = await w.store.readTurns(id);
+      expect(turns.find((turn) => turn.id === recovered.id)).toMatchObject({ status: "failed" });
+      // Not left `running` with no runner: back in the queue for admission.
+      expect(turns.find((turn) => turn.id === follower.id)).toMatchObject({ status: "queued", heldAtSettle: true, owner: null });
+      await runWorkQueue(w.ctx);
+      await expect.poll(async () => (await w.store.readTurns(id)).find((turn) => turn.id === follower.id)?.status, { timeout: 10_000, interval: 10 }).toBe("completed");
+      expect(w.prompts.filter((prompt) => prompt === "follower")).toHaveLength(1);
+    } finally {
+      gate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("holds no notice reservation when a recovered turn's held-notice read fails", async () => {
+    const w = await world();
+    const id = await w.make("held notice read");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    await sendTurn(w.store, id, { prompt: "recovered", queue: parseQueuePolicy({ conditions: [] }) });
+    const read = w.store.readDelegations.bind(w.store);
+    // Thrown outright, past the read's own fallback, and only for that caller:
+    // the failure lands wherever the recovery asks for the held notice.
+    const spy = vi.spyOn(w.store, "readDelegations").mockImplementation(() => {
+      if (new Error().stack?.includes("heldNoticeParent")) throw new Error("injected held-notice failure");
+      return read();
+    });
+    try {
+      await expect(runDueScheduledTurn(w.ctx, id)).rejects.toThrow("injected held-notice failure");
+      expect(usageNoticeReserved(id)).toBe(false);
+      expect(w.prompts).not.toContain("recovered");
+    } finally {
+      spy.mockRestore();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it.each([
+    ["text", "reset"], ["text", "answered"], ["runtime", "reset"], ["runtime", "answered"],
+  ] as const)("drops a prepared %s warning when its wait ends before the send (%s)", async (channel, ending) => {
+    const clears: string[] = [];
+    const w = await world("codex", undefined, channel === "runtime"
+      ? { notices: { codex: "delivered" }, onNoticeCleared: (threadId) => clears.push(threadId) }
+      : {});
+    const id = await w.make("expiring");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    // Only the clock is faked: the reset passes exactly when the test says.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const now = Date.parse("2026-03-01T12:00:00.000Z");
+      vi.setSystemTime(now);
+      const reset = new Date(now + 1000).toISOString();
+      const key = `codex:session@${reset}`;
+      await w.store.writeThreadRecord({
+        ...(await w.store.readThreadRecord(id))!,
+        usageNotices: { codex: { key, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+      });
+      const notice = await dispatchUsageNotice({
+        store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
+        provenance: "automatic", kind: "message", trigger: "dispatch",
+        mode: async () => "notify",
+      });
+      if (channel === "text") expect(notice.warning).toContain("<moxen-usage-notice>");
+      expect(clears).toEqual([]);
+      if (ending === "reset") {
+        vi.setSystemTime(now + 2000);
+      } else {
+        const thread = (await w.store.readThreadRecord(id))!;
+        await w.store.writeThreadRecord({ ...thread, usageNotices: { codex: { ...thread.usageNotices!.codex!, waiting: false } } });
+      }
+      // The record still has the key the plan was made for.
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex?.key).toBe(key);
+      expect(await notice.revalidate()).toBeNull();
+      if (channel === "runtime") expect(clears).toEqual([id]);
+      await notice.finish(true);
+      // A stripped text warning was never delivered.
+      if (channel === "text") expect((await w.store.readThreadRecord(id))?.usageNotices?.codex?.delivered).toBeNull();
+      expect(usageNoticeReserved(id)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it.each([
+    ["fresh", "injects"], ["fresh", "refuses injection"], ["promoted", "injects"], ["promoted", "refuses injection"],
+  ] as const)("sends the warning in the prompt Codex really sends: %s dispatch, the app-server %s", async (path_, runtime) => {
+    const injects = runtime === "injects";
+    const transport = new FakeCodexTransport(injects ? {} : { failRequests: { "thread/inject_items": "thread/inject_items is not supported yet" } });
+    const driver = new CodexDriver({ transport });
+    const w = await world("codex", driver);
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "codex warning", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    // The conversation's own turns: a title request runs on a fork beside them.
+    const turnStarts = () => transport.sessions.flatMap((session) => session.server.requestsTo("turn/start"))
+      .filter((request) => (request.params as { threadId?: string }).threadId === "codex-thread-1");
+    const complete = () => transport.sessions[0]!.server.notify("turn/completed", { threadId: "codex-thread-1", turn: { status: "completed" } });
+    // A title the user chose is not synced, which the fake would leave waiting.
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(thread.id))!, titleSource: "user" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    const warn = () => writeWarningBesideRun(w.store, thread.id, reset);
+    try {
+      if (path_ === "fresh") {
+        await warn();
+        await startTurn(w.ctx, { threadId: thread.id, prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue" });
+      } else {
+        await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+        await expect.poll(() => turnStarts().length, { timeout: 10_000 }).toBe(1);
+        await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
+        await sendTurn(w.store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue", delivery: "queue" });
+        await warn();
+        complete();
+      }
+      const expected = path_ === "fresh" ? 1 : 2;
+      await expect.poll(() => turnStarts().length, { timeout: 10_000 }).toBe(expected);
+      const input = ((turnStarts().at(-1)!.params as { input: ReadonlyArray<{ type: string; text?: string }> }).input)
+        .map((block) => block.text ?? "").join("");
+      const injected = transport.sessions.flatMap((session) => session.server.requestsTo("thread/inject_items"))
+        .map((request) => JSON.stringify(request.params)).join("");
+      // Exactly once, as ordinary text, on whichever prompt went out.
+      expect(input.split("<moxen-usage-notice>")).toHaveLength(2);
+      expect(injected).not.toContain("<moxen-usage-notice>");
+      expect(input.includes(USAGE_CONTINUE_PROMPT)).toBe(!injects);
+      if (injects) expect(injected).toContain(JSON.stringify(USAGE_CONTINUE_PROMPT).slice(1, -1));
+      await expect.poll(async () => (await w.store.readThreadRecord(thread.id))?.usageNotices?.codex?.delivered, { timeout: 10_000 }).toBe("text");
+      complete();
+      await expect.poll(async () => openTurn(await w.store.readTurns(thread.id)), { timeout: 10_000 }).toBeNull();
+    } finally {
+      // Stopping first ends the title request the fake never answers.
+      await Effect.runPromise(driver.stopSession(thread.id)).catch(() => undefined);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  }, 30_000);
+
+  it.each([
+    ["fresh", "injects"], ["fresh", "refuses injection"], ["promoted", "injects"], ["promoted", "refuses injection"],
+  ] as const)("sends no warning when Notify is switched off while Codex's injection is in flight: %s dispatch, the app-server %s", async (path_, runtime) => {
+    const injects = runtime === "injects";
+    const entered = deferred();
+    const gate = deferred();
+    const transport = new FakeCodexTransport({
+      ...(injects ? {} : { failRequests: { "thread/inject_items": "thread/inject_items is not supported yet" } }),
+      beforeResponse: async (method) => {
+        if (method !== "thread/inject_items") return;
+        entered.resolve();
+        await gate.promise;
+      },
+    });
+    const driver = new CodexDriver({ transport });
+    const w = await world("codex", driver);
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "codex late mode", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(thread.id))!, titleSource: "user" });
+    const turnStarts = () => transport.sessions.flatMap((session) => session.server.requestsTo("turn/start"))
+      .filter((request) => (request.params as { threadId?: string }).threadId === "codex-thread-1");
+    const complete = () => transport.sessions[0]!.server.notify("turn/completed", { threadId: "codex-thread-1", turn: { status: "completed" } });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    const warn = () => writeWarningBesideRun(w.store, thread.id, reset);
+    try {
+      if (path_ === "fresh") {
+        await warn();
+        // Not awaited: the send is parked inside the injection.
+        void startTurn(w.ctx, { threadId: thread.id, prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue" }).catch(() => undefined);
+      } else {
+        await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+        await expect.poll(() => turnStarts().length, { timeout: 10_000 }).toBe(1);
+        await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
+        await sendTurn(w.store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue", delivery: "queue" });
+        await warn();
+        complete();
+      }
+      await entered.promise;
+      const before = turnStarts().length;
+      w.ctx.config.usageProtection = "notify-user";
+      gate.resolve();
+      await expect.poll(() => turnStarts().length, { timeout: 10_000 }).toBe(before + 1);
+      expect(JSON.stringify(turnStarts().at(-1)!.params)).not.toContain("<moxen-usage-notice>");
+      await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
+      // Nothing carried it, so it is still owed.
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ delivered: null, waiting: true });
+      complete();
+      await expect.poll(async () => openTurn(await w.store.readTurns(thread.id)), { timeout: 10_000 }).toBeNull();
+    } finally {
+      gate.resolve();
+      await Effect.runPromise(driver.stopSession(thread.id)).catch(() => undefined);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  }, 30_000);
+
+  it("does not fold input queued after a focused /compact in ahead of it", async () => {
+    const w = await world("claude");
+    const id = await w.make("focused control");
+    const first = openTurn(await w.store.readTurns(id))!;
+    const before = (await sendTurn(w.store, id, { prompt: "before control", delivery: "queue" })).turn;
+    const control = (await sendTurn(w.store, id, { prompt: "/compact keep details", delivery: "queue" })).turn;
+    const after = (await sendTurn(w.store, id, { prompt: "after control", delivery: "queue" })).turn;
+    const dispatched: string[] = [];
+    let current = first;
+    for (let at = 0; at < 3; at += 1) {
+      await completeTurn(w.store, id, current.id, { text: "done" });
+      current = openTurn(await w.store.readTurns(id))!;
+      dispatched.push((await w.store.readMessages(id)).filter((message) => message.turnId === current.id && message.role === "user").map((message) => message.text).join(" + "));
+    }
+    expect(dispatched).toEqual(["before control", "/compact keep details", "after control"]);
+    expect((await w.store.readTurns(id)).slice(1).map((turn) => turn.id)).toEqual([before.id, control.id, after.id]);
+    await completeTurn(w.store, id, current.id, { text: "done" });
+    w.guard.close();
+  });
+
+  it("keeps a legacy queued /compact standalone from an ordinary automatic batch, and does not authorize", async () => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("legacy control");
+    const first = openTurn(await w.store.readTurns(id))!;
+    const command = await sendTurn(w.store, id, { prompt: "/compact", origin: "task-notification", delivery: "queue" });
+    const ordinary = await sendTurn(w.store, id, { prompt: "ordinary automatic text", origin: "task-notification", delivery: "queue" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    await completeTurn(w.store, id, first.id, { text: "done" });
+    const turns = await w.store.readTurns(id);
+    // The command is standalone; the ordinary automatic message stays queued
+    // rather than being folded into it.
+    expect(turns.find((turn) => turn.id === command.turn.id)).toMatchObject({ status: "running" });
+    expect(turns.find((turn) => turn.id === ordinary.turn.id)).toMatchObject({ status: "queued" });
+    expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+    await flushTurnRunners();
+    w.guard.close();
+  });
+
+  it("a control held at dispatch neither re-arms nor authorizes", async () => {
+    const gate = deferred();
+    const notices: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true, notices: { codex: "delivered" },
+      onNotice: (_threadId, text) => notices.push(text),
+      sendGate: async () => gate.promise,
+    });
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("held control");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const started = await startTurn(w.ctx, { threadId: id, prompt: "/compact" });
+      await expect.poll(() => w.prompts.includes("/compact"), { timeout: 10_000 }).toBe(true);
+      await w.guard.tick();
+      expect(notices).toEqual([]);
+      gate.resolve();
+      await expect.poll(() => usageNoticeReserved(id), { timeout: 10_000 }).toBe(false);
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+    } finally {
+      gate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("an accepted send against K1 does not end K2's wait", async () => {
+    const gate = deferred();
+    const w = await world("codex", undefined, { leaveTurnsRunning: true, sendGate: async () => gate.promise });
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("k1 k2");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const k1 = new Date(Date.now() + 3_600_000).toISOString();
+    const k2 = new Date(Date.now() + 7_200_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: k2 }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${k1}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: k1 }] } },
+    });
+    try {
+      const started = await startTurn(w.ctx, { threadId: id, prompt: "Keep going" });
+      await expect.poll(() => w.prompts.includes("Keep going"), { timeout: 10_000 }).toBe(true);
+      // A new window replaces K1 while the send is in flight.
+      await w.store.writeThreadRecord({
+        ...(await w.store.readThreadRecord(id))!,
+        usageNotices: { codex: { key: `codex:session@${k2}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: k2 }] } },
+      });
+      gate.resolve();
+      await expect.poll(() => usageNoticeReserved(id), { timeout: 10_000 }).toBe(false);
+      const state = (await w.store.readThreadRecord(id))?.usageNotices?.codex;
+      expect(state).toMatchObject({ key: `codex:session@${k2}`, waiting: true });
+    } finally {
+      gate.resolve();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("removes a stale runtime entry after a cold attach and before the first prompt", async () => {
+    const order: string[] = [];
+    const harness = await testHarness();
+    const base = harness.drivers.codex!();
+    const driver = new Proxy(base, {
+      get(target, prop) {
+        if (prop === "reconcileNotice") {
+          // Called only after the executor attaches the session; the removal
+          // must therefore be recorded before the prompt is sent.
+          return () => Effect.sync(() => {
+            order.push("clear");
+            return "cleared" as const;
+          });
+        }
+        if (prop === "sendTurn") {
+          return (input: unknown) => { order.push("send"); return (target.sendTurn as (value: unknown) => unknown)(input); };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const ctx: OperationContext = { store: harness.store, storeRoot: harness.root, config: { ...harness.config, usageProtection: "notify-user" }, driverFor: () => driver as TurnDriver };
+    const thread = await createThread(harness.store, {
+      projectId: "p", title: "cold", env: { mode: "local", path: harness.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    await harness.store.writeThreadRecord({
+      ...(await harness.store.readThreadRecord(thread.id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: harness.store.nowIso(), delivered: "runtime", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const started = await startTurn(ctx, { threadId: thread.id, prompt: "resume" });
+      await started.run;
+      expect(order.indexOf("clear")).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf("clear")).toBeLessThan(order.indexOf("send"));
+    } finally {
+      await interruptTurn(harness.store, thread.id).catch(() => undefined);
+      await flushTurnRunners();
+    }
+  });
+
+  it("never decorates a provider control, and carries the wait to the next ordinary automatic input", async () => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("control");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const compacted = await startTurn(w.ctx, { threadId: id, prompt: "/compact" });
+      await compacted.run;
+      expect(w.prompts.at(-1)).toBe("/compact");
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+      const next = await startTurn(w.ctx, { threadId: id, prompt: "A task you delegated has settled.", origin: "task-notification" });
+      await next.run;
+      expect(w.prompts.at(-1)).toContain("<moxen-usage-notice>");
+      expect(w.prompts.at(-1)).toContain("A task you delegated has settled.");
+    } finally {
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("preserves the wait when an explicit steer or provider start is rejected", async () => {
+    const steered = await world("codex", undefined, {
+      leaveTurnsRunning: true, steering: { codex: "fails" }, notices: { codex: "delivered" },
+    });
+    steered.ctx.config.usageProtection = "notify";
+    const thread = await createThread(steered.store, {
+      projectId: "p", title: "failed steer", env: { mode: "local", path: steered.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const running = await startTurn(steered.ctx, { threadId: thread.id, prompt: "First" });
+    const reset = new Date(Date.now() + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await steered.store.writeThreadRecord({
+      ...(await steered.store.readThreadRecord(thread.id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: steered.store.nowIso(), delivered: "runtime", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      await expect.poll(() => steered.prompts.length, { timeout: 10_000 }).toBe(1);
+      const attempted = await startTurn(steered.ctx, { threadId: thread.id, prompt: "Keep going", delivery: "steer" });
+      expect(attempted.steerDelivered).toBe(false);
+      expect((await steered.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+    } finally {
+      await interruptTurn(steered.store, thread.id, running.turn.id);
+      await flushTurnRunners();
+      steered.guard.close();
+    }
+
+    const rejected = await world("codex", undefined, { failTurns: true, notices: { codex: "delivered" } });
+    rejected.ctx.config.usageProtection = "notify";
+    const thread2 = await createThread(rejected.store, {
+      projectId: "p", title: "rejected start", env: { mode: "local", path: rejected.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    await rejected.store.writeThreadRecord({
+      ...(await rejected.store.readThreadRecord(thread2.id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: rejected.store.nowIso(), delivered: "runtime", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const started = await startTurn(rejected.ctx, { threadId: thread2.id, prompt: "Keep going" });
+      await started.run;
+      expect((await rejected.store.readThreadRecord(thread2.id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+    } finally {
+      await flushTurnRunners();
+      rejected.guard.close();
+    }
+  });
+
+  it("toggling Notify off and on keeps the dedupe history for the same reset", async () => {
+    const notices: string[] = [];
+    const clears: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true, notices: { codex: "delivered" },
+      onNotice: (_threadId, text) => notices.push(text),
+      onNoticeCleared: (threadId) => clears.push(threadId),
+    });
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "toggle", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+    const reset = new Date(Date.now() + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      await w.guard.tick();
+      expect(notices).toHaveLength(1);
+      const first = (await w.store.readThreadRecord(thread.id))?.usageNotices?.codex;
+      expect(first).toMatchObject({ delivered: "runtime", waiting: true });
+      w.ctx.config.usageProtection = "notify-user";
+      await w.guard.tick();
+      expect(clears).not.toHaveLength(0);
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ key: first!.key, delivered: "runtime", waiting: true });
+      w.ctx.config.usageProtection = "notify";
+      await w.guard.tick();
+      expect(notices).toHaveLength(1);
+    } finally {
+      await interruptTurn(w.store, thread.id, running.turn.id);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("warns each account once across real A → B → A dispatches", async () => {
+    const notices: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true, notices: { codex: "delivered", claude: "delivered" },
+      onNotice: (_threadId, text) => notices.push(text),
+    });
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "accounts", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const reset = new Date(Date.now() + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    const codexTurn = await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      await w.guard.tick();
+      expect(notices).toHaveLength(1);
+      await completeTurn(w.store, thread.id, codexTurn.turn.id, { text: "done" });
+      const claudeTurn = await startTurn(w.ctx, { threadId: thread.id, prompt: "Second", modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5" } });
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(2);
+      await w.guard.tick();
+      expect(notices).toHaveLength(2);
+      await completeTurn(w.store, thread.id, claudeTurn.turn.id, { text: "done" });
+      const back = await startTurn(w.ctx, { threadId: thread.id, prompt: "Third" });
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(3);
+      await w.guard.tick();
+      expect(notices).toHaveLength(2);
+      const record = (await w.store.readThreadRecord(thread.id))!;
+      expect(record.usageNotices?.codex).toMatchObject({ delivered: "runtime" });
+      expect(record.usageNotices?.claude).toMatchObject({ delivered: "runtime" });
+      await interruptTurn(w.store, thread.id, back.turn.id);
+    } finally {
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("keeps the wait on a reset continuation and treats a mixed batch as explicit", async () => {
+    const w = await world();
+    w.ctx.config.usageProtection = "notify";
+    const id = await w.make("batches");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    const reset = new Date(Date.now() + 3600_000).toISOString();
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(id))!,
+      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+    });
+    try {
+      const resumed = await startTurn(w.ctx, {
+        threadId: id, prompt: "Resume the work.", scheduleReason: "usage-reset",
+        scheduledFor: new Date(Date.now() - 1000).toISOString(),
+      });
+      if (resumed.run === null) await runDueScheduledTurn(w.ctx, id);
+      else await resumed.run;
+      await expect.poll(() => w.prompts.at(-1), { timeout: 10_000 }).toContain("<moxen-usage-notice>");
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: true });
+      await expect.poll(async () => openTurn(await w.store.readTurns(id)) === null, { timeout: 10_000 }).toBe(true);
+      const mixed = await startTurn(w.ctx, { threadId: id, prompt: "A task settled.", origin: "task-notification" });
+      await mixed.run;
+      await expect.poll(async () => openTurn(await w.store.readTurns(id)) === null, { timeout: 10_000 }).toBe(true);
+      const user = await startTurn(w.ctx, { threadId: id, prompt: "Actually, keep going." });
+      await user.run;
+      expect(w.prompts.at(-1)).toBe("Actually, keep going.");
+      expect((await w.store.readThreadRecord(id))?.usageNotices?.codex).toMatchObject({ waiting: false });
+    } finally {
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
+  it("Notify (you only) shows the forecast but sends the model nothing", async () => {
+    const steers: string[] = [];
+    const notices: string[] = [];
+    const w = await world("codex", undefined, {
+      leaveTurnsRunning: true,
+      steering: { codex: "delivers" },
+      onSteer: (_threadId, text) => steers.push(text),
+      notices: { codex: "delivered" },
+      onNotice: (_threadId, text) => notices.push(text),
+    });
+    w.ctx.config.usageProtection = "notify-user";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "user only", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    const running = await startTurn(w.ctx, { threadId: thread.id, prompt: "Finish the feature" });
+    recordUsageWindows("codex", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: null }]);
+    try {
+      await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
+      await w.guard.tick();
+      expect(w.guard.read().forecasts[0]?.shouldWrap).toBe(true);
+      expect(steers).toEqual([]);
+      expect(notices).toEqual([]);
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex ?? null).toBeNull();
+      expect(w.prompts).toEqual(["Finish the feature"]);
+    } finally {
+      await interruptTurn(w.store, thread.id, running.turn.id);
+      await flushTurnRunners();
+      w.guard.close();
+    }
   });
 
   it("recovers a missing reset time when telemetry supplies it, and releases parallel threads together", async () => {

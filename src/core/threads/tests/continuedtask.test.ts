@@ -148,6 +148,30 @@ describe("a delegated task continued in a new thread", () => {
   });
 });
 
+describe("a continuation's usage warning history", () => {
+  it("carries the delivering thread's per-account warning so the same window does not warn again", async () => {
+    const w = await world();
+    const source = await w.make("warned");
+    const first = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, first.id, { text: "done" });
+    const at = w.store.nowIso();
+    await w.store.writeThreadRecord({
+      ...(await w.store.readThreadRecord(source.id))!,
+      usageNotices: {
+        codex: {
+          key: "codex:session@unknown", provider: "codex", raisedAt: at, delivered: "runtime", waiting: true,
+          windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: null }],
+        },
+      },
+    });
+    const continued = await continueThread(w.ctx, { threadId: source.id, automatic: true });
+    expect((await w.store.readThreadRecord(continued.threadId))?.usageNotices?.codex).toMatchObject({
+      key: "codex:session@unknown", delivered: "runtime", waiting: true,
+    });
+    await flushTurnRunners();
+  });
+});
+
 describe("an orchestrator continued in a new thread", () => {
   // Four threads plus a ten-second notification wait: a loaded runner does not fit in fifteen seconds.
   it("takes its running and idle tasks along: listed in the handoff, reporting to the new thread", async () => {

@@ -12,9 +12,9 @@ import { readFile } from "node:fs/promises";
 
 import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
-import { isCompactCommand } from "../providers/spi.js";
+import { isCompactCommand, isControlCommand } from "../providers/spi.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
-import { antigravityHoldsAutomaticDispatch, automaticDispatchPrompt, hasSnoozeConditions, loadTurnOrigins, providerExhausted, snoozeActive, turnOriginKey, type QueueCondition, type TurnOrigins } from "./queue.js";
+import { antigravityHoldsAutomaticDispatch, automaticDispatchPrompt, hasSnoozeConditions, loadTurnOrigins, providerExhausted, snoozeActive, turnOriginKey, userConsentTurn, type QueueCondition, type TurnOrigins } from "./queue.js";
 import { startedTurn } from "./views.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { isDraining, serverDrainingError } from "./drain.js";
@@ -623,6 +623,8 @@ export async function sendTurn(
         role: "user",
         text: prompt,
         createdAt: now,
+        ...(input.automatic === true ? { automatic: true as const } : {}),
+        ...(input.control === true ? { control: true as const } : {}),
         ...withAttachments,
         ...withOrigin,
       });
@@ -738,6 +740,8 @@ export async function sendTurn(
       ...(isCompactCommand(prompt) ? { maintenance: true as const } : {}),
       runtimeMode,
       interactionMode,
+      ...(input.automatic === true ? { automatic: true as const } : {}),
+      ...(input.control === true ? { control: true as const } : {}),
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
       ...(origin !== undefined ? { origin } : {}),
       ...(input.handoffOpen ? { handoffOpen: true as const } : {}),
@@ -769,6 +773,8 @@ export async function sendTurn(
       role: "user",
       text: prompt,
       createdAt: now,
+      ...(input.automatic === true ? { automatic: true as const } : {}),
+      ...(input.control === true ? { control: true as const } : {}),
       ...withAttachments,
       ...withOrigin,
       ...(origin === "task-notification" ? { queuedTaskNotice: true } : {}),
@@ -912,6 +918,7 @@ export async function startBackgroundTurn(
       owner: currentTurnOwner(),
       executionSeq,
       delivery: "background",
+      automatic: true,
       messageId: store.newId(),
       runtimeMode: admitted.runtimeMode,
       interactionMode: admitted.interactionMode,
@@ -1160,6 +1167,8 @@ export async function redeliverUnconfirmedSteers(
       prompt: text,
       delivery: "queue",
       ...(original?.origin ? { origin: original.origin } : {}),
+      ...(original?.automatic === true ? { automatic: true as const } : {}),
+      ...(original?.control === true ? { control: true as const } : {}),
       ...(original?.notification ? { notification: original.notification } : {}),
       ...(uploads.length > 0 ? { attachments: uploads } : {}),
       ...(wakeSettled ? { wakeSettled: true } : {}),
@@ -1417,11 +1426,12 @@ export type GateProviders = Pick<CliConfig, "providers">["providers"];
  * A maintenance turn (`/compact`) never folds either way: folded into an
  * ordinary follow-up it keeps the marker and hides the real reply, and an
  * ordinary message folded into it would send `/compact` as text no provider
- * runs as a compaction. It is also a batching boundary: only messages queued
- * on the same side of it travel with `next`, so nothing queued after a
- * `/compact` overtakes it. Each keeps its own turn.
+ * runs as a compaction. The same goes for any control in the provider's own
+ * grammar (Claude's `/compact <focus>`). Each is also a batching boundary:
+ * only messages queued on the same side of it travel with `next`, so nothing
+ * queued after it overtakes it. Each keeps its own turn.
  */
-async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode, gated: ReadonlySet<string>, antigravity = false): Promise<void> {
+async function batchQueuedLocked(store: ThreadStore, threadId: string, next: StoredTurn, turns: readonly StoredTurn[], now: string, threadMode: InteractionMode, gated: ReadonlySet<string>, antigravity = false, baseModel: ModelSelection): Promise<void> {
   if (next.queue && next.scheduleReason !== "usage-reset") return;
   const nextAt = turns.findIndex((turn) => turn.id === next.id);
   const onwards = nextAt < 0 ? [] : turns.slice(nextAt + 1);
@@ -1437,9 +1447,17 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
       waitingInteractionMode(turn, threadMode) === waitingInteractionMode(next, threadMode) &&
       sameModel(turn, next),
   );
+  // No candidate means nothing to batch: do not read the message ledger here
+  // (a recovery read failure is the recovery's to observe).
   if (candidates.length === 0) return;
   const messages = await store.readMessages(threadId);
   if (isMaintenanceTurn(next, messages)) return;
+  const isControl = (turn: StoredTurn): boolean => {
+    const kind = driverKindOfInstance((turn.modelSelection ?? baseModel).instanceId);
+    return messages.some((message) => message.turnId === turn.id && (message.control === true || isControlCommand(kind, message.text)));
+  };
+  // A provider control stays standalone, including from other controls.
+  if (isControl(next)) return;
   // On Antigravity, promotion folds only what shares the dispatch's
   // provenance: the setting can turn off between this batch and the send that
   // runs it, and a phase where the user's words live inside a turn the gate
@@ -1447,12 +1465,26 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
   // notice that rides stays a rider wherever it queued (shared decision,
   // `automaticDispatchPrompt`); a task or agent message keeps its own row
   // and runs after the user's message, alone.
-  const automaticOf = (turn: StoredTurn): boolean =>
-    automaticDispatchPrompt(turn, turn.origin ?? messages.find((message) => message.turnId === turn.id && message.origin !== undefined)?.origin, turns);
-  // Everything after the first queued maintenance turn is on its far side.
-  const boundary = onwards.findIndex((turn) => turn.status === "queued" && isMaintenanceTurn(turn, messages));
+  const originOf = (turn: StoredTurn): MessageOrigin | undefined =>
+    turn.origin ?? messages.find((message) => message.turnId === turn.id && message.origin !== undefined)?.origin;
+  const automaticOf = (turn: StoredTurn): boolean => automaticDispatchPrompt(turn, originOf(turn), turns);
+  // Moxen's own turns with no origin, which the dispatch decision does not
+  // see: a continuation's opener, which must stay dispatchable.
+  const generatedOf = (turn: StoredTurn): boolean => originOf(turn) === undefined && (turn.automatic === true || turn.handoffOpen === true);
+  // Folding drops a turn's row, and with it what that row released: the held
+  // entries queued before it. A message of the user's moves only onto a row
+  // that releases the same: consent itself, with no automatic entry waiting
+  // between the two.
+  const keepsConsent = (turn: StoredTurn): boolean =>
+    !userConsentTurn(turn, originOf(turn))
+    || (userConsentTurn(next, originOf(next))
+      && !onwards.slice(0, onwards.indexOf(turn)).some((other) => other.status === "queued" && automaticOf(other)));
+  const sharesProvenance = (turn: StoredTurn): boolean => automaticOf(turn) === automaticOf(next) && generatedOf(turn) === generatedOf(next) && keepsConsent(turn);
+  // Everything after the first queued maintenance turn or provider control
+  // (a focused `/compact` included) is on its far side.
+  const boundary = onwards.findIndex((turn) => turn.status === "queued" && (isMaintenanceTurn(turn, messages) || isControl(turn)));
   const side = new Set((boundary < 0 ? onwards : onwards.slice(0, boundary)).map((turn) => turn.id));
-  const batch = candidates.filter((turn) => side.has(turn.id) && !isMaintenanceTurn(turn, messages) && (!antigravity || automaticOf(turn) === automaticOf(next)));
+  const batch = candidates.filter((turn) => side.has(turn.id) && !isMaintenanceTurn(turn, messages) && !isControl(turn) && (!antigravity || sharesProvenance(turn)));
   if (batch.length === 0) return;
   const folded = new Set(batch.map((turn) => turn.id));
   await store.rewriteLedger(threadId, "messages", messages.map((message) => (folded.has(message.turnId) ? { ...message, turnId: next.id } : message)));
@@ -1598,14 +1630,14 @@ async function cancelStaleContinueLocked(store: ThreadStore, threadId: string, t
   store.emit(threadId, "turn-interrupted");
 }
 
-async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false, gateProviders?: GateProviders): Promise<void> {
+async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: string, admittedId?: string, summary = false, gateProviders?: GateProviders): Promise<string | null> {
   const thread = requireStoredThread(await store.readThreadRecord(threadId), threadId);
   const pause = thread.usagePause;
-  if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return;
+  if (pause && (pause.forced || !summary && pause.phase !== "resuming" && (admittedId === undefined || pause.recoveryTurnId !== admittedId))) return null;
   let turns = await store.readTurns(threadId);
   // A live turn blocks promotion: a running one, an ownerless one, or one
   // with a status no build writes. So does a turns ledger hiding rows.
-  if (liveTurn(turns) || hiddenTurnsProblem(store, threadId)) return;
+  if (liveTurn(turns) || hiddenTurnsProblem(store, threadId)) return null;
   // Eligibility is decided here, before anything rewrites the queue: a
   // queued turn the Antigravity gate holds is never promoted as a runner's
   // follow-up and never batched into the turn that is, so its text and
@@ -1684,14 +1716,14 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
       }
     }
   }
-  if (!next) return;
+  if (!next) return null;
   const executionSeq = await allocateTurnSeqLocked(store, thread, turns);
   await store.writeThreadRecord({
     ...thread,
     turnSeq: executionSeq,
     ...(pause && pause.recoveryTurnId === next.id ? { usagePause: { ...pause, phase: "resuming" } } : {}),
   });
-  await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode, gated, driverKindOfInstance((next.modelSelection ?? thread.modelSelection).instanceId) === "antigravity");
+  await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode, gated, driverKindOfInstance((next.modelSelection ?? thread.modelSelection).instanceId) === "antigravity", thread.modelSelection);
   await store.updateTurn(threadId, next.id, { status: "running", executionSeq, interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now, ...(next.heldAtSettle || next.heldBySnooze ? { heldAtSettle: undefined, heldBySnooze: undefined } : {}) });
   await store.appendLedger(threadId, "activity", {
     id: store.newId(),
@@ -1702,6 +1734,7 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     createdAt: now,
   });
   store.emit(threadId, "turn-promoted");
+  return next.id;
 }
 
 /**
@@ -1823,7 +1856,7 @@ async function finishTurn(
   status: "completed" | "failed",
   input: FinishTurnInput = {},
   gateProviders?: GateProviders,
-): Promise<{ thread: StoredThread; turn: StoredTurn }> {
+): Promise<{ thread: StoredThread; turn: StoredTurn; promotedTurnId: string | null }> {
   const threadId = requireThreadId(rawThreadId);
   const turnId = rawTurnId.trim();
   if (!turnId) {
@@ -1882,13 +1915,14 @@ async function finishTurn(
     // A settle during a drain promotes nothing: a promoted turn would start on
     // a server that is going away. Held for the admission path, it runs once
     // the next server is up.
+    let promotedTurnId: string | null = null;
     if (isDraining()) await holdQueuedForAdmission(store, threadId, Date.parse(now));
-    else await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
+    else promotedTurnId = await promoteQueuedLocked(store, threadId, now, undefined, false, gateProviders);
     const latestThread = (await store.readThreadRecord(threadId)) ?? thread;
     const next = { ...latestThread, updatedAt: now };
     await store.writeThreadRecord(next);
     store.emit(threadId, status === "completed" ? "turn-completed" : "turn-failed");
-    return { thread: next, turn: updated };
+    return { thread: next, turn: updated, promotedTurnId };
   });
 }
 
@@ -1910,8 +1944,26 @@ export async function failTurn(
   turnId: string,
   input: FinishTurnInput = {},
   gateProviders?: GateProviders,
-): Promise<{ thread: StoredThread; turn: StoredTurn }> {
+): Promise<{ thread: StoredThread; turn: StoredTurn; promotedTurnId: string | null }> {
   return await finishTurn(store, threadId, turnId, "failed", input, gateProviders);
+}
+
+/**
+ * Fail a turn whose runner never took it (a failed session start or notice
+ * preparation) and hand back the promotion the failure actually made. The
+ * promotion is claimed and requeued for the admission path; a runner that
+ * already took it wins.
+ */
+export async function failUnstartedTurn(
+  store: ThreadStore,
+  threadId: string,
+  turnId: string,
+  input: FinishTurnInput = {},
+  gateProviders?: GateProviders,
+): Promise<{ thread: StoredThread; turn: StoredTurn; promotedTurnId: string | null }> {
+  const failed = await failTurn(store, threadId, turnId, input, gateProviders);
+  if (failed.promotedTurnId !== null) await holdStrandedPromotions(store, threadId, new Set([failed.promotedTurnId]));
+  return failed;
 }
 
 export interface InterruptTurnResult {
