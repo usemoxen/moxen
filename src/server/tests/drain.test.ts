@@ -8,12 +8,13 @@
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 
 import { CliError } from "../../core/errors.js";
 import { testHarness } from "../../core/testing/harness.js";
 import { RESTART_INTERRUPT_REASON, setDraining } from "../../core/threads/drain.js";
 import type { TurnDriver, TurnDriverFactories } from "../../core/threads/execute.js";
+import { ThreadStore } from "../../core/threads/store.js";
 import { createThread, sendTurn } from "../../core/threads/threads.js";
 import { DirectConnection } from "../connection.js";
 import type { ShellFrame } from "../protocol.js";
@@ -135,6 +136,43 @@ describe("a restart drains over the server boundary", () => {
       expect(connection.draining).toBeNull();
       expect(drainingEvents(frames).at(-1)).toMatchObject({ running: 0, deadline: null });
     } finally {
+      release();
+      await connection.close();
+    }
+  });
+
+  it("does not treat a transient ledger read error as zero running turns during a drain", async () => {
+    const { harness, connection, release, threadId } = await drainingConnection({ grace: "2m" });
+    const origReadTurns = ThreadStore.prototype.readTurns;
+    const origThreadVersion = ThreadStore.prototype.threadVersion;
+    let versionTick = 0;
+    let injectedFailures = 0;
+    const versionSpy = vi.spyOn(ThreadStore.prototype, "threadVersion").mockImplementation(async function (this: ThreadStore, id) {
+      const base = await origThreadVersion.call(this, id);
+      // Poll 1 caches the running turn; polls 2–3 force re-reads that hit EBUSY.
+      if (id === threadId && injectedFailures < 2) return `${base}:tick:${++versionTick}`;
+      return base;
+    });
+    const readSpy = vi.spyOn(ThreadStore.prototype, "readTurns").mockImplementation(async function (this: ThreadStore, id, options) {
+      if (id === threadId && versionTick > 1 && injectedFailures < 2) {
+        injectedFailures += 1;
+        const err = Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+        throw err;
+      }
+      return await origReadTurns.call(this, id, options);
+    });
+    try {
+      const drain = connection.drainForRestart();
+      await vi.waitFor(() => expect(injectedFailures).toBe(2), { timeout: 5_000 });
+      // Even after two transient read errors, the drain is still waiting on the running turn.
+      expect(connection.draining).not.toBeNull();
+      release();
+      expect(await drain).toMatchObject({ finished: 1, interrupted: 0 });
+      const rows = await harness.store.readTurns(threadId);
+      expect(rows.filter((turn) => turn.status === "running")).toHaveLength(0);
+    } finally {
+      readSpy.mockRestore();
+      versionSpy.mockRestore();
       release();
       await connection.close();
     }

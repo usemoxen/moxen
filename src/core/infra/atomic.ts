@@ -5,7 +5,7 @@
  * retried a few times before the error is allowed through.
  */
 import fs from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 /** Finish a same-directory temporary file before replacing the original. */
@@ -43,6 +43,21 @@ export function renameReplacingSync(from: string, to: string): void {
     } catch (error) {
       if (!retryable(error, attempt)) throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * attempt);
+    }
+  }
+}
+
+/**
+ * Read a UTF-8 file, retrying Windows transient sharing errors (EPERM/EBUSY/EACCES)
+ * that can land while a concurrent `renameReplacing` replaces the target.
+ */
+export async function readFileRetrying(file: string): Promise<string> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await readFile(file, "utf8");
+    } catch (error) {
+      if (!retryable(error, attempt)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 15 * attempt));
     }
   }
 }

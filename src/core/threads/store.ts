@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { renameReplacing } from "../infra/atomic.js";
+import { readFileRetrying, renameReplacing } from "../infra/atomic.js";
 import { appEnv, appHomeDir } from "../config.js";
 import { FIRST_FORMAT_VERSION, formatTooNew, formatVersionOf, migrateFormat, type FormatMigration } from "../format.js";
 import { CliError } from "../errors.js";
@@ -472,7 +472,7 @@ export class ThreadStore {
     const file = this.threadFile(threadId);
     let raw: string;
     try {
-      raw = await readFile(file, "utf8");
+      raw = await readFileRetrying(file);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       // A record that cannot even be read is skipped like a corrupt one:
@@ -577,7 +577,7 @@ export class ThreadStore {
     const file = ledgerFile(this.root, threadId, name);
     let raw: string;
     try {
-      raw = await readFile(file, "utf8");
+      raw = await readFileRetrying(file);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
@@ -657,7 +657,7 @@ export class ThreadStore {
   private async readRawLedgerLines(file: string): Promise<string[] | null> {
     this.assertInsideRoot(file);
     try {
-      return (await readFile(file, "utf8")).split("\n");
+      return (await readFileRetrying(file)).split("\n");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
@@ -823,7 +823,7 @@ export class ThreadStore {
   async readDelegations(): Promise<StoredDelegation[]> {
     let raw: string;
     try {
-      raw = await readFile(this.delegationsFile(), "utf8");
+      raw = await readFileRetrying(this.delegationsFile());
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;

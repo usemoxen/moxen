@@ -1049,8 +1049,10 @@ export class DirectConnection implements ClientApi {
         // turn ended however the session took the interrupt.
         const stops = await Promise.allSettled(running.map((turn) => this.interruptForDrain(ctx, turn)));
         interrupted = stops.filter((stop) => stop.status === "fulfilled" && stop.value === true).length;
-        // The interrupts abort the runners; their own settle writes are
-        // bounded, like close()'s, so one stuck runner cannot hang the stop.
+      }
+      if (wasRunning > 0 && !this.closed) {
+        // Wait (bounded, like close()) for runners that just finished or were
+        // interrupted to complete their final flushes before reporting drained.
         await flushTurnRunners(this.closeDriverTimeoutMs).catch(() => undefined);
       }
       return { finished: wasRunning - interrupted, interrupted, waitedMs: Date.now() - startedAt };
@@ -1101,8 +1103,20 @@ export class DirectConnection implements ClientApi {
     for (const id of ids) {
       const version = await store.threadVersion(id).catch(() => null);
       const cached = this.restartDrainTurnCache.get(id);
-      const turns = version !== null && cached && cached.version === version ? cached.turns : await store.readTurns(id).catch(() => []);
-      if (version !== null && (!cached || cached.version !== version)) this.restartDrainTurnCache.set(id, { version, turns });
+      let turns: StoredTurn[];
+      if (version !== null && cached && cached.version === version) {
+        turns = cached.turns;
+      } else {
+        try {
+          turns = await store.readTurns(id);
+          if (version !== null) this.restartDrainTurnCache.set(id, { version, turns });
+        } catch {
+          // A transient read failure (e.g., Windows EBUSY/EPERM while the
+          // ledger is being atomically replaced) must never look like zero
+          // running turns or poison the cache: keep the last known snapshot.
+          turns = cached?.turns ?? [];
+        }
+      }
       for (const turn of turns) {
         if (turn.status !== "running") continue;
         // Only what this server runs: a live runner tracks it here. A row
