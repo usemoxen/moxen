@@ -136,7 +136,17 @@ rather than waiting on a summary the gate would hold. The
 entry shows why it waits, and runs with your next message or when you turn the
 setting on. A turn marked as Moxen's own dispatch never counts as your message,
 even with no origin: it releases no held entry, a task notice cannot ride it,
-and a queued hand-off carrying the mark is not one you queued. Recovering a turn whose process died interrupts it either way, but
+and a queued hand-off carrying the mark is not one you queued. Fresh consent is
+something the writer records on a message you send here, never inferred from a
+missing origin: a copy a continue or a hand-off moved into this thread, a
+generated hand-off opener, a turn the provider started on its own, and a steer
+Moxen sends again for you after a crash all record themselves as replayed, so
+they release no held entry — a moved message of yours cannot vouch for the entry
+it was moved beside, and the entry still waits for a message you actually send on
+that thread (or the setting turning on). A copy an older build moved here carries
+no record at all; the queue request id the move wrote on it (a manual transfer's
+or a carried request's) is what still marks it as a replay.
+Recovering a turn whose process died interrupts it either way, but
 the follow-up it had queued is never dispatched past the gate: it goes back to
 queued for the admission path, which holds it like any other automatic prompt.
 A task notice holds its exception only while a live turn of yours can carry
@@ -1730,8 +1740,13 @@ admission until the move is whole. An entry condition elsewhere that names
 a moved message follows it to the new thread, and keeps following it across
 further moves: a landed move's marker is a durable alias, so retrying a
 continue (which rejoins the same destination) never releases a dependent
-while the work it follows is still pending; only the moved entry settling or
-being taken back ends the trail. Each new destination replaces the wait the
+while the work it follows is still pending — whether the entry carried it on
+with a further move or with a queued model/stored handoff of its own — and the
+marker is dropped once that onward work has genuinely settled, so no alias is
+left dangling. A hop whose ledger cannot be read is unknown, never settled, and
+a waiting entry you took back but can still restore still owns the work, so
+neither erases the alias: it stays until the work is genuinely finished. Each
+new destination replaces the wait the
 move itself added — the one it marks as its own at creation, beyond a reach
 of a client edit — never a wait the user wrote on a sibling entry, so a
 second move carries one server-owned wait, never two; the 16-condition
@@ -1757,8 +1772,10 @@ keeps its origin, so on an Antigravity thread with automatic prompts held it
 waits in the Work queue like any agent-queued message there until the user's
 next message on the new thread or the setting turns on; the generated handoff
 of the move itself is never read as the user's message, not even when both
-are written in the same millisecond. The agent's `thread_continue`
-above is unchanged: queued work left on the old thread stays there and runs
+are written in the same millisecond, and neither is the moved copy of a message
+of yours — a continue records what it carried as replayed, so only a message
+you send on the new thread releases a held entry there. The agent's
+`thread_continue` above is unchanged: queued work left on the old thread stays there and runs
 there.
 
 Some providers wake a session on their own — a finished background task,

@@ -123,7 +123,7 @@ import {
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { isDraining, RESTART_HELD_SUMMARY, serverDrainingError } from "./drain.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchGate, antigravitySteerGate, conditionBlockers, hasSnoozeConditions, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, snoozeActive, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { ANTIGRAVITY_HELD_MESSAGE, GATED_REQUEST_PREFIX, QUEUE_ADMISSION_LOCK, antigravityDispatchGate, antigravitySteerGate, conditionBlockers, hasSnoozeConditions, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, snoozeActive, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { prepareHandoff, continuedTitle } from "./handoff.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
@@ -785,7 +785,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // to complete. `handoff:gated:*` entries have no repair path and must
       // fail normally so a retry cannot execute them twice.
       const rid = turn.queue?.requestId;
-      if (isTransferDestinationRequestId(rid) || (rid?.startsWith("handoff:") === true && !rid.startsWith("handoff:gated:"))) {
+      if (isTransferDestinationRequestId(rid) || (rid?.startsWith("handoff:") === true && !rid.startsWith(GATED_REQUEST_PREFIX))) {
         try {
           await store.withThreadLock(threadId, async () => {
             const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
@@ -943,10 +943,10 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     // A snapshot that never contained this thread must not delay its
     // admission to the next rescan (cross-process scheduled work would wait
     // up to 60s): include it directly, the same fallback queueAgentMessage uses.
-    rows.push({ thread, turns: await ctx.store.readTurns(threadId) });
+    rows.push(await queueRowOf(ctx, thread));
     index = rows.length - 1;
   } else if (thread && index >= 0) {
-    rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
+    rows[index] = await queueRowOf(ctx, thread);
   }
   const at = rows.findIndex((r) => r.thread.id === threadId);
   if (at < 0) return false;
@@ -978,10 +978,10 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     // refresh its row so admission reads the settled turn, not the orphan.
     const thread = await ctx.store.readThreadRecord(dependency);
     if (!thread || thread.deletedAt) continue;
-    const turns = await ctx.store.readTurns(dependency);
+    const refreshed = await queueRowOf(ctx, thread);
     const at = rows.findIndex((r) => r.thread.id === dependency);
-    if (at >= 0) rows[at] = { thread, turns };
-    else rows.push({ thread, turns });
+    if (at >= 0) rows[at] = refreshed;
+    else rows.push(refreshed);
   }
   const idle = !openTurn([...row.turns]);
   let messages: readonly StoredMessage[] | null = null;
@@ -1057,9 +1057,21 @@ async function queueRows(ctx: OperationContext): Promise<QueueRow[]> {
   const rows: QueueRow[] = [];
   for (const id of await ctx.store.listThreadIds()) {
     const thread = await ctx.store.readThreadRecord(id);
-    if (thread && !thread.deletedAt) rows.push({ thread, turns: await ctx.store.readTurns(id) });
+    if (thread && !thread.deletedAt) rows.push(await queueRowOf(ctx, thread));
   }
   return rows;
+}
+
+/**
+ * One snapshot row for the queue rules, marked when this thread's turns ledger
+ * hides a row: a dependency hop that lands on such a thread cannot have its
+ * reservation proven absent, and keeps its dependent waiting rather than
+ * releasing it on an unreadable snapshot (LOCAL-023).
+ */
+async function queueRowOf(ctx: OperationContext, thread: StoredThread): Promise<QueueRow> {
+  const turns = await ctx.store.readTurns(thread.id);
+  const unreadable = hiddenTurnsProblem(ctx.store, thread.id) !== null;
+  return { thread, turns, ...(unreadable ? { unreadable: true as const } : {}) };
 }
 
 /**
@@ -1074,7 +1086,7 @@ async function queueDependencies(ctx: OperationContext, rows: QueueRow[]): Promi
     if (!known.has(id)) {
       known.add(id);
       const thread = await ctx.store.readThreadRecord(id);
-      if (thread && !thread.deletedAt) rows.push({ thread, turns: await ctx.store.readTurns(id) });
+      if (thread && !thread.deletedAt) rows.push(await queueRowOf(ctx, thread));
     }
     return rows.find((row) => row.thread.id === id);
   };
@@ -3048,6 +3060,10 @@ function buildTransferEntry(
     ...(sourceTurn.interactionModeExplicit === true ? { interactionModeExplicit: true as const } : {}),
     ...(sourceTurn.automatic !== undefined ? { automatic: sourceTurn.automatic } : {}),
     ...(sourceTurn.control !== undefined ? { control: sourceTurn.control } : {}),
+    // A copy a continue carried is the user's text, never a new submission
+    // here: it cannot vouch as fresh consent for a held automatic entry on
+    // the destination (LOCAL-023).
+    consent: "replayed" as const,
     modelSelection: sourceTurn.modelSelection ?? destination.modelSelection,
     parentTurnId: sourceTurn.parentTurnId,
     ...(sourceTurn.origin !== undefined ? { origin: sourceTurn.origin } : {}),
@@ -3311,6 +3327,59 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
 }
 
 /**
+ * Whether a landed move's destination entry carried its work onward into a
+ * thread that still owns it: a manual transfer row of its own (A→B→C), or a
+ * queue-selected model/stored handoff the destination's pass prepared. Both
+ * shapes are followed through the onward turn's own reservation, so the alias
+ * a cross-thread dependent follows is kept only while real work waits on the
+ * far side (LOCAL-023).
+ *
+ * Absence is only ever proven on a complete snapshot: every hop is read
+ * reporting a torn tail and checked for a hidden row before its reservation is
+ * called absent, so a downstream ledger that cannot be read keeps the alias
+ * instead of erasing it — a repaired ledger would otherwise resurrect work the
+ * dependent had already run past. A waiting entry the user took out of the
+ * runnable set (`queue.removed`) is still theirs to restore, so it owns the
+ * work too; only a leaf that is genuinely terminal, and can no longer return to
+ * the queue, ends the alias. A hop that moved its text on owns nothing when the
+ * destination it named never landed a row.
+ */
+async function onwardWorkPending(store: ThreadStore, entry: StoredTurn): Promise<boolean> {
+  if (entry.handoff === undefined) return false;
+  const seen = new Set<string>();
+  let target: StoredTurn = entry;
+  let followed = false;
+  while (target.handoff !== undefined) {
+    if (seen.has(target.id)) return true;
+    seen.add(target.id);
+    const handoff: HandoffRecord = target.handoff;
+    let turns: readonly StoredTurn[];
+    try {
+      turns = await store.readTurns(handoff.destinationThreadId, { reportTornTail: true });
+    } catch {
+      return true;
+    }
+    if (hiddenTurnsProblem(store, handoff.destinationThreadId) !== null) return true;
+    const destination: StoredTurn | undefined = turns.find((turn) => turn.queue?.requestId === `handoff:${handoff.requestId}`);
+    if (destination === undefined) break;
+    target = destination;
+    followed = true;
+  }
+  // A staged onward transfer whose destination has not landed yet still sits
+  // `queued` (or `running`) on this hop even with `queue.removed`, so keep the
+  // alias while the current hop owns queued/running work before concluding an
+  // unfollowed hop is dead (LOCAL-023).
+  if (target.status === "queued" || target.status === "running") return true;
+  if (!followed) return false;
+  // Match `editWorkQueue`'s restorability rule: any `failed` or `interrupted`
+  // queued leaf can still be put back into the queue by the user (even without
+  // `queue.removed`), so keep the alias while it can return; a terminal leaf
+  // already unblocks followers on its own while it stays terminal (LOCAL-023).
+  return target.queue !== undefined
+    && (target.status === "interrupted" || target.status === "failed");
+}
+
+/**
  * The migration body; the caller holds the queue admission lock. The manual
  * continue reaches here through `migrateQueuedMessages`, which takes the
  * lock, and the queue pass — already inside it — calls it directly after a
@@ -3420,15 +3489,17 @@ async function migrateStagedMessages(ctx: OperationContext, sourceId: string, de
         // stands: unmarking now would release cross-thread dependents
         // early, while the move is still queued ahead of them — so its
         // marker stays until the entry settles. The same goes for an
-        // entry that carried the work onward (A→B→C): it is a transfer
-        // row of its own now, and the marker here is the durable alias a
-        // cross-thread dependent still follows — unmarking would let the
-        // dependent run while the work is still pending (a retry continue
-        // on A rejoins B and reads B's interrupted transfer row as
-        // terminal) and would also resurrect the moved text in this
-        // thread's handoff projection. Everything else reads as ordinary
-        // removed history from here on, and a partial entry, which can
-        // never complete now, is taken back too.
+        // entry that carried the work onward, in either shape: a transfer
+        // row of its own (A→B→C), or a queue-selected model/stored handoff
+        // the destination's pass prepared. Its marker here is the durable
+        // alias a cross-thread dependent still follows — unmarking would
+        // let the dependent run while the work is still pending (a retry
+        // continue on A rejoins B and reads B's settled row as terminal) and
+        // would also resurrect the moved text in this thread's handoff
+        // projection. Only onward work that genuinely finished drops the
+        // alias. Everything else reads as ordinary removed history from
+        // here on, and a partial entry, which can never complete now, is
+        // taken back too.
         const sources = transferMessagesOf(messages, sourceTurn);
         const requestId = transferDestinationRequestId(sourceTurn.id);
         const entry = existing.find((turn) => turn.queue?.requestId === requestId) ?? null;
@@ -3439,7 +3510,7 @@ async function migrateStagedMessages(ctx: OperationContext, sourceId: string, de
           ? transferEntryComplete(entry, destinationMessages, sources)
           : destinationMessages.some((message) => message.id === entry.messageId));
         const live = entry !== null && (entry.status === "running" || (entry.status === "queued" && entry.queue !== undefined && entry.queue.removed !== true));
-        const movedOnward = entry !== null && isTransferredTurn(entry);
+        const movedOnward = entry !== null && (await onwardWorkPending(store, entry));
         if (whole && (live || movedOnward)) continue;
         const current = await store.readTurns(sourceId);
         await store.rewriteLedger(
@@ -3527,7 +3598,7 @@ async function landGatedPending(ctx: OperationContext, destinationId: string, ga
         order: Date.parse(now) + index,
         sequential: false,
         continuation: "same-thread",
-        requestId: `handoff:gated:${primary.messageId}`,
+        requestId: `${GATED_REQUEST_PREFIX}${primary.messageId}`,
         transferMessages: group.length,
       };
       const scheduled = typeof primary.scheduledFor === "string" && Date.parse(primary.scheduledFor) > Date.parse(now);
@@ -3544,6 +3615,9 @@ async function landGatedPending(ctx: OperationContext, destinationId: string, ga
         error: null,
         usage: null,
         queue,
+        // A request the hand-off carried over, not a submission here: it never
+        // vouches as fresh consent on the destination (LOCAL-023).
+        consent: "replayed" as const,
         ...(scheduled ? { scheduledFor: primary.scheduledFor!, scheduleReason: "user" as const } : {}),
         createdAt: now,
         updatedAt: now,

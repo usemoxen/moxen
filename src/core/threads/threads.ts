@@ -40,6 +40,7 @@ import type {
   TurnOwner,
   ThreadStatus,
   TurnDelivery,
+  TurnConsent,
   TurnUsage,
 } from "./types.js";
 
@@ -743,6 +744,11 @@ export async function sendTurn(
       runtimeMode,
       interactionMode,
       ...(input.automatic === true ? { automatic: true as const } : {}),
+      // Only a prompt the user sends here is fresh consent: Moxen's own
+      // dispatch, the generated opener and any text the writer is replaying
+      // are recorded as replayed, so a row with no origin can never release a
+      // held automatic entry it did not actually authorize (LOCAL-023).
+      consent: input.consent ?? ((origin === undefined && input.automatic !== true && input.handoffOpen !== true ? "fresh" : "replayed") satisfies TurnConsent),
       ...(input.control === true ? { control: true as const } : {}),
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
       ...(origin !== undefined ? { origin } : {}),
@@ -975,6 +981,10 @@ export async function startBackgroundTurn(
       executionSeq,
       delivery: "background",
       automatic: true,
+      // A turn the provider started on its own is Moxen's own work, whatever
+      // build wrote the row: recorded here so a legacy row with no
+      // `automatic` flag still never reads as the user's consent (LOCAL-023).
+      consent: "replayed" as const,
       messageId: store.newId(),
       runtimeMode: admitted.runtimeMode,
       interactionMode: admitted.interactionMode,
@@ -1238,6 +1248,10 @@ export async function redeliverUnconfirmedSteers(
       ...(original?.notification ? { notification: original.notification } : {}),
       ...(uploads.length > 0 ? { attachments: uploads } : {}),
       ...(wakeSettled ? { wakeSettled: true } : {}),
+      // The user's words, carried again by Moxen: the copy still runs, but it
+      // is no new submission and never vouches for a held automatic entry
+      // (LOCAL-023).
+      consent: "replayed" as const,
     }, config).catch(() => null);
     if (!sent) continue;
     copies.push(sent.turn.id);
