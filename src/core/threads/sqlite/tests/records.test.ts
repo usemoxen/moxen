@@ -56,6 +56,7 @@ import {
   sparseThread,
 } from "./fixtures.js";
 import { insertRow, openForTest, temporaryRoot, underBun } from "./support.js";
+import type { StoredTurn } from "../../types.js";
 import { openThreadStore } from "../../store.js";
 import { createThread } from "../../threads.js";
 import { noteMessageId } from "../../views.js";
@@ -87,6 +88,32 @@ describe.skipIf(!underBun)("row round trip", () => {
 
     const rows = db.query<TurnRow, []>("SELECT * FROM turns ORDER BY seq").all();
     expect(rows.map((row) => decodeTurn(row))).toEqual([completed, queued]);
+  });
+
+  it("keeps the failed-handoff mark on a turn that never started (MXN-382)", () => {
+    const db = storeWithThreads();
+    // The queue pass's terminal write for a preparation that failed before a
+    // handoff record could be reserved: failed, unstarted, no handoff, marked.
+    const failed: StoredTurn = {
+      id: "turn-failed-handoff",
+      threadId: "thread-1",
+      messageId: "msg-failed-handoff",
+      status: "failed",
+      delivery: "queued",
+      runtimeMode: "auto",
+      interactionMode: "default",
+      modelSelection: null,
+      parentTurnId: null,
+      handoffFailed: true,
+      error: "Handoff preparation failed. Add the entry back to retry.",
+      usage: null,
+      createdAt: AT,
+      updatedAt: AT,
+      completedAt: AT,
+    };
+    insertRow(db, INSERT_TURN, encodeTurn(failed));
+    const row = db.query<TurnRow, [string]>("SELECT * FROM turns WHERE id = ?").get(failed.id)!;
+    expect(decodeTurn(row)).toEqual(failed);
   });
 
   it("reads messages back with unicode, newlines, attachments and notification facts", () => {

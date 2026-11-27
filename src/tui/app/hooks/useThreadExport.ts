@@ -2,7 +2,7 @@ import { t } from "../../i18n/index.js";
 import { stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { defaultExportFilename, formatThreadExport, type ExportProject } from "../../model/export.js";
+import { countExportedTurns, defaultExportFilename, formatThreadExport, turnOrdinalResolver, type ExportProject } from "../../model/export.js";
 import type { ContextUsage, PendingUserInputRequest, PlanSnapshot } from "../../model/thread.js";
 import type { TurnGroup } from "../../model/turns.js";
 import type { ThreadEnvelope } from "../../../core/types.js";
@@ -41,6 +41,8 @@ export function useThreadExport(params: {
   plan: PlanSnapshot | null;
   pending: PendingUserInputRequest[];
   contextUsage: ContextUsage | null;
+  /** The open thread's canonical ordinals from its detail snapshot. */
+  turnOrdinals?: Readonly<Record<string, number>> | null;
   exportDir: string | null;
   fallbackDir: string | undefined;
   clipboard: { copyText: (text: string) => Promise<boolean> };
@@ -57,6 +59,7 @@ export function useThreadExport(params: {
     plan,
     pending,
     contextUsage,
+    turnOrdinals = null,
     exportDir,
     fallbackDir,
     clipboard,
@@ -76,6 +79,7 @@ export function useThreadExport(params: {
       return;
     }
     const id = openThreadId;
+    const turnNumber = turnOrdinalResolver(thread, turnOrdinals);
     const markdown = formatThreadExport({
       thread,
       threadId: id,
@@ -84,13 +88,17 @@ export function useThreadExport(params: {
       plan,
       pending,
       contextUsage,
+      turnOrdinals,
     });
     const dir = exportDir ?? fallbackDir ?? process.cwd();
     const filename = defaultExportFilename(thread, id);
     void uniquePath(dir, filename)
       .then((path) => writeFile(path, markdown, "utf8").then(() => path))
       .then((path) => {
-        toasts.push("thread-exported", "info", t("thread.exported", { count: groups.length, path }), COPY_TOAST_MS);
+        // The turns the export numbered, not the transcript blocks it drew
+        // (a never-run entry or a system-only group is not a turn).
+        const count = countExportedTurns(groups, turnNumber);
+        toasts.push("thread-exported", "info", t("thread.exported", { count, path }), COPY_TOAST_MS);
         closePicker(paletteReturnFocus);
         void clipboard.copyText(path).catch(() => false);
       })

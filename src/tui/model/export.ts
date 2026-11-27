@@ -23,6 +23,8 @@ export interface FormatThreadExportOptions {
   plan: PlanSnapshot | null;
   pending: PendingUserInputRequest[];
   contextUsage: ContextUsage | null;
+  /** The server's canonical ordinals; falls back to `thread.turnOrdinals`. */
+  turnOrdinals?: Readonly<Record<string, number>> | null;
   exportedAt?: string;
 }
 
@@ -44,6 +46,47 @@ function headLine(value: string, max = 100): string {
 
 function shortTurnId(turnId: string | null): string {
   return turnId ?? "no-turn-id";
+}
+
+/** Resolves a transcript group's turn id to the number every reader shows. */
+export type TurnOrdinal = (turnId: string | null) => number | null;
+
+/**
+ * The turn numbers every other reader shows — `thread_read`, checkpoint
+ * counts, `turnDiff`, revert and a handoff document use the same projection.
+ * The server sends it as `turnOrdinals` (computed from the run classification,
+ * so a turn whose checkpoint write failed still has one); a caller without it
+ * falls back to the checkpoint rows and the running turn. A group with no
+ * ordinal never ran here (a handoff entry, a prompt taken back) or is system
+ * activity, and stays unnumbered.
+ */
+export function turnOrdinalResolver(
+  thread: ThreadEnvelope | null,
+  ordinals?: Readonly<Record<string, number>> | null,
+): TurnOrdinal {
+  const canonical = ordinals ?? thread?.turnOrdinals ?? null;
+  if (canonical !== null && canonical !== undefined) {
+    return (turnId) => (turnId === null ? null : (typeof canonical[turnId] === "number" ? canonical[turnId] : null));
+  }
+  const fromCheckpoints = new Map<string, number>();
+  for (const row of thread?.checkpoints ?? []) {
+    if (typeof row.turnId !== "string" || typeof row.checkpointTurnCount !== "number") continue;
+    fromCheckpoints.set(row.turnId, row.checkpointTurnCount);
+  }
+  // No projection and no checkpoint: the running turn is the last to have run.
+  const active = thread?.session?.activeTurnId ?? null;
+  const activeNumber = (fromCheckpoints.size === 0 ? 0 : Math.max(...fromCheckpoints.values())) + 1;
+  return (turnId) => (turnId === null ? null : (fromCheckpoints.get(turnId) ?? (turnId === active ? activeNumber : null)));
+}
+
+/** How many canonical turns the exported groups show — the export's own count. */
+export function countExportedTurns(groups: readonly TurnGroup[], turnNumber: TurnOrdinal): number {
+  return new Set(
+    groups.flatMap((group) => {
+      const number = turnNumber(group.turnId);
+      return number === null ? [] : [number];
+    }),
+  ).size;
 }
 
 /**
@@ -195,6 +238,8 @@ export function formatThreadExport(options: FormatThreadExportOptions): string {
   const { thread, threadId, project, groups, plan, pending, contextUsage } = options;
   const exportedAt = options.exportedAt ?? new Date().toISOString();
   const title = thread?.title ?? "(untitled thread)";
+  const turnNumber = turnOrdinalResolver(thread, options.turnOrdinals ?? null);
+  const turnCount = countExportedTurns(groups, turnNumber);
   const modelSelection = thread?.modelSelection;
   const model = modelSelection === undefined ? null : `${modelSelection.instanceId}/${modelSelection.model}`;
   const session = thread?.session;
@@ -240,7 +285,7 @@ export function formatThreadExport(options: FormatThreadExportOptions): string {
   }
   lines.push(`- exported: ${exportedAt}`);
   lines.push(
-    `- turns: ${groups.length} · messages: ${messageCount} · tool calls: ${toolCount} · files changed: ${fileTurns} turn${fileTurns === 1 ? "" : "s"} (+${fileAdded} −${fileRemoved})`,
+    `- turns: ${turnCount} · messages: ${messageCount} · tool calls: ${toolCount} · files changed: ${fileTurns} turn${fileTurns === 1 ? "" : "s"} (+${fileAdded} −${fileRemoved})`,
   );
   lines.push("");
 
@@ -274,10 +319,11 @@ export function formatThreadExport(options: FormatThreadExportOptions): string {
     lines.push("");
   }
 
-  groups.forEach((group, index) => {
+  groups.forEach((group) => {
     const promptHead = group.prompts.length > 0 ? headLine(group.prompts[0]?.text ?? "") : "(no prompt)";
-    const turnNo = index + 1;
-    lines.push(`## T${turnNo} · ${promptHead.length > 0 ? promptHead : "(empty prompt)"} · ${shortTurnId(group.turnId)} · ${group.startedAt} · ${formatDuration(group.durationMs)}`, "");
+    const number = turnNumber(group.turnId);
+    const label = number === null ? "·" : `T${number} ·`;
+    lines.push(`## ${label} ${promptHead.length > 0 ? promptHead : "(empty prompt)"} · ${shortTurnId(group.turnId)} · ${group.startedAt} · ${formatDuration(group.durationMs)}`, "");
     if (group.prompts.length > 0) {
       lines.push("### User", "");
       for (const prompt of group.prompts) {

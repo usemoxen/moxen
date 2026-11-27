@@ -365,7 +365,21 @@ export interface StoredTurn {
      * lands.
      */
     readonly landed?: boolean;
+    /**
+     * How many queue passes kept this handoff queued to repair a destination
+     * turn row that was written without its prompt. Capped so a persistent
+     * failure before prompt repair fails the entry instead of retrying forever.
+     */
+    readonly repairAttempts?: number;
   };
+  /**
+   * The queue pass failed this entry's handoff preparation: it never ran here
+   * and never reached a destination. Set with the pass's terminal `failed`
+   * write, so it is durable even when the failure came before a `handoff`
+   * record could be reserved. Readers keep the row out of turn numbering even
+   * after its queue policy is edited back to `same-thread`.
+   */
+  readonly handoffFailed?: true;
   readonly id: string;
   readonly threadId: string;
   readonly status: TurnStatus;

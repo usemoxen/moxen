@@ -2,9 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { DEFAULT_CONFIG } from "../../config.js";
+import type { TurnDriver } from "../execute.js";
 import { readThreadForAgent } from "../agentread.js";
+import { prepareQueuedHandoff, type OperationContext } from "../operations.js";
+import { parseQueuePolicy } from "../queue.js";
 import { openThreadStore, type ThreadStore } from "../store.js";
 import { completeTurn, createThread, interruptTurn, promoteDueScheduledTurn, sendTurn } from "../threads.js";
 
@@ -16,7 +22,20 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((run) => run()));
 });
 
-async function setup(): Promise<{ store: ThreadStore; threadId: string; now: (iso: string) => void }> {
+/** A handoff's first turn on the destination is queued, so no provider is ever asked to run one. */
+function fakeDriver(): TurnDriver {
+  return {
+    hasSession: () => Effect.succeed(false),
+    startSession: () => Effect.succeed({}),
+    sendTurn: (input) => Effect.succeed({ threadId: input.threadId, turnId: "native-1" }),
+    interruptTurn: () => Effect.void,
+    awaitTurn: async () => ({ status: "completed", text: "", usage: null, error: null }),
+    streamEvents: Stream.never,
+    resumeCursor: () => null,
+  };
+}
+
+async function setup(): Promise<{ store: ThreadStore; threadId: string; ctx: OperationContext; now: (iso: string) => void }> {
   let clock = Date.parse("2026-11-19T00:00:00.000Z");
   const root = await mkdtemp(path.join(os.tmpdir(), "moxen-agentread-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -27,7 +46,8 @@ async function setup(): Promise<{ store: ThreadStore; threadId: string; now: (is
     modelSelection: MODEL,
     env: { mode: "local", path: root, branch: null },
   });
-  return { store, threadId: thread.id, now: (iso) => { clock = Date.parse(iso); } };
+  const ctx: OperationContext = { store, storeRoot: root, config: DEFAULT_CONFIG, driverFor: () => fakeDriver() };
+  return { store, threadId: thread.id, ctx, now: (iso) => { clock = Date.parse(iso); } };
 }
 
 /**
@@ -86,5 +106,40 @@ describe("thread_read numbering", () => {
     expect(after).toContain("3 turns");
     expect(await readThreadForAgent(store, { threadId, turns: "2" }, budget)).toContain("User: task settled");
     expect(await readThreadForAgent(store, { threadId, turns: "3" }, budget)).toContain("User: later");
+  });
+
+  /**
+   * A queued entry whose continuation is `model` or `stored` leaves for a new
+   * thread: the queue pass settles its row without ever starting it here. That
+   * row used to count as a turn at its queued position, so a reader that had
+   * already numbered the turns after it saw them move.
+   */
+  it("does not number an entry handed off before a turn that ran later", async () => {
+    const { store, ctx, threadId, now } = await setup();
+    now("2026-11-19T00:00:00.000Z");
+    const first = await sendTurn(store, threadId, { prompt: "first" });
+    await completeTurn(store, threadId, first.turn.id, { text: "done" });
+
+    now("2026-11-19T00:05:00.000Z");
+    const handedOff = await sendTurn(store, threadId, { prompt: "carry on elsewhere", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) });
+    expect(handedOff.turn).toMatchObject({ status: "queued", delivery: "queued" });
+
+    now("2026-11-19T00:09:00.000Z");
+    const second = await sendTurn(store, threadId, { prompt: "second" });
+    await completeTurn(store, threadId, second.turn.id, { text: "two" });
+
+    now("2026-11-19T00:19:00.000Z");
+    await prepareQueuedHandoff(ctx, threadId, handedOff.turn.id, Date.now());
+    expect((await store.readTurns(threadId)).find((turn) => turn.id === handedOff.turn.id)).toMatchObject({
+      status: "completed",
+      delivery: "queued",
+    });
+    expect((await store.readTurns(threadId)).find((turn) => turn.id === handedOff.turn.id)?.startedAt).toBeUndefined();
+
+    // Only the two turns that ran here are numbered; the entry continued in its own thread.
+    const thread = await readThreadForAgent(store, { threadId }, budget);
+    expect(thread).toContain("2 turns");
+    expect(thread).not.toContain("carry on elsewhere");
+    expect(await readThreadForAgent(store, { threadId, turns: "2" }, budget)).toContain("User: second");
   });
 });

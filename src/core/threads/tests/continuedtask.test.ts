@@ -1182,3 +1182,277 @@ describe("task adoption and agent queue mutations", () => {
     }
   });
 });
+
+describe("the queue pass's handoff preparation (MXN-382)", () => {
+  /** A queued stored handoff, as the user's send leaves it. */
+  async function queuedHandoff(w: Awaited<ReturnType<typeof world>>, threadId: string) {
+    return (await sendTurn(w.store, threadId, { prompt: "Handoff", queue: parseQueuePolicy({ conditions: [], continuation: "stored" }) })).turn;
+  }
+
+  it("does not hand off an entry a newer edit moved back to this thread", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+    // The scheduler's snapshot, taken before the edit below.
+    const snapshot = [{ thread: (await w.store.readThreadRecord(source.id))!, turns: await w.store.readTurns(source.id) }];
+
+    await editWorkQueue(w.ctx, source.id, entry.id, "edit", parseQueuePolicy({ conditions: [], continuation: "same-thread", order: entry.queue!.order }));
+    await runWorkQueue(w.ctx, Date.now(), snapshot);
+
+    const after = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(after.status).toBe("running");
+    expect(after.handoff).toBeUndefined();
+    expect(after.queue?.continuation).toBe("same-thread");
+    // No destination was created from the stale policy; it runs here.
+    expect(await w.store.listThreadIds()).toEqual([source.id]);
+    await flushTurnRunners();
+    const ran = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(ran.status).toBe("completed");
+    expect(ran.startedAt).toBeDefined();
+    expect(await w.store.listThreadIds()).toEqual([source.id]);
+  });
+
+  it("keeps a prepared handoff completed when its activity append fails", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const realAppend = w.store.appendLedger.bind(w.store);
+    w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+      if (threadId === source.id && name === "activity" && (row as { kind?: string }).kind === "handoff.prepared") throw new Error("injected activity failure");
+      return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+    };
+    try {
+      await runWorkQueue(w.ctx);
+    } finally {
+      w.store.appendLedger = realAppend;
+    }
+
+    const after = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(after.status).toBe("completed");
+    expect(after.handoffFailed).toBeUndefined();
+    expect(after.handoff).toBeDefined();
+    expect((await w.store.readTurns(after.handoff!.destinationThreadId)).map((turn) => turn.queue?.requestId)).toEqual([`handoff:${after.handoff!.requestId}`]);
+  });
+
+  /**
+   * MXN-382: a destination's turn row is written before its prompt, so the
+   * row alone only proves a reservation. The catch reconciled delivery from
+   * it and completed the source with nothing in the new thread.
+   */
+  it("does not complete a handoff whose destination turn was written without its prompt", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const realAppend = w.store.appendLedger.bind(w.store);
+    let failed = false;
+    w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+      if (!failed && threadId !== source.id && name === "messages") {
+        failed = true;
+        throw new Error("injected prompt failure");
+      }
+      return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+    };
+    try {
+      await runWorkQueue(w.ctx);
+    } finally {
+      w.store.appendLedger = realAppend;
+    }
+
+    const after = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(after.status).toBe("queued");
+    expect(after.handoffFailed).toBeUndefined();
+    const destinationId = after.handoff!.destinationThreadId;
+    expect((await w.store.readTurns(destinationId)).map((turn) => turn.queue?.requestId)).toEqual([`handoff:${after.handoff!.requestId}`]);
+    expect(await w.store.readMessages(destinationId)).toEqual([]);
+
+    // The next pass repairs the same reservation and only then settles the
+    // source; the repaired destination turn then actually runs to completion
+    // with its prompt.
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
+    const settled = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(settled.status).toBe("completed");
+    expect(settled.handoffFailed).toBeUndefined();
+    const destinationTurns = await w.store.readTurns(destinationId);
+    expect(destinationTurns).toHaveLength(1);
+    expect(destinationTurns[0]!.status).toBe("completed");
+    const destinationMessages = await w.store.readMessages(destinationId);
+    const prompt = destinationMessages.find((message) => message.turnId === destinationTurns[0]!.id && message.role === "user");
+    expect(prompt?.text).toContain("# Continuing: solo");
+    expect(destinationMessages.some((message) => message.turnId === destinationTurns[0]!.id && message.role === "assistant")).toBe(true);
+  });
+
+  /**
+   * MXN-382: keeping a prompt-less destination reservation queued for repair
+   * must be bounded, otherwise a persistent failure before prompt repair
+   * retries forever without failing or notifying the user.
+   */
+  it("fails a prompt-less handoff reservation after bounded repair retries and lets restore reset the budget", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const events: string[] = [];
+    const unsubscribe = w.store.subscribe((event) => {
+      if (event.type === "backend.thread.changed" && event.threadId === source.id && event.reason === "handoff-failed") events.push(event.reason);
+    });
+
+    const realAppend = w.store.appendLedger.bind(w.store);
+    let blockDestinationMessages = true;
+    w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+      if (blockDestinationMessages && threadId !== source.id && name === "messages") {
+        throw new Error("persistent prompt write failure");
+      }
+      return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+    };
+    try {
+      // Three passes stay queued while counting repair attempts.
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await runWorkQueue(w.ctx);
+        const turn = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
+        expect(turn.status).toBe("queued");
+        expect(turn.handoffFailed).toBeUndefined();
+        expect(turn.handoff?.repairAttempts).toBe(attempt);
+      }
+      expect(events).toEqual([]);
+
+      // The fourth pass exceeds the repair cap, marks the handoff failed, and
+      // settles the empty destination reservation.
+      await runWorkQueue(w.ctx);
+      const failed = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
+      expect(failed.status).toBe("failed");
+      expect(failed.handoffFailed).toBe(true);
+      expect(events).toEqual(["handoff-failed"]);
+      const abandoned = await w.store.readTurns(failed.handoff!.destinationThreadId);
+      expect(abandoned).toHaveLength(1);
+      expect(abandoned[0]!.status).toBe("interrupted");
+
+      // Restoring resets the repair budget so a later pass repairs the
+      // reservation, settles the source, and runs the destination to completion.
+      blockDestinationMessages = false;
+      await editWorkQueue(w.ctx, source.id, entry.id, "restore");
+      const restored = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
+      expect(restored.handoff?.repairAttempts).toBeUndefined();
+      await editWorkQueue(w.ctx, source.id, entry.id, "release");
+      await runWorkQueue(w.ctx);
+      await flushTurnRunners();
+      await runWorkQueue(w.ctx);
+      await flushTurnRunners();
+
+      const settled = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
+      expect(settled.status).toBe("completed");
+      const destinationId = settled.handoff!.destinationThreadId;
+      const destinationTurns = await w.store.readTurns(destinationId);
+      expect(destinationTurns).toHaveLength(1);
+      expect(destinationTurns[0]!.status).toBe("completed");
+      const destinationMessages = await w.store.readMessages(destinationId);
+      const prompt = destinationMessages.find((message) => message.turnId === destinationTurns[0]!.id && message.role === "user");
+      expect(prompt?.text).toContain("# Continuing: solo");
+      expect(destinationMessages.some((message) => message.turnId === destinationTurns[0]!.id && message.role === "assistant")).toBe(true);
+    } finally {
+      w.store.appendLedger = realAppend;
+      unsubscribe();
+    }
+  });
+
+  it("still fails a prompt-less handoff:gated entry with missing message instead of looping queued", async () => {
+    const w = await world();
+    const dest = await w.make("dest");
+    const now = w.store.nowIso();
+    const ghostId = w.store.newId();
+    await w.store.appendLedger(dest.id, "turns", {
+      id: ghostId,
+      threadId: dest.id,
+      status: "queued",
+      delivery: "queued",
+      messageId: "msg-lost",
+      runtimeMode: dest.runtimeMode,
+      interactionMode: dest.interactionMode,
+      modelSelection: dest.modelSelection,
+      parentTurnId: null,
+      queue: { ...parseQueuePolicy({ conditions: [] }), requestId: "handoff:gated:msg-lost" },
+      error: null,
+      usage: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+    });
+
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
+    const after = (await w.store.readTurns(dest.id)).find((candidate) => candidate.id === ghostId)!;
+    expect(after.status).toBe("failed");
+    expect(after.error).toBe("Its queued message is missing.");
+  });
+
+  /**
+   * MXN-382: after a failed attempt the source row keeps `handoffFailed`. The
+   * handoff document excluded it even once it was queued again and explicitly
+   * the entry being carried, so the restored request vanished from the new
+   * thread's opening prompt.
+   */
+  it("carries a restored request into the next handoff after an earlier attempt failed", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const realAppend = w.store.appendLedger.bind(w.store);
+    let failed = false;
+    w.store.appendLedger = async (threadId: string, name: string, row: unknown) => {
+      if (!failed && threadId !== source.id && name === "turns") {
+        failed = true;
+        throw new Error("injected turn failure");
+      }
+      return await realAppend(threadId, name as Parameters<typeof realAppend>[1], row);
+    };
+    try {
+      await runWorkQueue(w.ctx);
+    } finally {
+      w.store.appendLedger = realAppend;
+    }
+    const failedTurn = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(failedTurn.status).toBe("failed");
+    expect(failedTurn.handoffFailed).toBe(true);
+
+    await editWorkQueue(w.ctx, source.id, entry.id, "restore");
+    await editWorkQueue(w.ctx, source.id, entry.id, "release");
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
+
+    const settled = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(settled.status).toBe("completed");
+    const destinationPrompt = (await w.store.readMessages(settled.handoff!.destinationThreadId)).find((message) => message.role === "user")!;
+    expect(destinationPrompt.text).toContain("The user queued these and they were never sent");
+    expect(destinationPrompt.text).toContain("1. Handoff");
+  });
+
+  it("reconciles a landed handoff instead of failing it when the source completion write fails", async () => {
+    const w = await world();
+    const source = await w.make("solo");
+    const entry = await queuedHandoff(w, source.id);
+
+    const realUpdate = w.store.updateTurn.bind(w.store);
+    let thrown = false;
+    w.store.updateTurn = async (threadId, turnId, patch) => {
+      if (!thrown && threadId === source.id && turnId === entry.id && patch.status === "completed") {
+        thrown = true;
+        throw new Error("injected completion failure");
+      }
+      return await realUpdate(threadId, turnId, patch);
+    };
+    try {
+      await runWorkQueue(w.ctx);
+    } finally {
+      w.store.updateTurn = realUpdate;
+    }
+
+    const after = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
+    expect(after.status).toBe("completed");
+    expect(after.handoffFailed).toBeUndefined();
+    expect((await w.store.readTurns(after.handoff!.destinationThreadId)).map((turn) => turn.queue?.requestId)).toEqual([`handoff:${after.handoff!.requestId}`]);
+  });
+});

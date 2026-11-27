@@ -813,6 +813,13 @@ export interface ThreadEnvelope {
   checkpoints?: CheckpointEnvelope[];
   proposedPlans?: ProposedPlanEnvelope[];
   /**
+   * The canonical number of each turn that ran, by turn id (1-based, run
+   * order) — the one projection `thread_read`, checkpoint counts, `turnDiff`,
+   * revert, the Markdown export and a handoff document number by. Present on
+   * the thread detail a client draws from, not on the shell's thread list.
+   */
+  turnOrdinals?: Record<string, number>;
+  /**
    * The model each turn ran on, by turn id — `modelSelection` above is only
    * the thread's *current* choice. Turns recorded before per-turn models
    * were stored are absent; read those as the thread's selection.

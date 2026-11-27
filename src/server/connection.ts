@@ -1858,6 +1858,10 @@ export class DirectConnection implements ClientApi {
       messages: read.messages,
       activities: read.activities,
       checkpoints: await this.withCheckpointFiles(read.thread.env.path, read.checkpoints),
+      // The detail a client draws is where per-turn ordinals come from: the
+      // export must number a turn that ran even when its checkpoint write
+      // failed or its row predates checkpoints.
+      turnOrdinals: true,
     });
     const selection = read.turns.findLast((turn) => turn.modelSelection)?.modelSelection ?? thread.modelSelection;
     const driver = selection ? driverKey(selection.instanceId) : null;

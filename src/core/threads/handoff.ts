@@ -32,6 +32,7 @@
  * existed read with nothing carried.
  */
 import { maintenanceTurnIds } from "./maintenance.js";
+import { turnOrdinals } from "./project.js";
 import type { ThreadStore } from "./store.js";
 import { isTransferLanded, type QueueCondition } from "./queue.js";
 import type { HandoffFacts, HandoffPendingRequest, HandoffText, StoredActivity, StoredMessage, StoredThread, StoredTurn, } from "./types.js";
@@ -143,6 +144,8 @@ function toolLines(activities: readonly StoredActivity[]): string[] {
 
 interface TurnBlock {
   readonly turn: StoredTurn;
+  /** The canonical ordinal of this turn, from `ranTurns` before any filtering. */
+  readonly ordinal: number;
   readonly prompts: readonly StoredMessage[];
   readonly replies: readonly StoredMessage[];
   readonly tools: readonly string[];
@@ -153,8 +156,8 @@ interface TurnBlock {
 /** The line standing in for the opening hand-off in the conversation: its facts live in this document's head. */
 const OPENER_LINE = "_This prompt was the hand-off record that opened this thread; the sections above carry its goal and its last request, and this document supersedes it._";
 
-function verbatim(block: TurnBlock, index: number, threadId: string, pieceCap = PIECE_CHARS): string {
-  const lines: string[] = [`### Turn ${index + 1}${block.turn.status === "completed" ? "" : ` (${block.turn.status})`}`];
+function verbatim(block: TurnBlock, threadId: string, pieceCap = PIECE_CHARS): string {
+  const lines: string[] = [`### Turn ${block.ordinal}${block.turn.status === "completed" ? "" : ` (${block.turn.status})`}`];
   for (const prompt of block.prompts) lines.push("", "**User:**", "", prompt.id === block.openerMessageId ? OPENER_LINE : piece(prompt.text.trim(), threadId, pieceCap));
   if (block.tools.length > 0) {
     lines.push("", "**Work:**");
@@ -166,13 +169,13 @@ function verbatim(block: TurnBlock, index: number, threadId: string, pieceCap = 
   return lines.join("\n");
 }
 
-function summarized(block: TurnBlock, index: number): string {
+function summarized(block: TurnBlock): string {
   const asked = block.prompts[0] !== undefined && block.prompts[0]!.id === block.openerMessageId
     ? "the hand-off that opened this thread"
     : block.prompts[0] ? oneLine(block.prompts[0].text, 120) : "(no prompt)";
   const answered = block.replies.at(-1) ? oneLine(block.replies.at(-1)!.text, 120) : block.turn.status;
   const work = block.tools.length > 0 ? ` · ${block.tools.length} tool call${block.tools.length === 1 ? "" : "s"}` : "";
-  return `- Turn ${index + 1}: asked "${asked}" → ${answered}${work}`;
+  return `- Turn ${block.ordinal}: asked "${asked}" → ${answered}${work}`;
 }
 
 /** The latest checklist the thread was working through, its rows capped, the oldest dropped and marked. */
@@ -291,6 +294,14 @@ export async function prepareHandoff(store: ThreadStore, threadId: string, optio
   const openerMessageId = openerTurn === null ? null : openerTurn.messageId;
   const carried = thread.handoffFacts ?? null;
 
+  // Numbered from the run order, like thread_read, checkpoints and revert: an
+  // entry handed off to a new thread (prepared, or failed preparing) never ran
+  // here, so it has no ordinal and takes no number from a turn that ran after
+  // it. The ordinal is attached before the model-summary turn is dropped from
+  // the conversation, so a real turn after it keeps the number every reader
+  // gives it.
+  const ordinals = turnOrdinals(turns);
+  const runCount = ordinals.size;
   // A turn has reached the agent once it produced something. One that is
   // queued, or was promoted to `running` by a settle but never ran (the
   // runner held it for a usage reset, or its process went away), carries
@@ -318,9 +329,13 @@ export async function prepareHandoff(store: ThreadStore, threadId: string, optio
   const neverDispatched = (turn: StoredTurn): boolean =>
     turn.startedAt === undefined && !produced.has(turn.id)
     && (turn.queue?.removed === true || (turn.status === "interrupted" && stoppedBeforeStart.has(turn.id)));
-  const sent = turns.filter((turn) => reached(turn) && !turn.queue?.summaryFor && !movedIds.has(turn.id) && !neverDispatched(turn));
+  // Only a turn that ran (has a canonical ordinal) is history: a prepared or
+  // failed handoff row is terminal but never ran here, so it is neither a
+  // numbered block nor a delivered prompt.
+  const sent = turns.filter((turn) => ordinals.has(turn.id) && reached(turn) && !turn.queue?.summaryFor && !movedIds.has(turn.id) && !neverDispatched(turn));
   const blocks: TurnBlock[] = sent.map((turn) => ({
     turn,
+    ordinal: ordinals.get(turn.id)!,
     prompts: messages.filter((message) => message.turnId === turn.id && message.role === "user"),
     replies: messages.filter((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0),
     tools: toolLines(activities.filter((activity) => activity.turnId === turn.id)),
@@ -513,7 +528,9 @@ export async function prepareHandoff(store: ThreadStore, threadId: string, optio
       `- Working directory: ${field(where)}`,
       ...(options.projectTitle ? [`- Project: ${field(options.projectTitle)}`] : []),
       `- Model it ran on: ${field(`${thread.modelSelection.instanceId}/${thread.modelSelection.model}`)}`,
-      `- Turns so far: ${blocks.length}`,
+      // The thread's real run count, not just the conversation blocks shown:
+      // the handoff's own model-summary turn ran but is not conversation.
+      `- Turns so far: ${runCount}${blocks.length === runCount ? "" : ` (${blocks.length} in this record)`}`,
       `- Its record before this one: thread ${thread.id}`,
       "",
       "## Where it stopped",
@@ -580,8 +597,8 @@ export async function prepareHandoff(store: ThreadStore, threadId: string, optio
     if (authoredSummary !== null) {
       return [...head, "", "## Model's wrap-up", "", clamped(authoredSummary, state.wrapCap, thread.id), "", "Continue the unfinished task from these notes; do not repeat completed work."].join("\n");
     }
-    const older = blocks.slice(0, state.verbatimFrom).map((block, index) => summarized(block, index));
-    const recent = blocks.slice(state.verbatimFrom).map((block, index) => verbatim(block, state.verbatimFrom + index, thread.id, state.pieceCap));
+    const older = blocks.slice(0, state.verbatimFrom).map((block) => summarized(block));
+    const recent = blocks.slice(state.verbatimFrom).map((block) => verbatim(block, thread.id, state.pieceCap));
     let olderRows = older;
     if (olderRows.length > state.summaryRowCap) {
       const droppedTurns = olderRows.length - state.summaryRowCap;

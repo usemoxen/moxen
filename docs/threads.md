@@ -1804,10 +1804,18 @@ the file, and writes its replacement too.
 ## Revert
 
 Revert rolls back every provider that saw a dropped turn, then cuts the
-ledger. Turns are counted in the order they ran, as every other reader
-numbers them; a message that never ran is not counted: an interrupted one
-is left in the ledger, and a terminal one that never reached the provider
-has no prompt or snapshot to roll back.
+ledger. Turns are numbered once, in the order they ran — the run
+classification in `core/threads/project.ts` — and every reader shows that
+same ordinal: `thread_read`, checkpoint counts, `turnDiff`, revert, the
+Markdown export and a handoff document. The ordinal does not depend on a
+checkpoint row: a turn that ran keeps its number when its checkpoint write
+failed. A message that never ran is not a turn: an interrupted one is left
+in the ledger, and so is one the handoff path settled for a new thread,
+prepared or failed preparing — neither reached this thread's provider, so
+neither has a prompt or a snapshot to roll back. An export shows it
+unnumbered rather than taking a number from a turn that ran, and a handoff
+document numbers the turns it prints by the same ordinals, leaving out its
+own model-summary turn while counting it in the thread's total.
 Files stay as they are unless asked back too (`--restore-files`),
 in which case the worktree returns to the first dropped turn's snapshot
 and the replaced state is pinned under a `revert-*` ref to undo by.
