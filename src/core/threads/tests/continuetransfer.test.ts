@@ -1867,6 +1867,46 @@ describe("a manual continue moves pending messages to the new thread's work queu
     expect((await w.store.readTurns(follower.id)).find((turn) => turn.id === dependent.turn.id)?.status).toBe("queued");
   });
 
+  it.each(["failed", "interrupted"] as const)(
+    "keeps the alias on retry Continue when the moved leaf is %s without queue.removed so restoring it still blocks followers (LOCAL-023)",
+    async (leafStatus) => {
+      const w = await world();
+      const a = await w.make("chain-a");
+      const follower = await w.make("chain-follower");
+      const blocker = (await sendTurn(w.store, a.id, { prompt: "Running" })).turn;
+      const held = await sendTurn(w.store, a.id, { prompt: "Move down chain", queue: parseQueuePolicy({ conditions: [] }) });
+      const dependent = await sendTurn(w.store, follower.id, {
+        prompt: "Wait for A",
+        queue: parseQueuePolicy({ conditions: [{ type: "entry", threadId: a.id, turnId: held.turn.id }] }),
+      });
+      await completeTurn(w.store, a.id, blocker.id, { text: "Done." });
+
+      // Move held work A -> B -> C with a future condition so C stays queued.
+      const ab = await continueThread(w.ctx, { threadId: a.id });
+      await settleRuns();
+      const bMove = (await w.store.readTurns(ab.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${held.turn.id}`)!;
+      const at = new Date(Date.now() + 3_600_000).toISOString();
+      await editWorkQueue(w.ctx, ab.threadId, bMove.id, "edit", parseQueuePolicy({ conditions: [{ type: "at", at }] }));
+      const bc = await continueThread(w.ctx, { threadId: ab.threadId });
+      await settleRuns();
+      const cLeaf = (await w.store.readTurns(bc.threadId)).find((turn) => turn.queue?.requestId === `handoff:transfer:${bMove.id}`)!;
+
+      // Mark C as failed/interrupted WITHOUT setting queue.removed, then retry
+      // Continue on A: C is still restorable in Work queue, so A's alias stays.
+      await w.store.updateTurn(bc.threadId, cLeaf.id, { status: leafStatus });
+      expect((await w.store.readTurns(bc.threadId)).find((turn) => turn.id === cLeaf.id)?.queue?.removed).not.toBe(true);
+      await continueThread(w.ctx, { threadId: a.id });
+      expect((await w.store.readTurns(a.id)).find((turn) => turn.id === held.turn.id)?.handoff?.landed).toBe(true);
+
+      // Restore C before the follower runs: C returns to queued and the follower stays blocked.
+      await editWorkQueue(w.ctx, bc.threadId, cLeaf.id, "restore");
+      await runWorkQueue(w.ctx);
+      await settleRuns();
+      expect((await w.store.readTurns(bc.threadId)).find((turn) => turn.id === cLeaf.id)?.status).toBe("queued");
+      expect((await w.store.readTurns(follower.id)).find((turn) => turn.id === dependent.turn.id)?.status).toBe("queued");
+    },
+  );
+
   it("hides the server wait from the projected policy and reattaches it on edit, preserving handoff ordering", async () => {
     const w = await world();
     const source = await w.make("solo");

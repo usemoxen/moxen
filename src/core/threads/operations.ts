@@ -3345,9 +3345,11 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
  * destination it named never landed a row.
  */
 async function onwardWorkPending(store: ThreadStore, entry: StoredTurn): Promise<boolean> {
+  if (entry.handoff === undefined) return false;
   const seen = new Set<string>();
-  let target: StoredTurn | undefined = entry;
-  while (target !== undefined && target.handoff !== undefined) {
+  let target: StoredTurn = entry;
+  let followed = false;
+  while (target.handoff !== undefined) {
     if (seen.has(target.id)) return true;
     seen.add(target.id);
     const handoff: HandoffRecord = target.handoff;
@@ -3361,10 +3363,16 @@ async function onwardWorkPending(store: ThreadStore, entry: StoredTurn): Promise
     const destination: StoredTurn | undefined = turns.find((turn) => turn.queue?.requestId === `handoff:${handoff.requestId}`);
     if (destination === undefined) break;
     target = destination;
+    followed = true;
   }
-  if (target === undefined) return true;
+  if (!followed) return false;
   if (target.status === "queued" || target.status === "running") return true;
-  return target.handoff === undefined && target.status !== "completed" && target.queue?.removed === true;
+  // Match `editWorkQueue`'s restorability rule: any `failed` or `interrupted`
+  // queued leaf can still be put back into the queue by the user (even without
+  // `queue.removed`), so keep the alias while it can return; a terminal leaf
+  // already unblocks followers on its own while it stays terminal (LOCAL-023).
+  return target.queue !== undefined
+    && (target.status === "interrupted" || target.status === "failed");
 }
 
 /**
