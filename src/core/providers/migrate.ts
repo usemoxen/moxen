@@ -18,7 +18,7 @@ import { loadConfig, normalizeFileConfig, saveConfig } from "../config.js";
 import { listStoredProjects, rewriteStoredProjects } from "../projects/projects.js";
 import type { ThreadStore } from "../threads/store.js";
 import {
-  antigravityOffUseLaunchBlockedReason,
+  antigravityAccountBlockedReason,
   type AntigravityAccountConfig,
   type ClaudeAccountConfig,
   type CliConfig,
@@ -202,22 +202,23 @@ export async function migrateProviderProfiles(
     // The consumer-use switch is provider-level, not an account field: it
     // travels across untouched (a migration never turns it on) and stays off
     // the migrated account entries. Moxen supports at most one host-login
-    // Antigravity profile, so reuse an existing profile instead of adding a
-    // second `default` entry that would disable the user's configured one.
+    // Antigravity profile, so reuse existing profiles instead of adding a
+    // second `default` entry that would disable the user's configured one,
+    // carrying legacy top-level fields into each reused profile where it has
+    // no explicit override so working launch settings survive and isolation
+    // args stay visibly blocked for repair.
     const { accounts: existingAccounts = [], allowUnsupportedUse, ...legacyFields } = fileConfig.providers?.antigravity ?? {};
-    const existingHost = existingAccounts.find(
-      (entry) =>
-        antigravityOffUseLaunchBlockedReason(fileConfig.providers?.antigravity, {
-          homePath: entry.homePath,
-          env: entry.env,
-          launchArgs: entry.launchArgs ?? fileConfig.providers?.antigravity?.launchArgs,
-        }) === null,
-    );
-    const reusable = existingHost ?? existingAccounts[0];
     let accounts: AntigravityAccountConfig[];
-    if (reusable) {
-      antigravityTarget = `antigravity/${reusable.id.trim().toLowerCase()}`;
-      accounts = existingAccounts;
+    if (existingAccounts.length > 0) {
+      accounts = existingAccounts.map((entry) => {
+        const definedEntry = Object.fromEntries(
+          Object.entries(entry).filter(([, value]) => value !== undefined),
+        ) as AntigravityAccountConfig;
+        return {
+          ...legacyFields,
+          ...definedEntry,
+        };
+      });
     } else {
       const migratedDefault: AntigravityAccountConfig = {
         ...legacyFields,
@@ -225,13 +226,20 @@ export async function migrateProviderProfiles(
         label: "Default",
       };
       accounts = [migratedDefault];
-      antigravityTarget = "antigravity/default";
       createdAccounts.push("antigravity/default");
     }
-    nextProviders.antigravity = {
+    const nextAntigravity = {
       accounts,
       ...(allowUnsupportedUse !== undefined ? { allowUnsupportedUse } : {}),
     };
+    // Select the target against the final migrated config using the same
+    // eligibility rule as runtime so rewritten references are never displaced.
+    const eligible = accounts.find(
+      (entry) => antigravityAccountBlockedReason(nextAntigravity, `antigravity/${entry.id.trim().toLowerCase()}`) === null,
+    );
+    const chosen = eligible ?? accounts[0]!;
+    antigravityTarget = `antigravity/${chosen.id.trim().toLowerCase()}`;
+    nextProviders.antigravity = nextAntigravity;
   }
 
   let enabledOpencode = false;

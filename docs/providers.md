@@ -115,14 +115,7 @@ negotiates any other protocol version is refused loudly
   message of Moxen's into one of yours either way, even opted in; other
   providers batch as before. Nothing of a held entry is lost: it keeps its
   text and runs with your next message or when you turn the setting on.
-  A launch or login input that
-  moves the login off the host environment — an account `env` override of
-  `HOME`, `USERPROFILE`, `SSH_CONNECTION` or the home/profile/config-dir
-  variables, or a `--gemini-dir` launch argument — is refused with
-  `ANTIGRAVITY_ACCOUNT_OFF`, never silently stripped down to the host login.
-  Stored usage and credits of a gated account are not served, and turning
-  the setting off stops that account's live driver and sessions without a
-  restart. What you type, queue, schedule or click always runs. Turning it
+  What you type, queue, schedule or click always runs. Turning it
   on is your choice: Google does not support delegation or automatic prompts on
   consumer plans and may suspend the Antigravity account, and the TUI, desktop
   and CLI say so when you enable it. A turn the provider starts itself (a
@@ -134,14 +127,18 @@ negotiates any other protocol version is refused loudly
   `providers.antigravity.allowUnsupportedUse`. Adding Antigravity in the TUI or
   desktop settings creates `antigravity/default` directly with one click (no
   multi-account wizard or isolated home folder) and hides Antigravity from the
-  add picker once configured. Any legacy or hand-edited account with a
-  `homePath`, a non-host env/`--gemini-dir` override, or beyond the single host
-  account is shown as disabled with the reason (`moxen providers accounts list`,
-  the settings pages; the provider catalog reports the reason before checking
-  whether `agy` is installed in that folder), is never launched, probed for
-  usage or credits, or routed to, and a request targeting it fails with
-  `ANTIGRAVITY_ACCOUNT_OFF`. Your config is never deleted or rewritten on this
-  path; clear a legacy `homePath` with
+  add picker once configured. Any launch or login input that moves the login
+  off the host environment — a `homePath`, an account `env` override of `HOME`,
+  `USERPROFILE`, `SSH_CONNECTION` or the home/profile/config-dir variables, or
+  a `--gemini-dir` launch argument — is refused with `ANTIGRAVITY_ACCOUNT_OFF`,
+  never silently stripped down to the host login. Any legacy or hand-edited
+  account that is isolated or beyond the single host account is shown as
+  disabled with the reason (`moxen providers accounts list`, the settings
+  pages; the provider catalog reports the reason before checking whether `agy`
+  is installed in that folder), is never launched, probed for usage or credits,
+  or routed to (nor are its stored usage or credits served), and a request
+  targeting it fails with `ANTIGRAVITY_ACCOUNT_OFF`. Your config is never
+  deleted or rewritten on this path; clear a legacy `homePath` with
   `moxen config set 'providers.antigravity.accounts[<id>].homePath' ''` (or
   remove extra accounts).
 - **ACP profiles (`providers.acp.agents`)**: managed like Moxen Harness
