@@ -1654,8 +1654,11 @@ async function reviveCancelledDelegation(ctx: OperationContext, threadId: string
  * it. It records the execution so a cancellation mark can tell whether newer
  * work already finished, then clears a cancelled mark when this settle is
  * fresh work: a turn that ran after the one the mark names, still present in
- * the ledger, with nothing left running or queued. The turn the mark itself
- * stopped never clears it, and neither does an older or reverted one.
+ * the ledger. Pending queued or running work does not hold the stale mark back
+ * (live projection still masks the task as running, and withdrawing a queued
+ * turn must not resurface an already-superseded cancellation). The turn the
+ * mark itself stopped never clears it, and neither does an older or reverted
+ * one.
  */
 async function onTaskTurnSettled(ctx: OperationContext, threadId: string, settledTurnId: string, settledSeq?: number): Promise<void> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
@@ -1699,7 +1702,6 @@ async function clearCancelledOnSettle(ctx: OperationContext, threadId: string, s
         const anchorAt = ran.findIndex((turn) => turn.id === current.cancelledTurnId);
         if (anchorAt < 0 || settledAt <= anchorAt) return null;
       }
-      if (turns.some((turn) => turn.status === "running" || turn.status === "queued")) return null;
       return { status: "running" };
     });
   }).catch(() => null);

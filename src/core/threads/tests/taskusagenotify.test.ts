@@ -1796,6 +1796,40 @@ describe("cancellations that race later work", () => {
     expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
   });
 
+  it("clears cancellation when fresh work completes even while another turn is queued, so withdrawing the queued turn does not resurface it", async () => {
+    const aParked = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Running A") {
+        aParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed(`${prompt} done.`);
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Running A" });
+    await aParked.promise;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+
+    // Schedule C for later while B completes fresh work after A's cancellation.
+    const c = await sendTurn(w.store, child.id, {
+      prompt: "Scheduled C",
+      delivery: "queue",
+      scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const b = await startTurn(w.ctx, { threadId: child.id, prompt: "Fresh B" });
+    await b.run;
+    await flushTurnRunners();
+
+    // Remove queued C before it runs: B is the latest completed turn, not A's cancellation.
+    const { editWorkQueue } = await import("../operations.js");
+    await editWorkQueue(w.ctx, child.id, c.turn.id, "remove");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
   it("assigns a durable boundary when cancelling and reverting a legacy unsequenced turn", async () => {
     const w = await scriptedWorld(async () => completed("Fresh work done."));
     const parent = await w.make("orchestrator");
