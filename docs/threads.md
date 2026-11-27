@@ -124,7 +124,11 @@ rewrites the queue, and on Antigravity threads promotion never folds a
 message of Moxen's into one of yours or the other way round — even opted
 in, since the setting can change between the two — so a held entry is
 never merged into your message and your message is never stranded in a
-held one: what runs past the gate carries only what could run. Other
+held one: what runs past the gate carries only what could run. The opening turn
+of a continuation is Moxen's too. Nor is a message of yours folded where it
+would stop releasing the held entries it was sent after: into a task notice or
+a message you had scheduled, or past an automatic entry queued between the two.
+It keeps its own turn and its place. Other
 providers batch queued messages exactly as before. A running turn is never
 stopped for a compaction whose follow-up could not start, and a hand-off you
 queued yourself that wants a model summary completes on its stored summary
@@ -432,7 +436,9 @@ the next controllable request reconciles the entry again. A prepared warning is
 checked again just before the send: a mode change, another window, a reset that
 has passed or a wait that has ended drops it from the prompt or clears the
 provider's slot. On Codex it is part of the user input whether or not Moxen's
-developer items for the same turn are accepted.
+developer items for the same turn are accepted, and the check comes after that
+request and any skill lookup, immediately before `turn/start`. A warning counts
+as delivered only when the prompt that went out carried it.
 
 Only an explicit message from the user ends the wait: a turn the user sent with
 no internal origin, not a usage-control, compaction, handoff or background

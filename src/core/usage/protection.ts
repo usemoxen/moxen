@@ -599,7 +599,7 @@ export class UsageProtection {
     if (row.thread.hasPendingApprovals || row.thread.hasPendingUserInput) return;
     await dispatchUsageNotice({
       store: ctx.store, driver: ctx.driverFor(selection.instanceId), threadId: thread.id,
-      instanceId: selection.instanceId, prompt: "", provenance: "automatic", kind: "message",
+      instanceId: selection.instanceId, provenance: "automatic", kind: "message",
       trigger: "forecast", mode: live, ...(current.attemptId !== undefined ? { attemptId: current.attemptId } : {}),
     }).catch(() => undefined);
     // The attempt/delivery write must be visible to the next tick.
@@ -633,7 +633,7 @@ export class UsageProtection {
     if (usageNoticeReserved(threadId)) this.pendingNoticeClears.set(threadId, { account: provider, key });
     await dispatchUsageNotice({
       store: ctx.store, driver: ctx.driverFor(provider), threadId, instanceId: provider,
-      prompt: "", provenance: "automatic", kind: "message", trigger: "reconcile", mode: live,
+      provenance: "automatic", kind: "message", trigger: "reconcile", mode: live,
       clearAccount: { account: provider, key },
     }).catch(() => undefined);
   }
@@ -647,7 +647,7 @@ export class UsageProtection {
   ): Promise<void> {
     await dispatchUsageNotice({
       store: ctx.store, driver: ctx.driverFor(provider), threadId,
-      instanceId: provider, prompt: "", provenance: "automatic", kind: "message", trigger: "reconcile", mode: live,
+      instanceId: provider, provenance: "automatic", kind: "message", trigger: "reconcile", mode: live,
       clearAccount: { account: provider, key },
     }).catch(() => undefined);
   }

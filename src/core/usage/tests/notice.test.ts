@@ -14,7 +14,6 @@ import {
   usageNoticeText,
   usageNoticeWindows,
   waitingUsageNotice,
-  withUsageNotice,
   type UsageNoticeState,
 } from "../notice.js";
 
@@ -152,10 +151,6 @@ describe("the model-facing usage notice", () => {
     expect(turnKind([{ turnId: "t", role: "user", text: "/Users/aaron/project needs checking" } as never], { id: "t", delivery: "queued" }, "codex")).toBe("message");
     // An explicit flag still wins over text.
     expect(turnKind([{ turnId: "t", role: "user", text: "plain", control: true } as never], { id: "t", delivery: "queued" }, "codex")).toBe("control");
-  });
-
-  it("puts the block ahead of the typed prompt without changing it", () => {
-    expect(withUsageNotice("Do the thing", notice()).endsWith(`</${USAGE_NOTICE_TAG}>\n\nDo the thing`)).toBe(true);
   });
 
   it("tells every session what the tag is before one arrives", () => {

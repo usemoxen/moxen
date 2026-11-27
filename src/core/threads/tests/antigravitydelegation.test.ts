@@ -40,6 +40,16 @@ import {
 } from "../operations.js";
 import { completeTurn, createThread, interruptTurn, sendTurn } from "../threads.js";
 
+/**
+ * Release the parked answers. A prompt reaches the driver before its run waits
+ * on the answer, so wait for the waiter itself: releasing early releases
+ * nothing, and the turn never settles.
+ */
+async function releaseParked(release: (() => void)[]): Promise<void> {
+  await vi.waitFor(() => expect(release.length).toBeGreaterThan(0), { timeout: 10_000 });
+  for (const resolve of release.splice(0)) resolve();
+}
+
 async function world(clock?: () => number) {
   const w = await testHarness(clock === undefined ? {} : { clock });
   const drivers = new Map<string, TurnDriver>();
@@ -299,6 +309,103 @@ describe("Antigravity automatic prompts held while off", () => {
     await completeTurn(w.store, thread.id, live.id, { text: "Done." });
   });
 
+  /** The user's texts on the running turn, as promotion left it. */
+  async function runningTexts(store: ThreadStore, threadId: string): Promise<{ id: string; texts: string[] } | null> {
+    const turn = (await store.readTurns(threadId)).find((candidate) => candidate.status === "running");
+    if (!turn) return null;
+    const messages = await store.readMessages(threadId);
+    return { id: turn.id, texts: messages.filter((message) => message.turnId === turn.id && message.role === "user").map((message) => message.text) };
+  }
+
+  /** Settle the running turn and each one promotion starts after it, noting what each carried. */
+  async function drainPromotions(w: Awaited<ReturnType<typeof world>>, threadId: string): Promise<string[][]> {
+    const carried: string[][] = [];
+    await completeTurn(w.store, threadId, (await runningTexts(w.store, threadId))!.id, { text: "Done." }, w.config.providers);
+    for (let running = await runningTexts(w.store, threadId); running !== null; running = await runningTexts(w.store, threadId)) {
+      carried.push(running.texts);
+      await completeTurn(w.store, threadId, running.id, { text: "Done." }, w.config.providers);
+    }
+    return carried;
+  }
+
+  it("keeps the user's follow-up on its own row when a scheduled Continue opener comes due, so it still releases the held entry", async () => {
+    let ahead = 0;
+    const w = await world(() => Date.now() + ahead);
+    const source = await w.make("antigravity", "gemini-4-neon");
+    const first = (await sendTurn(w.store, source.id, { prompt: "First" })).turn;
+    await completeTurn(w.store, source.id, first.id, { text: "Done." });
+    const { threadId } = await continueThread(w.ctx, { threadId: source.id, scheduledFor: new Date(Date.now() + 3_600_000).toISOString() });
+    const opener = (await w.store.readTurns(threadId))[0]!;
+    expect(opener).toMatchObject({ status: "queued", automatic: true, handoffOpen: true });
+    expect(opener.origin).toBeUndefined();
+
+    // Before the opener is due: a user turn, then an agent entry, then the
+    // user's follow-up behind the same running turn.
+    const live = (await sendTurn(w.store, threadId, { prompt: "Start now" }, w.config)).turn;
+    expect(live.status).toBe("running");
+    const held = await queueAgentMessage(w.ctx, threadId, { message: "Check the logs" });
+    expect(held.status).toBe("queued");
+    const followUp = (await sendTurn(w.store, threadId, { prompt: "And one more thing", delivery: "queue" }, w.config)).turn;
+
+    ahead = 7_200_000;
+    await completeTurn(w.store, threadId, live.id, { text: "Done." }, w.config.providers);
+    // The opener runs, alone; the follow-up keeps its row behind the held entry.
+    expect((await runningTexts(w.store, threadId))?.id).toBe(opener.id);
+    expect((await runningTexts(w.store, threadId))?.texts).toHaveLength(1);
+    expect((await w.store.readTurns(threadId)).find((turn) => turn.id === followUp.id)?.status).toBe("queued");
+
+    expect(await drainPromotions(w, threadId)).toEqual([["And one more thing"]]);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(threadId)).find((turn) => turn.id === held.turnId)?.status).toBe("completed");
+  });
+
+  it.each([
+    // [what is ahead of the follow-up, what each promotion carries]
+    ["a riding task notice", [["Task settled."], ["And one more thing"]]],
+    ["an earlier message of yours", [["Earlier of yours"], ["And one more thing"]]],
+    ["a message you had scheduled", [["Scheduled of yours"], ["And one more thing"]]],
+  ] as const)("does not fold your follow-up into %s ahead of the entry it releases", async (ahead_, expected) => {
+    let ahead = 0;
+    const w = await world(() => Date.now() + ahead);
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    const live = (await sendTurn(w.store, thread.id, { prompt: "Live work" }, w.config)).turn;
+    const queue = (prompt: string, extra: Partial<Parameters<typeof sendTurn>[2]> = {}) =>
+      sendTurn(w.store, thread.id, { prompt, delivery: "queue", ...extra }, w.config);
+    if (ahead_ === "an earlier message of yours") await queue("Earlier of yours");
+    const held = await queueAgentMessage(w.ctx, thread.id, { message: "Check the logs" });
+    if (ahead_ === "a riding task notice") await queue("Task settled.", { origin: "task-notification", automatic: true });
+    // Queued after the held entry, so only its own schedule keeps it from releasing it.
+    if (ahead_ === "a message you had scheduled") await sendTurn(w.store, thread.id, { prompt: "Scheduled of yours", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() }, w.config);
+    await queue("And one more thing");
+
+    ahead = 7_200_000;
+    expect(live.status).toBe("running");
+    expect(await drainPromotions(w, thread.id)).toEqual(expected);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === held.turnId)?.status).toBe("completed");
+  });
+
+  it("never folds Moxen's own originless turn into yours", async () => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    await sendTurn(w.store, thread.id, { prompt: "Live work" }, w.config);
+    await sendTurn(w.store, thread.id, { prompt: "Yours", delivery: "queue" }, w.config);
+    await sendTurn(w.store, thread.id, { prompt: "Moxen's own", delivery: "queue", automatic: true }, w.config);
+    expect(await drainPromotions(w, thread.id)).toEqual([["Yours"], ["Moxen's own"]]);
+  });
+
+  it("still batches your queued messages, with a notice that rides them, where no held entry is between", async () => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    await sendTurn(w.store, thread.id, { prompt: "Live work" }, w.config);
+    await sendTurn(w.store, thread.id, { prompt: "Yours", delivery: "queue" }, w.config);
+    await sendTurn(w.store, thread.id, { prompt: "Task settled.", delivery: "queue", origin: "task-notification", automatic: true }, w.config);
+    await sendTurn(w.store, thread.id, { prompt: "Yours too", delivery: "queue" }, w.config);
+    expect(await drainPromotions(w, thread.id)).toEqual([["Yours", "Task settled.", "Yours too"]]);
+  });
+
   it("never reads the generated handoff of the move as fresh user consent, even stamped in the same millisecond", async () => {
     // One fixed millisecond: the continuation writes its handoff turn and the
     // transfer copy at the same instant, so a tie can never masquerade as a
@@ -501,7 +608,7 @@ describe("Antigravity usage recovery and compaction held while off", () => {
     await vi.waitFor(() => expect(prompts.some((prompt) => prompt.includes(COMPACT_PROMPT))).toBe(true), { timeout: 10_000 });
     // The user opts out while the compaction turn is still in flight.
     ctx.config.providers = { ...ctx.config.providers, antigravity: { compaction: "auto" } };
-    for (const resolve of release.splice(0)) resolve();
+    await releaseParked(release);
     await settleRuns();
     // The follow-up resume is an automatic prompt too: it is held, and the
     // driver never sees it.
@@ -782,7 +889,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     // The setting goes off before the turn settles; the promotion and dispatch
     // that follow must not hand the queued message to the driver.
     ctx.config.providers = { ...ctx.config.providers, antigravity: { allowUnsupportedUse: false } };
-    for (const resolve of release.splice(0)) resolve();
+    await releaseParked(release);
     await settleRuns();
     await runWorkQueue(ctx);
     await settleRuns();
@@ -922,7 +1029,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     expect(manual.turn.status).toBe("queued");
     expect(follow.turn.status).toBe("queued");
 
-    for (const resolve of release.splice(0)) resolve();
+    await releaseParked(release);
     await settleRuns();
     const statusOf = async (id: string) => (await w.store.readTurns(thread.id)).find((turn) => turn.id === id)?.status;
     expect(await statusOf(manual.turn.id)).toBe("completed");
@@ -941,7 +1048,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     await vi.waitFor(() => { expect(prompts.filter((prompt) => prompt === "Do a long job.").length).toBe(2); }, { timeout: 10_000 });
     const followFirst = await sendTurn(w.store, second.id, { prompt: "Now the follow-up", delivery: "queue", origin: "task-message" });
     const manualSecond = await sendTurn(w.store, second.id, { prompt: "My own words too", delivery: "queue" });
-    for (const resolve of release.splice(0)) resolve();
+    await releaseParked(release);
     await settleRuns();
     expect((await w.store.readTurns(second.id)).find((turn) => turn.id === followFirst.turn.id)?.status).toBe("completed");
     expect((await w.store.readTurns(second.id)).find((turn) => turn.id === manualSecond.turn.id)?.status).toBe("completed");
@@ -1021,7 +1128,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
 
     // The automatic turn ends, and the user's own turn is the ride the
     // exception needs: the notice steers into it, and only then.
-    for (const resolve of release.splice(0)) resolve();
+    await releaseParked(release);
     await settleRuns();
     await startTurn(ctx, { threadId: parent.id, prompt: "Please continue", onEvent: () => undefined });
     await vi.waitFor(() => expect(steers.length).toBe(1), { timeout: 10_000 });
@@ -1162,7 +1269,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     expect(await readBatches(w.root)).toHaveProperty(parent.id);
 
     // The automatic turn ends and the user's own turn rides the notice.
-    for (const resolve of release.splice(0)) resolve();
+    await releaseParked(release);
     await settleRuns();
     await startTurn(ctx, { threadId: parent.id, prompt: "Please continue", onEvent: () => undefined });
     await vi.waitFor(() => expect(steers.length).toBe(1), { timeout: 10_000 });
@@ -1282,7 +1389,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     expect((await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(1);
     expect(await readBatches(w.root)).toHaveProperty(parent.id);
 
-    for (const resolve of release.splice(0)) resolve();
+    await releaseParked(release);
     await vi.waitFor(async () => expect(await readBatches(w.root)).toEqual({}));
     await settleRuns();
   }, 30_000);

@@ -304,6 +304,17 @@ export function userAuthoredTurn(turn: StoredTurn): boolean {
 }
 
 /**
+ * Whether a turn, once it runs, is the user's fresh consent for automatic
+ * entries queued before it: one the user wrote and sent for then. A scheduled
+ * message that fires late authorizes nothing queued behind its timer.
+ * `origin` is the turn's, made whole with the message ledger for turns written
+ * before the row carried one.
+ */
+export function userConsentTurn(turn: StoredTurn, origin: MessageOrigin | undefined): boolean {
+  return origin === undefined && userAuthoredTurn(turn) && !turn.scheduledFor;
+}
+
+/**
  * Whether a notice turn still rides the user turn it was queued behind: the
  * nearest terminal turn before it completed as the user's own. The notice's
  * exception ends there — an interrupted or failed turn never carried it, and
@@ -339,12 +350,7 @@ function noticeRidesUserTurn(turns: readonly StoredTurn[], turn: StoredTurn): bo
 export function freshUserConsentReleases(turns: readonly StoredTurn[], turn: StoredTurn, threadId?: string, origins?: TurnOrigins): boolean {
   const queuedAt = turns.findIndex((candidate) => candidate.id === turn.id);
   return turns.some((other, index) => other.id !== turn.id
-    && (other.origin ?? (threadId !== undefined && origins !== undefined ? origins.get(turnOriginKey(threadId, other.id)) : undefined)) === undefined
-    && other.automatic !== true
-    && other.handoffOpen !== true
-    && other.queue?.automatic !== true && other.queue?.wakeUp !== true
-    && !other.scheduledFor
-    && other.scheduleReason !== "usage-reset" && other.scheduleReason !== "usage-hold"
+    && userConsentTurn(other, other.origin ?? (threadId !== undefined && origins !== undefined ? origins.get(turnOriginKey(threadId, other.id)) : undefined))
     && (other.status === "running" || other.status === "completed")
     && (queuedAt < 0
       ? Date.parse(other.createdAt) > Date.parse(turn.createdAt)

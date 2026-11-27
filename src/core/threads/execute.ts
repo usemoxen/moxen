@@ -37,7 +37,6 @@ import {
   usageNoticeFor,
   usageNoticeStale,
   usageNoticeText,
-  withUsageNotice,
   type UsageNoticeChannel,
   type UsageNoticeKind,
   type UsageNoticeProvenance,
@@ -584,7 +583,7 @@ export interface ExecuteTurnArgs {
   readonly driver: TurnDriver;
   readonly threadId: string;
   readonly storeTurnId: string;
-  /** Original text prompt, including the notice blocks in their composed order. */
+  /** Original text prompt, including the notice blocks in their composed order; never the usage warning, which `revalidateNotice` answers. */
   readonly prompt: string;
   /** The same delivery split between user text and developer notices, when supported. */
   readonly developerPrompt?: { readonly prompt: string; readonly notices: readonly string[] };
@@ -637,8 +636,12 @@ export interface ExecuteTurnArgs {
    * accepted this request, and with false on every pre-acceptance exit.
    */
   readonly onNoticeDispatch?: (accepted: boolean) => Promise<void>;
-  /** Revalidate the prepared notice at the final send boundary (mode/window may have changed). */
-  readonly revalidateNotice?: () => Promise<RevalidatedPrompt>;
+  /**
+   * The usage warning to put ahead of the prompt, decided at the final send
+   * boundary (mode and window may have changed since preparation). A driver
+   * with `warningAtSend` is handed this to call itself.
+   */
+  readonly revalidateNotice?: () => Promise<string | null>;
 }
 
 export function executeTurn(args: ExecuteTurnArgs): Promise<void> {
@@ -678,8 +681,8 @@ function serializeUsageDispatch<T>(threadId: string, run: () => Promise<T>): Pro
 }
 
 export interface UsageNoticeDispatchResult {
-  /** The provider prompt, with a text-channel block ahead of it when the plan says so. */
-  readonly prompt: string;
+  /** The text-channel block as planned, or null. What is sent is `revalidate`'s answer, not this. */
+  readonly warning: string | null;
   /**
    * Called once at the provider acceptance boundary. Idempotent: acceptance
    * commits the captured authorization/text delivery before the reservation
@@ -687,23 +690,13 @@ export interface UsageNoticeDispatchResult {
    */
   readonly finish: (accepted: boolean) => Promise<void>;
   /**
-   * Revalidate at the final controllable send boundary. A mode switch, or a
-   * window that was replaced, reset or answered since preparation, discards
-   * the prepared text and removes a runtime entry before the request goes
-   * out; returns the bare prompt in that case.
+   * Revalidate at the final controllable send boundary, and answer the
+   * text-channel block that goes out now. A mode switch, or a window that was
+   * replaced, reset or answered since preparation, answers null and removes a
+   * runtime entry before the request goes out. A text warning is recorded as
+   * delivered only if the last answer here carried it.
    */
-  readonly revalidate: () => Promise<RevalidatedPrompt>;
-}
-
-/** What survived revalidation at the send boundary. */
-export interface RevalidatedPrompt {
-  readonly prompt: string;
-  /**
-   * The text-channel block `prompt` carries ahead of it, or null. A driver
-   * with a developer channel may send a different prompt than this one, and
-   * has to carry the block there too.
-   */
-  readonly warning: string | null;
+  readonly revalidate: () => Promise<string | null>;
 }
 
 /** A short-lived reservation from preparation through provider acceptance, keyed by thread. */
@@ -744,7 +737,6 @@ export async function dispatchUsageNotice(input: {
   readonly driver: TurnDriver;
   readonly threadId: string;
   readonly instanceId: string;
-  readonly prompt: string;
   readonly provenance: UsageNoticeProvenance;
   readonly kind: UsageNoticeKind;
   readonly trigger: UsageNoticeTrigger;
@@ -763,7 +755,7 @@ export async function dispatchUsageNotice(input: {
         if (holder) return { wait: holder.done };
       }
       const unchanged: UsageNoticeDispatchResult = {
-        prompt: input.prompt, finish: async () => undefined, revalidate: async () => ({ prompt: input.prompt, warning: null }),
+        warning: null, finish: async () => undefined, revalidate: async () => null,
       };
       if (input.trigger !== "dispatch" && noticeReservations.has(input.threadId)) return unchanged;
       const mode = await input.mode().catch(() => undefined);
@@ -785,7 +777,8 @@ export async function dispatchUsageNotice(input: {
       const done = new Promise<void>((resolve) => { release = resolve; });
       const token = input.store.newId();
       if (input.trigger === "dispatch") noticeReservations.set(input.threadId, { done, token });
-      let discarded = false;
+      // Whether the request that is going out carries the text block.
+      let carried = false;
       let finished = false;
       const finish = async (accepted: boolean): Promise<void> => {
         if (finished) return;
@@ -797,7 +790,7 @@ export async function dispatchUsageNotice(input: {
             if (plan.authorize !== null) {
               await authorizeUsageNotice(input.store, input.threadId, record.provider, plan.authorize.key).catch(() => undefined);
             }
-            if (!discarded && plan.delivery === "text" && plan.prefix !== null) {
+            if (carried) {
               await markUsageNoticeDelivered(input.store, input.threadId, record.provider, record.key, "text").catch(() => undefined);
             }
           }
@@ -856,26 +849,24 @@ export async function dispatchUsageNotice(input: {
         const warning = plan.delivery === "text" && plan.prefix !== null && record !== null
           ? usageNoticeText(record, { automatic: true })
           : null;
-        const preparedPrompt = warning !== null && record !== null
-          ? withUsageNotice(input.prompt, record, { automatic: true })
-          : input.prompt;
         const carriesWarning = plan.delivery === "text" || plan.delivery === "runtime";
-        const revalidate = async (): Promise<RevalidatedPrompt> => await serializeUsageDispatch(input.threadId, async () => {
-          const currentMode = await input.mode().catch(() => undefined);
+        const revalidate = async (): Promise<string | null> => await serializeUsageDispatch(input.threadId, async () => {
           const currentThread = await input.store.readThreadRecord(input.threadId);
           const currentRecord = currentThread ? usageNoticeFor(currentThread, input.instanceId) : null;
+          // Read last, nearest the send: it is the setting a person can change meanwhile.
+          const currentMode = await input.mode().catch(() => undefined);
           // The same key is not enough: its reset may have passed, or its wait
           // ended, since the plan was made.
           const same = currentMode === "notify" && record !== null && currentRecord?.key === record.key
             && (!carriesWarning || (currentRecord.waiting !== false && !usageNoticeStale(currentRecord)));
-          if (same) return { prompt: preparedPrompt, warning };
-          discarded = true;
+          carried = same && warning !== null;
+          if (same) return warning;
           if (input.driver.reconcileNotice) {
             await reconcileNoticeWithin(input.driver, input.threadId, { kind: "clear", conditional: false });
           }
-          return { prompt: input.prompt, warning: null };
+          return null;
         });
-        return { prompt: preparedPrompt, finish, revalidate };
+        return { warning, finish, revalidate };
       } catch (cause) {
         if (noticeReservations.get(input.threadId)?.token === token) {
           noticeReservations.delete(input.threadId);
@@ -900,7 +891,7 @@ export async function reconcileUsageNotice(input: {
 }): Promise<void> {
   await dispatchUsageNotice({
     store: input.store, driver: input.driver, threadId: input.threadId, instanceId: input.instanceId,
-    prompt: "", provenance: "automatic", kind: "message", trigger: "reconcile", mode: input.mode,
+    provenance: "automatic", kind: "message", trigger: "reconcile", mode: input.mode,
     ...(input.clearAccount ? { clearAccount: input.clearAccount } : {}),
   }).catch(() => undefined);
 }
@@ -1071,7 +1062,7 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
     let notice;
     try {
       notice = await dispatchUsageNotice({
-        store, driver, threadId, instanceId: selection.instanceId, prompt: prompt.text,
+        store, driver, threadId, instanceId: selection.instanceId,
         provenance: turnProvenance(messages, next), kind: turnKind(messages, next, selection.instanceId),
         trigger: "dispatch", mode,
       });
@@ -1087,16 +1078,11 @@ export async function runPromotedTurn(args: ExecuteTurnArgs): Promise<void> {
       driver,
       threadId,
       storeTurnId: next.id,
-      prompt: promptWithNotices(notice.prompt, blocks),
+      prompt: promptWithNotices(prompt.text, blocks),
       ...(notices.length > 0 && !compact ? { developerPrompt: { prompt: usage?.prompt ?? prompt.text, notices } } : {}),
       ...(rules && !compact ? { afterAnswer: async () => rules.commit() } : {}),
       onNoticeDispatch: notice.finish,
-      // The rules block is applied after the notice prompt here, so revalidation
-      // composes it again rather than dropping it with a discarded notice.
-      revalidateNotice: async () => {
-        const checked = await notice.revalidate();
-        return { ...checked, prompt: promptWithNotices(checked.prompt, blocks) };
-      },
+      revalidateNotice: notice.revalidate,
       usageNoticeMode: mode,
       ...(images.length > 0 ? { images } : {}),
       modelSelection: selection,
@@ -1364,7 +1350,7 @@ export function watchDriverSession(
           if (current) {
             await dispatchUsageNotice({
               store, driver, threadId, instanceId: (turn.modelSelection ?? current.modelSelection).instanceId,
-              prompt: "", provenance: "automatic", kind: "native-wake", trigger: "reconcile", mode,
+              provenance: "automatic", kind: "native-wake", trigger: "reconcile", mode,
             }).catch(() => undefined);
           }
           void executeTurn({
@@ -2098,14 +2084,18 @@ async function runExecuteTurnInner(args: ExecuteTurnArgs): Promise<void> {
     const abortNotice = (): void => { void args.onNoticeDispatch?.(false).catch(() => undefined); };
     if (!args.driverTurnId) controller.signal.addEventListener("abort", abortNotice, { once: true });
     // The final controllable boundary (MXN-385): a mode switch, or a window
-    // replaced, reset or answered between preparation and here, discards the
-    // prepared text and removes a runtime entry before the request goes out.
-    const revalidated = !args.driverTurnId && args.revalidateNotice ? await args.revalidateNotice() : { prompt: args.prompt, warning: null };
-    const dispatchPrompt = args.driverTurnId ? args.prompt : await withResumeHandoff(args, revalidated.prompt);
+    // replaced, reset or answered between preparation and here, drops the
+    // warning and removes a runtime entry before the request goes out. A
+    // driver that awaits things of its own before sending asks for itself,
+    // after them; for the others this is that boundary.
+    const warningAtSend = !args.driverTurnId && driver.capabilities?.warningAtSend === true ? args.revalidateNotice : undefined;
+    const warning = !args.driverTurnId && warningAtSend === undefined ? (await args.revalidateNotice?.()) ?? null : null;
+    const warned = (text: string): string => (warning === null ? text : promptWithNotices(text, [warning]));
+    const dispatchPrompt = args.driverTurnId ? args.prompt : warned(await withResumeHandoff(args, args.prompt));
     // A developer-channel driver sends this in place of `dispatchPrompt` when
     // its items land: the warning is ordinary text there, so it rides this
     // prompt as well, never the developer items.
-    const developerText = developer && revalidated.warning !== null ? promptWithNotices(developer.prompt, [revalidated.warning]) : developer?.prompt;
+    const developerText = developer === undefined ? undefined : warned(developer.prompt);
     if (!args.driverTurnId && controller.signal.aborted) {
       interrupted = true;
       return;
@@ -2147,6 +2137,7 @@ async function runExecuteTurnInner(args: ExecuteTurnArgs): Promise<void> {
               threadId,
               prompt: developerText ?? dispatchPrompt,
               ...(developer ? { notices: developer.notices, fallbackPrompt: dispatchPrompt, storeTurnId } : {}),
+              ...(warningAtSend ? { warningAtSend } : {}),
               ...(args.images?.length ? { images: args.images } : {}),
               ...(args.modelSelection ? { modelSelection: args.modelSelection } : {}),
               ...(args.runtimeMode ? { runtimeMode: args.runtimeMode } : {}),

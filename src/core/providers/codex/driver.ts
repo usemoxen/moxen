@@ -312,6 +312,7 @@ export class CodexDriver implements ProviderAdapter<CliError> {
     // `thread/inject_items` (codex-cli 0.169+); an app-server that predates
     // it is detected on the first send and read as text from then on.
     developerNotices: true,
+    warningAtSend: true,
   };
 
   private readonly settings: CodexSettings;
@@ -922,9 +923,15 @@ export class CodexDriver implements ProviderAdapter<CliError> {
         // of the prompt instead, exactly as before.
         const injected = !compact && notices.length > 0 ? await this.injectNotices(session, codexThreadId, notices, input.storeTurnId) : false;
         const prompt = injected ? input.prompt : input.fallbackPrompt ?? promptWithNotices(input.prompt, notices);
+        const content = compact ? [] : [...await codexUserInput(session.peer, session.workingDirectory, prompt, input.images), ...(notes ? userInputBlocks(notes) : [])];
+        // Asked last: the injection and the skill lookup above take as long as
+        // the app-server does, and the warning may stop applying meanwhile.
+        const warning = compact ? null : (await input.warningAtSend?.()) ?? null;
         const result = asRecord(await session.peer.request(compact ? CODEX_METHODS.threadCompactStart : CODEX_METHODS.turnStart, compact ? { threadId: codexThreadId } : {
           threadId: codexThreadId,
-          input: [...await codexUserInput(session.peer, session.workingDirectory, prompt, input.images), ...(notes ? userInputBlocks(notes) : [])],
+          // Ahead of the typed text, inside its block; a skill lookup has read
+          // that text without it.
+          input: warning === null ? content : content.map((block, index) => (index === 0 ? { ...block, text: promptWithNotices(prompt, [warning]) } : block)),
           ...(effort ? { effort } : {}),
           summary: this.providerConfig.reasoningSummary ?? "detailed",
           ...(model ? { model } : {}),

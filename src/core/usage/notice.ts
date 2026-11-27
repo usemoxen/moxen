@@ -219,11 +219,6 @@ export function usageNoticeText(notice: Pick<UsageNoticeState, "provider" | "win
   ].join("\n");
 }
 
-/** A prompt with a waiting notice ahead of it for the provider only; the transcript keeps what was typed. */
-export function withUsageNotice(prompt: string, notice: UsageNoticeState, options: { readonly automatic?: boolean } = {}): string {
-  return [usageNoticeText(notice, options), "", prompt].join("\n");
-}
-
 /**
  * The provenance of a queued turn, from every message folded into it: any
  * genuine user message makes the batch explicit, while originless internal

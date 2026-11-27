@@ -128,10 +128,13 @@ describe("background work through ClientApi", () => {
       await expect.poll(async () => openTurn(await w.store.readTurns(thread.id)) === null, { timeout: 10_000 }).toBe(true);
       const reset = new Date(Date.now() + 3_600_000).toISOString();
       recordUsageWindows("claude", [{ id: "session", label: "Session", usedPercent: 96, exhausted: false, resetsAt: reset }]);
-      await w.store.writeThreadRecord({
-        ...(await w.store.readThreadRecord(thread.id))!,
+      // Under the server store's lock: the first turn reads as settled before its
+      // settle has saved the thread, and that save would drop a record written
+      // beside it.
+      await ctx.store.withThreadLock(thread.id, async () => ctx.store.writeThreadRecord({
+        ...(await ctx.store.readThreadRecord(thread.id))!,
         usageNotices: { claude: { key: `claude:session@${reset}`, provider: "claude", raisedAt: w.store.nowIso(), delivered: "text", waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
-      });
+      }));
       driver.wake(thread.id);
       await expect.poll(async () => (await w.store.readTurns(thread.id)).some((turn) => turn.status === "running" && turn.delivery === "background"), { timeout: 10_000 }).toBe(true);
       await sendTurn(w.store, thread.id, { prompt: "task report", origin: "task-notification", automatic: true, delivery: "queue" });

@@ -70,6 +70,14 @@ async function settleStartedTurns(w: Awaited<ReturnType<typeof world>>, threadId
   expect(openTurn(turns)).toBeNull();
 }
 
+/** A waiting Codex warning, written under the thread lock: a run in flight rewrites the record too, from the copy it read. */
+async function writeWarningBesideRun(store: OperationContext["store"], threadId: string, reset: string): Promise<void> {
+  await store.withThreadLock(threadId, async () => store.writeThreadRecord({
+    ...(await store.readThreadRecord(threadId))!,
+    usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
+  }));
+}
+
 describe("usage protection", () => {
   it("keeps forced wake-ups durable and ordered across reset and restart, and runs the user's message first", async () => {
     const w = await world();
@@ -1126,7 +1134,7 @@ describe("usage protection", () => {
     const gate = deferred();
     const base = {
       store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
-      prompt: "task", provenance: "automatic" as const, kind: "message" as const, trigger: "dispatch" as const,
+      provenance: "automatic" as const, kind: "message" as const, trigger: "dispatch" as const,
     };
     try {
       const a = dispatchUsageNotice({
@@ -1134,7 +1142,7 @@ describe("usage protection", () => {
         mode: async () => { entered.resolve(); await gate.promise; return "notify"; },
       });
       await entered.promise;
-      const b = dispatchUsageNotice({ ...base, prompt: "second", mode: async () => "notify" });
+      const b = dispatchUsageNotice({ ...base, mode: async () => "notify" });
       gate.resolve();
       const first = await a;
       await first.finish(false);
@@ -1195,12 +1203,12 @@ describe("usage protection", () => {
     });
     const notice = await dispatchUsageNotice({
       store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
-      prompt: "task text", provenance: "automatic", kind: "message", trigger: "dispatch",
+      provenance: "automatic", kind: "message", trigger: "dispatch",
       mode: async () => mode,
     });
-    expect(notice.prompt).toContain("<moxen-usage-notice>");
+    expect(notice.warning).toContain("<moxen-usage-notice>");
     mode = "notify-user";
-    expect(await notice.revalidate()).toEqual({ prompt: "task text", warning: null });
+    expect(await notice.revalidate()).toBeNull();
     await notice.finish(false);
     await flushTurnRunners();
     w.guard.close();
@@ -1354,11 +1362,7 @@ describe("usage protection", () => {
       await expect.poll(() => w.prompts.length, { timeout: 10_000 }).toBe(1);
       await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
       w.ctx.config.usageProtection = "notify";
-      const reset = new Date(Date.now() + 3_600_000).toISOString();
-      await w.store.writeThreadRecord({
-        ...(await w.store.readThreadRecord(thread.id))!,
-        usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
-      });
+      await writeWarningBesideRun(w.store, thread.id, new Date(Date.now() + 3_600_000).toISOString());
       await expect(startTurn(w.ctx, { threadId: thread.id, prompt: "task report", automatic: true, delivery: "steer" }))
         .rejects.toMatchObject({ code: "NOTICE_FAILED" });
       expect(steers).toEqual([]);
@@ -1458,10 +1462,10 @@ describe("usage protection", () => {
       });
       const notice = await dispatchUsageNotice({
         store: w.store, driver: w.ctx.driverFor("codex"), threadId: id, instanceId: "codex",
-        prompt: "task text", provenance: "automatic", kind: "message", trigger: "dispatch",
+        provenance: "automatic", kind: "message", trigger: "dispatch",
         mode: async () => "notify",
       });
-      if (channel === "text") expect(notice.prompt).toContain("<moxen-usage-notice>");
+      if (channel === "text") expect(notice.warning).toContain("<moxen-usage-notice>");
       expect(clears).toEqual([]);
       if (ending === "reset") {
         vi.setSystemTime(now + 2000);
@@ -1471,7 +1475,7 @@ describe("usage protection", () => {
       }
       // The record still has the key the plan was made for.
       expect((await w.store.readThreadRecord(id))?.usageNotices?.codex?.key).toBe(key);
-      expect(await notice.revalidate()).toEqual({ prompt: "task text", warning: null });
+      expect(await notice.revalidate()).toBeNull();
       if (channel === "runtime") expect(clears).toEqual([id]);
       await notice.finish(true);
       // A stripped text warning was never delivered.
@@ -1503,10 +1507,7 @@ describe("usage protection", () => {
     // A title the user chose is not synced, which the fake would leave waiting.
     await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(thread.id))!, titleSource: "user" });
     const reset = new Date(Date.now() + 3_600_000).toISOString();
-    const warn = async () => w.store.writeThreadRecord({
-      ...(await w.store.readThreadRecord(thread.id))!,
-      usageNotices: { codex: { key: `codex:session@${reset}`, provider: "codex", raisedAt: w.store.nowIso(), delivered: null, waiting: true, windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: reset }] } },
-    });
+    const warn = () => writeWarningBesideRun(w.store, thread.id, reset);
     try {
       if (path_ === "fresh") {
         await warn();
@@ -1535,6 +1536,65 @@ describe("usage protection", () => {
       await expect.poll(async () => openTurn(await w.store.readTurns(thread.id)), { timeout: 10_000 }).toBeNull();
     } finally {
       // Stopping first ends the title request the fake never answers.
+      await Effect.runPromise(driver.stopSession(thread.id)).catch(() => undefined);
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  }, 30_000);
+
+  it.each([
+    ["fresh", "injects"], ["fresh", "refuses injection"], ["promoted", "injects"], ["promoted", "refuses injection"],
+  ] as const)("sends no warning when Notify is switched off while Codex's injection is in flight: %s dispatch, the app-server %s", async (path_, runtime) => {
+    const injects = runtime === "injects";
+    const entered = deferred();
+    const gate = deferred();
+    const transport = new FakeCodexTransport({
+      ...(injects ? {} : { failRequests: { "thread/inject_items": "thread/inject_items is not supported yet" } }),
+      beforeResponse: async (method) => {
+        if (method !== "thread/inject_items") return;
+        entered.resolve();
+        await gate.promise;
+      },
+    });
+    const driver = new CodexDriver({ transport });
+    const w = await world("codex", driver);
+    w.ctx.config.usageProtection = "notify";
+    const thread = await createThread(w.store, {
+      projectId: "p", title: "codex late mode", env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+    });
+    await w.store.writeThreadRecord({ ...(await w.store.readThreadRecord(thread.id))!, titleSource: "user" });
+    const turnStarts = () => transport.sessions.flatMap((session) => session.server.requestsTo("turn/start"))
+      .filter((request) => (request.params as { threadId?: string }).threadId === "codex-thread-1");
+    const complete = () => transport.sessions[0]!.server.notify("turn/completed", { threadId: "codex-thread-1", turn: { status: "completed" } });
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    const warn = () => writeWarningBesideRun(w.store, thread.id, reset);
+    try {
+      if (path_ === "fresh") {
+        await warn();
+        // Not awaited: the send is parked inside the injection.
+        void startTurn(w.ctx, { threadId: thread.id, prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue" }).catch(() => undefined);
+      } else {
+        await startTurn(w.ctx, { threadId: thread.id, prompt: "First" });
+        await expect.poll(() => turnStarts().length, { timeout: 10_000 }).toBe(1);
+        await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
+        await sendTurn(w.store, thread.id, { prompt: USAGE_CONTINUE_PROMPT, origin: "usage-continue", delivery: "queue" });
+        await warn();
+        complete();
+      }
+      await entered.promise;
+      const before = turnStarts().length;
+      w.ctx.config.usageProtection = "notify-user";
+      gate.resolve();
+      await expect.poll(() => turnStarts().length, { timeout: 10_000 }).toBe(before + 1);
+      expect(JSON.stringify(turnStarts().at(-1)!.params)).not.toContain("<moxen-usage-notice>");
+      await expect.poll(() => usageNoticeReserved(thread.id), { timeout: 10_000 }).toBe(false);
+      // Nothing carried it, so it is still owed.
+      expect((await w.store.readThreadRecord(thread.id))?.usageNotices?.codex).toMatchObject({ delivered: null, waiting: true });
+      complete();
+      await expect.poll(async () => openTurn(await w.store.readTurns(thread.id)), { timeout: 10_000 }).toBeNull();
+    } finally {
+      gate.resolve();
       await Effect.runPromise(driver.stopSession(thread.id)).catch(() => undefined);
       await flushTurnRunners();
       w.guard.close();

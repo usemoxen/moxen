@@ -823,7 +823,6 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     try {
       notice = await dispatchUsageNotice({
         store, driver, threadId, instanceId: selection.instanceId,
-        prompt: prompt.prompt,
         provenance: turnProvenance(messages, turn), kind: turnKind(messages, turn, selection.instanceId), trigger: "dispatch", mode,
       });
     } catch (cause) {
@@ -849,7 +848,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       driver,
       threadId,
       storeTurnId: turn.id,
-      prompt: notice.prompt,
+      prompt: prompt.prompt,
       ...(prompt.developerPrompt ? { developerPrompt: prompt.developerPrompt } : {}),
       onNoticeDispatch: notice.finish,
       revalidateNotice: notice.revalidate,
@@ -3805,7 +3804,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
     // MXN-385: plan the usage warning for this steer and revalidate it at the
     // acceptance boundary; the reservation commits only once the steer lands.
     const notice = await dispatchUsageNotice({
-      store, driver, threadId: thread.id, instanceId: sendSelection.instanceId, prompt: text,
+      store, driver, threadId: thread.id, instanceId: sendSelection.instanceId,
       provenance: automatic ? "automatic" : "explicit", kind: control ? "control" : "message", trigger: "dispatch", mode,
     });
     const recordSteer = (kind: "steer.accepted" | "steer.confirmed") => store.appendLedger(thread.id, "activity", {
@@ -3821,8 +3820,8 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
     // every later send on this thread.
     let delivery: Awaited<ReturnType<typeof deliverSteer>> | undefined;
     try {
-      const checked = await notice.revalidate();
-      delivery = await deliverSteer(ctx, driver, thread.id, checked.prompt, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
+      const warning = await notice.revalidate();
+      delivery = await deliverSteer(ctx, driver, thread.id, warning === null ? text : promptWithNotices(text, [warning]), providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
     } finally {
       await notice.finish(delivery === "accepted");
     }
@@ -3951,7 +3950,6 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
     // prompt, with provenance decided from the send's own automatic/control flags.
     notice = await dispatchUsageNotice({
       store, driver, threadId: sent.thread.id, instanceId: turnModel.instanceId,
-      prompt: prompt.prompt,
       provenance: automatic ? "automatic" : "explicit", kind: control ? "control" : "message", trigger: "dispatch", mode,
     });
     run = executeTurn({
@@ -3959,7 +3957,7 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
       driver,
       threadId: thread.id,
       storeTurnId: sent.turn.id,
-      prompt: notice.prompt,
+      prompt: prompt.prompt,
       ...(prompt.developerPrompt ? { developerPrompt: prompt.developerPrompt } : {}),
       onNoticeDispatch: notice.finish,
       revalidateNotice: notice.revalidate,

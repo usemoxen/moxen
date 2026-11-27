@@ -14,7 +14,7 @@ import { imageSetError, type ImageAttachmentUpload } from "../attachments.js";
 import { CliError } from "../errors.js";
 import { isCompactCommand, isControlCommand } from "../providers/spi.js";
 import { captureUsageProtectionOverride, usageKeyForInstance, usageProtectionOverrideActive } from "../usage/limits.js";
-import { antigravityHoldsAutomaticDispatch, automaticDispatchPrompt, hasSnoozeConditions, loadTurnOrigins, providerExhausted, snoozeActive, turnOriginKey, type QueueCondition, type TurnOrigins } from "./queue.js";
+import { antigravityHoldsAutomaticDispatch, automaticDispatchPrompt, hasSnoozeConditions, loadTurnOrigins, providerExhausted, snoozeActive, turnOriginKey, userConsentTurn, type QueueCondition, type TurnOrigins } from "./queue.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { isDraining, serverDrainingError } from "./drain.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
@@ -1379,13 +1379,26 @@ async function batchQueuedLocked(store: ThreadStore, threadId: string, next: Sto
   // notice that rides stays a rider wherever it queued (shared decision,
   // `automaticDispatchPrompt`); a task or agent message keeps its own row
   // and runs after the user's message, alone.
-  const automaticOf = (turn: StoredTurn): boolean =>
-    automaticDispatchPrompt(turn, turn.origin ?? messages.find((message) => message.turnId === turn.id && message.origin !== undefined)?.origin, turns);
+  const originOf = (turn: StoredTurn): MessageOrigin | undefined =>
+    turn.origin ?? messages.find((message) => message.turnId === turn.id && message.origin !== undefined)?.origin;
+  const automaticOf = (turn: StoredTurn): boolean => automaticDispatchPrompt(turn, originOf(turn), turns);
+  // Moxen's own turns with no origin, which the dispatch decision does not
+  // see: a continuation's opener, which must stay dispatchable.
+  const generatedOf = (turn: StoredTurn): boolean => originOf(turn) === undefined && (turn.automatic === true || turn.handoffOpen === true);
+  // Folding drops a turn's row, and with it what that row released: the held
+  // entries queued before it. A message of the user's moves only onto a row
+  // that releases the same: consent itself, with no automatic entry waiting
+  // between the two.
+  const keepsConsent = (turn: StoredTurn): boolean =>
+    !userConsentTurn(turn, originOf(turn))
+    || (userConsentTurn(next, originOf(next))
+      && !onwards.slice(0, onwards.indexOf(turn)).some((other) => other.status === "queued" && automaticOf(other)));
+  const sharesProvenance = (turn: StoredTurn): boolean => automaticOf(turn) === automaticOf(next) && generatedOf(turn) === generatedOf(next) && keepsConsent(turn);
   // Everything after the first queued maintenance turn or provider control
   // (a focused `/compact` included) is on its far side.
   const boundary = onwards.findIndex((turn) => turn.status === "queued" && (isMaintenanceTurn(turn, messages) || isControl(turn)));
   const side = new Set((boundary < 0 ? onwards : onwards.slice(0, boundary)).map((turn) => turn.id));
-  const batch = candidates.filter((turn) => side.has(turn.id) && !isMaintenanceTurn(turn, messages) && !isControl(turn) && (!antigravity || automaticOf(turn) === automaticOf(next)));
+  const batch = candidates.filter((turn) => side.has(turn.id) && !isMaintenanceTurn(turn, messages) && !isControl(turn) && (!antigravity || sharesProvenance(turn)));
   if (batch.length === 0) return;
   const folded = new Set(batch.map((turn) => turn.id));
   await store.rewriteLedger(threadId, "messages", messages.map((message) => (folded.has(message.turnId) ? { ...message, turnId: next.id } : message)));

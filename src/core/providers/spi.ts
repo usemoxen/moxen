@@ -201,6 +201,16 @@ export interface ProviderSendTurnInput {
   /** Logical delivery identity for retrying notice injection, independent of the provider turn ID. */
   readonly storeTurnId?: string;
   /**
+   * Moxen's text warning for this turn, for a driver with
+   * `capabilities.warningAtSend`; `prompt` and `fallbackPrompt` then carry
+   * none. Ask once everything else the driver awaits to build the request is
+   * done (developer items included), immediately before the request that
+   * carries the prompt, with nothing awaited in between. Put a non-null answer
+   * ahead of whichever prompt goes out, never in a developer item. Moxen counts
+   * the warning as delivered only if it was asked for and the send succeeded.
+   */
+  readonly warningAtSend?: () => Promise<string | null>;
+  /**
    * Images for the model to see, in each provider's native form. A driver
    * whose provider cannot take them names them in the prompt instead —
    * see `imageMention` — so an image is never silently dropped.
@@ -310,6 +320,8 @@ export interface ProviderAdapterCapabilities {
    * take them (an older Codex app-server, say), so a turn is never lost.
    */
   readonly developerNotices?: boolean;
+  /** `sendTurn` awaits things before the prompt leaves, so it asks for `ProviderSendTurnInput.warningAtSend` itself. */
+  readonly warningAtSend?: boolean;
 }
 
 export interface ProviderThreadTurnSnapshot {
