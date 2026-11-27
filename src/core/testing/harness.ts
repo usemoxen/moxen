@@ -216,23 +216,23 @@ export interface TestHarnessOptions {
    * (accepted, never confirmed), `fails` (refused), or `unreported` (accepted,
    * with no way to tell whether it arrived). The others have none.
    */
-  readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness", "delivers" | "drops" | "fails" | "unreported">>;
+  readonly steering?: Partial<Record<"claude" | "codex" | "opencode" | "harness" | "antigravity", "delivers" | "drops" | "fails" | "unreported">>;
   /** Sees each steer a driver accepted. */
   readonly onSteer?: (threadId: string, text: string) => void;
   /** Answers `/btw` for these providers; the others have no `sideQuestion`, so they are `SIDE_QUESTION_UNSUPPORTED`. */
-  readonly sideQuestions?: Partial<Record<"claude" | "codex" | "opencode" | "harness", (input: SideQuestionInput) => Promise<SideAnswer>>>;
+  readonly sideQuestions?: Partial<Record<"claude" | "codex" | "opencode" | "harness" | "antigravity", (input: SideQuestionInput) => Promise<SideAnswer>>>;
 }
 
 function harnessDrivers(options: TestHarnessOptions): TurnDriverFactories {
   const behavior = options.failTurns ? "failing" : options.leaveTurnsRunning ? "pending" : "completing";
-  const factory = (kind?: "claude" | "codex" | "opencode" | "harness") => (): TurnDriver => {
+  const factory = (kind?: "claude" | "codex" | "opencode" | "harness" | "antigravity") => (): TurnDriver => {
     const mode = kind === undefined ? undefined : options.steering?.[kind];
     const sideQuestion = kind === undefined ? undefined : options.sideQuestions?.[kind];
     return new HarnessDriver(behavior, options.onStartSession, options.onSendTurn, options.onUpdateMcpServers, mode ? { mode, ...(options.onSteer ? { onSteer: options.onSteer } : {}) } : undefined, sideQuestion, options.onStopSession);
   };
   return {
     claude: factory("claude"), codex: factory("codex"), opencode: factory("opencode"),
-    harness: factory("harness"),
+    harness: factory("harness"), antigravity: factory("antigravity"),
     ...options.drivers,
   };
 }

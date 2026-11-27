@@ -1121,7 +1121,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     await settleRuns();
   }, 30_000);
 
-  it("refuses a steer whose target died before the driver took it: nothing is sent, nothing is recorded, and the notice stays durable", async () => {
+  it("files the notice as a turn of its own when the turn it meant to steer died before the driver took it", async () => {
     const prompts: string[] = [];
     const steers: string[] = [];
     const release: (() => void)[] = [];
@@ -1146,7 +1146,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
 
     // The parent's own turn is stalled live; the notice's flush decides on it.
     // Between the decision and the driver's steer, the turn dies — the steer
-    // must be refused and the notice kept durable, not steered into nothing.
+    // cannot ride it, and nothing is steered into nothing.
     live = (await startTurn(ctx, { threadId: parent.id, prompt: "User work", onEvent: () => undefined })).turn;
     await vi.waitFor(() => expect(prompts).toContain("User work"), { timeout: 10_000 });
     armed = true;
@@ -1155,24 +1155,18 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     const childTurn = (await sendTurn(w.store, child.id, { prompt: "Do it" })).turn;
     await completeTurn(w.store, child.id, childTurn.id, { text: "Done." });
     await queueTaskNotification(ctx, parent.id, child.id);
-    // The target turn dies between the flush's decision and the send, so the
-    // steered start throws before any ledger row is written: the flush never
-    // reaches its batch delete, and nothing is sent and nothing is recorded.
+    // The target turn dies between the flush's decision and the send: the
+    // steered start throws before any message row is written, and the notice
+    // goes out as a turn of its own for the now-idle parent rather than being
+    // stranded on it until a user message.
     await flushTaskNotifications(ctx, parent.id).catch(() => undefined);
     expect(steers.length).toBe(0);
-    expect((await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(0);
-    // Nothing re-fires on its own either: no watcher, no timer.
-    await new Promise((resolve) => setTimeout(resolve, 2600));
-    expect(steers.length).toBe(0);
-    expect((await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(0);
-    expect(await readBatches(w.root)).toHaveProperty(parent.id);
-
-    // The notice rides the next live user turn.
-    armed = false;
-    const retry = await startTurn(ctx, { threadId: parent.id, prompt: "User work again", onEvent: () => undefined });
-    await vi.waitFor(() => expect(steers.length).toBe(1), { timeout: 10_000 });
-    await interruptTurn(w.store, parent.id, retry.turn.id);
+    await vi.waitFor(async () => expect((await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification")).toHaveLength(1), { timeout: 10_000 });
     await settleRuns();
+    const [notice] = (await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification");
+    expect(notice?.turnId).not.toBe(live.id);
+    expect(steers.length).toBe(0);
+    expect(await readBatches(w.root)).toEqual({});
   }, 30_000);
 
   it("keeps the batch without a steer row if the final gate refuses after staging it", async () => {

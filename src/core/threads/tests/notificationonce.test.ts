@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Effect } from "effect";
@@ -16,6 +16,7 @@ import {
   sendTurn,
 } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
+import { setDraining } from "../drain.js";
 import {
   flushTaskNotifications,
   queueTaskNotification,
@@ -77,6 +78,11 @@ async function noticesIn(w: World, threadId: string) {
   return (await w.store.readMessages(threadId)).filter((message) => message.origin === "task-notification");
 }
 
+/** The durable batch file: what a flush kept for a later one. */
+async function readBatches(root: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(path.join(root, "task-notification-batches.json"), "utf8").catch(() => "{}")) as Record<string, unknown>;
+}
+
 describe("a task's settle is reported once", () => {
   it("reports once when the parent's running turn takes it mid-turn", async () => {
     const steered: string[] = [];
@@ -114,6 +120,186 @@ describe("a task's settle is reported once", () => {
     await flushTurnRunners();
     expect(await noticesIn(w, parent.id)).toHaveLength(1);
     expect(steered).toHaveLength(1);
+  }, 30_000);
+
+  it("files a notice for an idle parent whose turn ended before the steer left", async () => {
+    const steered: string[] = [];
+    const w = await world({
+      leaveTurnsRunning: true,
+      steering: { codex: "delivers" },
+      onSteer: (_threadId, text) => void steered.push(text),
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+
+    const live = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
+    expect(live.turn.status).toBe("running");
+
+    // The flush sees the parent running and decides to steer. The parent's own
+    // turn then ends while that decision is still being made — the window the
+    // steer's liveness check opens — so the steer finds no turn to ride. The
+    // notice must not be stranded on the now-idle parent until a user message.
+    const driver = w.driverFor("codex");
+    const hasSession = driver.hasSession.bind(driver);
+    let parentLooks = 0;
+    driver.hasSession = (threadId: string): ReturnType<NonNullable<TurnDriver["hasSession"]>> =>
+      Effect.flatMap(Effect.promise(async () => {
+        if (threadId === parent.id) {
+          parentLooks += 1;
+          if (parentLooks === 1) await interruptTurn(w.store, parent.id, live.turn.id);
+        }
+      }), () => hasSession(threadId));
+
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    // Nothing was steered: the turn it was going to ride was already over.
+    expect(steered).toEqual([]);
+    // The notice goes out as a turn of its own, with no further trigger.
+    await expect.poll(
+      async () => (await noticesIn(w, parent.id)).filter((message) => message.turnId !== live.turn.id).length,
+      { timeout: 10_000, interval: 50 },
+    ).toBe(1);
+    await flushTurnRunners();
+    expect(await readBatches(w.root)).toEqual({});
+
+    // Once only: a later flush, and the restart's recovery, find nothing left.
+    await flushTaskNotifications(w.ctx, parent.id);
+    await recoverTaskNotifications(w.ctx);
+    await flushTurnRunners();
+    expect((await noticesIn(w, parent.id)).filter((message) => message.turnId !== live.turn.id)).toHaveLength(1);
+    expect(steered).toEqual([]);
+  }, 30_000);
+
+  it("files a notice for an idle parent the steer's own delivery found ended", async () => {
+    const steered: string[] = [];
+    const w = await world({
+      leaveTurnsRunning: true,
+      steering: { codex: "delivers" },
+      onSteer: (_threadId, text) => void steered.push(text),
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+
+    const live = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
+    // The send's own gate passed and its steer row is written; the turn ends
+    // while the steer's final gate reads the target, so the steer never leaves.
+    const readTurns = w.store.readTurns.bind(w.store);
+    let armed = false;
+    let ended = false;
+    vi.spyOn(w.store, "readTurns").mockImplementation(async (threadId, options) => {
+      if (armed && !ended && threadId === parent.id && (await w.store.readMessages(parent.id)).some((row) => row.origin === "task-notification")) {
+        ended = true;
+        await interruptTurn(w.store, parent.id, live.turn.id);
+      }
+      return await readTurns(threadId, options);
+    });
+
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    armed = true;
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(steered).toEqual([]);
+    await expect.poll(
+      async () => (await noticesIn(w, parent.id)).filter((message) => message.turnId !== live.turn.id).length,
+      { timeout: 10_000, interval: 50 },
+    ).toBe(1);
+    await flushTurnRunners();
+    expect(await readBatches(w.root)).toEqual({});
+    // The staged steer never arrived, so it left no second copy behind.
+    expect((await noticesIn(w, parent.id)).filter((message) => message.turnId === live.turn.id)).toEqual([]);
+  }, 30_000);
+
+  it("keeps a notice Antigravity's policy holds, with no turn filed and no retry armed", async () => {
+    const steered: string[] = [];
+    const w = await world({
+      leaveTurnsRunning: true,
+      steering: { antigravity: "delivers" },
+      onSteer: (_threadId, text) => void steered.push(text),
+    });
+    const parent = await createThread(w.store, {
+      projectId: "p",
+      title: "orchestrator",
+      env: { mode: "local", path: w.work, branch: null },
+      modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+    });
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+
+    // Opted in for the user's own turn, then opted out: the live turn is
+    // Moxen's own (an automatic prompt), so the policy refuses the steer
+    // whatever the turn does. Nothing may be filed for it, and nothing retried.
+    w.config.providers = { ...w.config.providers, antigravity: { allowUnsupportedUse: true } };
+    const live = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate.", origin: "task-message" });
+    w.config.providers = { ...w.config.providers, antigravity: { allowUnsupportedUse: false } };
+
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id).catch(() => undefined);
+    // The turn ends while the parent is idle; the policy still holds.
+    await interruptTurn(w.store, parent.id, live.turn.id);
+    await new Promise((resolve) => setTimeout(resolve, 2_600));
+    await flushTurnRunners();
+    expect(await noticesIn(w, parent.id)).toEqual([]);
+    expect((await w.store.readTurns(parent.id)).some((turn) => turn.origin === "task-notification")).toBe(false);
+    expect(steered).toEqual([]);
+    expect(await readBatches(w.root)).toHaveProperty(parent.id);
+  }, 30_000);
+
+  it("dispatches nothing during a restart's drain, keeping the notice for the next server", async () => {
+    const steered: string[] = [];
+    const sent: string[] = [];
+    const w = await world({
+      leaveTurnsRunning: true,
+      steering: { codex: "delivers" },
+      onSteer: (_threadId, text) => void steered.push(text),
+      onSendTurn: (input) => void sent.push(input.prompt),
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+
+    const live = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
+    // The parent's turn ends as a restart's drain begins, the window the
+    // steer's final gate covers: the notice can neither steer nor be run.
+    const driver = w.driverFor("codex");
+    const hasSession = driver.hasSession.bind(driver);
+    let looked = false;
+    driver.hasSession = (threadId: string): ReturnType<NonNullable<TurnDriver["hasSession"]>> =>
+      Effect.flatMap(Effect.promise(async () => {
+        if (threadId === parent.id && !looked) {
+          looked = true;
+          await interruptTurn(w.store, parent.id, live.turn.id);
+          setDraining(true);
+        }
+      }), () => hasSession(threadId));
+
+    try {
+      await queueTaskNotification(w.ctx, parent.id, child.id);
+      await flushTaskNotifications(w.ctx, parent.id).catch(() => undefined);
+      await flushTurnRunners();
+      // Nothing steered, and no prompt reached the provider: whatever the
+      // flush kept is durable work the next server reads, never a dispatch.
+      expect(steered).toEqual([]);
+      expect(sent.filter((prompt) => prompt.includes("<task-notification>"))).toEqual([]);
+      // It waits as durable queued work, not as a running turn the drain
+      // would have to stop.
+      expect((await w.store.readTurns(parent.id)).filter((turn) => turn.origin === "task-notification")).toMatchObject([{ status: "queued" }]);
+    } finally {
+      setDraining(false);
+    }
+
+    // The next server delivers it — once, and only once.
+    await recoverTaskNotifications(w.ctx);
+    await flushTurnRunners();
+    expect((await noticesIn(w, parent.id)).filter((message) => message.turnId !== live.turn.id)).toHaveLength(1);
+    await recoverTaskNotifications(w.ctx);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect((await noticesIn(w, parent.id)).filter((message) => message.turnId !== live.turn.id)).toHaveLength(1);
   }, 30_000);
 
   it("reaches the parent when the provider takes the steer and never delivers it", async () => {

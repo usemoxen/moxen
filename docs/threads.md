@@ -1122,7 +1122,10 @@ filing the same settle again after a restart does not repeat it. Maintenance
 turns do not count as new work. A later work turn, pause or cancellation is a
 separate report. Moxen only steers a notice into providers that report what
 reached the turn; other providers receive it through the turn queue. A push
-the provider refuses stays pending until the parent is idle.
+the provider refuses stays pending until the parent is idle. The turn a
+notice was about to steer into can end while the notice is on its way in: the
+notice is then filed as a turn of its own, not left waiting for the parent's
+next message.
 
 ### A delegated task that runs out of usage
 

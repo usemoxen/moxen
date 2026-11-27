@@ -3614,6 +3614,21 @@ function noticeSteerGated(): CliError {
 }
 
 /**
+ * The turn a notice was on its way into is gone: it ended — or another turn
+ * took its place — between the flush deciding to steer and the steer leaving.
+ * No provider policy refused this and nothing was written, so the flush files
+ * the notice again for the now-idle parent instead of keeping it durable for
+ * the user's next message (which, on an idle parent, may be hours away).
+ */
+function noticeSteerTargetGone(): CliError {
+  return new CliError("TASK_NOTICE_STEER_TARGET_GONE", "The turn a task notice was going to steer is no longer running.");
+}
+
+function isNoticeSteerTargetGone(error: unknown): boolean {
+  return error instanceof CliError && error.code === "TASK_NOTICE_STEER_TARGET_GONE";
+}
+
+/**
  * Record a turn and, when it opens a fresh one, run it.
  *
  * The four entry points that used to do this each had their own copy, and
@@ -3640,16 +3655,35 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
   if (noticeSteer) {
     const live = await Effect.runPromise(driver.hasSession(thread.id)).catch(() => false);
     const gate = await antigravitySteerGate(store, thread.id, expectedNoticeTurnId ?? target?.id);
-    if (!target || !live || gate.refuses(() => liveProvidersOf(ctx), true)) throw noticeSteerGated();
+    // LOCAL-034 first: policy holds this notice whatever the target does, so
+    // the batch keeps it and no turn is filed for it.
+    if (gate.policyRefuses(() => liveProvidersOf(ctx))) throw noticeSteerGated();
+    // The turn this notice was going to ride is gone — it ended, or gave way
+    // to another while the checks above ran — and no policy denies the
+    // notice. Filed as its own turn instead of kept for the parent's next
+    // message, which on an idle parent may be hours away.
+    if (!live || target === null || gate.targetGone()) throw noticeSteerTargetGone();
   }
-  const sent = await sendTurn(
-    store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) }, ctx.config,
-    target === null ? undefined : (running) => {
-      if (running.id !== target.id || (!userAuthoredTurn(running) && antigravityAutoPromptsHeld(liveProvidersOf(ctx), (running.modelSelection ?? turnSelection).instanceId))) {
-        throw noticeSteerGated();
-      }
-    },
-  );
+  let sent: SendTurnResult;
+  try {
+    sent = await sendTurn(
+      store, thread.id, { ...send, ...(automaticQueue ? { queue: automaticQueue } : {}) }, ctx.config,
+      target === null ? undefined : (running) => {
+        // The same split under the send's own lock, where the target is read
+        // last: a target that left is the race above; a target still running
+        // but not the user's own is policy.
+        if (running.id !== target.id) throw noticeSteerTargetGone();
+        if (!userAuthoredTurn(running) && antigravityAutoPromptsHeld(liveProvidersOf(ctx), (running.modelSelection ?? turnSelection).instanceId)) {
+          throw noticeSteerGated();
+        }
+      },
+    );
+  } catch (error) {
+    // The turn ended inside the send's own lock, after the gate above read it
+    // as running: nothing was written and no policy refused the notice.
+    if (noticeSteer && error instanceof CliError && error.code === "THREAD_NOT_STEERABLE") throw noticeSteerTargetGone();
+    throw error;
+  }
   const uploads = input.attachments ?? [];
   if (sent.delivery === "steered" || sent.delivery === "injected") {
     // Drivers that cannot take images mid-turn still get them named in the text.
@@ -3664,11 +3698,17 @@ export async function startTurn(ctx: OperationContext, input: StartTurnInput, ex
     } : undefined;
     // A side question is the user's own; other origins are automatic prompts.
     const delivery = await deliverSteer(ctx, driver, thread.id, text, providerImages(uploads), sent.messageId, input.origin !== undefined && input.origin !== "question-answer", origin, target?.id);
-    if (noticeSteer && delivery === "gated") {
-      // Policy changed during the write. No steer was attempted, so leave
-      // only the durable batch, with no idle retry armed.
+    if (noticeSteer && (delivery === "gated" || delivery === "gone")) {
+      // The steer never left: nothing was sent and nothing arrived. The
+      // recorded steer row goes with it — only the durable batch stays.
       await store.discardStagedNoticeSteer(thread.id, sent.messageId);
-      throw noticeSteerGated();
+      if (delivery === "gated") {
+        // Policy changed during the write: no idle retry armed, no turn filed.
+        throw noticeSteerGated();
+      }
+      // The turn ended during the write: the batch is filed again for the
+      // now-idle parent instead of waiting for its next message.
+      throw noticeSteerTargetGone();
     }
     if (noticeSteer && delivery === "accepted") {
       await recordSteer("steer.accepted");
@@ -3848,10 +3888,14 @@ async function deliverSteer(
   payloadAutomatic: boolean,
   origin?: SteerOrigin,
   precheckedTurnId?: string,
-): Promise<"accepted" | "refused" | "gated"> {
+): Promise<"accepted" | "refused" | "gated" | "gone"> {
   if (!driver.steerTurn) return "gated";
   if (precheckedTurnId === undefined && !(await Effect.runPromise(driver.hasSession(threadId)).catch(() => false))) return "gated";
   const gate = await antigravitySteerGate(ctx.store, threadId, precheckedTurnId);
+  // Policy first, then the race, both decided on the target read after the
+  // awaits above — this is the moment the steer leaves.
+  if (payloadAutomatic && gate.policyRefuses(() => liveProvidersOf(ctx))) return "gated";
+  if (payloadAutomatic && gate.targetGone()) return "gone";
   if (gate.refuses(() => liveProvidersOf(ctx), payloadAutomatic)) return "gated";
   return await Effect.runPromise(driver.steerTurn(threadId, text, images, steerId, origin)).then(
     () => "accepted" as const,
@@ -4942,14 +4986,17 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
       // setting is read in force at the flush (LOCAL-034) — a timer's
       // captured context is as stale as a predecessor turn's snapshot.
       const antigravityHeld = !rides && antigravityAutoPromptsHeld(liveProvidersOf(ctx), activeSelection.instanceId);
-      // The steer's own gate, asked before anything is written: refusing
-      // here means no ledger row and no driver call, and this hold arms no
-      // child watcher and no retry timer — the batch waits for the next
-      // live user turn, an admission, or the setting turning on. The facts
-      // (the target the notice would ride) are re-read just now, so a turn
-      // that changed since the `rides` check above cannot be steered into.
+      // The steer's own gate, asked before anything is written: a policy
+      // refusal here means no ledger row and no driver call, and this hold
+      // arms no child watcher and no retry timer — the batch waits for the
+      // next live user turn, an admission, or the setting turning on. The
+      // facts (the target the notice would ride) are re-read just now, so a
+      // turn that changed since the `rides` check above cannot be steered
+      // into. Only policy holds here: a target that merely ended is not a
+      // refusal of the notice, and the delivery below files it as a turn of
+      // its own for the now-idle parent.
       const steerGate = running ? await antigravitySteerGate(ctx.store, parentThreadId) : null;
-      const steerRefused = steerGate !== null && steerGate.refuses(() => liveProvidersOf(ctx), true);
+      const steerRefused = steerGate !== null && steerGate.policyRefuses(() => liveProvidersOf(ctx));
       if (receivable && (parentNotificationsHeld(held) || antigravityHeld || steerRefused || (!running && spent))) {
         // Still held, or spent with no live turn to steer into: stay durable
         // in the batch file instead of starting a turn into the same wall —
@@ -4963,7 +5010,20 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
         return;
       }
     }
-    const { kept, deferred } = await deliverTaskNotifications(ctx, parentThreadId, mine);
+    // The turn this flush was steering into can end while the gate and the
+    // send acquire their locks. That is not a refusal of the notice: the
+    // parent is idle now, so the batch is filed again — which delivers it as
+    // a turn of its own — instead of leaving it for the user's next message.
+    // Policy and drain refusals are untouched by this: those throw their own
+    // errors (or nothing at all) and keep the batch exactly as it was.
+    let delivery: Awaited<ReturnType<typeof deliverTaskNotifications>>;
+    try {
+      delivery = await deliverTaskNotifications(ctx, parentThreadId, mine);
+    } catch (error) {
+      if (!isNoticeSteerTargetGone(error)) throw error;
+      delivery = { kept: mine, deferred: [] };
+    }
+    const { kept, deferred } = delivery;
     await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
       // A refused push and a child still working have different watchers,
       // but both stay durable until the next flush.
@@ -4972,7 +5032,8 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     });
     for (const entry of deferred) watchDeferredNotification(ctx, parentThreadId, entry);
     // Kept back for a turn that is still running: nothing would flush it again
-    // once the batch window's timer is gone, so its end is what files it.
+    // once the batch window's timer is gone, so its end is what files it —
+    // and on a parent that already ended, the first check runs at once.
     if (kept.length > 0) retryTaskNotificationsWhenIdle(ctx, parentThreadId);
   });
 }
