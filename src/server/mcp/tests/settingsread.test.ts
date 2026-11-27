@@ -340,6 +340,30 @@ describe("settings_read", () => {
     }
   });
 
+  it("redacts overflowing durations and emits canonical bounded durations for direct and inherited values", async () => {
+    const overflow = `${"9".repeat(400)}h`;
+    const overflowViews = describeSettings(normalizeConfig({ sessionTtl: overflow }));
+    for (const key of ["sessionTtl", "providers.claude.sessionTtl"]) {
+      const projected = projectAgentSettings(overflowViews, { key });
+      expect(projected.settings[0]).toMatchObject({ key, redacted: "free-form" });
+      expect(JSON.stringify(projected)).not.toContain("9999999999");
+    }
+
+    const padded = `${"0".repeat(16_384)}1h`;
+    const paddedViews = describeSettings(normalizeConfig({ sessionTtl: padded }));
+    const direct = projectAgentSettings(paddedViews, { key: "sessionTtl" });
+    expect(direct.settings[0]).toMatchObject({ key: "sessionTtl", redacted: false, value: "1h" });
+    expect(JSON.stringify(direct)).not.toContain("00000000");
+
+    const inherited = projectAgentSettings(paddedViews, { key: "providers.claude.sessionTtl" });
+    expect(inherited.settings[0]).toMatchObject({
+      key: "providers.claude.sessionTtl",
+      redacted: false,
+      effective: { value: "1h" },
+    });
+    expect(JSON.stringify(inherited)).not.toContain("00000000");
+  });
+
   it("maps config read errors to a path-free SETTINGS_UNAVAILABLE response", async () => {
     const harness = await testHarness();
     let failLoad = false;

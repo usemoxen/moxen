@@ -10,7 +10,7 @@
  * validated duration/threshold lines). A new setting is therefore hidden until
  * someone adds it to the list.
  */
-import { SETTING_SECTIONS, type SettingAppliesAt, type SettingDescriptor, type SettingEffective, type SettingKind, type SettingValue, type SettingView } from "../core/configschema.js";
+import { SETTING_SECTIONS, formatSettingValue, type SettingAppliesAt, type SettingDescriptor, type SettingEffective, type SettingKind, type SettingValue, type SettingView } from "../core/configschema.js";
 import { CliError } from "../core/errors.js";
 import { durationMs } from "../core/threads/idle.js";
 import { lineText, parseLine } from "../core/threads/lines.js";
@@ -212,6 +212,17 @@ function baseOf(descriptor: SettingDescriptor): AgentSettingBase {
   };
 }
 
+function canonicalDuration(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const ms = durationMs(value);
+  if (ms === null || !Number.isSafeInteger(ms) || ms < 0) return null;
+  const match = /^(\d+)(ms|s|m|h)$/.exec(value.trim());
+  if (!match) return null;
+  const count = Number(match[1]);
+  if (!Number.isSafeInteger(count)) return null;
+  return `${count}${match[2]}`;
+}
+
 function canonicalLiveValue(
   kind: SettingKind,
   value: SettingValue,
@@ -224,8 +235,10 @@ function canonicalLiveValue(
       return typeof value === "number" && Number.isFinite(value) ? { ok: true, value } : { ok: false };
     case "enum":
       return typeof value === "string" && kind.choices.some((choice) => choice.value === value) ? { ok: true, value } : { ok: false };
-    case "duration":
-      return typeof value === "string" && durationMs(value) !== null ? { ok: true, value: value.trim() } : { ok: false };
+    case "duration": {
+      const canonical = canonicalDuration(value);
+      return canonical !== null ? { ok: true, value: canonical } : { ok: false };
+    }
     case "line": {
       const parsed = parseLine(value);
       return parsed !== null ? { ok: true, value: lineText(parsed) } : { ok: false };
@@ -247,7 +260,13 @@ function projectView(view: SettingView): AgentSetting {
     return { ...baseOf(descriptor), redacted: "free-form" };
   }
   const value = checked.value;
-  const effective = view.effective === undefined ? undefined : { ...view.effective, value: checkedEffective!.value };
+  const effective = view.effective === undefined
+    ? undefined
+    : {
+        ...view.effective,
+        value: checkedEffective!.value,
+        ...(checkedEffective!.value === undefined ? {} : { label: formatSettingValue(descriptor, checkedEffective!.value) }),
+      };
   const source: AgentSettingValue["source"] = view.explicit
     ? "config"
     : effective !== undefined
