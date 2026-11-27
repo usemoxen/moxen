@@ -317,7 +317,7 @@ export function killProcessTree(
   signal: NodeJS.Signals = "SIGTERM",
 ): void {
   if (process.platform === "win32" && child.pid) {
-    const result = spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+    const result = spawnSync("taskkill", taskkillArgs(child.pid), {
       stdio: "ignore",
       windowsHide: true,
       timeout: 10_000,
@@ -339,7 +339,7 @@ export function killProcessTree(
  */
 export function killProcessGroup(pid: number, signal: NodeJS.Signals = "SIGTERM"): void {
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
+    spawnSync("taskkill", taskkillArgs(pid), { stdio: "ignore", windowsHide: true, timeout: 10_000 });
     return;
   }
   for (const target of [-pid, pid]) {
@@ -350,4 +350,118 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals = "SIGTERM"
       // Not a group leader, or gone: try the process itself, then give up.
     }
   }
+}
+
+/** `taskkill /PID <pid> /T /F` as argv, never a shell string. */
+function taskkillArgs(pid: number): string[] {
+  return ["/PID", String(pid), "/T", "/F"];
+}
+
+/** How long the async Windows reaper may run before it is killed itself. */
+export const TASKKILL_TIMEOUT_MS = 5_000;
+
+export interface KillProcessTreeOptions {
+  readonly platform?: NodeJS.Platform;
+  /** The spawner the Windows reaper uses; tests inject a fake. */
+  readonly spawn?: typeof spawn;
+  /** Bound on the Windows reaper; default `TASKKILL_TIMEOUT_MS`. */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * What a cleanup achieved: `reaped` — the Windows tree was taken down by
+ * `taskkill` — or `signalled`, the leader alone was signalled (POSIX, or the
+ * Windows fallback). A cleanup never throws: a caller ending a process has
+ * nothing to gain from an exception, and a leaked rejection would fail a turn.
+ */
+export type KillProcessTreeOutcome = "reaped" | "signalled";
+
+/**
+ * The async form of `killProcessTree`, for a caller whose answer must not wait
+ * on the platform's reaper. On Windows `taskkill` runs as a child process —
+ * never `spawnSync`, which would block the event loop for as long as the
+ * reaper takes. On POSIX it signals the child's process group, so descendants
+ * die with it even after the leader has exited.
+ *
+ * The Windows reaper is bounded: a `taskkill` that cannot start, exits
+ * non-zero or hangs ends the wait at `timeoutMs` (a hung one is killed), and
+ * the leader is signalled directly instead — so cleanup always finishes, and a
+ * caller that has already answered learns whether the whole tree died or only
+ * the leader was signalled, rather than waiting on it forever.
+ */
+export async function killProcessTreeAsync(
+  child: { readonly pid?: number | undefined; kill(signal?: NodeJS.Signals): unknown },
+  signal: NodeJS.Signals = "SIGTERM",
+  options: KillProcessTreeOptions = {},
+): Promise<KillProcessTreeOutcome> {
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    if (child.pid !== undefined && await taskkillAsync(child.pid, options.spawn ?? spawn, options.timeoutMs ?? TASKKILL_TIMEOUT_MS) === "reaped") {
+      return "reaped";
+    }
+    try {
+      child.kill(signal);
+    } catch {
+      // Already gone.
+    }
+    return "signalled";
+  }
+  // The probe runs detached, so its pid is its process-group id: signal the
+  // group (-pid) and not just the leader, which may already be gone.
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return "signalled";
+    } catch {
+      // Not a group leader, or gone: fall back to the process itself.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Already gone.
+  }
+  return "signalled";
+}
+
+/**
+ * `taskkill /T /F` on a pid, bounded by `timeoutMs`. `reaped` when `taskkill`
+ * exited cleanly, so the tree is gone; `failed` when it could not start,
+ * errored, exited non-zero or had to be killed for hanging — the caller then
+ * signals the leader itself, so cleanup is bounded but never silently skipped.
+ */
+function taskkillAsync(pid: number, spawnImpl: typeof spawn, timeoutMs: number): Promise<"reaped" | "failed"> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let killer: ReturnType<typeof spawn> | null = null;
+    const finish = (outcome: "reaped" | "failed"): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      resolve(outcome);
+    };
+    try {
+      killer = spawnImpl("taskkill", taskkillArgs(pid), { stdio: "ignore", windowsHide: true });
+    } catch {
+      finish("failed");
+      return;
+    }
+    // The reaper and the timer are both referenced on purpose: an awaiting
+    // caller must actually stay alive until cleanup finishes or is given up on.
+    killer.once("error", () => finish("failed"));
+    // A non-zero exit (access denied, or a tree that is somehow still there)
+    // is not proof the tree died, so it takes the same fallback as a hang.
+    killer.once("exit", (code: number | null) => finish(code === 0 ? "reaped" : "failed"));
+    timer = setTimeout(() => {
+      // Its own hang must not outlive the bound: kill the reaper, then let the
+      // caller signal the leader so cleanup is not silently skipped.
+      try {
+        killer?.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+      finish("failed");
+    }, timeoutMs);
+  });
 }

@@ -1,8 +1,8 @@
 /**
  * `usage_status` (MXN-299): an agent sees the user's current shared provider
- * usage — every set-up provider's windows with when each reading was taken
- * and whether it is stale — instead of routing by the hours-old figures the
- * `models` tool carries.
+ * usage — every provider an agent can delegate to has its windows, with when
+ * each reading was taken and whether it is stale — instead of routing by the
+ * hours-old figures the `models` tool carries.
  */
 import { describe, expect, it } from "vitest";
 
@@ -130,6 +130,7 @@ describe("usage_status", () => {
         provider: "harness",
         displayName: "HARNESS",
         enabled: true,
+        authStatus: "authenticated",
         checkedAt: null,
         stale: false,
         windows: [],
@@ -137,6 +138,58 @@ describe("usage_status", () => {
       },
     ]);
     expect(result.text).toMatch(/do not treat it as headroom/i);
+  });
+
+  it("keeps OpenCode Go's row and windows while its credential probe does not answer", async () => {
+    // The catalog calls every OpenCode provider disabled when
+    // `opencode auth list` does not answer; the provider still runs work and
+    // its plan windows are still the ones to route around.
+    const checkedAt = new Date().toISOString();
+    const world: World = {
+      providers: [provider("opencode/opencode-go", {
+        enabled: false,
+        models: [{ slug: "opencode-go/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", isCustom: false, isDefault: null, isHidden: false, efforts: [] }],
+      })],
+      stored: { "opencode/opencode-go": limits(checkedAt, 40) },
+      protection: { forecasts: [], queue: [] },
+      callerProvider: "opencode/opencode-go",
+      refresh: { "opencode/opencode-go": limits(checkedAt, 55) },
+    };
+    const result = await ask(world);
+    expect(result.isError).toBe(false);
+    const answer = JSON.parse(result.text) as Answer;
+    expect(answer.providers).toHaveLength(1);
+    expect(answer.providers[0]).toMatchObject({
+      provider: "opencode/opencode-go",
+      checkedAt,
+      windows: [{ id: "session", label: "Session", usedPercent: 55 }],
+    });
+  });
+
+  it("carries the login's verification state beside usage freshness, with a note", async () => {
+    const checkedAt = new Date().toISOString();
+    const world: World = {
+      providers: [
+        provider("opencode/opencode-go", { authStatus: "unverified" }),
+        provider("opencode/opencode", { authStatus: "unknown", models: [] }),
+      ],
+      stored: { "opencode/opencode-go": limits(checkedAt, 40) },
+      protection: { forecasts: [], queue: [] },
+      callerProvider: "opencode/opencode-go",
+      refresh: { "opencode/opencode-go": limits(checkedAt, 55) },
+    };
+    const result = await ask(world);
+    expect(result.isError).toBe(false);
+    const answer = JSON.parse(result.text) as {
+      providers: Array<{ provider: string; authStatus?: string; authNote?: string; stale: boolean; windows: Array<{ usedPercent: number }> }>;
+    };
+    const go = answer.providers.find((row) => row.provider === "opencode/opencode-go");
+    // Auth verification and usage freshness are separate: fresh usage, unverified login.
+    expect(go).toMatchObject({ authStatus: "unverified", stale: false, windows: [{ usedPercent: 55 }] });
+    expect(go?.authNote).toMatch(/not confirmed since/i);
+    const opencode = answer.providers.find((row) => row.provider === "opencode/opencode");
+    expect(opencode).toMatchObject({ authStatus: "unknown", windows: [] });
+    expect(opencode?.authNote).toMatch(/login is unconfirmed/i);
   });
 
   it("reads a fresh refresh rather than the stored reading", async () => {

@@ -24,7 +24,37 @@ but never reaches upward into the server or a client
 Credentials live with the provider CLIs (OpenCode keeps them in its own
 SQLite, read only as provider type). This CLI never handles their tokens; the
 only keys Moxen holds are a harness profile's and a search key, in the OS
-keychain.
+keychain. Moxen reads OpenCode's credential list to know which providers are
+connected. When that read does not answer, a provider read once before keeps
+its models and stays usable, with its auth state reported `unverified` (the
+answer is no longer current); with nothing ever read it is `unknown`, and
+either a stored usage reading or the provider being OpenCode Go — OpenCode's
+own plan — keeps its models listed while its credentials are unknown. A provider is never
+hidden from `providers list` just because its credentials could not be
+checked, and a successful answer, including an empty one, replaces the
+snapshot on the next probe. That answer only counts when the probe exited
+cleanly: a non-zero exit code or a signal makes the whole reply a failed probe
+whose output is ignored, so a `[]` printed by an interrupted CLI can never
+wipe a valid login. Both
+agent tools carry that state: each `models` and `usage_status` row has
+`authStatus` when the catalog has a value (it is left out when that value is
+null), and an `authNote` only when it is unknown or unverified. Which replies
+can replace Go's state: `[]` logs out every provider, a reply with a Go row
+replaces Go's state (a Go row with no connections logs Go out), and a
+nonempty reply without a Go row updates the other providers but leaves Go as
+it was. A malformed reply, or one with two rows for the same provider,
+replaces nothing. An `unknown`
+provider with no other evidence — no usage reading and no env API key — is
+left out of both tools, except OpenCode's own row (with its free tier enabled
+it can stay listed with zero models, which separates credential status from
+usability) and OpenCode Go, which stays listed with its models and the
+unconfirmed-auth note while its credentials are unknown. An explicit logout still hides Go: only an unreadable
+probe keeps it listed. A provider whose
+credentials are unknown or unverified, or whose models are all hidden, can be
+listed with no visible models: switching a thread to it without a model
+answers `MODEL_REQUIRED_FOR_PROVIDER`, so name a model explicitly. The catalog
+finds OpenCode with the same executable the driver starts
+(`providers.opencode.binaryPath`), on PATH or not.
 
 GPT models can run through native Codex, OpenCode, or Sign in with ChatGPT
 via Moxen Harness. When a ChatGPT attachment or tool image exceeds OpenAI's

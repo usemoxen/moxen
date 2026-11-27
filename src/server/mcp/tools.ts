@@ -14,6 +14,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import { CliError } from "../../core/errors.js";
+import { delegableProviders } from "../../core/catalog/summary.js";
 import { knowledgeInput, KNOWLEDGE_LIMITS } from "../../core/knowledge/input.js";
 import { untrustedContext } from "../../core/untrusted.js";
 import { fetchPage } from "../../core/providers/harness/web/fetch.js";
@@ -241,8 +242,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
   {
     name: "models",
     description:
-      "The providers you can delegate to, with each one's models and reasoning efforts — only providers that are set up " +
-      "here, and only models the user has not hidden, plus each provider's usage limits (session, weekly and monthly windows) when known. " +
+      "The providers Moxen can run work on here, with each one's models and reasoning efforts — only models the user has not hidden, plus each provider's usage limits (session, weekly and monthly windows) when known. " +
+      "Each row's authStatus (when known) says how its login was confirmed; an authNote explains an unknown or unverified login, which is not by itself a reason to skip the provider. " +
       "Those limits can be hours old: usage_status reads them fresh before you decide where there is headroom. " +
       "Pass provider to list just that one.",
     inputSchema: {
@@ -276,7 +277,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
   {
     name: "usage_status",
     description:
-      "The user's current shared provider usage, for every set-up provider: each window's percent used, reset time and label, when that reading was taken, and whether it is stale. " +
+      "The user's current shared provider usage, for every provider Moxen can run work on — including one whose credentials could not be checked, which stays listed and says unknown or unverified: each window's percent used, reset time and label, when that reading was taken, and whether it is stale. " +
+      "authStatus (when known) and authNote carry the login's verification state, a separate axis from the usage freshness in stale. " +
       "Also which provider your own thread runs on, and what usage protection holds or has queued (a delegated task sees its own held entry only). " +
       "Call it before fanning work out (Orchestrate: after models, before delegate), and whenever you must decide where there is headroom: the usageLimits in models can be hours old, while this tries a cheap fresh reading first and falls back to the stored one with its age. " +
       "A provider with no windows has no data, which is not the same as unlimited: key that off the empty windows list, not off stale. " +
@@ -1771,10 +1773,20 @@ async function statusTool(
 }
 
 /**
- * The catalog as an agent needs it to route work: enabled providers, their
- * visible models, each model's effort values. Compact on purpose — a full
- * provider catalog (every models.dev entry, capability descriptors) would
- * cost more context than the delegation it serves.
+ * What the catalog's auth state means for an agent, when it is not a
+ * confirmed login. Null for a confirmed one or none at all.
+ */
+function authNoteFor(authStatus: string | null): string | null {
+  if (authStatus === "unknown") return "Moxen could not read this provider's credential store, so its login is unconfirmed. Delegating may still work.";
+  if (authStatus === "unverified") return "This provider's login was read before but not confirmed since. Delegating may still work.";
+  return null;
+}
+
+/**
+ * The catalog as an agent needs it to route work: the providers it can
+ * delegate to, their visible models, each model's effort values. Compact on
+ * purpose — a full provider catalog (every models.dev entry, capability
+ * descriptors) would cost more context than the delegation it serves.
  */
 async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
   const only = argString(args, "provider");
@@ -1783,18 +1795,20 @@ async function modelsTool(api: ClientApi, args: Record<string, unknown>) {
     api.query({ type: "config.read" }),
   ]);
   const antigravityAllowed = antigravityUnsupportedUseAllowed(config);
-  const rows = providers
-    .filter((provider) => provider.enabled && provider.installed)
+  const rows = delegableProviders(providers)
     .filter((provider) => only === undefined || provider.instanceId === only)
     .map((provider) => {
       const visible = provider.models.filter((model) => !model.isHidden);
       // Antigravity with delegation off is not a delegation target: the row
       // stays (its models still inform the user's own threads) but says so.
       const delegationOff = !antigravityAllowed && driverKindOfInstance(provider.instanceId) === "antigravity";
+      const authNote = authNoteFor(provider.authStatus);
       return {
         provider: provider.instanceId,
         name: provider.displayName ?? provider.instanceId,
         ...(delegationOff ? { note: "Not available for delegation: providers.antigravity.allowUnsupportedUse is off. Google does not support delegation, automatic prompts or multiple accounts on consumer plans and may suspend the account; delegating here is refused until the user turns the setting on." } : {}),
+        ...(provider.authStatus ? { authStatus: provider.authStatus } : {}),
+        ...(authNote ? { authNote } : {}),
         ...(provider.usageLimits ? { usageLimits: provider.usageLimits } : {}),
         models: visible.slice(0, MAX_MODELS_PER_PROVIDER).map((model) => {
           const efforts = model.efforts.find((descriptor) => descriptor.id === "effort")?.choices.map((choice) => choice.id) ?? [];
@@ -1898,12 +1912,12 @@ async function contextUsageTool(api: ClientApi, parentThreadId: string, args: Re
 
 /**
  * `usage_status`: the user's current shared provider usage, for an agent
- * deciding where there is headroom. Every enabled, installed provider keeps
- * one row: its windows (percent used, reset time, label), when that reading
- * was taken, and whether it is stale (older than USAGE_STALE_AFTER_MS).
- * A provider with no windows has no data, which is not unlimited. The
- * protection snapshot is the same one `moxen usage status` shows: what
- * usage protection holds or has queued.
+ * deciding where there is headroom. Every provider an agent can delegate to
+ * keeps one row: its windows (percent used, reset time, label), when that
+ * reading was taken, and whether it is stale (older than
+ * USAGE_STALE_AFTER_MS). A provider with no windows has no data, which is not
+ * unlimited. The protection snapshot is the same one `moxen usage status`
+ * shows: what usage protection holds or has queued.
  */
 async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs: number, delegated: boolean) {
   const [listed, stored, protection, inspected] = await Promise.all([
@@ -1918,15 +1932,22 @@ async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs
   const refreshed = await withinDeadline(api.query({ type: "usage.refresh" }), timeoutMs).catch(() => "timeout" as const);
   const snapshot = refreshed === "timeout" ? stored.providers : refreshed.providers;
   const now = Date.now();
-  const providers = listed.providers
-    .filter((provider) => provider.enabled && provider.installed)
+  const providers = delegableProviders(listed.providers)
     .map((provider) => {
       const usage = snapshot[usageKeyForInstance(provider.instanceId)] ?? snapshot[provider.driver] ?? provider.usageLimits;
+      // The login's verification state is its own axis: usage freshness in
+      // `stale` never stands in for it.
+      const authNote = authNoteFor(provider.authStatus);
+      const auth = {
+        ...(provider.authStatus ? { authStatus: provider.authStatus } : {}),
+        ...(authNote ? { authNote } : {}),
+      };
       if (!usage || usage.windows.length === 0) {
         return {
           provider: provider.instanceId,
           displayName: provider.displayName ?? provider.instanceId,
           enabled: true,
+          ...auth,
           checkedAt: usage?.checkedAt ?? null,
           stale: false,
           windows: [],
@@ -1940,6 +1961,7 @@ async function usageStatusTool(api: ClientApi, parentThreadId: string, timeoutMs
         provider: provider.instanceId,
         displayName: provider.displayName ?? provider.instanceId,
         enabled: true,
+        ...auth,
         checkedAt: usage.checkedAt,
         stale: !Number.isFinite(taken) || now - taken > USAGE_STALE_AFTER_MS,
         windows: usage.windows.map((window) => ({

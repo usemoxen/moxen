@@ -507,6 +507,7 @@ export class DirectConnection implements ClientApi {
         ...(providers?.chatgpt ? { chatgpt: providers.chatgpt } : {}),
         ...(providers?.codex ? { codex: providers.codex } : {}),
         ...(providers?.opencode ? { opencode: providers.opencode } : {}),
+        ...(providers?.opencode?.binaryPath ? { opencodeBinaryPath: providers.opencode.binaryPath } : {}),
         ...(providers?.antigravity ? { antigravity: providers.antigravity } : {}),
         ...(providers?.vibe ? { vibe: providers.vibe } : {}),
         ...(providers?.acp ? { acp: providers.acp } : {}),

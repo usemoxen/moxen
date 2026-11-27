@@ -36,20 +36,29 @@ import { resolveLiveModels } from "../providers/claude/livemodels.js";
 import { binaryOnPath } from "../infra/process.js";
 import { resolveStoreRoot } from "../threads/store.js";
 import { isModelHidden, loadModelPrefs } from "./prefs.js";
+import { OPENCODE_DEFAULT_BINARY } from "../providers/opencode/config.js";
 import {
+  GO_PROVIDER,
+  OPENCODE_AUTH_TRUST_MS,
+  authForProvider,
+  defaultMonotonic,
   effortValuesOf,
   freeModelsDisabled,
   freeTierModels,
   loadModelsDevCatalog,
   loadServedModels,
   presentApiKeyEnvs,
-  readStoredAuthTypes,
+  readStoredAuth,
+  sameProviderId,
   storedAuthTypeFor,
   type LoadedModelsDevCatalog,
   type LoadedServedModels,
   type ModelsDevModel,
   type ModelsDevProvider,
+  type ReadStoredAuthOptions,
+  type StoredAuth,
 } from "../providers/opencode/catalog.js";
+import { usageLimitsSnapshot } from "../usage/limits.js";
 import {
   accountInstanceId,
   type AcpProviderConfig,
@@ -61,7 +70,7 @@ import {
   type OpencodeProviderConfig,
   type VibeProviderConfig,
 } from "../types.js";
-import type { EffortDescriptor, ModelSummary, ProviderSummary } from "./summary.js";
+import type { EffortDescriptor, ModelSummary, ProviderSummary, ProviderUsageLimits } from "./summary.js";
 
 export interface DirectCatalogOptions {
   readonly env?: NodeJS.ProcessEnv;
@@ -86,11 +95,16 @@ export interface DirectCatalogOptions {
   /** The models OpenCode's own provider serves today (`loadServedModels`); read only when its free tier is offered. */
   readonly opencodeServed?: () => Promise<LoadedServedModels>;
   /**
-   * The `opencode` executable to ask for stored credentials. No setting feeds
-   * this today (the OpenCode driver is built with its defaults too), so it is
-   * the bare `opencode` on PATH until one exists.
+   * The `opencode` executable the driver starts servers with
+   * (`providers.opencode.binaryPath`). Installation detection and the
+   * credential probe use the same executable, so a configured one outside
+   * PATH is not reported absent.
    */
   readonly opencodeBinaryPath?: string;
+  /** How the stored OpenCode credentials are read; tests inject a runner and clock. */
+  readonly storedAuth?: Omit<ReadStoredAuthOptions, "binaryPath">;
+  /** The latest usage reading per account (`usageLimitsSnapshot`), which is evidence a provider is configured. */
+  readonly usageLimits?: () => Readonly<Record<string, ProviderUsageLimits>>;
   /**
    * Asks the installed Claude Code for its models (`supportedModels()`).
    * Without it only a cached answer is read, so a catalog build never
@@ -131,6 +145,31 @@ const SERVED_NOTE: Readonly<Record<LoadedServedModels["source"], string>> = {
   none: "; OpenCode's list of served models could not be read, so some may be retired",
 };
 
+/** Whether a provider executable is there: an absolute path as given, else a PATH lookup. */
+function binaryPresent(binary: string, env: NodeJS.ProcessEnv): boolean {
+  const file = binary.trim();
+  if (file.length === 0) return false;
+  if (!path.isAbsolute(file)) return binaryOnPath(file, env);
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** How long ago a reading was taken, in the shortest unit that stays honest. */
+function elapsed(sinceMs: number): string {
+  const minutes = Math.max(1, Math.floor(sinceMs / 60_000));
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+}
+
+/** Whether a models.dev provider id is OpenCode Go's, across the v1→v2 spellings. */
+function isGoProvider(providerId: string): boolean {
+  return sameProviderId(providerId, GO_PROVIDER);
+}
+
 /**
  * Per-provider `opencode/<id>` entries: categorized, browsable sections.
  * Credentialed providers list everything. Without a credential only
@@ -138,7 +177,18 @@ const SERVED_NOTE: Readonly<Record<LoadedServedModels["source"], string>> = {
  * zero-cost on models.dev and still served (`freeTierModels`), none at all
  * under `OPENCODE_DISABLE_FREE_MODELS`; every other provider refuses every
  * request, so it is listed disabled with no models rather than offering a
- * long tail of models the user cannot run.
+ * long tail of models the user cannot run. With the free tier on but no free
+ * model served, OpenCode's own row still stays listed (zero models): the
+ * credential state is unknown, which is not the same as unusable.
+ *
+ * A probe that never answers is *unknown*, not "not connected": a provider
+ * with a stored usage reading, or OpenCode Go (which runs without a stored
+ * credential), keeps its models and stays delegable, and says the credentials
+ * are unknown. Requiring that evidence for Go would hide it on every first
+ * run, which is when the catalog most needs to show it. A credential read once
+ * but not confirmed since (the latest probe failed, or the last success is
+ * older than `OPENCODE_AUTH_TRUST_MS`) stays usable and is reported
+ * `unverified` rather than passing an old answer off as current.
  */
 async function opencodeProviders(
   loaded: LoadedModelsDevCatalog,
@@ -147,14 +197,35 @@ async function opencodeProviders(
   isHidden: (instanceId: string, slug: string) => boolean,
   binaryPath?: string,
   loadServed: () => Promise<LoadedServedModels> = loadServedModels,
+  usage: Readonly<Record<string, ProviderUsageLimits>> = {},
+  storedAuth: Omit<ReadStoredAuthOptions, "binaryPath"> = {},
 ): Promise<ProviderSummary[]> {
-  const stored = installed ? await readStoredAuthTypes(env, { binaryPath }) : {};
+  const auth: StoredAuth = installed
+    ? await readStoredAuth(env, { ...storedAuth, binaryPath })
+    : { attempt: { seq: 0, outcome: "valid", completedAt: null, completedAtMono: null }, go: null, others: null };
+  const now = (storedAuth.now ?? Date.now)();
+  const monoNow = (storedAuth.monotonic ?? defaultMonotonic)();
   const freeOff = freeModelsDisabled(env);
-  const needsServed = installed && !freeOff && loaded.catalog.some((provider) => provider.id.toLowerCase() === "opencode" && storedAuthTypeFor(stored, provider.id) === undefined && presentApiKeyEnvs(provider, env).length === 0);
+  const storedOthers = auth.others?.value ?? {};
+  const needsServed = installed && !freeOff && loaded.catalog.some((provider) => provider.id.toLowerCase() === "opencode" && storedAuthTypeFor(storedOthers, provider.id) === undefined && presentApiKeyEnvs(provider, env).length === 0);
   const served: LoadedServedModels = needsServed ? await loadServed().catch((): LoadedServedModels => ({ ids: null, source: "none" })) : { ids: null, source: "none" };
   return loaded.catalog.map((provider: ModelsDevProvider) => {
+    const instanceId = `opencode/${provider.id}`;
     const keyEnvs = presentApiKeyEnvs(provider, env);
-    const storedType = storedAuthTypeFor(stored, provider.id);
+    // Go and every other provider have their own snapshot: a reply that did
+    // not mention Go cannot reconfirm it, and an older Go login stays usable
+    // when a later attempt fails.
+    const providerAuth = authForProvider(auth, provider.id);
+    const storedType = storedAuthTypeFor(providerAuth.types, provider.id);
+    // No snapshot for this group at all: unknown, not none. A snapshot with an
+    // empty map is a confirmed logout instead.
+    const unknown = installed && providerAuth.verifiedAt === null;
+    // A login read once is not re-confirmed now: past the trust bound, or as
+    // soon as the latest attempt fails or does not cover this group, it is
+    // reported unverified while staying usable. The age is monotonic: a wall
+    // clock that moves backwards must not make an old login look confirmed.
+    const trustAge = providerAuth.verifiedAtMono === null ? Number.NaN : monoNow - providerAuth.verifiedAtMono;
+    const stale = providerAuth.verifiedAt !== null && (!providerAuth.answered || !Number.isFinite(trustAge) || trustAge < 0 || trustAge > OPENCODE_AUTH_TRUST_MS);
     const credential = storedType === "oauth"
       ? "oauth"
       : storedType === "api" || storedType === "env"
@@ -166,11 +237,27 @@ async function opencodeProviders(
             : null;
     const ownProvider = credential === null && provider.id.toLowerCase() === "opencode";
     const freeTier = ownProvider && !freeOff;
-    const connected = credential !== null || freeTier;
-    const models = credential !== null ? provider.models : freeTier ? freeTierModels(provider.models, served.ids) : [];
+    // A stored usage reading is evidence a session ran on this instance: with
+    // the credential probe unknown, it is what keeps the provider listed.
+    const evidence = usage[instanceId]?.windows.length ? "a usage reading exists for it" : null;
+    const unknownButUsed = unknown && credential === null && !freeTier && evidence !== null;
+    // OpenCode Go is OpenCode's own plan, so a probe that cannot answer must
+    // not hide it. Requiring a stored usage reading hid it on every first run
+    // — exactly when the agent needs to see what it can run work on. An
+    // explicit logout still hides it: `unknown` is what separates the two.
+    const unconfirmedGo = unknown && credential === null && !freeTier && isGoProvider(provider.id);
+    const connected = credential !== null || freeTier || unknownButUsed || unconfirmedGo;
+    const models = credential !== null || unknownButUsed || unconfirmedGo
+      ? provider.models
+      : freeTier
+        ? freeTierModels(provider.models, served.ids)
+        : [];
     const keyHint = provider.env.length > 0 ? provider.env[0] : null;
+    // An env key is live proof; a stored login is only as good as its last successful read.
+    const unverified = credential !== null && storedType !== undefined && keyEnvs.length === 0 && stale;
+    const authStatus = credential === null ? (unknown ? "unknown" : null) : unverified ? "unverified" : credential;
     return {
-      instanceId: `opencode/${provider.id}`,
+      instanceId,
       driver: "opencode",
       displayName: provider.name,
       enabled: installed && connected,
@@ -179,19 +266,25 @@ async function opencodeProviders(
         ? "not installed"
         : freeTier
           ? `free models only (connect it for all ${provider.models.length})${SERVED_NOTE[served.source]}`
-          : !connected
-            ? ownProvider
-              ? "free models off (OPENCODE_DISABLE_FREE_MODELS); connect it to use it"
-              : keyHint !== null
-                ? `not connected (set ${keyHint} or run opencode auth login)`
-                : "not connected (run opencode auth login)"
-            : loaded.source === "live"
-              ? null
-              : `models.dev ${loaded.source}`,
-      authStatus: credential,
+          : credential === null && unknownButUsed
+            ? `credentials unknown (${evidence}; delegating may still work)`
+            : credential === null && unknown
+              ? "credentials unknown (run opencode auth login if a model refuses)"
+              : !connected
+                ? ownProvider
+                  ? "free models off (OPENCODE_DISABLE_FREE_MODELS); connect it to use it"
+                  : keyHint !== null
+                    ? `not connected (set ${keyHint} or run opencode auth login)`
+                    : "not connected (run opencode auth login)"
+                : unverified
+                  ? `credentials unverified (last confirmed ${elapsed(now - (providerAuth.verifiedAt ?? now))})`
+                  : loaded.source === "live"
+                    ? null
+                    : `models.dev ${loaded.source}`,
+      authStatus,
       models: models.map((model) => ({
         ...baseModel(slugOf(provider, model), model.name),
-        isHidden: isHidden(`opencode/${provider.id}`, slugOf(provider, model)),
+        isHidden: isHidden(instanceId, slugOf(provider, model)),
         efforts: opencodeEfforts(model),
       })),
       supportedRuntimeModes: null,
@@ -278,7 +371,10 @@ function harnessProviders(
  */
 export async function buildDirectProviders(options: DirectCatalogOptions = {}): Promise<ProviderSummary[]> {
   const env = options.env ?? process.env;
-  const opencodeInstalled = binaryOnPath("opencode", env);
+  // The same executable the driver starts servers with: a configured path
+  // outside PATH counts, and is what the credential probe asks.
+  const opencodeBinary = options.opencode?.binaryPath?.trim() || options.opencodeBinaryPath?.trim() || OPENCODE_DEFAULT_BINARY;
+  const opencodeInstalled = binaryPresent(opencodeBinary, env);
   const storeRoot = options.storeRoot ?? resolveStoreRoot();
 
   const [claudeInstalled, modelsDev, prefs] = await Promise.all([
@@ -387,8 +483,10 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
     }),
   );
 
+  // OpenCode is opt-in (`providers.opencode.enabled`). Once it is on, each of
+  // its providers is listed from the credential state — a probe that does not
+  // answer is unknown, not "logged out" — so a failed read cannot drop them.
   const opencodeEnabled = options.opencode?.enabled === true;
-  const opencodeBinary = options.opencode?.binaryPath?.trim() || options.opencodeBinaryPath;
   const opencode = opencodeEnabled
     ? await opencodeProviders(
         modelsDev,
@@ -397,6 +495,8 @@ export async function buildDirectProviders(options: DirectCatalogOptions = {}): 
         (instanceId, slug) => isModelHidden(prefs, instanceId, slug),
         opencodeBinary,
         options.opencodeServed,
+        (options.usageLimits ?? usageLimitsSnapshot)(),
+        options.storedAuth ?? {},
       )
     : [];
   const compat = opencodeEnabled ? [opencodeCompatInstance(modelsDev, opencodeInstalled)] : [];

@@ -197,12 +197,17 @@ thread still exists in the caller's project — a deleted or foreign one is the
 same `TASK_NOT_FOUND` a stranger gets. Each explanation is its own field
 (`breakdownNote`, `costNote`) so `note` says exactly what it always said.
 
-`usage_status` answers with every set-up provider's allowance: each window's
-percent used, reset time and label, when that reading was taken, and whether
-it is stale — plus which provider the calling thread runs on, and what usage
-protection holds or has queued. It tries a cheap fresh reading first, bounded,
-and falls back to the stored one with its age. A provider with no windows has
-no data, which is not the same as unlimited.
+`usage_status` answers with every provider Moxen can run work on: each
+window's percent used, reset time and label, when that reading was taken, and
+whether it is stale — plus which provider the calling thread runs on, and what
+usage protection holds or has queued. Each row carries `authStatus` when the
+catalog has one (it is omitted when that value is null), and `authNote` only
+when the state is `unknown` or `unverified`: that is a separate axis from
+usage freshness, and a provider whose credentials could not be checked is
+still listed and may still run work, so it is not on its own a reason to skip
+it. It tries a cheap fresh reading first, bounded, and falls back to the
+stored one with its age. A provider with no windows has no data, which is not
+the same as unlimited. `models` rows follow the same rule for both fields.
 
 `thread_read` never floods the caller's context: it returns an outline (one
 line per turn, newest first), then the turns asked for (each tool call one

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { selectModel, selectProvider } from "../summary.js";
 import { buildDirectProviders } from "../direct.js";
-import type { LoadedServedModels } from "../../providers/opencode/catalog.js";
+import { clearStoredAuthCache, type LoadedServedModels } from "../../providers/opencode/catalog.js";
 import { tempDir } from "../../testing/tmp.js";
 
 function binDir(names: string[]): string {
@@ -21,6 +21,16 @@ function opencodeBin(list: unknown[]): string {
   else fs.writeFileSync(path.join(dir, "opencode"), `#!/bin/sh\necho '${JSON.stringify(list)}'\n`, { mode: 0o755 });
   return dir;
 }
+
+/** An `opencode` stub at an explicit path; `null` makes its auth call exit non-zero. */
+function opencodeAt(file: string, list: unknown[] | null): string {
+  const body = list === null ? null : JSON.stringify(list);
+  if (process.platform === "win32") fs.writeFileSync(file, body === null ? "@echo off\r\nexit /b 7\r\n" : `@echo off\r\necho ${body}\r\n`);
+  else fs.writeFileSync(file, body === null ? "#!/bin/sh\nexit 7\n" : `#!/bin/sh\necho '${body}'\n`, { mode: 0o755 });
+  return file;
+}
+
+const AUTH_ONLY_ANTHROPIC = [{ id: "anthropic", name: "Anthropic", connections: [{ type: "key" }] }];
 
 const MODELS_DEV = {
   catalog: [
@@ -121,7 +131,7 @@ describe("buildDirectProviders", () => {
 
   it("lists a provider that is not connected as disabled, with no models to pick", async () => {
     const providers = await buildDirectProviders({
-      env: { PATH: binDir(["opencode"]) },
+      env: { PATH: opencodeBin([]) },
       storeRoot: tmpStore(),
       opencode: { enabled: true },
       modelsDev: async () => MODELS_DEV,
@@ -149,7 +159,7 @@ describe("buildDirectProviders", () => {
     source: "live" as const,
   };
   const zenOf = async (env: NodeJS.ProcessEnv, served: () => Promise<LoadedServedModels>) =>
-    (await buildDirectProviders({ env: { PATH: binDir(["opencode"]), ...env }, storeRoot: tmpStore(), opencode: { enabled: true }, modelsDev: async () => ZEN, opencodeServed: served })).find((entry) => entry.instanceId === "opencode/opencode");
+    (await buildDirectProviders({ env: { PATH: opencodeBin([]), ...env }, storeRoot: tmpStore(), opencode: { enabled: true }, modelsDev: async () => ZEN, opencodeServed: served })).find((entry) => entry.instanceId === "opencode/opencode");
 
   it("keeps OpenCode's own free tier without a login: zero-cost models it still serves", async () => {
     const zen = await zenOf({}, async () => ({ ids: new Set(["free-one", "paid-one"]), source: "live" }));
@@ -203,6 +213,50 @@ describe("buildDirectProviders", () => {
     });
     const entry = providers.find((item) => item.instanceId === "opencode");
     expect(entry?.models.map((model) => model.slug)).toEqual(["zen/bare-model"]);
+  });
+
+  it("finds a configured OpenCode executable outside PATH, and asks it for credentials", async () => {
+    clearStoredAuthCache();
+    const binary = opencodeAt(path.join(tempDir("moxen-config-bin-"), process.platform === "win32" ? "opencode.cmd" : "opencode"), AUTH_ONLY_ANTHROPIC);
+    const providers = await buildDirectProviders({
+      env: { PATH: "/nonexistent" },
+      opencode: { enabled: true },
+      opencodeBinaryPath: binary,
+      storeRoot: tmpStore(),
+      modelsDev: async () => MODELS_DEV,
+    });
+    const section = providers.find((entry) => entry.instanceId === "opencode/anthropic");
+    expect(section?.installed).toBe(true);
+    expect(section?.enabled).toBe(true);
+    expect(section?.authStatus).toBe("api-key");
+    expect(section?.models).toHaveLength(2);
+    clearStoredAuthCache();
+  });
+
+  it("keeps a provider a usage reading proves ran when the credential probe never answers", async () => {
+    clearStoredAuthCache();
+    const binary = opencodeAt(path.join(tempDir("moxen-auth-bin-"), process.platform === "win32" ? "opencode.cmd" : "opencode"), null);
+    const providers = await buildDirectProviders({
+      env: { PATH: "/nonexistent" },
+      opencode: { enabled: true },
+      opencodeBinaryPath: binary,
+      storeRoot: tmpStore(),
+      modelsDev: async () => MODELS_DEV,
+      usageLimits: () => ({
+        "opencode/anthropic": {
+          checkedAt: "2026-11-19T00:00:00.000Z",
+          windows: [{ id: "session", kind: "session", label: "Session", usedPercent: 10, resetsAt: null }],
+          unavailable: null,
+        },
+      }),
+    });
+    const section = providers.find((entry) => entry.instanceId === "opencode/anthropic");
+    expect(section?.installed).toBe(true);
+    expect(section?.enabled).toBe(true);
+    expect(section?.authStatus).toBe("unknown");
+    expect(section?.status).toMatch(/credentials unknown .*usage reading/);
+    expect(section?.models).toHaveLength(2);
+    clearStoredAuthCache();
   });
 
   it("keeps selectProvider/selectModel error codes on direct output", async () => {

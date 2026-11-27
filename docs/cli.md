@@ -407,7 +407,7 @@ moxen handover --stdin
 
 `models hide` / `models show` curate the pickers: hidden models stay usable when named explicitly and stay visible on threads already running them — they only leave the model picker lists. `models list` still lists them, with a `hidden` marker.
 
-`providers list` reports each instance's `usageLimits` from the server's last recorded windows; it reads `null` only before any session has reported for that account. Per-turn token totals are recorded in the turn ledger as runs settle and feed the TUI usage display.
+`providers list` reports each instance's `usageLimits` from the server's last recorded windows; it reads `null` only before any session has reported for that account. Per-turn token totals are recorded in the turn ledger as runs settle and feed the TUI usage display. An OpenCode instance's auth column reads the stored login type while the credential store answers; it reads `unverified` when a login was read before but the latest probe failed (or the read is over a day old), and `unknown` when the store has never answered. A provider with a recorded usage reading stays listed and usable in either state. The executable the catalog checks and asks is `providers.opencode.binaryPath`, so a configured one outside PATH still counts.
 
 ## Opening threads
 
