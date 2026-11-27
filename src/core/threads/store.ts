@@ -855,12 +855,28 @@ export class ThreadStore {
     delegationId: string,
     patch: Partial<StoredDelegation>,
   ): Promise<StoredDelegation | null> {
+    return await this.updateDelegationWith(delegationId, () => patch);
+  }
+
+  /**
+   * Patch a delegation row from a builder run under the one ledger lock: the
+   * row it decides on is the row it writes, so a check and the write it
+   * guards cannot be separated by another writer. Null from the builder
+   * leaves the row alone; so does a missing row.
+   */
+  async updateDelegationWith(
+    delegationId: string,
+    build: (current: StoredDelegation) => Partial<StoredDelegation> | null | Promise<Partial<StoredDelegation> | null>,
+  ): Promise<StoredDelegation | null> {
     return await this.withThreadLock("!delegations", async () => {
       const all = await this.readDelegations();
       const index = all.findIndex((delegation) => delegation.id === delegationId);
       if (index < 0) return null;
+      const current = all[index]!;
+      const patch = await build(current);
+      if (patch === null) return null;
       const updated: StoredDelegation = {
-        ...all[index]!,
+        ...current,
         ...patch,
         id: delegationId,
         updatedAt: this.nowIso(),
@@ -868,6 +884,21 @@ export class ThreadStore {
       const next = [...all.slice(0, index), updated, ...all.slice(index + 1)];
       await this.writeDelegationRows(next);
       return updated;
+    });
+  }
+
+  /**
+   * Record that a task turn settled, monotonically by execution sequence so a
+   * delayed settle callback from an older turn can never overwrite newer work.
+   */
+  async recordDelegationSettle(delegationId: string, turnId: string, settledSeq?: number): Promise<void> {
+    await this.updateDelegationWith(delegationId, (current) => {
+      if (settledSeq !== undefined) {
+        if (current.lastSettledSeq !== undefined && settledSeq < current.lastSettledSeq) return null;
+        return { lastSettledTurnId: turnId, lastSettledSeq: settledSeq };
+      }
+      if (current.lastSettledSeq !== undefined) return null;
+      return { lastSettledTurnId: turnId };
     });
   }
 

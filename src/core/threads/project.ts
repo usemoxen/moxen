@@ -66,14 +66,57 @@ function runAt(turn: StoredTurn): number {
   return Date.parse(turn.startedAt ?? turn.createdAt);
 }
 
+function finiteRunAt(turn: StoredTurn): number {
+  const at = runAt(turn);
+  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+}
+
 /**
  * The thread's turns in the order they ran: the numbering every reader shows.
  * Ledger row order is not that order — a message queued before a later turn
  * starts after it — so numbering by row would move turns a client has
- * already seen. Ties keep ledger order.
+ * already seen.
+ *
+ * Input contract: `turns` is supplied in persisted ledger order. Sequenced
+ * turns sort strictly by monotonic `executionSeq`; legacy unsequenced turns
+ * sort by finite start/create timestamp (invalid timestamps sort earliest)
+ * with ties preserving ledger order. Live writes seed pre-upgrade legacy turns
+ * atomically before allocating new sequences, so active ledgers order purely
+ * by `executionSeq`.
  */
 export function ranTurns(turns: readonly StoredTurn[]): StoredTurn[] {
-  return turns.filter(turnRan).sort((left, right) => runAt(left) - runAt(right));
+  const ran = turns.filter(turnRan);
+  const sequenced: StoredTurn[] = [];
+  const legacy: StoredTurn[] = [];
+  for (const turn of ran) {
+    if (turn.executionSeq !== undefined) sequenced.push(turn);
+    else legacy.push(turn);
+  }
+  sequenced.sort((left, right) => left.executionSeq! - right.executionSeq!);
+  if (legacy.length === 0) return sequenced;
+  legacy.sort((left, right) => {
+    const leftAt = finiteRunAt(left);
+    const rightAt = finiteRunAt(right);
+    if (leftAt === rightAt) return 0;
+    return leftAt < rightAt ? -1 : 1;
+  });
+  if (sequenced.length === 0) return legacy;
+  // Mixed ledger: preserve monotonic executionSeq order among sequenced turns
+  // (even across backward clock jumps), while interleaving legacy turns by
+  // timestamp (legacy before sequenced on the same tick, newer legacy after).
+  const merged: StoredTurn[] = [];
+  let legacyIndex = 0;
+  for (const seqTurn of sequenced) {
+    const seqAt = finiteRunAt(seqTurn);
+    while (legacyIndex < legacy.length && finiteRunAt(legacy[legacyIndex]!) <= seqAt) {
+      merged.push(legacy[legacyIndex++]!);
+    }
+    merged.push(seqTurn);
+  }
+  while (legacyIndex < legacy.length) {
+    merged.push(legacy[legacyIndex++]!);
+  }
+  return merged;
 }
 
 /**

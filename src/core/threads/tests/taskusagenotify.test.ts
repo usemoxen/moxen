@@ -1,9 +1,14 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { createThread, completeTurn, failTurn, sendTurn, openTurn, interruptTurn, settleThread, isContinuationBusy } from "../threads.js";
-import { flushTurnRunners, type TurnDriver } from "../execute.js";
+import { flushTurnRunners, type TurnDriver, type TurnOutcome } from "../execute.js";
+import { CliError } from "../../errors.js";
+import type { ProviderRuntimeEvent } from "../../providers/spi.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { driverKindOfInstance } from "../../types.js";
 import {
@@ -18,6 +23,8 @@ import {
   queueTaskNotification,
   recoverPendingAdoptions,
   recoverTaskNotifications,
+  revertThread,
+  runDueScheduledTurn,
   runWorkQueue,
   scheduleUsageContinue,
   sendTaskMessage,
@@ -26,6 +33,7 @@ import {
   type OperationContext,
 } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
+import type { ThreadStore } from "../store.js";
 import { taskNotificationText } from "../notify.js";
 import { UsageProtection } from "../../usage/protection.js";
 
@@ -52,7 +60,11 @@ afterEach(() => {
   resetUsageLimitsForTests();
 });
 
-async function world(config: Record<string, unknown> = {}, harnessOptions: Parameters<typeof testHarness>[0] = {}) {
+async function world(
+  config: Record<string, unknown> = {},
+  harnessOptions: Parameters<typeof testHarness>[0] = {},
+  script?: (driver: TurnDriver) => TurnDriver,
+) {
   const harness = await testHarness(harnessOptions);
   const drivers = new Map<string, TurnDriver>();
   const ctx: OperationContext = {
@@ -64,6 +76,7 @@ async function world(config: Record<string, unknown> = {}, harnessOptions: Param
       let driver = drivers.get(kind);
       if (!driver) {
         driver = harness.drivers[kind]!();
+        if (script) driver = script(driver);
         drivers.set(kind, driver);
       }
       return driver;
@@ -77,6 +90,99 @@ async function world(config: Record<string, unknown> = {}, harnessOptions: Param
       modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
     });
   return { ...harness, ctx, make };
+}
+
+/**
+ * A harness driver whose turns follow a script by the order they were sent:
+ * the test holds one provider run where it needs the interleaving.
+ */
+function scriptedDriver(
+  base: TurnDriver,
+  sent: readonly string[],
+  behavior: (prompt: string, signal?: AbortSignal) => Promise<TurnOutcome> | TurnOutcome,
+): TurnDriver {
+  const driver = Object.create(base) as TurnDriver;
+  let awaited = 0;
+  driver.awaitTurn = (_threadId, _turnId, signal) => Promise.resolve(behavior(sent[awaited++] ?? "", signal));
+  return driver;
+}
+
+function completed(text: string): TurnOutcome {
+  return { status: "completed", text, usage: { input: 1, cacheRead: 0, cacheCreate: 0, output: 2, thinking: 0 }, error: null };
+}
+
+/**
+ * A store whose named delegation writes pass through `gate` first: the test
+ * holds one write to force an interleaving. Internal store calls bypass it.
+ */
+function gateStore(store: ThreadStore, methods: readonly string[], gate: () => Promise<void>): ThreadStore {
+  return new Proxy(store, {
+    get(target, property) {
+      if (typeof property === "string" && methods.includes(property)) {
+        const original = Reflect.get(target, property, target) as (...args: unknown[]) => Promise<unknown>;
+        return async (...args: unknown[]) => {
+          await gate();
+          return await original.apply(target, args);
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as ThreadStore;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+/**
+ * A driver like Claude Code waking its own session: a real event stream,
+ * so the session watcher records and runs the turn the provider starts.
+ */
+class WakingDriver implements TurnDriver {
+  private readonly sessions = new Set<string>();
+  private readonly queue = Effect.runSync(Queue.unbounded<ProviderRuntimeEvent>());
+  private readonly outcomes = new Map<string, (outcome: TurnOutcome) => void>();
+  private readonly settled = new Map<string, TurnOutcome>();
+  private turn = 0;
+
+  private settle(turnId: string, outcome: TurnOutcome): void {
+    const waiter = this.outcomes.get(turnId);
+    if (waiter) waiter(outcome);
+    else this.settled.set(turnId, outcome);
+  }
+
+  wake(threadId: string): string {
+    const turnId = `wake-${(this.turn += 1)}`;
+    Effect.runSync(Queue.offer(this.queue, { type: "turn.started", provider: "codex", threadId, turnId, origin: "background" }));
+    setTimeout(() => this.settle(turnId, completed("Woken.")), 5);
+    return turnId;
+  }
+
+  hasSession(threadId: string) {
+    return Effect.succeed(this.sessions.has(threadId));
+  }
+  startSession(input: { threadId: string }) {
+    return Effect.sync(() => void this.sessions.add(input.threadId));
+  }
+  sendTurn(input: { threadId: string }) {
+    return Effect.sync(() => {
+      const turnId = `driver-${(this.turn += 1)}`;
+      this.settle(turnId, completed("Done."));
+      return { threadId: input.threadId, turnId };
+    });
+  }
+  interruptTurn() {
+    return Effect.void;
+  }
+  awaitTurn(_threadId: string, turnId: string): Promise<TurnOutcome> {
+    const done = this.settled.get(turnId);
+    if (done) return Promise.resolve(done);
+    return new Promise((resolve) => this.outcomes.set(turnId, resolve));
+  }
+  readonly streamEvents: TurnDriver["streamEvents"] = Stream.fromQueue(this.queue);
 }
 
 async function delegateNotifying(w: Awaited<ReturnType<typeof world>>, parentId: string, childId: string, notify = true): Promise<void> {
@@ -609,6 +715,42 @@ describe("cancelling a delegated task's automatic continue", () => {
     await interruptTurn(w.store, child.id, followUp.turn.id);
   });
 
+  it("keeps the cancel when the interrupted turn's own settle lands after it", async () => {
+    const w = await world({}, { leaveTurnsRunning: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const running = await startTurn(w.ctx, { threadId: child.id, prompt: "Work" });
+    expect(running.turn.status).toBe("running");
+    const cancelled = await cancelTask(w.ctx, parent.id, child.id);
+    expect(cancelled.interruptRequested).toBe(true);
+    // The cancel wrote its mark first; the turn it interrupted settles after.
+    await running.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("cancelled");
+  });
+
+  it("clears a cancelled mark when a later turn settles, not the one it stopped", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // The mark an explicit cancel leaves names the turn it stopped.
+    const stopped = (await sendTurn(w.store, child.id, { prompt: "Work" })).turn;
+    await interruptTurn(w.store, child.id, stopped.id);
+    const row = (await w.store.readDelegations()).find((candidate) => candidate.childThreadId === child.id)!;
+    await w.store.updateDelegation(row.id, { status: "cancelled", cancelledTurnId: stopped.id });
+
+    const resumed = await startTurn(w.ctx, { threadId: child.id, prompt: "Go on." });
+    await resumed.run;
+    await flushTurnRunners();
+    expect((await w.store.readDelegations()).find((candidate) => candidate.childThreadId === child.id)?.status).toBe("running");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
   it("clears the mark when fresh work settles, reading the new outcome", async () => {
     const w = await world({ autoContinueAtUsageLimit: true });
     const parent = await w.make("orchestrator");
@@ -704,6 +846,1128 @@ async function hold(w: Awaited<ReturnType<typeof world>>, threadId: string, prov
     usagePause: { provider, windows: [], phase, resetsAt: new Date(Date.now() + 3_600_000).toISOString(), order: 1, handoff: false },
   });
 }
+
+describe("cancelling a running task", () => {
+  it("reads the promoted follow-up's own outcome, not the cancelled turn's mark", async () => {
+    const sent: string[] = [];
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await world(
+      {},
+      { leaveTurnsRunning: true, onSendTurn: (input) => sent.push(input.prompt) },
+      (base) => scriptedDriver(base, sent, async (prompt, signal) => {
+        if (prompt !== "Work A") return completed("Done.");
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }),
+    );
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const running = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    const queued = await sendTurn(w.store, child.id, { prompt: "Work B", delivery: "queue" });
+    expect(queued.turn.status).toBe("queued");
+    // Stopping A promotes B, which this runner then takes to completion.
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await running.run;
+    await flushTurnRunners();
+
+    expect((await w.store.readTurns(child.id)).at(-1)?.status).toBe("completed");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("does not let the older turn's settle erase a newer cancellation", async () => {
+    const sent: string[] = [];
+    let aParked!: () => void;
+    const aIsParked = new Promise<void>((resolve) => { aParked = resolve; });
+    let bParked!: () => void;
+    const bIsParked = new Promise<void>((resolve) => { bParked = resolve; });
+    const w = await world(
+      {},
+      { leaveTurnsRunning: true, onSendTurn: (input) => sent.push(input.prompt) },
+      (base) => scriptedDriver(base, sent, async (prompt, signal) => {
+        if (prompt === "Work A") {
+          aParked();
+          return await base.awaitTurn("", "", signal);
+        }
+        bParked();
+        return await base.awaitTurn("", "", signal);
+      }),
+    );
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const first = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aIsParked;
+    // A has settled in the ledger; its runner, and so its settle callback, is
+    // still held (set directly: the runner's own settle would free it).
+    // Cancelling now takes the idle path (no turn to stop).
+    await w.store.updateTurn(child.id, first.turn.id, { status: "completed", completedAt: w.store.nowIso() });
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(false);
+
+    // B runs and is cancelled while A's callback is still held.
+    const second = await startTurn(w.ctx, { threadId: child.id, prompt: "Work B" });
+    await bIsParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    // Release A: its callback lands after B's cancellation is persisted, and
+    // A is older than the turn that mark names.
+    w.store.abortRunning(first.turn.id);
+    await first.run;
+    await second.run?.catch(() => undefined);
+    await flushTurnRunners();
+
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("reports the task's own ending when it finished before the cancel interrupted it", async () => {
+    const w = await world({}, { leaveTurnsRunning: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const running = await startTurn(w.ctx, { threadId: child.id, prompt: "Work" });
+    // The cancel reads the task as live, then the turn completes before the
+    // interrupt takes the thread lock. The gate stands in for that window:
+    // the store hands the interrupt its lock only after the turn settled.
+    let armed = false;
+    const store = new Proxy(w.ctx.store, {
+      get(target, property) {
+        if (property === "withThreadLock") {
+          return async (id: string, run: () => Promise<unknown>) => {
+            if (armed && id === child.id) {
+              armed = false;
+              // Settle in the ledger only: the runner stays held for the cleanup.
+              await target.updateTurn(child.id, running.turn.id, { status: "completed", completedAt: target.nowIso() });
+            }
+            return await target.withThreadLock(id, run);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof w.ctx.store;
+    try {
+      armed = true;
+      const cancelled = await cancelTask({ ...w.ctx, store }, parent.id, child.id);
+      expect(cancelled.interruptRequested).toBe(false);
+      expect(cancelled.task.status).toBe("completed");
+      expect(cancelled.stateAfter).toBe("completed");
+      // Nothing was stopped, so the delegation is untouched and reads its own ending.
+      expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("running");
+      expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+    } finally {
+      w.store.abortRunning(running.turn.id);
+    }
+  });
+});
+
+describe("cancellations that race later work", () => {
+  function scriptedWorld(
+    behavior: (prompt: string, base: TurnDriver, signal?: AbortSignal) => Promise<TurnOutcome> | TurnOutcome,
+  ) {
+    const sent: string[] = [];
+    return world(
+      {},
+      { leaveTurnsRunning: true, onSendTurn: (input) => sent.push(input.prompt) },
+      (base) => scriptedDriver(base, sent, (prompt, signal) => behavior(prompt, base, signal)),
+    );
+  }
+
+  it("does not write a mark that a follow-up already settled ahead of", async () => {
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt !== "Work A") return completed("Done.");
+      parked();
+      return await base.awaitTurn("", "", signal);
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const running = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    await sendTurn(w.store, child.id, { prompt: "Work B", delivery: "queue" });
+
+    // Hold the cancellation write while the promoted follow-up completes and
+    // its own settle lands: the mark would arrive behind work that already ended.
+    const held = deferred();
+    const release = deferred();
+    let first = true;
+    const store = gateStore(w.store, ["updateDelegationWith", "updateDelegationIf", "updateDelegation"], async () => {
+      if (!first) return;
+      first = false;
+      held.resolve();
+      await release.promise;
+    });
+    const cancelling = cancelTask({ ...w.ctx, store }, parent.id, child.id);
+    await held.promise;
+    // Let the promoted follow-up finish and its own settle land.
+    await running.run;
+    await flushTurnRunners();
+    expect((await w.store.readTurns(child.id)).some((turn) => turn.status === "completed")).toBe(true);
+    release.resolve();
+    const cancelled = await cancelling;
+
+    expect(cancelled.task.status).toBe("completed");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("running");
+  });
+
+  it("clears the mark for a turn promoted from a startup abort", async () => {
+    const started = deferred();
+    const session = deferred();
+    const sent: string[] = [];
+    const w = await world(
+      {},
+      { leaveTurnsRunning: true, onSendTurn: (input) => sent.push(input.prompt) },
+      (base) => {
+        const driver = scriptedDriver(base, sent, () => completed("Done."));
+        const start = driver.startSession.bind(driver);
+        driver.startSession = (input) =>
+          Effect.tryPromise({
+            try: async () => {
+              started.resolve();
+              await session.promise;
+              return await Effect.runPromise(start(input));
+            },
+            catch: (cause) => new CliError("DRIVER_START_FAILED", "The test session could not start.", { cause }),
+          });
+        return driver;
+      },
+    );
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // A is stopped while its provider session is still starting; the stop
+    // promotes B, which the send path runs itself once the session returns.
+    const starting = startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await started.promise;
+    const queued = await sendTurn(w.store, child.id, { prompt: "Work B", delivery: "queue" });
+    expect(queued.turn.status).toBe("queued");
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    session.resolve();
+    await starting;
+    await flushTurnRunners();
+
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("clears the mark for a turn the provider starts itself", async () => {
+    const driver = new WakingDriver();
+    const w = await world({}, { drivers: { codex: () => driver } });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // A first turn opens the watched session; the task is then cancelled.
+    const first = await startTurn(w.ctx, { threadId: child.id, prompt: "Work" });
+    await first.run;
+    await flushTurnRunners();
+    expect(await noteAutoContinueCancelled(w.ctx, child.id)).toBe(true);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+
+    driver.wake(child.id);
+    await vi.waitFor(async () => {
+      const turns = await w.store.readTurns(child.id);
+      expect(turns.some((turn) => turn.delivery === "background" && turn.status === "completed")).toBe(true);
+    }, { timeout: 15_000 });
+    await vi.waitFor(async () => {
+      expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+    }, { timeout: 10_000 });
+  });
+
+  it("orders freshness by when the turn ran, not when it was queued", async () => {
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // Q is created first but runs last: the ledger says [Q, A], execution says A then Q.
+    // Due shortly in real time: promotion reads the real clock.
+    const dueAt = Date.now() + 1500;
+    const queued = await sendTurn(w.store, child.id, { prompt: "Work Q", scheduledFor: new Date(dueAt).toISOString() });
+    expect(queued.turn.status).toBe("queued");
+    const running = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await running.run;
+    await flushTurnRunners();
+    // Q still waits, so the task has live work; the mark is on the row.
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("cancelled");
+
+    await vi.waitFor(() => expect(Date.now() >= dueAt).toBe(true), { timeout: 10_000, interval: 10 });
+    expect(await runDueScheduledTurn(w.ctx, child.id)).toBe(true);
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("does not clear for a settle whose turn was reverted away", async () => {
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await flushTurnRunners();
+
+    // Hold B's settle just before it would clear, then revert B and keep A.
+    const held = deferred();
+    const release = deferred();
+    let first = true;
+    const store = gateStore(w.store, ["updateDelegationWith", "updateDelegationIf"], async () => {
+      if (!first) return;
+      first = false;
+      held.resolve();
+      await release.promise;
+    });
+    const b = await startTurn({ ...w.ctx, store }, { threadId: child.id, prompt: "Work B" });
+    await held.promise;
+    await revertThread(w.ctx, child.id, 1);
+    release.resolve();
+    await b.run;
+    await flushTurnRunners();
+
+    expect((await w.store.readTurns(child.id)).some((turn) => turn.id === b.turn.id)).toBe(false);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("does not let an older settle erase a newer recovery cancellation", async () => {
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const bRunning = deferred();
+    const bRelease = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      bRunning.resolve();
+      await bRelease.promise;
+      return completed("Done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await flushTurnRunners();
+    // Hold B's settle just before its generation check, then cancel the recovery.
+    const held = deferred();
+    const release = deferred();
+    let first = true;
+    const store = gateStore(w.store, ["updateDelegationWith", "updateDelegationIf"], async () => {
+      if (!first) return;
+      first = false;
+      held.resolve();
+      await release.promise;
+    });
+    const b = await startTurn({ ...w.ctx, store }, { threadId: child.id, prompt: "Work B" });
+    await bRunning.promise;
+    bRelease.resolve();
+    await held.promise;
+    // A usage-reset continue waits on the settled task, then is cancelled
+    // while the older settle is held just before its write.
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const cont = (await sendTurn(w.store, child.id, {
+      prompt: "Continue later.",
+      queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true },
+      scheduledFor: at,
+      scheduleReason: "usage-reset",
+    })).turn;
+    expect(cont.status).toBe("queued");
+    expect(await cancelAutoContinue(w.ctx, child.id)).toBe(true);
+    release.resolve();
+    await b.run;
+    await flushTurnRunners();
+
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("clears a cancelled mark when the cancelled turn was reverted and new work completes", async () => {
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Fresh work done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+
+    // Reverting to 0 drops the cancelled turn from the ledger; fresh work
+    // that runs afterwards must replace the cancelled mark instead of leaving
+    // the task stuck cancelled.
+    await revertThread(w.ctx, child.id, 0);
+    const b = await startTurn(w.ctx, { threadId: child.id, prompt: "Work B" });
+    await b.run;
+    await flushTurnRunners();
+
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("rejects an older delayed settle even on the same clock tick after the cancelled turn is reverted", async () => {
+    const fixedNow = "2026-11-27T05:00:00.000Z";
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Old work done.");
+    });
+    w.store.nowIso = () => fixedNow;
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // Complete O on the same clock tick, holding O's settle callback before it
+    // touches the delegation row.
+    const heldO = deferred();
+    const releaseO = deferred();
+    let holdFirst = true;
+    const gatedOStore = gateStore(w.store, ["recordDelegationSettle"], async () => {
+      if (!holdFirst) return;
+      holdFirst = false;
+      heldO.resolve();
+      await releaseO.promise;
+    });
+    const o = await startTurn({ ...w.ctx, store: gatedOStore }, { threadId: child.id, prompt: "Work O" });
+    await heldO.promise;
+
+    // Start, cancel, and revert A (keeping O) on the exact same millisecond.
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await revertThread(w.ctx, child.id, 1);
+
+    // Releasing O's delayed settle callback must not clear A's cancellation.
+    releaseO.resolve();
+    await o.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("keeps lastSettledSeq monotonic so an older delayed settle cannot hide fresh work from a delayed cancel", async () => {
+    const fixedNow = "2026-11-27T05:00:00.000Z";
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed(`Done ${prompt}`);
+    });
+    w.store.nowIso = () => fixedNow;
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // O completes with its settle callback held.
+    const heldO = deferred();
+    const releaseO = deferred();
+    let holdO = true;
+    const storeO = gateStore(w.store, ["recordDelegationSettle"], async () => {
+      if (!holdO) return;
+      holdO = false;
+      heldO.resolve();
+      await releaseO.promise;
+    });
+    const o = await startTurn({ ...w.ctx, store: storeO }, { threadId: child.id, prompt: "Work O" });
+    await heldO.promise;
+
+    // A starts and is cancelled, holding markCancelled before its write.
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    const heldCancel = deferred();
+    const releaseCancel = deferred();
+    let holdCancel = true;
+    const storeCancel = gateStore(w.store, ["updateDelegationWith"], async () => {
+      if (!holdCancel) return;
+      holdCancel = false;
+      heldCancel.resolve();
+      await releaseCancel.promise;
+    });
+    const cancelling = cancelTask({ ...w.ctx, store: storeCancel }, parent.id, child.id);
+    await heldCancel.promise;
+    await a.run;
+
+    // Revert A (keeping O) and complete fresh work B on the exact same tick.
+    await revertThread(w.ctx, child.id, 1);
+    const b = await startTurn(w.ctx, { threadId: child.id, prompt: "Work B" });
+    await b.run;
+
+    // Release O's older settle callback BEFORE A's delayed cancel write:
+    // lastSettledSeq must stay at B's seq so A's delayed cancel still loses.
+    releaseO.resolve();
+    await o.run;
+    releaseCancel.resolve();
+    await cancelling;
+    await flushTurnRunners();
+
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("gives a recovery cancellation its own boundary so a delayed settle held at recordDelegationSettle cannot erase it", async () => {
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Work B done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // Cancel and revert A.
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await flushTurnRunners();
+    await revertThread(w.ctx, child.id, 0);
+
+    // Complete B, holding its callback at recordDelegationSettle (before reading generation).
+    const heldB = deferred();
+    const releaseB = deferred();
+    let holdB = true;
+    const storeB = gateStore(w.store, ["recordDelegationSettle"], async () => {
+      if (!holdB) return;
+      holdB = false;
+      heldB.resolve();
+      await releaseB.promise;
+    });
+    const b = await startTurn({ ...w.ctx, store: storeB }, { threadId: child.id, prompt: "Work B" });
+    await heldB.promise;
+
+    // Queue and cancel a usage-reset continuation AFTER B ran.
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    await sendTurn(w.store, child.id, {
+      prompt: "Continue later.",
+      queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true },
+      scheduledFor: at,
+      scheduleReason: "usage-reset",
+    });
+    expect(await cancelAutoContinue(w.ctx, child.id)).toBe(true);
+
+    // Releasing B's delayed callback must not erase the newer recovery cancel.
+    releaseB.resolve();
+    await b.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("preserves promoted turnSeq on disk so reverting a cancelled promotion still lets the next turn clear", async () => {
+    let bParked!: () => void;
+    const bParkedPromise = new Promise<void>((resolve) => { bParked = resolve; });
+    const aRelease = deferred();
+    const aStarted = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        aStarted.resolve();
+        await aRelease.promise;
+        return completed("A done.");
+      }
+      if (prompt === "Work B") {
+        bParked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("C done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aStarted.promise;
+    await sendTurn(w.store, child.id, { prompt: "Work B", delivery: "queue" });
+    aRelease.resolve();
+    await a.run;
+    await bParkedPromise;
+
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await flushTurnRunners();
+    expect((await w.store.readThreadRecord(child.id))?.turnSeq).toBe(2);
+
+    // Revert B (keeping only A), then complete fresh turn C: C must get seq 3
+    // and clear B's cancellation mark.
+    await revertThread(w.ctx, child.id, 1);
+    const c = await startTurn(w.ctx, { threadId: child.id, prompt: "Work C" });
+    await c.run;
+    await flushTurnRunners();
+    expect(c.turn.executionSeq).toBe(3);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("orders a same-tick queued turn promoted after a cancelled turn as the latest completed outcome", async () => {
+    const fixedNow = "2026-11-27T05:00:00.000Z";
+    let aParked!: () => void;
+    const aParkedPromise = new Promise<void>((resolve) => { aParked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        aParked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Queued work Q done.");
+    });
+    w.store.nowIso = () => fixedNow;
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // Queue Q (scheduled) before starting A on the same frozen clock tick.
+    const q = (await sendTurn(w.store, child.id, {
+      prompt: "Work Q",
+      delivery: "queue",
+      scheduledFor: "2026-11-27T06:00:00.000Z",
+    })).turn;
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParkedPromise;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await flushTurnRunners();
+
+    // Promote and complete Q on the same frozen clock tick: Q ran after A and
+    // must be reported as the latest completed turn.
+    await w.store.updateTurn(child.id, q.id, { scheduledFor: "2026-11-27T04:00:00.000Z" });
+    await runDueScheduledTurn(w.ctx, child.id, Date.parse(fixedNow));
+    await flushTurnRunners();
+    const described = await describeTask(w.ctx, parent.id, child.id);
+    expect(described.child.latestTurn?.turnId).toBe(q.id);
+    expect(described.child.latestTurn?.state).toBe("completed");
+    expect(described.task.status).toBe("completed");
+  });
+
+  it("keeps the earlier sequenced turn when reverting a mixed legacy and sequenced same-tick ledger", async () => {
+    const fixedNow = "2026-11-27T05:00:00.000Z";
+    const w = await scriptedWorld(async () => completed("Done."));
+    w.store.nowIso = () => fixedNow;
+    const thread = await w.make("mixed-revert");
+
+    // Queue scheduled B first (ledger order will be B, L, A), then complete legacy L
+    // (no executionSeq), then A (seq 2), then promote and complete B (seq 3).
+    const b = (await sendTurn(w.store, thread.id, {
+      prompt: "B last",
+      delivery: "queue",
+      scheduledFor: "2026-11-27T06:00:00.000Z",
+    })).turn;
+    const legacy = await startTurn(w.ctx, { threadId: thread.id, prompt: "L first" });
+    await legacy.run;
+    await flushTurnRunners();
+    // Strip executionSeq from L to simulate a pre-MXN-390 legacy turn while keeping turnSeq.
+    await w.store.rewriteLedger(
+      thread.id,
+      "turns",
+      (await w.store.readTurns(thread.id)).map((t) => {
+        if (t.id !== legacy.turn.id) return t;
+        const { executionSeq: _drop, ...rest } = t;
+        return rest;
+      }),
+    );
+
+    const a = await startTurn(w.ctx, { threadId: thread.id, prompt: "A second" });
+    await a.run;
+    await flushTurnRunners();
+
+    await w.store.updateTurn(thread.id, b.id, { scheduledFor: "2026-11-27T04:00:00.000Z" });
+    await runDueScheduledTurn(w.ctx, thread.id, Date.parse(fixedNow));
+    await flushTurnRunners();
+
+    // Execution order is L (legacy), A (seq 2), B (seq 3): keeping 2 turns drops B.
+    await revertThread(w.ctx, thread.id, 2);
+    const remainingUserPrompts = (await w.store.readMessages(thread.id))
+      .filter((m) => m.role === "user")
+      .map((m) => m.text);
+    expect(remainingUserPrompts).toEqual(["L first", "A second"]);
+  });
+
+  it("keeps pre-upgrade history ahead of new sequenced turns even across a backward clock step", async () => {
+    const w = await scriptedWorld(async () => completed("Done."));
+    let now = "2026-11-27T05:11:00.000Z";
+    w.store.nowIso = () => now;
+    const thread = await w.make("mixed-backward-clock");
+
+    // Pre-upgrade legacy turn L ran at 05:11 (no executionSeq, no thread.turnSeq).
+    const legacy = await startTurn(w.ctx, { threadId: thread.id, prompt: "L first" });
+    await legacy.run;
+    await flushTurnRunners();
+    const rawThread = (await w.store.readThreadRecord(thread.id))!;
+    const { turnSeq: _dropThreadSeq, ...legacyThread } = rawThread;
+    await w.store.writeThreadRecord(legacyThread);
+    await w.store.rewriteLedger(
+      thread.id,
+      "turns",
+      (await w.store.readTurns(thread.id)).map((t) => {
+        if (t.id !== legacy.turn.id) return t;
+        const { executionSeq: _drop, ...rest } = t;
+        return rest;
+      }),
+    );
+
+    // After upgrade the wall clock steps backwards before A (05:10) and B (05:05) run.
+    now = "2026-11-27T05:10:00.000Z";
+    const a = await startTurn(w.ctx, { threadId: thread.id, prompt: "A second" });
+    await a.run;
+    await flushTurnRunners();
+
+    now = "2026-11-27T05:05:00.000Z";
+    const b = await startTurn(w.ctx, { threadId: thread.id, prompt: "B third" });
+    await b.run;
+    await flushTurnRunners();
+
+    // L was seeded durably before A ran, so execution order stays [L, A, B]: keeping 2 drops B.
+    await revertThread(w.ctx, thread.id, 2);
+    const remainingUserPrompts = (await w.store.readMessages(thread.id))
+      .filter((m) => m.role === "user")
+      .map((m) => m.text);
+    expect(remainingUserPrompts).toEqual(["L first", "A second"]);
+  });
+
+  it("still marks a cancelled task when a newer follow-up settled and was reverted before the mark landed", async () => {
+    const aParked = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Running A") {
+        aParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Follow-up B done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Running A" });
+    await aParked.promise;
+    await sendTurn(w.store, child.id, { prompt: "Queued B", delivery: "queue" });
+
+    // Pause the cancellation's delegation mark write until after B has settled and been reverted.
+    const markEntered = deferred();
+    const releaseMark = deferred();
+    let interceptMark = true;
+    const pausedStore = new Proxy(w.ctx.store, {
+      get(target, property) {
+        if (property === "updateDelegationWith") {
+          return async (...args: Parameters<typeof target.updateDelegationWith>) => {
+            if (interceptMark) {
+              interceptMark = false;
+              markEntered.resolve();
+              await releaseMark.promise;
+            }
+            return await target.updateDelegationWith(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof w.ctx.store;
+
+    const cancelling = cancelTask({ ...w.ctx, store: pausedStore }, parent.id, child.id);
+    await markEntered.promise;
+    await a.run;
+    await flushTurnRunners();
+
+    // B promoted, ran, and settled (recording lastSettledSeq > A's seq), then was reverted.
+    expect((await w.store.readTurns(child.id)).map((t) => t.status)).toEqual(["interrupted", "completed"]);
+    await revertThread(w.ctx, child.id, 1);
+    expect((await w.store.readTurns(child.id)).map((t) => t.id)).toEqual([a.turn.id]);
+
+    // Now release the paused cancellation mark write: B is gone, so A's cancel must land.
+    releaseMark.resolve();
+    const cancelled = await cancelling;
+    expect(cancelled.interruptRequested).toBe(true);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("seeds pre-upgrade legacy turns atomically so a failed seed cannot swap tied legacy turns on revert", async () => {
+    const fixedNow = "2026-11-27T05:11:00.000Z";
+    const w = await scriptedWorld(async () => completed("Done."));
+    let now = fixedNow;
+    w.store.nowIso = () => now;
+    const thread = await w.make("atomic-seed");
+
+    const l1 = await startTurn(w.ctx, { threadId: thread.id, prompt: "L1" });
+    await l1.run;
+    const l2 = await startTurn(w.ctx, { threadId: thread.id, prompt: "L2" });
+    await l2.run;
+    await flushTurnRunners();
+
+    // Strip turnSeq + executionSeq to simulate two pre-upgrade same-timestamp legacy turns.
+    const rawThread = (await w.store.readThreadRecord(thread.id))!;
+    const { turnSeq: _dropThreadSeq, ...legacyThread } = rawThread;
+    await w.store.writeThreadRecord(legacyThread);
+    await w.store.rewriteLedger(
+      thread.id,
+      "turns",
+      (await w.store.readTurns(thread.id)).map((t) => {
+        const { executionSeq: _drop, ...rest } = t;
+        return rest;
+      }),
+    );
+
+    // Move clock backward and fail the atomic turns-ledger rewrite during seeding.
+    now = "2026-11-27T05:05:00.000Z";
+    const failingStore = new Proxy(w.ctx.store, {
+      get(target, property) {
+        if (property === "rewriteLedger") {
+          return async (...args: Parameters<typeof target.rewriteLedger>) => {
+            if (args[1] === "turns") throw new Error("simulated seed rewrite failure");
+            return await target.rewriteLedger(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof w.ctx.store;
+    await expect(startTurn({ ...w.ctx, store: failingStore }, { threadId: thread.id, prompt: "New turn" })).rejects.toThrow("simulated seed rewrite failure");
+
+    // Neither legacy turn was partially seeded, so reverting to 1 keeps L1 (never L2).
+    expect((await w.store.readTurns(thread.id)).map((t) => t.executionSeq)).toEqual([undefined, undefined]);
+    await revertThread(w.ctx, thread.id, 1);
+    const remainingUserPrompts = (await w.store.readMessages(thread.id))
+      .filter((m) => m.role === "user")
+      .map((m) => m.text);
+    expect(remainingUserPrompts).toEqual(["L1"]);
+  });
+
+  it("keeps cancellation intact when revert races either the markCancelled or clearCancelledOnSettle retention read", async () => {
+    const aParked = deferred();
+    const bRelease = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Running A") {
+        aParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      await bRelease.promise;
+      return completed("Follow-up B done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Running A" });
+    await aParked.promise;
+    await sendTurn(w.store, child.id, { prompt: "Queued B", delivery: "queue" });
+
+    // Cancel A immediately so status becomes cancelled while B is still running.
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+
+    // Now pause B's settle retention read inside clearCancelledOnSettle while revertThread runs.
+    const readEntered = deferred();
+    const releaseRead = deferred();
+    let interceptRead = true;
+    const origReadTurns = w.store.readTurns.bind(w.store);
+    const origWithLock = w.store.withThreadLock.bind(w.store);
+    let insideDelegationClear = false;
+    w.store.withThreadLock = async <T>(lockId: string, fn: () => Promise<T>): Promise<T> => {
+      if (lockId === "!delegations" && interceptRead) {
+        insideDelegationClear = true;
+        try {
+          return await origWithLock(lockId, fn);
+        } finally {
+          insideDelegationClear = false;
+        }
+      }
+      return await origWithLock(lockId, fn);
+    };
+    w.store.readTurns = async (threadId: string) => {
+      const result = await origReadTurns(threadId);
+      if (insideDelegationClear && threadId === child.id && interceptRead) {
+        interceptRead = false;
+        readEntered.resolve();
+        await releaseRead.promise;
+      }
+      return result;
+    };
+
+    try {
+      bRelease.resolve();
+      await readEntered.promise;
+      // Start reverting B while clearCancelledOnSettle is paused after reading turns containing B.
+      const reverting = revertThread(w.ctx, child.id, 1);
+      releaseRead.resolve();
+      await reverting;
+      await flushTurnRunners();
+    } finally {
+      w.store.readTurns = origReadTurns;
+      w.store.withThreadLock = origWithLock;
+    }
+
+    expect((await w.store.readTurns(child.id)).map((t) => t.id)).toEqual([a.turn.id]);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("waits on the delegation lock during revert reconciliation when a clear write is still committing", async () => {
+    const aParked = deferred();
+    const bRelease = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Running A") {
+        aParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      await bRelease.promise;
+      return completed("Follow-up B done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Running A" });
+    await aParked.promise;
+    await sendTurn(w.store, child.id, { prompt: "Queued B", delivery: "queue" });
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+
+    // Pause clearCancelledOnSettle AFTER it released the child lock (after readTurns)
+    // and BEFORE updateDelegationWith commits, so revertThread removes B while the
+    // delegation row on disk is still "cancelled" and !delegations is held.
+    const commitPaused = deferred();
+    const releaseCommit = deferred();
+    let armed = true;
+    const origUpdateWith = w.store.updateDelegationWith.bind(w.store);
+    w.store.updateDelegationWith = async (delegationId, build) => {
+      return await origUpdateWith(delegationId, async (current) => {
+        const patch = await build(current);
+        if (armed && patch?.status === "running" && current.status === "cancelled") {
+          armed = false;
+          commitPaused.resolve();
+          await releaseCommit.promise;
+        }
+        return patch;
+      });
+    };
+
+    try {
+      bRelease.resolve();
+      await commitPaused.promise;
+      // Child lock is already free: revertThread rewrites the turns ledger and
+      // then blocks on !delegations until the clear commits, then reconciles.
+      const reverting = revertThread(w.ctx, child.id, 1);
+      await new Promise((r) => setTimeout(r, 40));
+      releaseCommit.resolve();
+      await reverting;
+      await flushTurnRunners();
+    } finally {
+      w.store.updateDelegationWith = origUpdateWith;
+    }
+
+    expect((await w.store.readTurns(child.id)).map((t) => t.id)).toEqual([a.turn.id]);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("restores cancellation on revert even if a future turn is queued during reconciliation and later withdrawn", async () => {
+    const bParked = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Turn B") {
+        bParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed(`${prompt} done.`);
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Turn A" });
+    await a.run;
+    const b = await startTurn(w.ctx, { threadId: child.id, prompt: "Turn B" });
+    await bParked.promise;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await b.run;
+    const c = await startTurn(w.ctx, { threadId: child.id, prompt: "Turn C" });
+    await c.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+
+    // Queue a future scheduled turn D between revertThread's ledger rewrite and reconciliation.
+    let queuedDId: string | null = null;
+    const origUpdateWith = w.store.updateDelegationWith.bind(w.store);
+    let armed = true;
+    w.store.updateDelegationWith = async (delegationId, build) => {
+      if (armed) {
+        armed = false;
+        const d = await sendTurn(w.store, child.id, {
+          prompt: "Future D",
+          delivery: "queue",
+          scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
+        });
+        queuedDId = d.turn.id;
+      }
+      return await origUpdateWith(delegationId, build);
+    };
+    try {
+      await revertThread(w.ctx, child.id, 2);
+    } finally {
+      w.store.updateDelegationWith = origUpdateWith;
+    }
+
+    expect(queuedDId).not.toBeNull();
+    // Withdraw D before it ever runs: B must still report cancelled.
+    await w.store.updateTurn(child.id, queuedDId!, { status: "interrupted", completedAt: w.store.nowIso() });
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("clears cancellation when fresh work completes even while another turn is queued, so withdrawing the queued turn does not resurface it", async () => {
+    const aParked = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Running A") {
+        aParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed(`${prompt} done.`);
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Running A" });
+    await aParked.promise;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+
+    // Schedule C for later while B completes fresh work after A's cancellation.
+    const c = await sendTurn(w.store, child.id, {
+      prompt: "Scheduled C",
+      delivery: "queue",
+      scheduledFor: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const b = await startTurn(w.ctx, { threadId: child.id, prompt: "Fresh B" });
+    await b.run;
+    await flushTurnRunners();
+
+    // Remove queued C before it runs: B is the latest completed turn, not A's cancellation.
+    const { editWorkQueue } = await import("../operations.js");
+    await editWorkQueue(w.ctx, child.id, c.turn.id, "remove");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("assigns a durable boundary when cancelling and reverting a legacy unsequenced turn", async () => {
+    const w = await scriptedWorld(async () => completed("Fresh work done."));
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // Simulate a legacy running turn written before turnSeq/executionSeq existed.
+    const legacy = (await sendTurn(w.store, child.id, { prompt: "Legacy A" })).turn;
+    const rawThread = (await w.store.readThreadRecord(child.id))!;
+    const { turnSeq: _dropThreadSeq, ...legacyThread } = rawThread;
+    await w.store.writeThreadRecord(legacyThread);
+    const rawTurns = await w.store.readTurns(child.id);
+    await w.store.rewriteLedger(
+      child.id,
+      "turns",
+      rawTurns.map((t) => {
+        if (t.id !== legacy.id) return t;
+        const { executionSeq: _dropTurnSeq, ...rest } = t;
+        return rest;
+      }),
+    );
+
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await revertThread(w.ctx, child.id, 0);
+    const fresh = await startTurn(w.ctx, { threadId: child.id, prompt: "Fresh B" });
+    await fresh.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("leaves a finished task alone when the cancel stops nothing", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const turn = await startTurn(w.ctx, { threadId: child.id, prompt: "Work" });
+    await turn.run;
+    await flushTurnRunners();
+
+    const cancelled = await cancelTask(w.ctx, parent.id, child.id);
+    expect(cancelled.interruptRequested).toBe(false);
+    expect(cancelled.task.status).toBe("completed");
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.status).toBe("running");
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("builds the finished reply from a fresh projection", async () => {
+    const w = await world({}, { leaveTurnsRunning: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const running = await startTurn(w.ctx, { threadId: child.id, prompt: "Work" });
+
+    // The turn completes in the window between the cancel's read and its
+    // interrupt: the reply must be the task as it now is, not the pre-read.
+    let armed = false;
+    const store = new Proxy(w.ctx.store, {
+      get(target, property) {
+        if (property === "withThreadLock") {
+          return async (id: string, run: () => Promise<unknown>) => {
+            if (armed && id === child.id) {
+              armed = false;
+              await target.updateTurn(child.id, running.turn.id, { status: "completed", completedAt: target.nowIso() });
+            }
+            return await target.withThreadLock(id, run);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof w.ctx.store;
+    try {
+      armed = true;
+      const cancelled = await cancelTask({ ...w.ctx, store }, parent.id, child.id);
+      const fresh = await describeTask(w.ctx, parent.id, child.id);
+      expect(cancelled.task.workState).toBe(fresh.task.workState);
+      expect(cancelled.task).toMatchObject({ status: "completed", workState: "result_available" });
+      expect(cancelled.interruptRequested).toBe(false);
+      expect(cancelled.stateAfter).toBe("completed");
+      expect(fresh.task).toMatchObject({ status: "completed", workState: "result_available" });
+    } finally {
+      w.store.abortRunning(running.turn.id);
+    }
+  });
+});
 
 describe("a task notification across a continued parent", () => {
   it("reroutes a queued pause to the new parent only", async () => {
