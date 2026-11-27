@@ -1255,6 +1255,36 @@ describe("the queue pass's handoff preparation (MXN-382)", () => {
     }
   });
 
+  it("still fails a prompt-less handoff:gated entry with missing message instead of looping queued", async () => {
+    const w = await world();
+    const dest = await w.make("dest");
+    const now = w.store.nowIso();
+    const ghostId = w.store.newId();
+    await w.store.appendLedger(dest.id, "turns", {
+      id: ghostId,
+      threadId: dest.id,
+      status: "queued",
+      delivery: "queued",
+      messageId: "msg-lost",
+      runtimeMode: dest.runtimeMode,
+      interactionMode: dest.interactionMode,
+      modelSelection: dest.modelSelection,
+      parentTurnId: null,
+      queue: { ...parseQueuePolicy({ conditions: [] }), requestId: "handoff:gated:msg-lost" },
+      error: null,
+      usage: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+    });
+
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
+    const after = (await w.store.readTurns(dest.id)).find((candidate) => candidate.id === ghostId)!;
+    expect(after.status).toBe("failed");
+    expect(after.error).toBe("Its queued message is missing.");
+  });
+
   /**
    * MXN-382: after a failed attempt the source row keeps `handoffFailed`. The
    * handoff document excluded it even once it was queued again and explicitly

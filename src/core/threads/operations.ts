@@ -753,8 +753,10 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // A moved entry or a handoff reservation still being repaired (a crash
       // between its turn and message writes) must wait for the repair, not
       // fail and not run: put it back queued for the next pass on its source
-      // to complete.
-      if (isTransferDestinationRequestId(turn.queue?.requestId) || turn.queue?.requestId?.startsWith("handoff:")) {
+      // to complete. `handoff:gated:*` entries have no repair path and must
+      // fail normally so a retry cannot execute them twice.
+      const rid = turn.queue?.requestId;
+      if (isTransferDestinationRequestId(rid) || (rid?.startsWith("handoff:") === true && !rid.startsWith("handoff:gated:"))) {
         try {
           await store.withThreadLock(threadId, async () => {
             const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
