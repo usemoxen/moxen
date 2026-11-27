@@ -3226,7 +3226,7 @@ async function continueThreadReserved(
     opener = started.turn;
     // A delegated task continued in a new thread reports to its parent when
     // the new thread settles, the same way the original task did.
-    if (notifyParent && started.run !== null) void started.run.then(() => queueTaskNotification(ctx, notifyParent, created.id));
+    if (notifyParent && started.run !== null) void started.run.then(() => queueTaskNotification(ctx, notifyParent, created.id)).catch(() => undefined);
   } else {
     // The turn and its prompt are two ledger writes. Repair that exact
     // opener after a crash, never a new turn or one unrelated to the handoff.

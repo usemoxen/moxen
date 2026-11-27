@@ -92,6 +92,34 @@ describe("a delegated task continued in a new thread", () => {
     expect(sent[0]).toContain(`taskId ${continued.threadId}, continued from taskId ${child.id}`);
   }, 30_000);
 
+  it("does not emit an unhandled rejection when parent notification fails after a single continueThread", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d-single-fail", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const first = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, first.id, { text: "Stopped at the usage limit." });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    const realRead = w.store.readThreadRecord.bind(w.store);
+    try {
+      await continueThread(w.ctx, { threadId: child.id, automatic: true });
+      w.store.readThreadRecord = (async (id: string) => {
+        if (id === parent.id) throw new Error("transient parent read failure");
+        return realRead(id);
+      }) as typeof w.store.readThreadRecord;
+      await flushTurnRunners();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(unhandled).toEqual([]);
+    } finally {
+      delete (w.store as unknown as Record<string, unknown>).readThreadRecord;
+      process.off("unhandledRejection", onUnhandled);
+    }
+  }, 30_000);
+
   it("leaves a thread that was not delegated without a delegation row", async () => {
     const w = await world();
     const thread = await w.make("solo");
