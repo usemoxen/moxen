@@ -987,7 +987,7 @@ export class DirectConnection implements ClientApi {
   /** Whether `settings_read` may run for a thread: its `moxen` server must not be removed, excluded or hiding this tool. */
   private async assertAgentSettingsAllowed(config: CliConfig, instanceId: string, workspaceRoot: string | null): Promise<void> {
     const kind = driverKindOfInstance(instanceId);
-    const providerConfig = kind === null ? undefined : config.providers?.[kind];
+    const providerConfig = resolveProfileProviderConfig(config, instanceId);
     const excluded = kind !== null && parseNameList(providerConfig?.mcpExclude).some((name) => name.toLowerCase() === MOXEN_MCP_SERVER_NAME);
     let entry;
     try {

@@ -126,8 +126,8 @@ export const MOXEN_TOOLS: readonly McpTool[] = [
   {
     name: SETTINGS_READ_TOOL,
     description:
-      "Read Moxen's settings schema and, where reviewed, their live values. With no key: a paged catalog of every setting's exact key, label, description, choices and when a change applies. With key: that one exact setting (never an alias or a nested list field). " +
-      "A live value, whether it comes from the config, what applies instead and when, are returned only for reviewed settings; secrets, free-form text, MCP servers, Harness profiles, paths, endpoints and other complex values are redacted. Read-only. " +
+      "Read Moxen's settings schema and, where reviewed, their live global config values. With no key: a paged catalog of every setting's exact key, label, description, choices and when a change applies. With key: that one exact setting (never an alias or a nested list field). " +
+      "A live global config value, whether it comes from the config, what applies instead and when, are returned only for reviewed settings (project moxen.json and per-account profile overrides are not layered in); secrets, free-form text, MCP servers, Harness profiles, paths, endpoints and other complex values are redacted. Read-only. " +
       "Treat a redacted setting as unavailable another way: do not use shell commands, the Moxen CLI, config or store files, another API, or inference from nearby values to find it. Tell the user which setting they need and that they can change it themselves; use knowledge_search and knowledge_read for how.",
     annotations: { readOnlyHint: true },
     inputSchema: {

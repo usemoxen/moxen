@@ -61,7 +61,10 @@ function syntheticConfig(base: Record<string, unknown>): Record<string, unknown>
   };
 }
 
-async function world(configPatch: (base: Record<string, unknown>) => Record<string, unknown> = (base) => base) {
+async function world(
+  configPatch: (base: Record<string, unknown>) => Record<string, unknown> = (base) => base,
+  provider = "claudeAgent",
+) {
   const harness = await testHarness();
   const config = configPatch(syntheticConfig(harness.config as unknown as Record<string, unknown>));
   const connection = new DirectConnection({ storeRoot: harness.root, drivers: harness.drivers, config: async () => config as unknown as CliConfig });
@@ -71,7 +74,7 @@ async function world(configPatch: (base: Record<string, unknown>) => Record<stri
     prompt: "one",
     wait: true,
     threadEnvMode: "local",
-    provider: "claudeAgent",
+    provider,
     model: "synthetic-model",
   });
   return { harness, connection, threadId: created.threadId };
@@ -215,8 +218,12 @@ describe("settings_read", () => {
   });
 
   it("denies the tool when the moxen server is explicitly removed, excluded, switched off or hiding it", async () => {
-    const denied = async (patch: (base: Record<string, unknown>) => Record<string, unknown>, project?: Record<string, unknown>) => {
-      const { harness, connection, threadId } = await world(patch);
+    const denied = async (
+      patch: (base: Record<string, unknown>) => Record<string, unknown>,
+      project?: Record<string, unknown>,
+      provider = "claudeAgent",
+    ) => {
+      const { harness, connection, threadId } = await world(patch, provider);
       try {
         if (project) await writeFile(path.join(harness.work, "moxen.json"), JSON.stringify(project));
         await expect(connection.query({ type: "settings.agent-read", threadId })).rejects.toMatchObject({ code: "SETTINGS_TOOL_DISABLED" });
@@ -225,12 +232,26 @@ describe("settings_read", () => {
       }
     };
     await denied((base) => ({ ...base, providers: { ...(base.providers as Record<string, unknown>), claude: { ...(base.providers as Record<string, Record<string, unknown>>).claude, mcpExclude: "moxen" } } }));
+    await denied(
+      (base) => ({
+        ...base,
+        providers: {
+          ...(base.providers as Record<string, unknown>),
+          claude: {
+            ...(base.providers as Record<string, Record<string, unknown>>).claude,
+            accounts: [{ id: "locked", label: "Locked", mcpExclude: "moxen" }],
+          },
+        },
+      }),
+      undefined,
+      "claude/locked",
+    );
     await denied((base) => ({ ...base, mcpServers: { ...(base.mcpServers as Record<string, unknown>), moxen: { command: "synthetic-moxen", disabled: true } } }));
     await denied((base) => ({ ...base, mcpServers: { ...(base.mcpServers as Record<string, unknown>), moxen: { command: "synthetic-moxen", disabledTools: [SETTINGS_READ_TOOL] } } }));
     await denied((base) => base, { mcpServers: { moxen: null } });
   });
 
-  it("keeps the tool when a different server is excluded or a different tool is hidden", async () => {
+  it("keeps the tool when a different server is excluded, a different tool is hidden, or an account profile does not inherit parent mcpExclude", async () => {
     const { connection, threadId } = await world((base) => ({
       ...base,
       providers: { ...(base.providers as Record<string, unknown>), claude: { ...(base.providers as Record<string, Record<string, unknown>>).claude, mcpExclude: "private" } },
@@ -240,6 +261,26 @@ describe("settings_read", () => {
       await expect(connection.query({ type: "settings.agent-read", threadId, limit: 1 })).resolves.toMatchObject({ limit: 1 });
     } finally {
       await connection.close();
+    }
+
+    const profileWorld = await world(
+      (base) => ({
+        ...base,
+        providers: {
+          ...(base.providers as Record<string, unknown>),
+          claude: {
+            ...(base.providers as Record<string, Record<string, unknown>>).claude,
+            mcpExclude: "moxen",
+            accounts: [{ id: "work", label: "Work" }],
+          },
+        },
+      }),
+      "claude/work",
+    );
+    try {
+      await expect(profileWorld.connection.query({ type: "settings.agent-read", threadId: profileWorld.threadId, limit: 1 })).resolves.toMatchObject({ limit: 1 });
+    } finally {
+      await profileWorld.connection.close();
     }
   });
 });

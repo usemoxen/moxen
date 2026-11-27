@@ -185,7 +185,8 @@ it off.
 
 `settings_read` answers with the canonical settings schema: every setting's
 exact key, label, description, choices and when a change applies, paged. For an
-allowlisted set of reviewed keys it also reports the live value, whether it
+allowlisted set of reviewed keys it also reports the live global config value
+(not project `moxen.json` or per-account profile overrides), whether it
 comes from the config, what applies instead and when. Secrets, free-form text,
 MCP server entries, Harness profiles, paths, endpoints and other complex values
 are redacted. It remains available to delegated tasks and does not depend on the
