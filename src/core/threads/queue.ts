@@ -81,7 +81,17 @@ export interface QueuePolicy {
   readonly removed?: boolean;
 }
 
-export interface QueueRow { readonly thread: StoredThread; readonly turns: readonly StoredTurn[] }
+export interface QueueRow {
+  readonly thread: StoredThread;
+  readonly turns: readonly StoredTurn[];
+  /**
+   * The snapshot could not read every row of this thread's turns ledger (a
+   * skipped line, or a torn tail now reported), so a row absent here is
+   * unproven: a dependency hop that lands on this thread may still be waiting
+   * behind the row that could not be read, and must not be read as settled.
+   */
+  readonly unreadable?: boolean;
+}
 
 /**
  * A manual "Continue in a new thread" moves the source's pending ordinary
@@ -122,6 +132,13 @@ export function isTransferLanded(turn: StoredTurn): boolean {
 export function isTransferDestinationRequestId(requestId: string | undefined): boolean {
   return requestId?.startsWith(`handoff:${TRANSFER_REQUEST_PREFIX}`) === true;
 }
+
+/**
+ * The queue request id the hand-off machinery writes on a carried request it
+ * lands as a gated entry of the destination (`handoff:gated:<message id>`): a
+ * copy of work the source already held, never a new submission there.
+ */
+export const GATED_REQUEST_PREFIX = "handoff:gated:";
 
 export interface WorkQueueEntry {
   readonly threadId: string; readonly turnId: string; readonly title: string; readonly prompt: string;
@@ -238,7 +255,12 @@ function entryPending(rows: readonly QueueRow[], threadId: string, turnId: strin
     if (seen.has(target.id)) return true;
     seen.add(target.id);
     const { destinationThreadId, requestId } = target.handoff;
-    const destination = rows.find((row) => row.thread.id === destinationThreadId)?.turns.find((turn) => turn.queue?.requestId === `handoff:${requestId}`);
+    const dependency = rows.find((row) => row.thread.id === destinationThreadId);
+    // A snapshot that could not read every row of the hop's thread cannot
+    // prove its reservation absent: the work may still be behind the row that
+    // was skipped, so the dependent keeps waiting (LOCAL-023).
+    if (dependency?.unreadable === true) return true;
+    const destination = dependency?.turns.find((turn) => turn.queue?.requestId === `handoff:${requestId}`);
     if (!destination) break;
     target = destination;
   }
@@ -344,11 +366,17 @@ export function userAuthoredTurn(turn: StoredTurn): boolean {
  * provider-native background turn were never submitted here, so they vouch for
  * nothing even with no origin of their own (LOCAL-023). Rows written before
  * that record keep the inference below, which still reads a real local send as
- * consent.
+ * consent — apart from a copy an older build moved, which its queue request id
+ * still names.
  */
 export function userConsentTurn(turn: StoredTurn, origin: MessageOrigin | undefined): boolean {
   if (turn.consent === "replayed") return false;
   if (turn.consent === "fresh") return origin === undefined && !turn.scheduledFor;
+  // A row written before the record existed: a copy a move or a hand-off
+  // carried is recognised by the queue request id the writer stamped on it,
+  // so an older build's migrated copy cannot pass as a submission either.
+  const requestId = turn.queue?.requestId;
+  if (requestId !== undefined && (isTransferDestinationRequestId(requestId) || requestId.startsWith(GATED_REQUEST_PREFIX))) return false;
   return origin === undefined && userAuthoredTurn(turn) && !turn.scheduledFor;
 }
 

@@ -139,10 +139,13 @@ even with no origin: it releases no held entry, a task notice cannot ride it,
 and a queued hand-off carrying the mark is not one you queued. Fresh consent is
 something the writer records on a message you send here, never inferred from a
 missing origin: a copy a continue or a hand-off moved into this thread, a
-generated hand-off opener, and a turn the provider started on its own all record
-themselves as replayed, so they release no held entry — a moved message of
-yours cannot vouch for the entry it was moved beside, and the entry still waits
-for a message you actually send on that thread (or the setting turning on).
+generated hand-off opener, a turn the provider started on its own, and a steer
+Moxen sends again for you after a crash all record themselves as replayed, so
+they release no held entry — a moved message of yours cannot vouch for the entry
+it was moved beside, and the entry still waits for a message you actually send on
+that thread (or the setting turning on). A copy an older build moved here carries
+no record at all; the queue request id the move wrote on it (a manual transfer's
+or a carried request's) is what still marks it as a replay.
 Recovering a turn whose process died interrupts it either way, but
 the follow-up it had queued is never dispatched past the gate: it goes back to
 queued for the admission path, which holds it like any other automatic prompt.
@@ -1740,7 +1743,10 @@ continue (which rejoins the same destination) never releases a dependent
 while the work it follows is still pending — whether the entry carried it on
 with a further move or with a queued model/stored handoff of its own — and the
 marker is dropped once that onward work has genuinely settled, so no alias is
-left dangling. Each new destination replaces the wait the
+left dangling. A hop whose ledger cannot be read is unknown, never settled, and
+a waiting entry you took back but can still restore still owns the work, so
+neither erases the alias: it stays until the work is genuinely finished. Each
+new destination replaces the wait the
 move itself added — the one it marks as its own at creation, beyond a reach
 of a client edit — never a wait the user wrote on a sibling entry, so a
 second move carries one server-owned wait, never two; the 16-condition

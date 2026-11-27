@@ -745,10 +745,10 @@ export async function sendTurn(
       interactionMode,
       ...(input.automatic === true ? { automatic: true as const } : {}),
       // Only a prompt the user sends here is fresh consent: Moxen's own
-      // dispatch and the generated opener are recorded as replayed, so a row
-      // with no origin can never release a held automatic entry it did not
-      // actually authorize (LOCAL-023).
-      consent: (origin === undefined && input.automatic !== true && input.handoffOpen !== true ? "fresh" : "replayed") satisfies TurnConsent,
+      // dispatch, the generated opener and any text the writer is replaying
+      // are recorded as replayed, so a row with no origin can never release a
+      // held automatic entry it did not actually authorize (LOCAL-023).
+      consent: input.consent ?? ((origin === undefined && input.automatic !== true && input.handoffOpen !== true ? "fresh" : "replayed") satisfies TurnConsent),
       ...(input.control === true ? { control: true as const } : {}),
       ...(input.interactionMode !== undefined ? { interactionModeExplicit: true as const } : {}),
       ...(origin !== undefined ? { origin } : {}),
@@ -1248,6 +1248,10 @@ export async function redeliverUnconfirmedSteers(
       ...(original?.notification ? { notification: original.notification } : {}),
       ...(uploads.length > 0 ? { attachments: uploads } : {}),
       ...(wakeSettled ? { wakeSettled: true } : {}),
+      // The user's words, carried again by Moxen: the copy still runs, but it
+      // is no new submission and never vouches for a held automatic entry
+      // (LOCAL-023).
+      consent: "replayed" as const,
     }, config).catch(() => null);
     if (!sent) continue;
     copies.push(sent.turn.id);

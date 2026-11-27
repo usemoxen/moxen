@@ -812,6 +812,12 @@ export interface SendTurnInput {
   readonly notification?: { readonly tasks: readonly TaskNotification[]; readonly notices?: readonly string[] };
   /** Internal: the prompt is the generated hand-off that opens a continued thread, recorded as its provenance. */
   readonly handoffOpen?: true;
+  /**
+   * Internal: the writer already knows this prompt is Moxen's own replay of
+   * text it carried before (a redelivered steer), so the turn records
+   * `replayed` rather than a fresh submission. Never accepted from a client.
+   */
+  readonly consent?: TurnConsent;
   /** Internal: the pending request message ids this hand-off opener carries as its task (see `StoredTurn.handoffPending`). */
   readonly handoffPending?: readonly string[];
 }

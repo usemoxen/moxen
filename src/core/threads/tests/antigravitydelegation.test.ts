@@ -38,7 +38,7 @@ import {
   startTurn,
   type OperationContext,
 } from "../operations.js";
-import { completeTurn, createThread, interruptTurn, sendTurn } from "../threads.js";
+import { completeTurn, createThread, interruptTurn, redeliverUnconfirmedSteers, sendTurn } from "../threads.js";
 
 /**
  * Release the parked answers. A prompt reaches the driver before its run waits
@@ -542,6 +542,76 @@ describe("Antigravity automatic prompts held while off", () => {
     expect((await readWorkQueue(w.ctx)).find((entry) => entry.turnId === queued.turnId)!.blocked.join(" "))
       .toContain("providers.antigravity.allowUnsupportedUse");
   });
+
+  it("never reads a steer Moxen sent again as fresh user consent (LOCAL-023)", async () => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    // Queued with the setting on, an agent message is ordinary traffic; the
+    // gate it is held under is the one this test turns off below.
+    w.allow(true);
+    const live = (await sendTurn(w.store, thread.id, { prompt: "Live work" })).turn;
+    const steered = await sendTurn(w.store, thread.id, { prompt: "Also check the logs", delivery: "steer" });
+    expect(steered.delivery).toBe("steered");
+    const held = await queueAgentMessage(w.ctx, thread.id, { message: "Check the logs" });
+    expect(held.status).toBe("queued");
+
+    // The live turn dies with the steer unconfirmed, and Moxen sends the user's
+    // words again as a turn of its own — the user's text, but no new
+    // submission.
+    await interruptTurn(w.store, thread.id, live.id);
+    w.allow(false);
+    const copies = await redeliverUnconfirmedSteers(
+      w.store, thread.id, live.id, [{ messageId: steered.messageId, text: "Also check the logs", images: [] }], w.config,
+    );
+    expect(copies).toHaveLength(1);
+    const copy = (await w.store.readTurns(thread.id)).find((turn) => turn.id === copies[0]!)!;
+    expect(copy.consent).toBe("replayed");
+
+    // It still runs — redelivery is not blocked — but it releases nothing.
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === copies[0]!)?.status).toBe("completed");
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === held.turnId)?.status).toBe("queued");
+    expect((await readWorkQueue(w.ctx)).find((entry) => entry.turnId === held.turnId)!.blocked.join(" "))
+      .toContain("providers.antigravity.allowUnsupportedUse");
+  });
+
+  it.each(["handoff:transfer:legacy-source", "handoff:gated:legacy-message"])(
+    "never reads a legacy moved copy as fresh consent, recognising the request id a move wrote (%s, LOCAL-023)",
+    async (requestId) => {
+      const w = await world();
+      const thread = await w.make("antigravity", "gemini-4-neon");
+      const held = await queueAgentMessage(w.ctx, thread.id, { message: "Check the logs" });
+      // The shape a build before the consent record wrote: no record, no
+      // origin, a completed copy of work its source already held.
+      const now = w.store.nowIso();
+      await w.store.appendLedger(thread.id, "turns", {
+        id: "legacy-moved-copy",
+        threadId: thread.id,
+        messageId: "legacy-moved-message",
+        status: "completed",
+        delivery: "queued",
+        runtimeMode: "auto",
+        interactionMode: "default",
+        queue: { conditions: [], held: false, order: Date.parse(now), sequential: false, continuation: "same-thread", requestId },
+        modelSelection: null,
+        parentTurnId: null,
+        error: null,
+        usage: null,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: now,
+      });
+
+      await runWorkQueue(w.ctx);
+      await settleRuns();
+      expect((await w.store.readTurns(thread.id)).find((turn) => turn.id === held.turnId)?.status).toBe("queued");
+      expect((await readWorkQueue(w.ctx)).find((entry) => entry.turnId === held.turnId)!.blocked.join(" "))
+        .toContain("providers.antigravity.allowUnsupportedUse");
+    },
+  );
 });
 
 describe("Antigravity usage recovery and compaction held while off", () => {

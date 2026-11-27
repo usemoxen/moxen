@@ -123,7 +123,7 @@ import {
 import { armScheduledTurn, disarmScheduledTurn } from "./schedule.js";
 import { isDraining, RESTART_HELD_SUMMARY, serverDrainingError } from "./drain.js";
 import { parseScheduledTime } from "./scheduledtime.js";
-import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchGate, antigravitySteerGate, conditionBlockers, hasSnoozeConditions, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, snoozeActive, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
+import { ANTIGRAVITY_HELD_MESSAGE, GATED_REQUEST_PREFIX, QUEUE_ADMISSION_LOCK, antigravityDispatchGate, antigravitySteerGate, conditionBlockers, hasSnoozeConditions, isTransferDestinationRequestId, userAuthoredTurn, isTransferLanded, isTransferredTurn, loadTurnOrigins, queueAdmission, parseQueuePolicy, providerExhausted, resolveQueueResetConditions, snoozeActive, transferDestinationRequestId, transferRequestId, turnOriginKey, type QueueCondition, type QueuePolicy, type QueueRow, type WorkQueueEntry } from "./queue.js";
 import { prepareHandoff, continuedTitle } from "./handoff.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
@@ -785,7 +785,7 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       // to complete. `handoff:gated:*` entries have no repair path and must
       // fail normally so a retry cannot execute them twice.
       const rid = turn.queue?.requestId;
-      if (isTransferDestinationRequestId(rid) || (rid?.startsWith("handoff:") === true && !rid.startsWith("handoff:gated:"))) {
+      if (isTransferDestinationRequestId(rid) || (rid?.startsWith("handoff:") === true && !rid.startsWith(GATED_REQUEST_PREFIX))) {
         try {
           await store.withThreadLock(threadId, async () => {
             const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
@@ -943,10 +943,10 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     // A snapshot that never contained this thread must not delay its
     // admission to the next rescan (cross-process scheduled work would wait
     // up to 60s): include it directly, the same fallback queueAgentMessage uses.
-    rows.push({ thread, turns: await ctx.store.readTurns(threadId) });
+    rows.push(await queueRowOf(ctx, thread));
     index = rows.length - 1;
   } else if (thread && index >= 0) {
-    rows[index] = { thread, turns: await ctx.store.readTurns(threadId) };
+    rows[index] = await queueRowOf(ctx, thread);
   }
   const at = rows.findIndex((r) => r.thread.id === threadId);
   if (at < 0) return false;
@@ -978,10 +978,10 @@ async function admitQueuedTurn(ctx: OperationContext, threadId: string, rows: Qu
     // refresh its row so admission reads the settled turn, not the orphan.
     const thread = await ctx.store.readThreadRecord(dependency);
     if (!thread || thread.deletedAt) continue;
-    const turns = await ctx.store.readTurns(dependency);
+    const refreshed = await queueRowOf(ctx, thread);
     const at = rows.findIndex((r) => r.thread.id === dependency);
-    if (at >= 0) rows[at] = { thread, turns };
-    else rows.push({ thread, turns });
+    if (at >= 0) rows[at] = refreshed;
+    else rows.push(refreshed);
   }
   const idle = !openTurn([...row.turns]);
   let messages: readonly StoredMessage[] | null = null;
@@ -1057,9 +1057,21 @@ async function queueRows(ctx: OperationContext): Promise<QueueRow[]> {
   const rows: QueueRow[] = [];
   for (const id of await ctx.store.listThreadIds()) {
     const thread = await ctx.store.readThreadRecord(id);
-    if (thread && !thread.deletedAt) rows.push({ thread, turns: await ctx.store.readTurns(id) });
+    if (thread && !thread.deletedAt) rows.push(await queueRowOf(ctx, thread));
   }
   return rows;
+}
+
+/**
+ * One snapshot row for the queue rules, marked when this thread's turns ledger
+ * hides a row: a dependency hop that lands on such a thread cannot have its
+ * reservation proven absent, and keeps its dependent waiting rather than
+ * releasing it on an unreadable snapshot (LOCAL-023).
+ */
+async function queueRowOf(ctx: OperationContext, thread: StoredThread): Promise<QueueRow> {
+  const turns = await ctx.store.readTurns(thread.id);
+  const unreadable = hiddenTurnsProblem(ctx.store, thread.id) !== null;
+  return { thread, turns, ...(unreadable ? { unreadable: true as const } : {}) };
 }
 
 /**
@@ -1074,7 +1086,7 @@ async function queueDependencies(ctx: OperationContext, rows: QueueRow[]): Promi
     if (!known.has(id)) {
       known.add(id);
       const thread = await ctx.store.readThreadRecord(id);
-      if (thread && !thread.deletedAt) rows.push({ thread, turns: await ctx.store.readTurns(id) });
+      if (thread && !thread.deletedAt) rows.push(await queueRowOf(ctx, thread));
     }
     return rows.find((row) => row.thread.id === id);
   };
@@ -3320,9 +3332,17 @@ export async function migrateQueuedMessages(ctx: OperationContext, sourceId: str
  * queue-selected model/stored handoff the destination's pass prepared. Both
  * shapes are followed through the onward turn's own reservation, so the alias
  * a cross-thread dependent follows is kept only while real work waits on the
- * far side — a chain whose last handoff has settled owns nothing, and keeping
- * the marker then would leave it dangling (LOCAL-023). An unreadable ledger is
- * unknown, not finished, so the alias stays.
+ * far side (LOCAL-023).
+ *
+ * Absence is only ever proven on a complete snapshot: every hop is read
+ * reporting a torn tail and checked for a hidden row before its reservation is
+ * called absent, so a downstream ledger that cannot be read keeps the alias
+ * instead of erasing it — a repaired ledger would otherwise resurrect work the
+ * dependent had already run past. A waiting entry the user took out of the
+ * runnable set (`queue.removed`) is still theirs to restore, so it owns the
+ * work too; only a leaf that is genuinely terminal, and can no longer return to
+ * the queue, ends the alias. A hop that moved its text on owns nothing when the
+ * destination it named never landed a row.
  */
 async function onwardWorkPending(store: ThreadStore, entry: StoredTurn): Promise<boolean> {
   const seen = new Set<string>();
@@ -3331,13 +3351,20 @@ async function onwardWorkPending(store: ThreadStore, entry: StoredTurn): Promise
     if (seen.has(target.id)) return true;
     seen.add(target.id);
     const handoff: HandoffRecord = target.handoff;
-    const turns: readonly StoredTurn[] | null = await store.readTurns(handoff.destinationThreadId).catch(() => null);
-    if (turns === null) return true;
+    let turns: readonly StoredTurn[];
+    try {
+      turns = await store.readTurns(handoff.destinationThreadId, { reportTornTail: true });
+    } catch {
+      return true;
+    }
+    if (hiddenTurnsProblem(store, handoff.destinationThreadId) !== null) return true;
     const destination: StoredTurn | undefined = turns.find((turn) => turn.queue?.requestId === `handoff:${handoff.requestId}`);
     if (destination === undefined) break;
     target = destination;
   }
-  return target === undefined || target.status === "queued" || target.status === "running";
+  if (target === undefined) return true;
+  if (target.status === "queued" || target.status === "running") return true;
+  return target.handoff === undefined && target.status !== "completed" && target.queue?.removed === true;
 }
 
 /**
@@ -3559,7 +3586,7 @@ async function landGatedPending(ctx: OperationContext, destinationId: string, ga
         order: Date.parse(now) + index,
         sequential: false,
         continuation: "same-thread",
-        requestId: `handoff:gated:${primary.messageId}`,
+        requestId: `${GATED_REQUEST_PREFIX}${primary.messageId}`,
         transferMessages: group.length,
       };
       const scheduled = typeof primary.scheduledFor === "string" && Date.parse(primary.scheduledFor) > Date.parse(now);
