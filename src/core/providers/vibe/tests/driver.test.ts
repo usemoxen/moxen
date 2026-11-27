@@ -1,3 +1,4 @@
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -2086,6 +2087,69 @@ describe("VibeDriver lazy MCP gateway (LOCAL-032)", () => {
     expect(await Effect.runPromise(driver.hasSession("th-gw-version-skew"))).toBe(false);
     expect(preflightServer.closed).toBe(true);
     expect(mainServer.closed).toBe(true);
+  });
+
+  it("closes the main peer before awaiting gateway shutdown so an open gateway request from the peer cannot stall refusal (LOCAL-038)", async () => {
+    const mainServer = new FakeVibeServer();
+    const preflightServer = new FakeVibeServer();
+    setupGatewaySession(mainServer, emptyNative());
+    setupGatewaySession(preflightServer, emptyNative());
+
+    const peerState: { socket: net.Socket | null; closed: boolean } = { socket: null, closed: false };
+    const origCreatePeer = mainServer.createPeer.bind(mainServer);
+    mainServer.createPeer = () => {
+      const peer = origCreatePeer();
+      const origClose = peer.close.bind(peer);
+      peer.close = () => {
+        peerState.closed = true;
+        peerState.socket?.destroy();
+        peerState.socket = null;
+        origClose();
+      };
+      return peer;
+    };
+
+    mainServer.on(VIBE_METHODS.configEffectiveRead, async () => {
+      // Simulate the main peer holding an authenticated, incomplete HTTP
+      // request open against the loopback gateway while post-start
+      // config/effective/read fails.
+      const gw = await gatewaySpec(mainServer);
+      const url = new URL(gw.url);
+      const authHeaders = Object.entries(gw.headers)
+        .map(([k, v]) => `${k}: ${v}\r\n`)
+        .join("");
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.createConnection({ host: url.hostname, port: Number(url.port) }, () => {
+          sock.write(
+            `POST ${url.pathname} HTTP/1.1\r\nHost: ${url.host}\r\n${authHeaders}Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{`,
+          );
+          sock.on("error", () => {});
+          setTimeout(resolve, 25);
+        });
+        sock.once("error", reject);
+        peerState.socket = sock;
+      });
+      throw new Error("post-start effective config unreadable");
+    });
+
+    const driver = new VibeDriver({
+      transport: makeTransport([mainServer, preflightServer]),
+      connectMcp: stubUpstreamServers({ exa: ["web_search_exa"] }, []),
+    });
+    try {
+      const exit = await Effect.runPromiseExit(driver.startSession({
+        threadId: "th-gw-stalled-req",
+        workingDirectory: "/tmp/repo",
+        mcpServers: [exaHttp],
+        disabledMcpTools: ["mcp__exa__agent_run"],
+      }));
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(peerState.closed).toBe(true);
+      expect(mainServer.closed).toBe(true);
+      expect(peerState.socket).toBeNull();
+    } finally {
+      peerState.socket?.destroy();
+    }
   });
 
   it("does not mistake the gateway's own merged entry for a native collision (arms, not self-locks)", async () => {

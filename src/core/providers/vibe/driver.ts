@@ -855,8 +855,11 @@ export class VibeDriver implements ProviderAdapter<CliError> {
             startedAt: session.startedAt,
           };
         } catch (cause) {
-          await lazyGateway?.close().catch(() => undefined);
+          // Close the peer BEFORE awaiting gateway shutdown so any in-flight
+          // HTTP request the peer holds open against the loopback gateway is
+          // dropped and cannot stall `server.close()` (LOCAL-038).
           peer.close();
+          await lazyGateway?.close().catch(() => undefined);
           throw cause;
         }
       },
