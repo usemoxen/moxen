@@ -375,3 +375,46 @@ describe("bad store records", () => {
     expect(store.storeProblems()).toEqual([]);
   });
 });
+
+describe("delegation ledger writes", () => {
+  it("keeps a delegation appended while a rewrite is replacing the ledger", async () => {
+    const { root, store } = await testStore();
+    const now = new Date().toISOString();
+    const row = (id: string, childThreadId: string) => ({ id, parentThreadId: "p1", childThreadId, prompt: id, status: "running" as const, createdAt: now, updatedAt: now });
+    await store.appendDelegation(row("d1", "c1"));
+    const file = path.join(root, "delegations.jsonl");
+
+    // Hold the rewrite after it has read the ledger and before it replaces the
+    // file, then let a competing append run while it is in flight.
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const original = (store as unknown as { writeLedgerFile: (target: string, lines: string[]) => Promise<void> }).writeLedgerFile.bind(store);
+    let held = false;
+    (store as unknown as { writeLedgerFile: unknown }).writeLedgerFile = async (target: string, lines: string[]) => {
+      if (!held && target === file) {
+        held = true;
+        entered();
+        await gate;
+      }
+      return await original(target, lines);
+    };
+    try {
+      const rewrite = store.updateDelegation("d1", { review: { verdict: "MERGE", report: "r" } });
+      await started;
+      const appended = store.appendDelegation(row("d2", "c2"));
+      // Release without waiting on the append: the ledger lock queues it
+      // behind the rewrite instead of letting it be overwritten.
+      release();
+      await rewrite;
+      await appended;
+    } finally {
+      (store as unknown as { writeLedgerFile: unknown }).writeLedgerFile = original;
+    }
+
+    const rows = await store.readDelegations();
+    expect(rows.map((entry) => entry.id).sort()).toEqual(["d1", "d2"]);
+    expect(rows.find((entry) => entry.id === "d1")?.review?.verdict).toBe("MERGE");
+  });
+});

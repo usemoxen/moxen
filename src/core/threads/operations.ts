@@ -84,7 +84,6 @@ import {
   createThread,
   continuationBusyError,
   deleteThread,
-  delegationForChild,
   failTurn,
   hiddenTurnsProblem,
   hiddenLedgerProblem,
@@ -126,7 +125,9 @@ import { ANTIGRAVITY_HELD_MESSAGE, QUEUE_ADMISSION_LOCK, antigravityDispatchGate
 import { prepareHandoff, continuedTitle } from "./handoff.js";
 import { isMaintenanceTurn } from "./maintenance.js";
 import { COMPACTED_CONTINUE_PROMPT, COMPACT_PROMPT, planLongThreadAction, type LongThreadAction, type LongThreadSnapshot } from "./longthreads.js";
-import { reportHeadline, reviewFactsOf, reviewVerdictOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type ReviewVerdict, type TaskNotification } from "./notify.js";
+import { reportHeadline, reviewFactsOf, taskNotificationText, type BackgroundWorkNote, type ReviewFacts, type TaskNotification } from "./notify.js";
+import { REVIEW_HANDOFF_INSTRUCTION, legacyReviewFacts, outcomeFromRow, outcomeFromTurns, reviewFactsFor, storedOutcome, type ReviewOutcome } from "./reviewtask.js";
+import { delegationSettleGeneration, markDelegationNoticeReported } from "./delegationnotice.js";
 import { CHECKPOINT_REF_NAMESPACE, diffCheckpointStat, restoreWorktreeTo } from "../checkpoints/git.js";
 import { readStatus } from "../git/history.js";
 import { RESEARCH_LENSES, RESEARCH_SIZE_MESSAGE, isValidResearchSize, type ResearchLens } from "./researchvocab.js";
@@ -1562,15 +1563,6 @@ export async function submitHandoff(ctx: OperationContext, threadId: string, req
 const HANDOFF_SUMMARY_BUDGET_MS = 120_000;
 const MAX_HANDOFF_REPAIR_ATTEMPTS = 3;
 
-/**
- * How many continuations a walk follows through a chain — task resolution,
- * live-thread lookup and handoff-key retries alike — before it stops and
- * says the chain ends there. Bounded so a corrupt cycle cannot spin
- * forever, generous enough that a real chain (a task continued dozens of
- * times) still resolves to the thread doing the work.
- */
-const CONTINUATION_FOLLOW_HOPS = 128;
-
 type HandoffRecord = NonNullable<StoredTurn["handoff"]>;
 
 /** The destination turn a handoff reserved, if its row exists. A reservation, not delivery. */
@@ -2488,6 +2480,19 @@ async function reserveContinuation(ctx: OperationContext, source: StoredThread, 
     store.emit(source.id, "thread-continued");
     return id;
   });
+}
+
+/**
+ * Whether this thread's task is a review, so its continuation carries the
+ * acknowledgement instruction. A retry after the delegation transferred reads
+ * the destination's row, or the source's superseded one.
+ */
+async function reviewContinuation(store: ThreadStore, source: StoredThread, destinationId: string): Promise<boolean> {
+  const rows = await store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const row = rows.find((candidate) => candidate.childThreadId === destinationId)
+    ?? rows.find((candidate) => candidate.childThreadId === source.id);
+  if (row === undefined) return false;
+  return row.reviewTask === true || row.review !== undefined || source.interactionMode === "review";
 }
 
 /** The delegation row a handoff's continuation reports through, when the parent asked to be told. */
@@ -3518,6 +3523,11 @@ async function continueThreadReserved(
       if (current && current.researchPicker !== true) await store.writeThreadRecord({ ...current, researchPicker: true });
     });
   }
+  // The continuation of a delegated review must either do the work or say
+  // exactly that it is only acknowledging the hand-off, so no language or
+  // phrasing can hide a report inside an acknowledgement. Resolved before the
+  // hand-off marks the source row as continued.
+  const reviewHandoff = await reviewContinuation(store, source, created.id);
   const notifyParent = await carryDelegation(store, source.id, created.id);
   await endContinuedSession(ctx, source);
   const adopted = await adoptTasks(store, source.id, created.id);
@@ -3527,7 +3537,8 @@ async function continueThreadReserved(
   const origin = request.byAgent === true ? "agent-message" as const : undefined;
   if (origin) requireAntigravityDelegation({ ...ctx.config, providers: liveProvidersOf(ctx) }, modelSelection.instanceId);
   const priorTasks = saved ? await adoptedTasksOf(ctx, created.id) : adopted;
-  const prompt = handoff.document + runningTasksNote(priorTasks) + firstMessageNote(request.firstMessage);
+  const prompt = handoff.document + runningTasksNote(priorTasks) + firstMessageNote(request.firstMessage)
+    + (reviewHandoff ? `\n\n${REVIEW_HANDOFF_INSTRUCTION}` : "");
   let opener = (await store.readTurns(created.id)).find((turn) =>
     turn.handoffOpen === true || (request.queue?.requestId !== undefined && turn.queue?.requestId === request.queue.requestId),
   );
@@ -3539,6 +3550,7 @@ async function continueThreadReserved(
       ...(origin ? { origin } : {}),
       ...(request.queue ? { queue: request.queue } : {}),
       ...(request.scheduledFor !== undefined ? { scheduledFor: request.scheduledFor, scheduleReason: "user" as const } : {}),
+      ...(reviewHandoff ? { reviewHandoff: true } : {}),
       // The next handoff excludes the document itself, and knows what work
       // it rendered as soon as this opener dispatches (MXN-413).
       handoffOpen: true,
@@ -3947,31 +3959,55 @@ async function endContinuedSession(ctx: OperationContext, source: StoredThread):
  * A delegated task that carries on in a new thread stays the parent's task:
  * the continuation gets its own delegation row (so the parent is told when it
  * ends), and the source's row records where the work went (so the source
- * settling by handing off is not reported as the task finishing).
+ * settling by handing off is not reported as the task finishing). One locked
+ * replacement writes both, so no reader sees a live source beside its
+ * successor. A review's durable outcome and review flag travel with it, so
+ * the next report builds on what this task settled with, not on a transcript.
  * Idempotent: a handoff retried after a restart adds no second row.
  */
 async function carryDelegation(store: ThreadStore, sourceId: string, destinationId: string): Promise<string | null> {
-  const rows = await store.readDelegations().catch(() => [] as StoredDelegation[]);
-  const row = rows.find((candidate) => candidate.childThreadId === sourceId && candidate.status === "running");
-  if (!row || row.continuedIn !== undefined || rows.some((candidate) => candidate.childThreadId === destinationId)) return null;
-  const now = store.nowIso();
-  await store.appendDelegation({
-    id: randomUUID(),
-    parentThreadId: row.parentThreadId,
-    childThreadId: destinationId,
-    prompt: row.prompt,
-    status: "running",
-    ...(row.baseBranch !== undefined ? { baseBranch: row.baseBranch } : {}),
-    ...(row.notify ? { notify: true } : {}),
-    // The continuation is the same task lineage: it inherits who the
-    // reviewer shared a model with, but pins its own verdict when it settles.
-    ...(row.modelSnapshot ? { modelSnapshot: row.modelSnapshot } : {}),
-    continuesTaskId: row.continuesTaskId ?? row.childThreadId,
-    createdAt: now,
-    updatedAt: now,
+  return await store.withThreadLock(sourceId, async () => {
+    const rows = await store.readDelegations().catch(() => [] as StoredDelegation[]);
+    const row = rows.find((candidate) => candidate.childThreadId === sourceId && candidate.status === "running");
+    if (!row || row.continuedIn !== undefined || rows.some((candidate) => candidate.childThreadId === destinationId)) return null;
+    // Reconcile a decision the row missed — a crash between the terminal turn
+    // and the row write — before it travels: the turn ledger is the truth.
+    const turns = await store.readTurns(sourceId).catch(() => [] as StoredTurn[]);
+    const reviewTask = row.reviewTask === true || row.review !== undefined
+      || (await store.readThreadRecord(sourceId).catch(() => null))?.interactionMode === "review";
+    let outcome: ReviewOutcome | null = outcomeFromTurns(turns, sourceId);
+    if (reviewTask && outcome === null) {
+      if (row.reviewTask === true) {
+        outcome = row.review !== undefined ? outcomeFromRow(row) : null;
+      } else {
+        // A row from before outcomes were durable: seed its legacy chain once.
+        outcome = (await legacyReviewFacts(store, row, rows)).outcome;
+      }
+    }
+    const now = store.nowIso();
+    const destination: StoredDelegation = {
+      id: randomUUID(),
+      parentThreadId: row.parentThreadId,
+      childThreadId: destinationId,
+      prompt: row.prompt,
+      status: "running",
+      ...(row.baseBranch !== undefined ? { baseBranch: row.baseBranch } : {}),
+      ...(row.notify ? { notify: true } : {}),
+      // The continuation is the same task lineage: it inherits who the
+      // reviewer shared a model with, and what the review last settled with.
+      ...(row.modelSnapshot ? { modelSnapshot: row.modelSnapshot } : {}),
+      ...(reviewTask ? { reviewTask: true as const } : {}),
+      ...(outcome !== null ? { review: storedOutcome(outcome) } : {}),
+      continuesTaskId: row.continuesTaskId ?? row.childThreadId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const transferred = await store.transferDelegation(sourceId, destination, {
+      ...(reviewTask ? { reviewTask: true as const } : {}),
+      ...(outcome !== null ? { review: storedOutcome(outcome) } : {}),
+    });
+    return transferred === null ? null : transferred.notify === true ? transferred.parentThreadId : null;
   });
-  await store.updateDelegation(row.id, { continuedIn: destinationId });
-  return row.notify ? row.parentThreadId : null;
 }
 
 /**
@@ -4055,10 +4091,12 @@ async function delegationOf(
 async function continuedLiveThread(store: ThreadStore, threadId: string): Promise<string | null> {
   let current: string | undefined = threadId;
   let latest: string | null = null;
-  for (let hops = 0; current !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
+  const seen = new Set<string>([threadId]);
+  while (current !== undefined) {
     const notes = await store.readActivities(current).catch(() => []);
     const next = notes.findLast((activity) => activity.kind === "thread.continued" && typeof activity.payload?.threadId === "string")?.payload?.threadId as string | undefined;
-    if (next === undefined) break;
+    if (next === undefined || seen.has(next)) break;
+    seen.add(next);
     latest = next;
     current = (await store.readThreadRecord(next).catch(() => null)) === null ? undefined : next;
   }
@@ -5293,6 +5331,17 @@ export interface PendingTaskNotification {
    * ledger decides whether its report was already delivered.
    */
   readonly unidentified?: true;
+  /**
+   * Identities of earlier notices of this task and kind that this one replaced
+   * while waiting. One report covers them all, and records every one, so no
+   * copy of an older generation left in a replayed batch reads as unsent.
+   */
+  readonly covers?: readonly string[];
+  /**
+   * The settle generation the delegation row had when this notice was
+   * observed: what queuing it satisfies. In memory only, never persisted.
+   */
+  readonly generation?: number;
 }
 
 /** Settle entries report; pause entries carry `resumesAt` (possibly null), cancel entries `cancelled`. */
@@ -5325,7 +5374,19 @@ async function newTaskNotice(
   return { ...facts, id: taskNoticeId(kind, child, last?.id ?? null), child };
 }
 
-/** Union pending entries: one entry per child and kind; a repeat carries the latest facts and identity. */
+/**
+ * A settle notice about to be queued, carrying the settle generation it will
+ * satisfy. Read before the turns, so a settle landing in between stays owed.
+ */
+async function observedTaskNotice(ctx: OperationContext, child: string): Promise<PendingTaskNotification> {
+  const generation = await delegationSettleGeneration(ctx.store, child);
+  return { ...(await newTaskNotice(ctx, child)), generation };
+}
+
+/**
+ * Union pending entries: one entry per child and kind; a repeat carries the
+ * latest facts and identity, and remembers the identities it replaced.
+ */
 function unionTaskEntries(
   left: readonly PendingTaskNotification[],
   right: readonly PendingTaskNotification[],
@@ -5334,17 +5395,25 @@ function unionTaskEntries(
   for (const entry of [...left, ...right]) {
     const key = `${pendingEntryKind(entry)}:${entry.child}`;
     const known = merged.get(key);
+    if (known === undefined) {
+      merged.set(key, entry);
+      continue;
+    }
+    let next = entry;
     // A repeat must not clear the hold on a notice the provider refused.
-    if (known?.refusedMessageId !== undefined && entry.refusedMessageId === undefined) {
-      merged.set(key, { ...entry, refusedMessageId: known.refusedMessageId });
-      continue;
+    if (known.refusedMessageId !== undefined && entry.refusedMessageId === undefined) {
+      next = { ...entry, refusedMessageId: known.refusedMessageId };
+    } else if (known.unidentified === true && entry.unidentified !== true) {
+      // Nor may one strip the marker of an entry that carries no identity.
+      next = { ...entry, unidentified: true };
     }
-    // Nor may one strip the marker of an entry that carries no identity.
-    if (known?.unidentified === true && entry.unidentified !== true) {
-      merged.set(key, { ...entry, unidentified: true });
-      continue;
-    }
-    merged.set(key, entry);
+    // A fabricated identity proves nothing, so it is never carried as covered.
+    const covered = new Set([...(known.covers ?? []), ...(entry.covers ?? []), ...(known.unidentified === true ? [] : [known.id])]);
+    covered.delete(next.id);
+    if (covered.size > 0) next = { ...next, covers: [...covered] };
+    const generation = Math.max(known.generation ?? 0, entry.generation ?? 0);
+    if (generation > 0) next = { ...next, generation };
+    merged.set(key, next);
   }
   return [...merged.values()];
 }
@@ -5368,19 +5437,22 @@ function normalizeTaskEntries(value: unknown): PendingTaskNotification[] | null 
     const id = typeof record.id === "string" && record.id.length > 0 ? record.id : null;
     const refused = record.refusedMessageId;
     if (refused !== undefined && (typeof refused !== "string" || refused.length === 0)) return null;
+    const covers = record.covers;
+    if (covers !== undefined && !(Array.isArray(covers) && covers.every((item) => typeof item === "string" && item.length > 0))) return null;
+    const carried = covers !== undefined && covers.length > 0 ? { covers: covers as string[] } : {};
     if (record.resumesAt !== undefined) {
       if (record.resumesAt !== null && (typeof record.resumesAt !== "string" || !Number.isFinite(Date.parse(record.resumesAt)))) return null;
-      const entry = { id: id ?? taskNoticeId("pause", child, null), child, resumesAt: record.resumesAt, ...(refused !== undefined ? { refusedMessageId: refused } : {}) };
+      const entry = { id: id ?? taskNoticeId("pause", child, null), child, resumesAt: record.resumesAt, ...carried, ...(refused !== undefined ? { refusedMessageId: refused } : {}) };
       entries.push(id === null ? unidentified(entry) : entry);
       continue;
     }
     if (record.cancelled !== undefined) {
       if (record.cancelled !== true) return null;
-      const entry: PendingTaskNotification = { id: id ?? taskNoticeId("cancel", child, null), child, cancelled: true, ...(refused !== undefined ? { refusedMessageId: refused } : {}) };
+      const entry: PendingTaskNotification = { id: id ?? taskNoticeId("cancel", child, null), child, cancelled: true, ...carried, ...(refused !== undefined ? { refusedMessageId: refused } : {}) };
       entries.push(id === null ? unidentified(entry) : entry);
       continue;
     }
-    const entry = { id: id ?? taskNoticeId("settle", child, null), child, ...(refused !== undefined ? { refusedMessageId: refused } : {}) };
+    const entry = { id: id ?? taskNoticeId("settle", child, null), child, ...carried, ...(refused !== undefined ? { refusedMessageId: refused } : {}) };
     entries.push(id === null ? unidentified(entry) : entry);
   }
   return unionTaskEntries(entries, []);
@@ -5444,8 +5516,8 @@ async function updateTaskNotificationBatches(
     const durable = Object.fromEntries(Object.entries(batches).map(([key, entries]) => [
       key,
       entries.map((entry) => entry.unidentified === true
-        ? { ...entry, id: undefined, unidentified: undefined }
-        : entry),
+        ? { ...entry, id: undefined, unidentified: undefined, generation: undefined }
+        : { ...entry, generation: undefined }),
     ]));
     await writeAtomic(taskNotificationBatchesFile(storeRoot), `${JSON.stringify(durable)}\n`);
   });
@@ -5540,20 +5612,65 @@ async function acknowledgeTaskNotifications(
  * when nothing of the lineage is live.
  */
 function liveParentOf(rows: readonly StoredDelegation[], childThreadId: string): string | undefined {
-  let current = childThreadId;
-  const seen = new Set<string>();
-  // A continuation chain only moves forward; the bound guards a store that
-  // keeps changing under us.
-  for (let hops = 0; hops < 16 && !seen.has(current); hops += 1) {
-    seen.add(current);
-    const lineage = rows.filter((row) => row.childThreadId === current);
-    const live = lineage.find((row) => row.continuedIn === undefined);
-    if (live !== undefined) return live.parentThreadId;
-    const next = lineage.find((row) => row.continuedIn !== undefined)?.continuedIn;
-    if (next === undefined) return undefined;
-    current = next;
+  const byChild = successorIndex(rows);
+  const start = byChild.get(childThreadId);
+  if (start === undefined) return undefined;
+  return liveSuccessor(byChild, start)?.parentThreadId;
+}
+
+/** Whether a task handed off into a new thread: it has rows, and none of them is live. */
+function isSupersededTask(rows: readonly StoredDelegation[], childThreadId: string): boolean {
+  return rows.some((row) => row.childThreadId === childThreadId) &&
+    !rows.some((row) => row.childThreadId === childThreadId && row.continuedIn === undefined);
+}
+
+/**
+ * The live incarnation a superseded child's settle belongs to, when it has
+ * already finished: the notice is regenerated for it, so a lost callback
+ * cannot leave the parent with nothing. A successor still running, waiting,
+ * or with no settled work yet (a handoff still landing) reports when it
+ * settles itself.
+ */
+async function settledSuccessor(
+  ctx: OperationContext,
+  rows: readonly StoredDelegation[],
+  childThreadId: string,
+): Promise<StoredDelegation | null> {
+  const byChild = successorIndex(rows);
+  const start = byChild.get(childThreadId);
+  if (start === undefined) return null;
+  const live = liveSuccessor(byChild, start);
+  if (live === null || live.childThreadId === childThreadId) return null;
+  if (!(await taskHasSettledForGood(ctx, live.childThreadId))) return null;
+  return (await settledWorkTurnCount(ctx, live.childThreadId)) > 0 ? live : null;
+}
+
+/**
+ * What stands in for each settle notice whose task has since handed off: the
+ * finished successor's own notice with the parent it reports to, or null
+ * when the successor will report by itself. Other entries are not listed.
+ */
+async function supersededSettles(
+  ctx: OperationContext,
+  rows: readonly StoredDelegation[],
+  entries: readonly PendingTaskNotification[],
+): Promise<Map<PendingTaskNotification, { readonly parentThreadId: string; readonly entry: PendingTaskNotification } | null>> {
+  const found = new Map<PendingTaskNotification, { readonly parentThreadId: string; readonly entry: PendingTaskNotification } | null>();
+  for (const entry of entries) {
+    if (pendingEntryKind(entry) !== "settle" || !isSupersededTask(rows, entry.child)) continue;
+    const successor = await settledSuccessor(ctx, rows, entry.child);
+    found.set(entry, successor === null ? null : { parentThreadId: successor.parentThreadId, entry: await observedTaskNotice(ctx, successor.childThreadId) });
   }
-  return undefined;
+  return found;
+}
+
+/** Record that these settle notices are queued: their generations need no startup repair. */
+async function markNoticesReported(ctx: OperationContext, entries: readonly PendingTaskNotification[]): Promise<void> {
+  for (const entry of entries) {
+    if (pendingEntryKind(entry) === "settle" && entry.generation !== undefined) {
+      await markDelegationNoticeReported(ctx.store, entry.child, entry.generation);
+    }
+  }
 }
 
 /**
@@ -5585,16 +5702,46 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
     // batch on restart (at-least-once), while forgetting first could lose it
     // with the dying process. The union below keeps one flush to one message.
     const replay = (await readTaskNotificationBatches(ctx.storeRoot))[parentThreadId] ?? [];
-    const snapshot = unionTaskEntries(pending?.entries ?? [], replay);
+    let snapshot = unionTaskEntries(pending?.entries ?? [], replay);
     if (snapshot.length === 0) return;
     // Every notice a delivered message reports is recorded with it, so a
     // flush whose acknowledgement write failed is counted done here instead of
     // reporting the same settle twice.
     const reported = await deliveredTaskNoticeIds(ctx, parentThreadId);
-    const entries = await unreportedTaskNotices(ctx, snapshot, reported);
+    let entries = await unreportedTaskNotices(ctx, snapshot, reported);
     if (entries.length === 0) {
       await acknowledgeTaskNotifications(ctx.storeRoot, parentThreadId, snapshot);
       return;
+    }
+    // A settle batched for a task that has itself continued is the
+    // successor's to report, also when a restart replays the batch. When that
+    // successor has already finished, its notice takes the dropped one's
+    // place, so a lost callback cannot leave the parent with nothing.
+    const successors = await supersededSettles(ctx, await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]), entries);
+    if (successors.size > 0) {
+      const local: PendingTaskNotification[] = [];
+      const elsewhere: { parentThreadId: string; entry: PendingTaskNotification }[] = [];
+      for (const replacement of successors.values()) {
+        if (replacement === null) continue;
+        if (replacement.parentThreadId === parentThreadId) local.push(replacement.entry);
+        else elsewhere.push(replacement);
+      }
+      // Durable at their destinations before the originals are forgotten,
+      // and the local swap is one write: no crash leaves neither.
+      await rerouteTaskNotifications(ctx, elsewhere);
+      const superseded = new Set([...successors.keys()].map((entry) => entry.id));
+      await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
+        const remaining = unionTaskEntries((batches[parentThreadId] ?? []).filter((entry) => !superseded.has(entry.id)), local);
+        if (remaining.length > 0) batches[parentThreadId] = remaining;
+        else delete batches[parentThreadId];
+      });
+      await markNoticesReported(ctx, local);
+      snapshot = unionTaskEntries(snapshot.filter((entry) => !successors.has(entry)), local);
+      entries = await unreportedTaskNotices(ctx, snapshot, reported);
+      if (entries.length === 0) {
+        await acknowledgeTaskNotifications(ctx.storeRoot, parentThreadId, snapshot);
+        return;
+      }
     }
     // A task whose parent continued in a new thread reports there instead —
     // even when this thread is held: the batches belong to the live
@@ -5606,7 +5753,7 @@ export async function flushTaskNotifications(ctx: OperationContext, parentThread
       const live = liveParent(entry.child);
       return live !== undefined && live !== parentThreadId;
     });
-    for (const entry of moved) await enqueueTaskNotification(ctx, liveParent(entry.child)!, entry);
+    await rerouteTaskNotifications(ctx, moved.map((entry) => ({ parentThreadId: liveParent(entry.child)!, entry })));
     const mine = entries.filter((entry) => !moved.includes(entry));
     // Notices this flush does not deliver — re-queued elsewhere or already
     // reported — still leave this batch; what waits here stays.
@@ -5793,12 +5940,23 @@ function watchDeferredNotification(ctx: OperationContext, parentThreadId: string
  * parent would never hear. Each such child is reconciled first — outside the
  * parent's notification lock, which is the child's own thread lock — so the
  * flush reads whether it has live or queued work left, and not a corpse.
+ *
+ * Settle obligations no batch covers are reconciled last: a task can settle
+ * (and persist its review outcome) with the process lost before its run
+ * callback queued anything. Each settle records its generation on the
+ * delegation row, so one ahead of the last generation a notice was queued
+ * for is queued now; a delivered notice's receipt suppresses a repeat.
  */
 export async function recoverTaskNotifications(ctx: OperationContext): Promise<void> {
   const batches = await readTaskNotificationBatches(ctx.storeRoot);
   const parents = Object.keys(batches);
   const affected = new Set([...Object.values(batches).flatMap((entries) => entries.map((entry) => entry.child)), ...parents]);
-  if (parents.length === 0) return;
+  if (parents.length > 0) await replayTaskNotificationBatches(ctx, affected);
+  await reportOwedSettles(ctx, affected);
+}
+
+/** Coalesce inherited batches by their live recipient, then deliver them. */
+async function replayTaskNotificationBatches(ctx: OperationContext, affected: ReadonlySet<string>): Promise<void> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   // A crash can leave the same notice durable under both the old parent and
   // the one it moved to. Coalesce every copy by its live recipient in one
@@ -5835,9 +5993,26 @@ export async function recoverTaskNotifications(ctx: OperationContext): Promise<v
   }
 }
 
+/** Queue and deliver every settle whose notice was never queued before the previous process ended. */
+async function reportOwedSettles(ctx: OperationContext, recovered: ReadonlySet<string>): Promise<void> {
+  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
+  const owed = new Set<string>();
+  for (const row of rows) {
+    if (row.continuedIn !== undefined || row.notify !== true) continue;
+    if ((row.settleGeneration ?? 0) <= (row.reportedGeneration ?? 0)) continue;
+    if (!(await taskHasSettledForGood(ctx, row.childThreadId))) continue;
+    await enqueueTaskNotification(ctx, row.parentThreadId, await observedTaskNotice(ctx, row.childThreadId));
+    owed.add(row.parentThreadId);
+  }
+  for (const parentThreadId of owed) {
+    if (!recovered.has(parentThreadId)) await recoverOrphanedTurn(ctx, parentThreadId).catch(() => undefined);
+    await flushTaskNotifications(ctx, parentThreadId).catch(() => undefined);
+  }
+}
+
 /** Note a settled task for its parent; the batch goes out once no other task settles for a moment. */
 export async function queueTaskNotification(ctx: OperationContext, parentThreadId: string, childThreadId: string): Promise<void> {
-  await enqueueTaskNotification(ctx, parentThreadId, await newTaskNotice(ctx, childThreadId));
+  await enqueueTaskNotification(ctx, parentThreadId, await observedTaskNotice(ctx, childThreadId));
 }
 
 /**
@@ -5865,12 +6040,6 @@ async function notifyDelegationParent(ctx: OperationContext, childThreadId: stri
   return row?.notify === true ? row.parentThreadId : null;
 }
 
-/** The parent a task reports to now, whether or not it asked to be told; undefined when it has no live row. */
-async function liveDelegationParent(ctx: OperationContext, childThreadId: string): Promise<string | undefined> {
-  const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
-  return rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined)?.parentThreadId;
-}
-
 /** Arm a parent's batch flush; the durable file, not the timer, is what survives a restart. */
 function armTaskNotificationFlush(ctx: OperationContext, parentThreadId: string, entries: PendingTaskNotification[]): void {
   const timer = setTimeout(() => void flushTaskNotifications(ctx, parentThreadId).catch(() => undefined), TASK_NOTIFICATION_BATCH_MS);
@@ -5879,23 +6048,29 @@ function armTaskNotificationFlush(ctx: OperationContext, parentThreadId: string,
 }
 
 /**
- * Batch a task notice for the thread that owns the task now; held or spent
- * parents keep it durably until they can receive it. A completion callback
- * armed before a handoff still names the old parent, so the live row is
- * resolved first: checking the old recipient's usage there would strand the
- * notice in a batch no flush reaches until a restart.
+ * Batch one task's notices for the thread that owns it now; held or spent
+ * parents keep them durably until they can receive them. The entries are
+ * written together under one destination lock and in one batch write, so a
+ * destination flush never sees part of a coalesced report. A completion
+ * callback armed before a handoff still names the old parent, so the live row
+ * is resolved first and re-read under the target's lock: checking the old
+ * recipient's usage there would strand the notice in a batch no flush reaches
+ * until a restart.
  */
-async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: string, entry: PendingTaskNotification): Promise<void> {
+async function enqueueTaskNotifications(ctx: OperationContext, parentThreadId: string, entries: readonly PendingTaskNotification[]): Promise<void> {
+  if (entries.length === 0) return;
+  const child = entries[0]!.child;
+  const liveParent = async () => liveParentOf(await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]), child);
   let target = parentThreadId;
   // Handoffs only move a row forward, so a chain cannot cycle; the bound is a
   // guard against a store that keeps changing under us.
   for (let hops = 0; hops < 16; hops += 1) {
-    const live = await liveDelegationParent(ctx, entry.child);
+    const live = await liveParent();
     if (live !== undefined) target = live;
     const rerouted = await ctx.store.withThreadLock(`\0task-notification:${target}`, async (): Promise<string | null> => {
       // Re-read under the lock: a handoff that landed since the read above
       // must win over the row we resolved.
-      const current = await liveDelegationParent(ctx, entry.child);
+      const current = await liveParent();
       if (current !== undefined && current !== target) return current;
       // Serialize fact collection too: a later, faster report cannot overtake an
       // earlier one. Registered under the thread lock so protection's flush
@@ -5905,29 +6080,51 @@ async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: st
         // Held or spent: keep it durably in the batch file for the recovery or
         // the user's next message, instead of starting its own turn into the wall.
         await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-          batches[target] = unionTaskEntries(batches[target] ?? [], [entry]);
+          batches[target] = unionTaskEntries(batches[target] ?? [], entries);
         });
         return null;
       }
       const pending = pendingNotifications.get(target);
       if (pending) clearTimeout(pending.timer);
-      const entries = unionTaskEntries(pending?.entries ?? [], [entry]);
+      const queued = unionTaskEntries(pending?.entries ?? [], entries);
       // Persisted before the timer is armed: a restart inside the batch
       // window replays the file, and the replay unions what is on disk.
       await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-        batches[target] = unionTaskEntries(batches[target] ?? [], entries);
+        batches[target] = unionTaskEntries(batches[target] ?? [], queued);
       });
-      armTaskNotificationFlush(ctx, target, entries);
+      armTaskNotificationFlush(ctx, target, queued);
       return null;
     });
-    if (rerouted === null) return;
+    if (rerouted === null) {
+      await markNoticesReported(ctx, entries);
+      return;
+    }
     target = rerouted;
   }
-  // Not reachable for a real continuation chain: keep the notice durable for
-  // the next flush of whichever parent we resolved last rather than drop it.
+  // Not reachable for a real continuation chain: keep the notices durable for
+  // the next flush of whichever parent we resolved last rather than drop them.
   await updateTaskNotificationBatches(ctx.storeRoot, (batches) => {
-    batches[target] = unionTaskEntries(batches[target] ?? [], [entry]);
+    batches[target] = unionTaskEntries(batches[target] ?? [], entries);
   });
+}
+
+async function enqueueTaskNotification(ctx: OperationContext, parentThreadId: string, entry: PendingTaskNotification): Promise<void> {
+  await enqueueTaskNotifications(ctx, parentThreadId, [entry]);
+}
+
+/** Enqueue rerouted notices together per destination and task, so no group is split. */
+async function rerouteTaskNotifications(
+  ctx: OperationContext,
+  rerouted: ReadonlyArray<{ readonly parentThreadId: string; readonly entry: PendingTaskNotification }>,
+): Promise<void> {
+  const groups = new Map<string, { readonly parentThreadId: string; readonly entries: PendingTaskNotification[] }>();
+  for (const moved of rerouted) {
+    const key = `${moved.parentThreadId}\0${moved.entry.child}`;
+    const group = groups.get(key) ?? { parentThreadId: moved.parentThreadId, entries: [] };
+    group.entries.push(moved.entry);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) await enqueueTaskNotifications(ctx, group.parentThreadId, group.entries);
 }
 
 /**
@@ -6139,65 +6336,44 @@ async function taskBackgroundState(
 }
 
 /**
- * A review child's facts for its parent, pinned at settle. The pin lives on
- * the delegation row — the verdict and report of the newest settled turn
- * whose final message carries a `VERDICT` line — so a conversational
- * follow-up turn cannot rewrite the settled verdict, while a follow-up
- * that settles with its own verdict re-pins. The same-model comparison
- * reads the delegation-time snapshot, never the live records. While the
- * task runs, the facts are computed live and nothing is pinned.
+ * A review child's facts for its parent, from the task's durable outcome: the
+ * verdict its newest settled report ended with (explicitly null when its
+ * report carried none), the report, and the model that produced it. A row
+ * that predates durable outcomes is seeded from its own legacy chain; a
+ * modern row never reads an earlier transcript, so a chain's read cost does
+ * not grow with each hand-off.
  */
 async function reviewFactsForTask(
   ctx: OperationContext,
   child: ThreadEnvelope,
   parent: { modelSelection?: { instanceId: string; model: string } } | null,
   row: StoredDelegation | undefined | null,
+  rows: readonly StoredDelegation[],
   task: TaskView,
+  childTurns: readonly StoredTurn[],
 ): Promise<(ReviewFacts & { report: string | null }) | null> {
-  if (child.interactionMode !== "review") return null;
-  const modelOf = (selection: { instanceId: string; model: string } | undefined | null) =>
-    selection ? `${selection.instanceId}/${selection.model}` : null;
-  const snapshot = row?.modelSnapshot;
-  const childModel = snapshot?.child ?? modelOf(child.modelSelection);
-  const parentModel = snapshot?.parent ?? (parent === null ? null : modelOf(parent.modelSelection));
-  if (task.status === "running") {
-    return { ...reviewFactsOf({ finished: false, interactionMode: "review", report: null, childModel, parentModel })!, report: null };
-  }
-  const pinned = await settledReviewPin(ctx, child);
-  const report = pinned?.report ?? task.summary;
-  const facts = reviewFactsOf({ finished: true, interactionMode: "review", report, childModel, parentModel })!;
-  const owned = row ?? null;
-  if (owned !== null && (owned.review?.verdict !== facts.verdict || owned.review?.report !== report)) {
-    await ctx.store.updateDelegation(owned.id, { review: { verdict: facts.verdict, report } }).catch(() => undefined);
-  }
-  return { ...facts, report };
-}
-
-/**
- * The newest settled turn whose final message carries a verdict, newest
- * first. A conversational follow-up settles without one, so the search
- * walks past it to the settled review; a follow-up that is itself a
- * review re-pins with its own verdict. Null when no settled turn carries
- * one — the missing-verdict path then says so visibly.
- */
-async function settledReviewPin(
-  ctx: OperationContext,
-  child: ThreadEnvelope,
-): Promise<{ verdict: ReviewVerdict; report: string } | null> {
-  const [turns, messages] = await Promise.all([
-    ctx.store.readTurns(child.id).catch(() => [] as StoredTurn[]),
-    ctx.store.readMessages(child.id).catch(() => [] as StoredMessage[]),
-  ]);
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
-    const turn = turns[index]!;
-    if (turn.status !== "completed") continue;
-    // The completion text lands last, so the first match walking back is
-    // the turn's final message rather than a mid-turn progress note.
-    const text = [...messages].reverse().find((message) => message.turnId === turn.id && message.role === "assistant" && message.text.trim().length > 0)?.text ?? null;
-    const verdict = reviewVerdictOf(text);
-    if (verdict !== null && text !== null) return { verdict, report: text };
-  }
-  return null;
+  const facts = await reviewFactsFor({
+    store: ctx.store,
+    row: row ?? null,
+    rows,
+    childTurns,
+    childThreadId: child.id,
+    interactionMode: child.interactionMode,
+  });
+  if (!facts.reviewTask) return null;
+  const snapshot = (row ?? undefined)?.modelSnapshot;
+  const parentModel = snapshot?.parent
+    ?? (parent?.modelSelection ? `${parent.modelSelection.instanceId}/${parent.modelSelection.model}` : null);
+  // The model that produced the displayed report; a legacy row that never
+  // recorded one stays unknown, and is never attributed to a continuation.
+  const childModel = facts.outcome?.model ?? null;
+  // A durable outcome is authoritative, explicit nulls included: transcript
+  // text is parsed only for a legacy record with no outcome at all.
+  const report = facts.outcome !== null
+    ? facts.outcome.report
+    : facts.durable || task.status === "running" ? null : task.summary;
+  const reviewFacts = reviewFactsOf({ finished: task.status !== "running", interactionMode: "review", report, childModel, parentModel })!;
+  return { ...reviewFacts, report };
 }
 
 /** One task's settled facts: status, time, model, branch, headline, and what it changed. */
@@ -6235,12 +6411,15 @@ export async function taskNotificationOf(ctx: OperationContext, childThreadId: s
   // A review task's verdict and findings ride in the notification itself, and a
   // missing verdict (or a reviewer on the parent's own model) is said visibly.
   // The facts are pinned at settle on the delegation row, so a follow-up
-  // turn cannot rewrite the settled verdict.
-  const rows = child.interactionMode === "review" ? await ctx.store.readDelegations().catch(() => []) : [];
+  // turn cannot rewrite the settled verdict. A continued review child reads
+  // as Build, so its row (and the chain it continues) decides instead.
+  const rows = child.interactionMode === "review" || record?.continuedFrom !== undefined
+    ? await ctx.store.readDelegations().catch(() => [])
+    : [];
   const row = rows.find((candidate) => candidate.childThreadId === childThreadId && candidate.continuedIn === undefined) ??
     rows.find((candidate) => candidate.childThreadId === childThreadId);
   const parent = row ? await ctx.store.readThreadRecord(row.parentThreadId).catch(() => null) : null;
-  const facts = await reviewFactsForTask(ctx, child, parent, row, { ...task, status });
+  const facts = await reviewFactsForTask(ctx, child, parent, row, rows, { ...task, status }, turns);
   return {
     taskId: childThreadId,
     title: child.title,
@@ -6298,13 +6477,17 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   // task that itself continued reports as its continuation: resolve the whole
   // lineage to the row that is live now. One entry per task and kind: a batch
   // that carries two generations of the same notice reports the task once, as
-  // its latest state.
-  const unique = unionTaskEntries(entries, []);
+  // its latest state. A task that has continued since has no settle of its own
+  // left: its finished successor's notice takes that place.
+  const batched = unionTaskEntries(entries, []);
+  const successors = await supersededSettles(ctx, rows, batched);
+  const regenerated = [...successors.values()].flatMap((found) => (found !== null && !delivered.has(found.entry.id) ? [found.entry] : []));
+  const unique = unionTaskEntries(batched.filter((entry) => !successors.has(entry)), regenerated);
   const liveParent = (id: string) => liveParentOf(rows, id);
-  for (const entry of unique) {
+  await rerouteTaskNotifications(ctx, unique.flatMap((entry) => {
     const parent = liveParent(entry.child);
-    if (parent !== undefined && parent !== parentThreadId) await enqueueTaskNotification(ctx, parent, entry);
-  }
+    return parent !== undefined && parent !== parentThreadId ? [{ parentThreadId: parent, entry }] : [];
+  }));
   const addressed = unique.filter((entry) => (liveParent(entry.child) ?? parentThreadId) === parentThreadId);
   const parent = await ctx.store.readThreadRecord(parentThreadId);
   if (!parent || parent.archivedAt != null) return { kept: [], deferred: [] };
@@ -6349,7 +6532,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   const continuedPauses = (await Promise.all(mine.filter((entry) => pendingEntryKind(entry) === "pause" && movedOn(entry.child)).map(async (entry) => {
     let current = entry.child;
     const seen = new Set([current]);
-    for (let hops = 0; hops < 16; hops += 1) {
+    for (;;) {
       const next = rows.find((row) => row.childThreadId === current && row.continuedIn !== undefined)?.continuedIn;
       if (next === undefined || seen.has(next)) return null;
       seen.add(next);
@@ -6357,7 +6540,6 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
       const record = await ctx.store.readThreadRecord(current).catch(() => null);
       if (record?.usagePause?.phase === "waiting") return { ...entry, child: current };
     }
-    return null;
   }))).filter((entry): entry is PendingTaskNotification => entry !== null);
   pauseIds.push(...continuedPauses.map((entry) => entry.child));
   const pauseEntries = [...mine, ...continuedPauses];
@@ -6374,10 +6556,12 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   }))).filter(
     (task): task is TaskNotification => task !== null,
   );
-  const pauseTasks = (await Promise.all(pauseIds.map(async (id): Promise<TaskNotification | null> => {
+  // One pause report per task, however many pauses were queued for it.
+  const pauseTasks = (await Promise.all([...new Set(pauseIds)].map(async (id): Promise<TaskNotification | null> => {
     const task = await taskNotificationOf(ctx, id);
     if (!task || movedOn(id) || (await taskHasSettledForGood(ctx, id))) return null;
-    const resumesAt = pauseEntries.find((entry) => entry.child === id && pendingEntryKind(entry) === "pause")?.resumesAt ?? null;
+    // The newest pause carries the reset time observed last.
+    const resumesAt = pauseEntries.findLast((entry) => entry.child === id && pendingEntryKind(entry) === "pause")?.resumesAt ?? null;
     return { ...task, status: "running" as const, resumesAt };
   }))).filter(
     (task): task is TaskNotification => task !== null,
@@ -6389,27 +6573,76 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   }))).filter(
     (task): task is TaskNotification => task !== null,
   );
+  // Recheck after the async fact collection: a task may have continued while
+  // its report was being built, so its settle belongs to the successor. A
+  // successor that has already finished supplies the report instead.
+  const after = await ctx.store.readDelegations().catch(() => rows);
+  const settleReports: TaskNotification[] = [];
+  const replacementEntries: PendingTaskNotification[] = [];
+  for (const task of tasks) {
+    if (!isSupersededTask(after, task.taskId)) {
+      settleReports.push(task);
+      continue;
+    }
+    const successor = await settledSuccessor(ctx, after, task.taskId);
+    if (successor === null) continue;
+    const notice = await observedTaskNotice(ctx, successor.childThreadId);
+    if (successor.parentThreadId !== parentThreadId) {
+      await enqueueTaskNotification(ctx, successor.parentThreadId, notice);
+      continue;
+    }
+    generations.set(successor.childThreadId, await settledWorkTurnCount(ctx, successor.childThreadId));
+    const replacement = await taskNotificationOf(ctx, successor.childThreadId);
+    if (replacement === null) continue;
+    replacementEntries.push(notice);
+    settleReports.push(successor.continuesTaskId ? { ...replacement, continuedFrom: successor.continuesTaskId } : replacement);
+  }
   // Deferred entries can render a later settle (and a pause can follow a
   // continuation). Deduplicate and record the facts we actually send.
-  const all = [...tasks, ...pauseTasks, ...cancelTasks].filter((task) => !delivered.has(reportedTaskNoticeId(task)));
+  const all = [...settleReports, ...pauseTasks, ...cancelTasks]
+    .filter((task) => !delivered.has(reportedTaskNoticeId(task)))
+    .filter((task, index, list) => list.findIndex((other) => other.taskId === task.taskId && noticeKindOf(other) === noticeKindOf(task)) === index);
   if (all.length === 0) return { kept, deferred };
-  const reported = pauseEntries.filter((entry) => all.some((task) => task.taskId === entry.child && noticeKindOf(task) === pendingEntryKind(entry)));
-  const notices = all.map(reportedTaskNoticeId);
-  const noticeEntries = reported.filter((entry) => !entry.unidentified && !notices.includes(entry.id)).map((entry) => entry.id);
+  const reportable = [...pauseEntries, ...replacementEntries];
+  const entriesFor = (task: TaskNotification) => reportable.filter((entry) => entry.child === task.taskId && noticeKindOf(task) === pendingEntryKind(entry));
   const selection = running?.modelSelection ?? parent.modelSelection;
-  // A refused notice must never steer again, including if the parent starts
-  // another turn between this flush's idle check and the send.
-  const steerable = running !== null && !reported.some((entry) => entry.refusedMessageId !== undefined)
+  const canTakeSteer = running !== null
     && ctx.driverFor(selection.instanceId).reportsSteerArrival?.(parentThreadId) === true
     && (await canSteer(ctx, { ...parent, modelSelection: selection }));
+  // A parent handoff can land after the checks above, while these facts were
+  // being built: never post a task's report to a parent that no longer owns
+  // it. Its notices move to the owner, together.
+  const owners = await ctx.store.readDelegations().catch(() => after);
+  const staying: TaskNotification[] = [];
+  const leaving: { parentThreadId: string; entry: PendingTaskNotification }[] = [];
+  for (const task of all) {
+    const owner = liveParentOf(owners, task.taskId);
+    if (owner === undefined || owner === parentThreadId) {
+      staying.push(task);
+      continue;
+    }
+    // The hold a refusal left belonged to this parent's turn.
+    const moving = entriesFor(task).map(({ refusedMessageId: _refused, ...entry }) => entry);
+    if (moving.length === 0) moving.push(await observedTaskNotice(ctx, task.taskId));
+    leaving.push(...moving.map((entry) => ({ parentThreadId: owner, entry })));
+  }
+  await rerouteTaskNotifications(ctx, leaving);
+  if (staying.length === 0) return { kept, deferred };
+  const reported = reportable.filter((entry) => staying.some((task) => task.taskId === entry.child && noticeKindOf(task) === pendingEntryKind(entry)));
+  const notices = staying.map(reportedTaskNoticeId);
+  const noticeEntries = [...new Set(reported.flatMap((entry) => [...(entry.unidentified ? [] : [entry.id]), ...(entry.covers ?? [])]))]
+    .filter((id) => !notices.includes(id));
+  // A refused notice must never steer again, including if the parent starts
+  // another turn between this flush's idle check and the send.
+  const steerable = canTakeSteer && !reported.some((entry) => entry.refusedMessageId !== undefined);
   const attempt = steerable ? { turnId: running.id, messageId: ctx.store.newId() } : undefined;
   let started: StartedTurn;
   try {
     started = await startTurn(ctx, {
       threadId: parentThreadId,
-      prompt: taskNotificationText(all),
+      prompt: taskNotificationText(staying),
       origin: "task-notification",
-      notification: { tasks: all, notices, ...(noticeEntries.length > 0 ? { noticeEntries } : {}) },
+      notification: { tasks: staying, notices, ...(noticeEntries.length > 0 ? { noticeEntries } : {}) },
       delivery: steerable ? "steer" : "queue",
       ...(steerable ? { modelSelection: selection } : {}),
       wakeSettled: true,
@@ -6425,9 +6658,9 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   // A check that only failed to look (nothing named) arms nothing: there is no
   // work to wait past, and a settled task must not re-announce because Moxen
   // could not see. The notice and `task_status` still say the check failed.
-  for (const task of all) {
+  for (const task of staying) {
     if (noticeKindOf(task) !== "settle" || task.background.length === 0) continue;
-    const row = rows.find(
+    const row = owners.find(
       (candidate) =>
         candidate.childThreadId === task.taskId &&
         candidate.parentThreadId === parentThreadId &&
@@ -6710,21 +6943,12 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     if (initial) {
       // A retry after the task handed off finds the original row (which now
       // carries `continuedIn`) and follows it to the current incarnation,
-      // whose continuation row holds no key (MXN-290).
-      let row = initial;
-      let current = true;
-      for (let hops = 0; row.continuedIn !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
-        const next = rows.find((candidate) => lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
-        if (!next) {
-          current = false;
-          break;
-        }
-        row = next;
-      }
-      // A broken chain, the hop cap, or a gone child falls through to a
-      // fresh delegate rather than returning a superseded row.
-      if (current && row.continuedIn === undefined && (await ctx.store.readThreadRecord(row.childThreadId))) {
-        return await describeDelegation(row.childThreadId, row);
+      // whose continuation row holds no key (MXN-290). A broken chain, a
+      // cycle, or a gone child falls through to a fresh delegate rather than
+      // returning a superseded row.
+      const live = liveSuccessor(successorIndex(rows), initial, (row) => lineage.has(row.parentThreadId));
+      if (live !== null && (await ctx.store.readThreadRecord(live.childThreadId))) {
+        return await describeDelegation(live.childThreadId, live);
       }
     }
   }
@@ -6758,6 +6982,8 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
       ...(worktree ? { baseBranch: worktree.baseBranch } : {}),
       ...(request.wait === false && request.notify !== false ? { notify: true } : {}),
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+      // The row its parent reads review facts from, from this delegation on.
+      ...(request.interactionMode === "review" ? { reviewTask: true as const } : {}),
       // Both sides' models as they stand now: the review same-model check
       // reads this snapshot, never the live records.
       ...(parentModel !== null && childModel !== null ? { modelSnapshot: { parent: parentModel, child: childModel } } : {}),
@@ -7074,6 +7300,34 @@ export interface DescribedTask {
   readonly review: ReviewFacts | null;
 }
 
+/** One pass over the delegation ledger, indexed by child id: task lookup never scans per hop. */
+function successorIndex(rows: readonly StoredDelegation[]): ReadonlyMap<string, StoredDelegation> {
+  const byChild = new Map<string, StoredDelegation>();
+  for (const row of rows) if (!byChild.has(row.childThreadId)) byChild.set(row.childThreadId, row);
+  return byChild;
+}
+
+/**
+ * Follow a task's `continuedIn` links to the thread it lives in now. A
+ * missing successor or a cycle yields null: a row that already continued is
+ * superseded, and must never be answered as the live task.
+ */
+function liveSuccessor(
+  byChild: ReadonlyMap<string, StoredDelegation>,
+  start: StoredDelegation,
+  accept: (row: StoredDelegation) => boolean = () => true,
+): StoredDelegation | null {
+  const seen = new Set([start.id]);
+  let row = start;
+  while (row.continuedIn !== undefined) {
+    const next = byChild.get(row.continuedIn);
+    if (next === undefined || seen.has(next.id) || !accept(next)) return null;
+    seen.add(next.id);
+    row = next;
+  }
+  return row;
+}
+
 /** A delegated task a caller may read, with the threads the read needs. */
 export interface AgentTaskThread {
   readonly parent: ThreadEnvelope;
@@ -7083,6 +7337,34 @@ export interface AgentTaskThread {
   readonly child: ThreadEnvelope;
   /** The direct delegation row, null when the task is reachable through the caller's lineage only. */
   readonly delegation: StoredDelegation | null;
+}
+
+/**
+ * The task gate and its live incarnation. The live thread is resolved from
+ * one pass over the delegation ledger before any thread is loaded, so a long
+ * continuation chain never reads a superseded transcript. A broken or cyclic
+ * chain is refused: a superseded row is never answered as the task.
+ */
+async function resolveAgentTask(
+  ctx: OperationContext,
+  rawParentThreadId: string,
+  rawTaskId: string,
+): Promise<AgentTaskThread & { readonly live: StoredDelegation | null; readonly rows: readonly StoredDelegation[] }> {
+  const parentThreadId = requireThreadId(rawParentThreadId);
+  const taskId = requireThreadId(rawTaskId);
+  const parent = await threadWithLedger(ctx.store, parentThreadId);
+  const rows = await ctx.store.readDelegations();
+  const lineage = await threadLineage(ctx, parentThreadId);
+  const delegation = rows.find((row) => row.parentThreadId === parentThreadId && row.childThreadId === taskId) ?? null;
+  const owned = rows.find((row) => lineage.has(row.parentThreadId) && row.childThreadId === taskId) ?? null;
+  if (owned === null && !(await isTaskVisibleToParent(ctx, parentThreadId, taskId, rows, lineage))) {
+    throw taskReadRefused(taskId, parentThreadId);
+  }
+  const live = owned === null ? null : liveSuccessor(successorIndex(rows), owned, (row) => lineage.has(row.parentThreadId));
+  if (owned !== null && live === null) throw taskReadRefused(taskId, parentThreadId);
+  const child = await threadWithLedger(ctx.store, live?.childThreadId ?? taskId).catch(() => null);
+  if (!child || child.projectId !== parent.projectId) throw taskReadRefused(taskId, parentThreadId);
+  return { parent, taskId, child, delegation, live, rows };
 }
 
 /**
@@ -7098,23 +7380,7 @@ export async function requireAgentTaskThread(
   rawParentThreadId: string,
   rawTaskId: string,
 ): Promise<AgentTaskThread> {
-  const parentThreadId = requireThreadId(rawParentThreadId);
-  const taskId = requireThreadId(rawTaskId);
-  const parent = await threadWithLedger(ctx.store, parentThreadId);
-  const delegation = await delegationForChild(ctx.store, parentThreadId, taskId);
-  if (!delegation && !(await isTaskVisibleToParent(ctx, parentThreadId, taskId))) {
-    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parentThreadId}.`, {
-      exitCode: 3,
-      details: { taskId, parentThreadId },
-    });
-  }
-  const child = await threadWithLedger(ctx.store, delegation?.childThreadId ?? taskId).catch(() => null);
-  if (!child || child.projectId !== parent.projectId) {
-    throw new CliError("TASK_NOT_FOUND", `No delegated task exists with id ${taskId} for thread ${parentThreadId}.`, {
-      exitCode: 3,
-      details: { taskId, parentThreadId },
-    });
-  }
+  const { parent, taskId, child, delegation } = await resolveAgentTask(ctx, rawParentThreadId, rawTaskId);
   return { parent, taskId, child, delegation };
 }
 
@@ -7190,18 +7456,16 @@ export async function confirmAgentTaskThread(
 /** A delegated task by parent + task id; the task id is the child thread id. */
 export async function describeTask(ctx: OperationContext, rawParentThreadId: string, rawTaskId: string): Promise<DescribedTask> {
   const parentThreadId = requireThreadId(rawParentThreadId);
-  const { parent, taskId, child, delegation } = await requireAgentTaskThread(ctx, rawParentThreadId, rawTaskId);
   // The live thread, following the same continuedIn chain task control
   // resolves: asking about a task that carried on reads the continuation,
   // the thread a send would steer — never the dormant source.
-  const live = await ownedDelegation(ctx, parentThreadId, taskId).catch(() => null);
-  const target = live !== null ? await threadWithLedger(ctx.store, live.childThreadId).catch(() => null) : null;
-  const seen = target ?? child;
+  const { parent, taskId, child: seen, live, rows } = await resolveAgentTask(ctx, parentThreadId, rawTaskId);
   const ledger = taskOf(seen, taskId);
   // A usage pause is not an end: a queued continue or recovery reads running
   // until it settles, so `task_status` waits rather than reporting it failed.
   const childTurns = await ctx.store.readTurns(seen.id).catch(() => [] as StoredTurn[]);
-  const childPause = (await ctx.store.readThreadRecord(seen.id).catch(() => null))?.usagePause;
+  const seenRecord = await ctx.store.readThreadRecord(seen.id).catch(() => null);
+  const childPause = seenRecord?.usagePause;
   const resume = hasQueuedResume(childTurns, childPause?.recoveryTurnId);
   // A cancelled automatic continue — or the whole task — reads cancelled,
   // however the child's turns settled, until a wake revives it. The mark
@@ -7209,23 +7473,26 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
   // reports on its own, and its settle clears the mark.
   const settledForGood = !childTurns.some((turn) => turn.status === "running" || turn.status === "queued");
   const status =
-    (live ?? delegation)?.status === "cancelled" && settledForGood
+    live?.status === "cancelled" && settledForGood
       ? ("cancelled" as const)
       : resume
         ? ("running" as const)
         : ledger.status;
   const task = { ...ledger, status, workState: delegatedWorkStateOf(status) };
   // A review child's verdict, warnings and finished state ride with the
-  // status. The settled verdict is pinned on the (live) delegation row, so a
-  // follow-up turn cannot rewrite it; `task_status` and the task
-  // notification read the same pinned facts.
-  const facts = await reviewFactsForTask(ctx, seen, parent, live ?? delegation ?? undefined, task);
+  // status. The durable outcome is written when a turn settles and carried by
+  // each hand-off; `task_status` and the task notification read the same
+  // projection, and a stale row yields to the live thread's terminal turn.
+  const reviewRows = seen.interactionMode === "review" || seenRecord?.continuedFrom !== undefined || live?.reviewTask === true
+    ? rows
+    : [];
+  const facts = await reviewFactsForTask(ctx, seen, parent, live, reviewRows, task, childTurns);
   return {
     project: await projectById(ctx.storeRoot, parent.projectId),
     parent,
     child: seen,
     task,
-    background: await taskBackgroundState(ctx, child.id, child.modelSelection ?? null),
+    background: await taskBackgroundState(ctx, seen.id, seen.modelSelection ?? null),
     review: facts === null ? null : { verdict: facts.verdict, sameModel: facts.sameModel, note: facts.note },
   };
 }
@@ -7237,13 +7504,23 @@ export async function describeTask(ctx: OperationContext, rawParentThreadId: str
  * of a run this thread leads (roles are published to the run, and older
  * delegations may predate the row).
  */
-async function isTaskVisibleToParent(ctx: OperationContext, parentThreadId: string, taskId: string): Promise<boolean> {
-  const rows = await ctx.store.readDelegations();
-  const lineage = await threadLineage(ctx, parentThreadId);
+async function isTaskVisibleToParent(
+  ctx: OperationContext,
+  parentThreadId: string,
+  taskId: string,
+  knownRows?: readonly StoredDelegation[],
+  knownLineage?: ReadonlySet<string>,
+): Promise<boolean> {
+  const rows = knownRows ?? await ctx.store.readDelegations();
+  const byChild = successorIndex(rows);
+  const lineage = knownLineage ?? await threadLineage(ctx, parentThreadId);
+  const seen = new Set<string>();
   let current: string | undefined = taskId;
-  for (let hops = 0; current !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
-    if (rows.some((row) => row.childThreadId === current && lineage.has(row.parentThreadId))) return true;
-    current = rows.find((row) => row.childThreadId === current)?.continuedIn;
+  while (current !== undefined && !seen.has(current)) {
+    seen.add(current);
+    const row = byChild.get(current);
+    if (row !== undefined && lineage.has(row.parentThreadId)) return true;
+    current = row?.continuedIn;
   }
   const lead = await ctx.store.readThreadRecord(parentThreadId);
   const runs = lead?.researchRun === undefined ? [] : [lead.researchRun, ...(lead.pastResearchRuns ?? [])];
@@ -7281,13 +7558,7 @@ function delegationFor(scope: ManagementScope, rawTaskId: string): StoredDelegat
   }
   const owned = scope.delegations.find((row) => scope.lineage.has(row.parentThreadId) && row.childThreadId === taskId);
   if (!owned) return null;
-  let row = owned;
-  for (let hops = 0; row.continuedIn !== undefined && hops < CONTINUATION_FOLLOW_HOPS; hops += 1) {
-    const next = scope.delegations.find((candidate) => scope.lineage.has(candidate.parentThreadId) && candidate.childThreadId === row.continuedIn);
-    if (!next) break;
-    row = next;
-  }
-  return row;
+  return liveSuccessor(successorIndex(scope.delegations), owned, (row) => scope.lineage.has(row.parentThreadId));
 }
 
 /**
