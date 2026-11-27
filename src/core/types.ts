@@ -18,7 +18,7 @@ export type SpeedMode = "standard" | "fast";
 
 export interface CliConfig {
   /** Account quota protection; providers without quota windows are never guessed. */
-  usageProtection?: "off" | "notify" | "auto";
+  usageProtection?: "off" | "notify-user" | "notify" | "auto";
   usageMinimumSession?: number;
   usageMinimumWeekly?: number;
   usageRecovery?: "parallel" | "sequential";

@@ -82,7 +82,8 @@ describe("runtime instructions", () => {
         "\n\n" +
         "# Messages from Moxen\n\n" +
         MESSAGES_GUIDANCE +
-        "\n\n" +
+        "\n" +
+        "Claude Code injects it outside your user turns through its runtime hook context.\n\n" +
         UNTRUSTED_NOTE,
     );
     expect(LOOKUP_GUIDANCE).toContain("read the official documentation");

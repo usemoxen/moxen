@@ -42,6 +42,8 @@ import type {
   BackgroundTaskSummary,
   ContextBreakdown,
   ContextWindowUsage,
+  NoticeReconcileOutcome,
+  NoticeReconcileRequest,
   ProviderAdapter,
   ProviderAdapterCapabilities,
   ProviderApprovalDecision,
@@ -235,6 +237,10 @@ interface OpenCodeSession {
   backgroundShells?: Map<string, { readonly command: string; readonly startedAt: string }>;
   /** Every message id whose parts this session has handled: late updates to a finished message are not a new run. */
   seenMessageIds?: Set<string>;
+  /** The physical `moxen-usage-notice` entry: unknown until a request reconciles it. */
+  noticeSlot: "unknown" | "empty" | { readonly account: string; readonly key: string; readonly attemptId: string };
+  /** Fences a timed-out notice mutation so its late completion cannot publish ownership. */
+  noticeEpoch: number;
   startedAt: string;
 }
 
@@ -340,6 +346,8 @@ function canonicalToolList(names: string | readonly string[] | undefined): strin
 
 /** The instruction entry key runtime instructions live under. */
 const INSTRUCTIONS_KEY = "moxen";
+/** The session instruction entry a usage warning uses: runtime context, never a user message. */
+const NOTICE_INSTRUCTION_KEY = "moxen-usage-notice";
 
 /**
  * The name agents see moxen's tools under (`MOXEN_MCP_SERVER_NAME` in
@@ -1270,6 +1278,8 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
         waiters: new Map(),
         parked: new Map(),
         context: null,
+        noticeSlot: "unknown",
+        noticeEpoch: 0,
         startedAt: new Date().toISOString(),
       };
       // A stop that gave up waiting abandons the start: tear down instead of
@@ -2642,6 +2652,53 @@ export class OpenCodeDriver implements ProviderAdapter<CliError> {
       } catch (cause) {
         turn.steerMessageIds.delete(messageID);
         throw cause;
+      }
+    });
+
+  /**
+   * Reconcile the `moxen-usage-notice` instruction entry for future requests:
+   * set it when the plan calls for it, otherwise remove it. Called after a
+   * cold session is attached and before its first prompt. A required removal
+   * that fails fails the dispatch rather than leaving a stale stop block.
+   */
+  readonly reconcileNotice = (
+    threadId: ThreadId,
+    request: NoticeReconcileRequest,
+    signal?: AbortSignal,
+  ): Effect.Effect<NoticeReconcileOutcome, CliError> =>
+    this.attempt("OPENCODE_NOTICE_FAILED", `Could not reconcile a usage notice on thread ${threadId}`, async () => {
+      const session = this.requireSession(threadId);
+      if (session.closed) throw new CliError("OPENCODE_NOT_STARTED", `No live OpenCode session exists for thread ${threadId}.`, { details: { threadId } });
+      const aborted = (): boolean => signal?.aborted === true;
+      if (aborted()) throw new CliError("NOTICE_ABORTED", "The usage notice was cancelled.");
+      const connection = await this.connectionFor(session);
+      if (aborted()) throw new CliError("NOTICE_ABORTED", "The usage notice was cancelled.");
+      const epoch = ++session.noticeEpoch;
+      const onAbort = (): void => {
+        // The request may already be on the wire; the slot is no longer known.
+        session.noticeSlot = "unknown";
+        session.noticeEpoch += 1;
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        if (request.kind === "clear") {
+          const owner = session.noticeSlot;
+          if (request.conditional && owner === "empty") return "skipped" as const;
+          if (request.conditional && owner === "unknown" && (request.account !== undefined || request.key !== undefined)) return "skipped" as const;
+          if (request.conditional && typeof owner === "object"
+            && (request.account !== undefined || request.key !== undefined)
+            && (owner.account !== request.account || owner.key !== request.key)) return "skipped" as const;
+          await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, null, signal);
+          if (aborted() || session.noticeEpoch !== epoch) return "skipped" as const;
+          session.noticeSlot = "empty";
+          return "cleared" as const;
+        }
+        await connection.setInstructions(session.nativeSessionId, NOTICE_INSTRUCTION_KEY, request.text, signal);
+        if (aborted() || session.noticeEpoch !== epoch) return "skipped" as const;
+        session.noticeSlot = { account: request.account, key: request.key, attemptId: request.attemptId };
+        return "issued" as const;
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
       }
     });
 

@@ -83,6 +83,18 @@ export function fullThread(): StoredThread {
       since: AT,
       windows: [{ id: "session", label: "Session", usedPercent: 97.5, resetsAt: LATER }],
     },
+    usageNotices: {
+      claude: {
+        key: "session:2026-11-19T11:00:00.000Z",
+        provider: "claude",
+        windows: [{ id: "session", label: "Session", usedPercent: 96, resetsAt: LATER }],
+        delivered: "runtime",
+        waiting: true,
+        raisedAt: AT,
+        deliveredAt: AT,
+        attemptId: "attempt-1",
+      },
+    },
     providerSessions: { claude: "session-abc" },
     instructionState: { claude: { baseline: "båseline", delivered: "delivered" } },
     modeState: { claude: "orchestrate" },
@@ -134,6 +146,8 @@ export function queuedTurn(threadId = "thread-1"): StoredTurn {
     continueAttempt: 2,
     heldAtSettle: true,
     heldBySnooze: true,
+    automatic: true,
+    control: true,
     queue: {
       conditions: [{ type: "usage", provider: "claude", window: "session", minimum: 5 }],
       held: true,
@@ -199,6 +213,8 @@ export function fullMessage(): StoredMessage {
     turnId: "turn-1",
     role: "assistant",
     origin: "task-notification",
+    automatic: true,
+    control: true,
     createdAt: AT,
     text: "ligne un\nlínea dos\r\n三行目 🧵 \"quoted\" \\ backslash\tend",
     attachments: [

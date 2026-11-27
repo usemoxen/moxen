@@ -121,6 +121,10 @@ export interface MessageRow {
   original_text: string | null;
   attachments: string | null;
   notification: string | null;
+  /** Moxen's own dispatch, not the user's (MXN-385); NULL on rows written before the flag. */
+  automatic: number | null;
+  /** A provider control command (MXN-385); NULL on rows written before the flag. */
+  control: number | null;
 }
 
 export interface ActivityRow {
@@ -254,6 +258,7 @@ export function encodeThread(thread: StoredThread): ThreadRow {
   if (thread.researchPicker !== undefined) rest.researchPicker = thread.researchPicker;
   if (thread.continueClaim !== undefined) rest.continueClaim = thread.continueClaim;
   if (thread.handoffFacts !== undefined) rest.handoffFacts = thread.handoffFacts;
+  if (thread.usageNotices !== undefined) rest.usageNotices = thread.usageNotices;
   if (thread.usageProtectionOverride !== undefined) rest.usageProtectionOverride = thread.usageProtectionOverride;
   if (thread.providerSessions !== undefined) rest.providerSessions = thread.providerSessions;
   if (thread.instructionState !== undefined) rest.instructionState = thread.instructionState;
@@ -331,6 +336,7 @@ export function decodeThread(row: ThreadRow): StoredThread {
     ...(rest.researchPicker === undefined ? {} : { researchPicker: rest.researchPicker as NonNullable<StoredThread["researchPicker"]> }),
     ...(rest.continueClaim === undefined ? {} : { continueClaim: rest.continueClaim as NonNullable<StoredThread["continueClaim"]> }),
     ...(rest.handoffFacts === undefined ? {} : { handoffFacts: rest.handoffFacts as NonNullable<StoredThread["handoffFacts"]> }),
+    ...(rest.usageNotices === undefined ? {} : { usageNotices: rest.usageNotices as NonNullable<StoredThread["usageNotices"]> }),
     ...(rest.usageProtectionOverride === undefined ? {} : { usageProtectionOverride: rest.usageProtectionOverride as NonNullable<StoredThread["usageProtectionOverride"]> }),
     ...(rest.providerSessions === undefined ? {} : { providerSessions: rest.providerSessions as NonNullable<StoredThread["providerSessions"]> }),
     ...(rest.instructionState === undefined ? {} : { instructionState: rest.instructionState as NonNullable<StoredThread["instructionState"]> }),
@@ -369,6 +375,8 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.turnOutputTokens !== undefined) rest.turnOutputTokens = turn.turnOutputTokens;
   if (turn.startedAt !== undefined) rest.startedAt = turn.startedAt;
   if (turn.heldBySnooze !== undefined) rest.heldBySnooze = turn.heldBySnooze;
+  if (turn.automatic !== undefined) rest.automatic = turn.automatic;
+  if (turn.control !== undefined) rest.control = turn.control;
 
   return {
     id: turn.id,
@@ -435,6 +443,8 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     interactionMode: rest.interactionMode as InteractionMode,
     ...(rest.interactionModeExplicit === undefined ? {} : { interactionModeExplicit: true as const }),
     ...(rest.heldBySnooze === undefined ? {} : { heldBySnooze: true }),
+    ...(rest.automatic === undefined ? {} : { automatic: rest.automatic as boolean }),
+    ...(rest.control === undefined ? {} : { control: rest.control as boolean }),
     modelSelection: (rest.modelSelection ?? null) as ModelSelection | null,
     parentTurnId: (rest.parentTurnId ?? null) as string | null,
     error: (rest.error ?? null) as string | null,
@@ -466,6 +476,8 @@ export function encodeMessage(message: StoredMessage): MessageRow {
     original_text: body === message.text ? null : JSON.stringify(message.text),
     attachments: jsonText(message.attachments),
     notification: jsonText(message.notification),
+    automatic: flag(message.automatic),
+    control: flag(message.control),
   };
 }
 
@@ -482,6 +494,8 @@ export function decodeMessage(row: MessageRow): StoredMessage {
     ...(row.origin === null ? {} : { origin: row.origin as NonNullable<StoredMessage["origin"]> }),
     ...(attachments === undefined || attachments === null ? {} : { attachments }),
     ...(notification === undefined || notification === null ? {} : { notification }),
+    ...(row.automatic === null || row.automatic === undefined ? {} : { automatic: row.automatic !== 0 }),
+    ...(row.control === null || row.control === undefined ? {} : { control: row.control !== 0 }),
   };
 }
 

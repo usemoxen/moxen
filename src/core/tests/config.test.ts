@@ -32,6 +32,15 @@ describe("config", () => {
     );
   });
 
+  it("reads every usage protection mode, keeping the value an older config wrote", () => {
+    for (const value of ["off", "notify-user", "notify", "auto"] as const) {
+      expect(normalizeConfig({ usageProtection: value }).usageProtection).toBe(value);
+    }
+    // `notify` from before model notices now means Notify: the value loads unchanged, and the mode it names is the model-aware one.
+    expect(normalizeConfig({ usageProtection: "notify" }).usageProtection).toBe("notify");
+    expect(() => normalizeConfig({ usageProtection: "notify-model" })).toThrow(/usageProtection must be one of/);
+  });
+
   it("normalizes model selection overrides", () => {
     const config = normalizeConfig({
       provider: " claudeAgent ",

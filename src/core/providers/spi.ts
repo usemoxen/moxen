@@ -270,6 +270,22 @@ export function isCompactCommand(prompt: string): boolean {
   return prompt.trim() === "/compact";
 }
 
+/** `/compact`, alone or with what the summary should pay attention to (Harness and Claude). */
+export function isManualCompactionCommand(prompt: string): boolean {
+  return /^\/compact(?:\s+[\s\S]*)?$/.test(prompt.trim());
+}
+
+/**
+ * Whether a prompt is a provider control command, by that provider's own
+ * grammar: Codex and OpenCode accept the bare `/compact`, Claude and the
+ * Harness also accept a focus. No other slash-led text is a control.
+ */
+export function isControlCommand(kind: ProviderDriverKind | null, prompt: string): boolean {
+  if (kind === "codex" || kind === "opencode") return isCompactCommand(prompt);
+  if (kind === "claude" || kind === "harness") return isManualCompactionCommand(prompt);
+  return false;
+}
+
 /**
  * One `awaitTurn` caller aborted: drop only its waiter, so the turn's other
  * waiters still settle. Removing the whole list (as aborting used to) rejects
@@ -588,6 +604,14 @@ export type ProviderRuntimeEvent =
       readonly threadId: ThreadId;
       readonly state: string;
       readonly raw?: unknown;
+    }
+  | {
+      /** A usage warning was issued into the provider's runtime context (a hook took it). Not proof the model read it. */
+      readonly type: "usage.notice.issued";
+      readonly provider: ProviderDriverKind;
+      readonly threadId: ThreadId;
+      readonly key: string;
+      readonly attemptId: string;
     };
 
 /** A live background task, as a driver reports it. */
@@ -629,6 +653,25 @@ export interface ProviderSessionTitles {
   /** Have the provider title the session again from its conversation; resolves to the new title, null when it made none. */
   readonly regenerateSessionTitle?: (cursor: string, workingDirectory: string) => Promise<string | null>;
 }
+
+/** One runtime-context warning reconciliation. */
+export type NoticeReconcileRequest =
+  | {
+    readonly kind: "arm";
+    readonly account: string;
+    readonly key: string;
+    readonly attemptId: string;
+    readonly text: string;
+  }
+  | {
+    /** Required before a controllable request, or conditional on the current owner for maintenance. */
+    readonly kind: "clear";
+    readonly conditional: boolean;
+    readonly account?: string;
+    readonly key?: string;
+  };
+
+export type NoticeReconcileOutcome = "armed" | "issued" | "cleared" | "skipped";
 
 export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles {
   readonly provider: ProviderDriverKind;
@@ -696,6 +739,21 @@ export interface ProviderAdapter<TError = unknown> extends ProviderSessionTitles
    * lost, so it is only trusted to a driver that reports arrivals.
    */
   readonly reportsSteerArrival?: (threadId: ThreadId) => boolean;
+
+  /**
+   * Reconcile the provider's runtime-context warning slot for future
+   * requests: arm `notice` (Claude's next hook attempt, OpenCode's
+   * `moxen-usage-notice` instruction entry via `setInstructions`), or clear
+   * it with null. Called after a cold session is attached and before its
+   * first send, and at each dispatch. The return says what the provider
+   * accepted, never that the model read it. Omitted by Codex and the
+   * Harness: their warning is ordinary text.
+   */
+  readonly reconcileNotice?: (
+    threadId: ThreadId,
+    request: NoticeReconcileRequest,
+    signal?: AbortSignal,
+  ) => Effect.Effect<NoticeReconcileOutcome, TError>;
 
   /**
    * A steer handed to the provider's running turn that the provider has not

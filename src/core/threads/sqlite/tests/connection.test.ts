@@ -19,7 +19,7 @@ import {
   storeDatabasePath,
   storeOpenLockPath,
 } from "../connection.js";
-import { readSchemaVersion } from "../migrations.js";
+import { SCHEMA_VERSION, readSchemaVersion } from "../migrations.js";
 import { SCHEMA_V1 } from "../schema.js";
 import { closeForTest, openForTest, rawForTest, startChild, temporaryRoot, underBun, waitFor } from "./support.js";
 
@@ -78,7 +78,7 @@ describe.skipIf(!underBun)("the SQLite store connection", () => {
     const db = openForTest(root);
     expect(db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
     expect(db.query<{ application_id: number }, []>("PRAGMA application_id").get()).toEqual({ application_id: STORE_APPLICATION_ID });
-    expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+    expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()).toEqual({ user_version: SCHEMA_VERSION });
     expect(db.query<{ timeout: number }, []>("PRAGMA busy_timeout").get()).toEqual({ timeout: 5_000 });
     expect(db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
     expect(db.query<{ cache_size: number }, []>("PRAGMA cache_size").get()).toEqual({ cache_size: -16_000 });
@@ -295,7 +295,7 @@ describe.skipIf(!underBun)("the SQLite store connection", () => {
     }
 
     const db = openForTest(root);
-    expect(readSchemaVersion(db)).toBe(1);
+    expect(readSchemaVersion(db)).toBe(SCHEMA_VERSION);
     expect(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE name = 'threads'").get()).toEqual({ name: "threads" });
   });
 
@@ -309,7 +309,7 @@ describe.skipIf(!underBun)("the SQLite store connection", () => {
 
     const db = openForTest(root);
     expect(db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-    expect(readSchemaVersion(db)).toBe(1);
+    expect(readSchemaVersion(db)).toBe(SCHEMA_VERSION);
     expect(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE name = 'threads'").get()).toEqual({ name: "threads" });
   });
 

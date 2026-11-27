@@ -830,9 +830,17 @@ const SETTINGS_IN_WRITTEN_ORDER: readonly SettingDescriptor[] = [
   {
     key: "usageProtection",
     label: "Usage protection",
-    description: "Warn before a shared plan allowance runs out, or pause work and request an orderly wrap-up automatically. Only providers reporting quota windows participate; estimates cannot guarantee avoiding a limit.",
+    description: "Warn before a shared plan allowance runs out, warn the running model too, or pause work and request an orderly wrap-up automatically. Only providers reporting quota windows participate; estimates cannot guarantee avoiding a limit.",
     section: "sessions",
-    kind: { type: "enum", choices: [choice("off", "Off"), choice("notify", "Notify"), choice("auto", "Automatic")] },
+    kind: {
+      type: "enum",
+      choices: [
+        choice("off", "Off"),
+        choice("notify-user", "Notify (you only)", "Show the warning above the composer; the running model is not told."),
+        choice("notify", "Notify", "Show the warning and tell the running model to stop safely through its provider's runtime context, or as text where it has none."),
+        choice("auto", "Automatic"),
+      ],
+    },
     defaultValue: "off",
   },
   {

@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 
 import type { Database } from "bun:sqlite";
 
+import { MIGRATIONS, migrateStoreSchema } from "../migrations.js";
+import { storeDatabasePath } from "../connection.js";
 import {
   encodeActivity,
   encodeCheckpoint,
@@ -19,7 +21,7 @@ import {
 } from "../records.js";
 import { INSERT_ACTIVITY, INSERT_CHECKPOINT, INSERT_MESSAGE, INSERT_THREAD, INSERT_TURN } from "./inserts.js";
 import { activityWithoutPayload, completedTurn, sparseCheckpoint, sparseMessage, sparseThread } from "./fixtures.js";
-import { insertRow, openForTest, temporaryRoot, underBun } from "./support.js";
+import { insertRow, openForTest, rawForTest, temporaryRoot, underBun } from "./support.js";
 
 /** Every object `sqlite_master` knows, in name order: the schema, verbatim. */
 function schemaDump(db: Database): string {
@@ -35,8 +37,19 @@ function schemaDump(db: Database): string {
 
 describe.skipIf(!underBun)("schema v1", () => {
   it("pins the DDL", async () => {
-    const db = openForTest(temporaryRoot("golden"));
+    const db = rawForTest(storeDatabasePath(temporaryRoot("golden")));
+    migrateStoreSchema(db, { migrations: MIGRATIONS.slice(0, 1) });
     await expect(schemaDump(db)).toMatchFileSnapshot(path.join(__dirname, "fixtures", "schema-v1.sql"));
+  });
+
+  it("adds automatic and control columns to messages in schema v2", () => {
+    const db = openForTest(temporaryRoot("v2-columns"));
+    const columns = db
+      .query<{ name: string; type: string }, []>("PRAGMA table_info(messages)")
+      .all()
+      .map((row) => [row.name, row.type]);
+    expect(columns).toContainEqual(["automatic", "INTEGER"]);
+    expect(columns).toContainEqual(["control", "INTEGER"]);
   });
 
   it("refuses a thread row with no model selection", () => {

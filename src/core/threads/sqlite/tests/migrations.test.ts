@@ -32,8 +32,8 @@ describe.skipIf(!underBun)("schema migrations", () => {
   it("does not run a step on a database already at its version", () => {
     const db = openForTest(temporaryRoot("current"));
     let runs = 0;
-    const counted: SchemaMigration = { version: 1, name: "counted", up: () => { runs += 1; } };
-    expect(migrateStoreSchema(db, { migrations: [counted] })).toBe(1);
+    const counted: SchemaMigration = { version: SCHEMA_VERSION, name: "counted", up: () => { runs += 1; } };
+    expect(migrateStoreSchema(db, { migrations: [counted] })).toBe(SCHEMA_VERSION);
     expect(runs).toBe(0);
   });
 
@@ -64,10 +64,10 @@ describe.skipIf(!underBun)("schema migrations", () => {
     const plain = openForTest(temporaryRoot("plain"));
     const withNoop = rawForTest(storeDatabasePath(temporaryRoot("noop")));
     const version = migrateStoreSchema(withNoop, {
-      migrations: [...MIGRATIONS, { version: 2, name: "nothing to do", up: () => {} }],
+      migrations: [...MIGRATIONS, { version: SCHEMA_VERSION + 1, name: "nothing to do", up: () => {} }],
     });
-    expect(version).toBe(2);
-    expect(readSchemaVersion(withNoop)).toBe(2);
+    expect(version).toBe(SCHEMA_VERSION + 1);
+    expect(readSchemaVersion(withNoop)).toBe(SCHEMA_VERSION + 1);
     expect(tableNames(withNoop)).toEqual(tableNames(plain));
   });
 
@@ -75,7 +75,7 @@ describe.skipIf(!underBun)("schema migrations", () => {
     const root = temporaryRoot("failing");
     const db = rawForTest(storeDatabasePath(root));
     const failing: SchemaMigration = {
-      version: 2,
+      version: SCHEMA_VERSION + 1,
       name: "break things",
       up: (connection) => {
         connection.exec("CREATE TABLE scratch (value TEXT)");
@@ -85,13 +85,13 @@ describe.skipIf(!underBun)("schema migrations", () => {
     };
 
     expect(() => migrateStoreSchema(db, { migrations: [...MIGRATIONS, failing] })).toThrow(
-      expect.objectContaining({ code: "STORE_MIGRATION_FAILED", message: expect.stringContaining("2 (break things)") }),
+      expect.objectContaining({ code: "STORE_MIGRATION_FAILED", message: expect.stringContaining(`${SCHEMA_VERSION + 1} (break things)`) }),
     );
 
-    expect(readSchemaVersion(db)).toBe(1);
+    expect(readSchemaVersion(db)).toBe(SCHEMA_VERSION);
     expect(tableNames(db)).not.toContain("scratch");
     expect(db.query<{ count: number }, []>("SELECT count(*) AS count FROM meta").get()).toEqual({ count: 0 });
-    // Version 1 itself committed and is usable.
+    // The registered steps themselves committed and are usable.
     expect(tableNames(db)).toContain("threads");
   });
 
@@ -119,7 +119,7 @@ describe.skipIf(!underBun)("schema migrations", () => {
     }
 
     const db = rawForTest(file);
-    expect(readSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    expect(readSchemaVersion(db)).toBe(1);
     expect(tableNames(db)).toContain("threads");
   });
 
