@@ -2052,7 +2052,7 @@ describe("review facts and owed notices against compaction and withdrawn message
     await flushTurnRunners();
     expect(await notificationsIn(w, parent.id)).toHaveLength(1);
 
-    const later = (await sendTurn(w.store, child.id, { prompt: "Later", scheduledFor: new Date(Date.now() + 3_600_000).toISOString() })).turn;
+    const later = (await sendTurn(w.store, child.id, { prompt: "Later", scheduledFor: new Date(Date.now() + 3_600_000).toISOString(), parentNotice: true })).turn;
     await interruptTurn(w.store, child.id, later.id);
     await recoverTaskNotifications(w.ctx);
     await flushTurnRunners();

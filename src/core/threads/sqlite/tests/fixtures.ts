@@ -182,6 +182,7 @@ export function queuedTurn(threadId = "thread-1"): StoredTurn {
     usagePause: { provider: "claude", windows: [], resetsAt: null, pausedAt: AT, hasUncommittedChanges: null, forced: true },
     agentThreadId: "thread-agent",
     reviewHandoff: true,
+    parentNotice: true,
     reviewDecision: { verdict: null, report: "No verdict yet 🧵", model: "claude/claude-test-1" },
     createdAt: AT,
     updatedAt: LATER,

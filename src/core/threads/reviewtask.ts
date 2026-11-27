@@ -127,8 +127,8 @@ export async function liveReviewRow(store: ThreadStore, thread: StoredThread): P
 
 /**
  * The decision a settling turn makes for the thread's live delegation, with
- * the row to write it to; null when the thread is not a review task or the
- * turn changes nothing. Called before the terminal turn update so the
+ * the row to bring up to date; null when the thread is not a review task or
+ * the turn changes nothing. Called before the terminal turn update so the
  * decision is recorded with it.
  */
 export async function settleReviewDecision(input: {
@@ -159,16 +159,16 @@ export async function settleReviewDecision(input: {
   return decision === null ? null : { rowId: row.id, decision };
 }
 
-/** Write the decision to the still-live delegation row, after the terminal turn carries it. */
-export async function commitReviewDecision(
-  store: ThreadStore,
-  pending: { readonly rowId: string; readonly decision: StoredReviewDecision },
-  threadId: string,
-  turnId: string,
-): Promise<void> {
-  await store.updateDelegation(pending.rowId, {
-    review: { ...pending.decision, threadId, turnId },
-    reviewTask: true,
+/**
+ * Bring the delegation row up to the terminal turns, after the thread lock a
+ * decision was written under is released. It copies the newest decision the
+ * turn ledger holds, read under the ledger lock, so two settles committing out
+ * of order both write the newer one.
+ */
+export async function commitReviewDecision(store: ThreadStore, rowId: string, threadId: string): Promise<void> {
+  await store.updateDelegationWith(rowId, async () => {
+    const outcome = outcomeFromTurns(await store.readTurns(threadId), threadId);
+    return outcome === null ? null : { review: storedOutcome(outcome), reviewTask: true };
   });
 }
 

@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testHarness } from "../../testing/harness.js";
-import { createThread, completeTurn, failTurn, sendTurn, openTurn, interruptTurn, settleThread, isContinuationBusy } from "../threads.js";
+import { createThread, completeTurn, failTurn, sendTurn, openTurn, interruptTurn, reconcileOrphanedTurn, settleThread, isContinuationBusy } from "../threads.js";
 import { flushTurnRunners, type TurnDriver } from "../execute.js";
 import { recordUsageWindows, resetUsageLimitsForTests } from "../../usage/limits.js";
 import { driverKindOfInstance } from "../../types.js";
@@ -11,13 +11,17 @@ import {
   cancelTask,
   continueOwnThread,
   continueThread,
+  delegate,
   describeTask,
   editWorkQueue,
   flushTaskNotifications,
   noteAutoContinueCancelled,
+  queueAgentMessage,
   queueTaskNotification,
   recoverPendingAdoptions,
   recoverTaskNotifications,
+  removeAgentQueuedMessage,
+  runDueScheduledTurn,
   runWorkQueue,
   scheduleUsageContinue,
   sendTaskMessage,
@@ -501,8 +505,9 @@ describe("cancelling a delegated task's automatic continue", () => {
     const parent = await w.make("orchestrator");
     const child = await w.make("task");
     await delegateNotifying(w, parent.id, child.id);
-    const stopped = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    const stopped = (await sendTurn(w.store, child.id, { prompt: "Build it", parentNotice: true })).turn;
     await failTurn(w.store, child.id, stopped.id, { error: "Usage limit reached." });
+    expect((await w.store.readDelegations())[0]?.settleGeneration).toBe(1);
     await scheduleUsageContinue(w.ctx, child.id, stopped.id, new Date(Date.now() + 3_600_000).toISOString());
     expect(await cancelAutoContinue(w.ctx, child.id, opts)).toBe(true);
     await flushTaskNotifications(w.ctx, parent.id);
@@ -530,6 +535,23 @@ describe("cancelling a delegated task's automatic continue", () => {
     expect(await notificationsIn(w, parent.id)).toEqual([]);
   });
 
+  it.each([["with its notice", {}, 1], ["silently", { notifyParent: false }, 0]] as const)(
+    "owes nothing for a direct follow-up after a cancel %s",
+    async (_how, opts, notices) => {
+      const { w, parent, child } = await cancelledAfterLimit(opts);
+      // Typed straight into the task: it settles, revives the status, and the
+      // running server tells the parent nothing.
+      await (await startTurn(w.ctx, { threadId: child.id, prompt: "One more thing." })).run;
+      await flushTurnRunners();
+      await flushTaskNotifications(w.ctx, parent.id);
+      await flushTurnRunners();
+      expect((await w.store.readDelegations())[0]).toMatchObject({ status: "running", settleGeneration: 1 });
+      expect(await notificationsIn(w, parent.id)).toHaveLength(notices);
+      await restart(w);
+      expect(await notificationsIn(w, parent.id)).toHaveLength(notices);
+    },
+  );
+
   it("keeps the cancelled settle accounted for once later compaction revives the task", async () => {
     const { w, parent, child } = await cancelledAfterLimit({ notifyParent: false });
     // The compaction settles for good, which clears the cancelled mark
@@ -547,8 +569,9 @@ describe("cancelling a delegated task's automatic continue", () => {
     const child = await w.make("task");
     await delegateNotifying(w, parent.id, child.id);
     // No run callback: the process dies before one could queue the notice.
-    await sendTurn(w.store, child.id, { prompt: "Build it" });
+    await sendTurn(w.store, child.id, { prompt: "Build it", parentNotice: true });
     await cancelTask(w.ctx, parent.id, child.id);
+    expect((await w.store.readDelegations())[0]?.settleGeneration).toBe(1);
     await restart(w);
     expect(await notificationsIn(w, parent.id)).toEqual([]);
   });
@@ -1509,11 +1532,214 @@ describe("owed settle bookkeeping (MXN-389)", () => {
 
   it.each(["completed", "interrupted"] as const)("owes nothing for a %s compaction written before the turn marker existed", async (outcome) => {
     const { w, child, row } = await notifyingTask();
-    const compact = (await sendTurn(w.store, child.id, { prompt: "/compact" })).turn;
+    // Marked as awaited, so only its being a compaction keeps it from counting.
+    const compact = (await sendTurn(w.store, child.id, { prompt: "/compact", parentNotice: true })).turn;
     const { maintenance: _marker, ...legacy } = compact;
     await w.store.rewriteLedger(child.id, "turns", [legacy]);
     if (outcome === "completed") await completeTurn(w.store, child.id, compact.id, { text: "Conversation compacted." });
     else await interruptTurn(w.store, child.id, compact.id);
     expect((await row()).settleGeneration).toBeUndefined();
+  });
+});
+
+describe("a restart owes only what the running server would report (MXN-389)", () => {
+  type World = Awaited<ReturnType<typeof world>>;
+  const rowOf = async (w: World, childId: string) =>
+    (await w.store.readDelegations()).find((row) => row.childThreadId === childId && row.continuedIn === undefined)!;
+  const restart = async (w: World): Promise<void> => {
+    await recoverTaskNotifications({ ...w.ctx, store: await openThreadStore(w.root) });
+    await flushTurnRunners();
+  };
+  const flush = async (w: World, parentId: string): Promise<void> => {
+    await flushTaskNotifications(w.ctx, parentId);
+    await flushTurnRunners();
+  };
+  /** A task delegated without waiting, settled, its one notice delivered. */
+  async function reportedDelegation() {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const childId = (await delegate(w.ctx, { parentThreadId: parent.id, task: "Build it", wait: false })).child.id;
+    await flushTurnRunners();
+    await expect.poll(async () => (await rowOf(w, childId)).reportedGeneration).toBe(1);
+    await flush(w, parent.id);
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+    return { w, parent, childId };
+  }
+  /** A message typed into the task's own thread, run to its end. */
+  async function typeIntoTask(w: World, childId: string, prompt = "One more thing."): Promise<void> {
+    await (await startTurn(w.ctx, { threadId: childId, prompt })).run;
+    await flushTurnRunners();
+  }
+
+  it("owes nothing for a direct follow-up after the delegated turn was reported", async () => {
+    const { w, parent, childId } = await reportedDelegation();
+    await typeIntoTask(w, childId);
+    await flush(w, parent.id);
+    expect(await rowOf(w, childId)).toMatchObject({ settleGeneration: 1, reportedGeneration: 1 });
+    await restart(w);
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+  });
+
+  it("owes a task_send, a scheduled turn and a continuation's opener", async () => {
+    const { w, parent, childId } = await reportedDelegation();
+
+    const sent = await sendTaskMessage(w.ctx, parent.id, childId, "Also check the tests.", true);
+    // On the turn itself: a watcher would not survive a crash mid-turn.
+    expect((await w.store.readTurns(childId)).find((turn) => turn.id === sent.turnId)?.parentNotice).toBe(true);
+    await flushTurnRunners();
+    await expect.poll(async () => (await rowOf(w, childId)).settleGeneration).toBe(2);
+
+    // Due a moment from now: promotion reads the real clock.
+    await sendTurn(w.store, childId, { prompt: "Scheduled follow-up", scheduledFor: new Date(Date.now() + 250).toISOString() });
+    await expect.poll(() => runDueScheduledTurn(w.ctx, childId), { timeout: 5_000 }).toBe(true);
+    await flushTurnRunners();
+    await expect.poll(async () => (await rowOf(w, childId)).settleGeneration).toBe(3);
+
+    const successor = await continueThread(w.ctx, { threadId: childId });
+    await flushTurnRunners();
+    await expect.poll(async () => (await rowOf(w, successor.threadId)).settleGeneration).toBe(1);
+  }, 30_000);
+
+  it("owes the turn that takes a steered task_send, even one typed into the task", async () => {
+    const w = await world({}, { leaveTurnsRunning: true, steering: { codex: "delivers" } });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const typed = await startTurn(w.ctx, { threadId: child.id, prompt: "Look around." });
+    expect((await sendTaskMessage(w.ctx, parent.id, child.id, "Also check the tests.", false)).outcome).toBe("steered");
+    expect((await w.store.readTurns(child.id)).find((turn) => turn.id === typed.turn.id)?.parentNotice).toBe(true);
+    await completeTurn(w.store, child.id, typed.turn.id, { text: "Done." });
+    expect((await rowOf(w, child.id)).settleGeneration).toBe(1);
+  });
+
+  it("owes the parent's message after it is batched into one typed earlier", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const running = (await sendTurn(w.store, child.id, { prompt: "Look around." })).turn;
+    const typed = (await sendTurn(w.store, child.id, { prompt: "Mine.", delivery: "queue" })).turn;
+    await sendTurn(w.store, child.id, { prompt: "The parent's.", delivery: "queue", parentNotice: true });
+    await completeTurn(w.store, child.id, running.id, { text: "Looked." });
+    const turns = await w.store.readTurns(child.id);
+    expect(turns.map((turn) => turn.id)).toEqual([running.id, typed.id]);
+    expect(turns[1]).toMatchObject({ status: "running", parentNotice: true });
+  });
+
+  it("owes a typed message's settle only while a watcher waits on the task", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const running = (await sendTurn(w.store, child.id, { prompt: "Build it", parentNotice: true })).turn;
+    // Still working, so the notice is deferred and a watcher waits on the task.
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flush(w, parent.id);
+    const typed = (await sendTurn(w.store, child.id, { prompt: "And this.", delivery: "queue" })).turn;
+    await completeTurn(w.store, child.id, running.id, { text: "Built." });
+    await completeTurn(w.store, child.id, typed.id, { text: "Done too." });
+    expect((await rowOf(w, child.id)).settleGeneration).toBe(2);
+  });
+
+  it("counts a notice queued early as reported once it is delivered", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const running = (await sendTurn(w.store, child.id, { prompt: "Build it", parentNotice: true })).turn;
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flush(w, parent.id);
+    await completeTurn(w.store, child.id, running.id, { text: "Built." });
+    await expect.poll(async () => {
+      await flush(w, parent.id);
+      return (await notificationsIn(w, parent.id)).length;
+    }).toBe(1);
+    await expect.poll(async () => (await rowOf(w, child.id)).reportedGeneration).toBe(1);
+
+    // A later typed message is the task's newest work: a restart that still
+    // thought the first settle unsent would report it under that identity.
+    await typeIntoTask(w, child.id);
+    await restart(w);
+    expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+  });
+});
+
+describe("delegation lock order (MXN-389)", () => {
+  type World = Awaited<ReturnType<typeof world>>;
+
+  /**
+   * Run `operation` while this holds the delegation ledger lock, then take the
+   * task's thread lock inside it: the order a cancellation takes them. An
+   * operation holding that thread lock while it waits for the ledger would
+   * deadlock against it, which shows here as the lock never coming free.
+   */
+  async function againstLedgerThenThread(w: World, threadId: string, operation: () => Promise<unknown>): Promise<void> {
+    let running: Promise<unknown> = Promise.resolve();
+    let free = false;
+    await w.store.withThreadLock("!delegations", async () => {
+      running = operation();
+      running.catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      free = await Promise.race([
+        w.store.withThreadLock(threadId, async () => true),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 2_000); }),
+      ]);
+      clearTimeout(timer);
+    });
+    await running;
+    expect(free).toBe(true);
+  }
+
+  /** A notifying review task with an awaited turn running, so a settle writes both delegation facts. */
+  async function awaitedReview() {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    await w.store.updateDelegation(`d-${child.id}`, { reviewTask: true });
+    const turn = (await sendTurn(w.store, child.id, { prompt: "Review it", parentNotice: true })).turn;
+    const row = async () => (await w.store.readDelegations())[0]!;
+    return { w, parent, child, turn, row };
+  }
+
+  it("settles a turn", async () => {
+    const { w, child, turn, row } = await awaitedReview();
+    await againstLedgerThenThread(w, child.id, () => completeTurn(w.store, child.id, turn.id, { text: "Fine.\n\nVERDICT: MERGE" }));
+    expect(await row()).toMatchObject({ settleGeneration: 1, review: { verdict: "MERGE", turnId: turn.id } });
+  });
+
+  it("interrupts a turn", async () => {
+    const { w, child, turn, row } = await awaitedReview();
+    await againstLedgerThenThread(w, child.id, () => interruptTurn(w.store, child.id, turn.id));
+    expect(await row()).toMatchObject({ settleGeneration: 1, review: { turnId: turn.id } });
+  });
+
+  it("settles a thread by stopping its work", async () => {
+    const { w, child, row } = await awaitedReview();
+    await againstLedgerThenThread(w, child.id, () => settleThread(w.store, child.id, { stop: true }));
+    expect((await row()).settleGeneration).toBe(1);
+  });
+
+  it("reconciles an orphaned turn", async () => {
+    const { w, child, turn, row } = await awaitedReview();
+    await w.store.updateTurn(child.id, turn.id, { owner: { pid: 2_147_483_647, host: turn.owner!.host } });
+    await againstLedgerThenThread(w, child.id, () => reconcileOrphanedTurn(w.store, child.id));
+    expect((await row()).settleGeneration).toBe(1);
+  });
+
+  it("carries a delegation into a continuation", async () => {
+    const { w, child, turn } = await awaitedReview();
+    await completeTurn(w.store, child.id, turn.id, { text: "Fine.\n\nVERDICT: MERGE" });
+    await againstLedgerThenThread(w, child.id, () => continueThread(w.ctx, { threadId: child.id }));
+    await flushTurnRunners();
+    expect((await w.store.readDelegations()).find((entry) => entry.childThreadId === child.id)?.continuedIn).toBeDefined();
+  }, 30_000);
+
+  it("takes back an agent's queued message", async () => {
+    const { w, parent, child } = await awaitedReview();
+    const queued = await queueAgentMessage(w.ctx, parent.id, { threadId: child.id, message: "Later." });
+    await againstLedgerThenThread(w, child.id, () => removeAgentQueuedMessage(w.ctx, parent.id, queued.turnId));
+    expect((await w.store.readTurns(child.id)).find((entry) => entry.id === queued.turnId)?.status).toBe("interrupted");
   });
 });

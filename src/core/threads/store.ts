@@ -238,6 +238,27 @@ export class ThreadStore {
     }
   }
 
+  /**
+   * Task threads a watcher in this process waits to report to a parent, with
+   * how many watch each: their next settle is owed. In memory only, like the
+   * watchers themselves, so a restart owes nothing for a watch it lost.
+   */
+  private readonly settleWatches = new Map<string, number>();
+
+  /** Note that a watcher waits on this thread's settle; the returned call ends the watch. */
+  watchSettle(threadId: string): () => void {
+    this.settleWatches.set(threadId, (this.settleWatches.get(threadId) ?? 0) + 1);
+    return () => {
+      const left = (this.settleWatches.get(threadId) ?? 0) - 1;
+      if (left > 0) this.settleWatches.set(threadId, left);
+      else this.settleWatches.delete(threadId);
+    };
+  }
+
+  hasSettleWatch(threadId: string): boolean {
+    return this.settleWatches.has(threadId);
+  }
+
   emit(threadId: string, reason: string): void {
     this.bus.publish({ type: "backend.thread.changed", threadId, reason });
   }
@@ -847,15 +868,18 @@ export class ThreadStore {
   }
 
   async appendDelegation(delegation: StoredDelegation): Promise<void> {
-    await this.assertStoreWriteable();
     // Under the ledger lock: a rewrite reads the file and replaces it, so an
     // append landing between that read and the write would be dropped. The
     // lock is per ThreadStore instance; the store's single writer is the
     // server that holds `server.lock` (docs/overview.md). Two processes on
     // one root can still lose an append.
-    await this.withThreadLock("!delegations", async () => {
-      await appendFile(this.delegationsFile(), `${JSON.stringify(delegation)}\n`, "utf8");
-    });
+    await this.withThreadLock("!delegations", () => this.appendDelegationLocked(delegation));
+  }
+
+  /** Append under a `!delegations` lock the caller already holds. */
+  async appendDelegationLocked(delegation: StoredDelegation): Promise<void> {
+    await this.assertStoreWriteable();
+    await appendFile(this.delegationsFile(), `${JSON.stringify(delegation)}\n`, "utf8");
   }
 
   /**
@@ -863,27 +887,36 @@ export class ThreadStore {
    * in one locked file replacement. The rows are the same task, so a reader
    * must see the source before the transfer or the destination after it,
    * never a source that still looks live beside its successor.
+   *
+   * The builder and the write run under the ledger lock and then the source
+   * thread's lock (the one order: `!delegations` outer), so no turn of the
+   * source settles between what the builder read and the rows written. Null
+   * from the builder transfers nothing.
    */
   async transferDelegation(
     sourceChildId: string,
-    destination: StoredDelegation,
-    sourcePatch: Partial<StoredDelegation> = {},
+    build: (
+      source: StoredDelegation,
+      rows: readonly StoredDelegation[],
+    ) => Promise<{ readonly destination: StoredDelegation; readonly sourcePatch: Partial<StoredDelegation> } | null>,
   ): Promise<StoredDelegation | null> {
-    return await this.withThreadLock("!delegations", async () => {
+    return await this.withThreadLock("!delegations", () => this.withThreadLock(sourceChildId, async () => {
       const all = await this.readDelegations();
       const source = all.find((row) => row.childThreadId === sourceChildId && row.continuedIn === undefined);
-      if (!source || all.some((row) => row.childThreadId === destination.childThreadId)) return null;
+      if (!source) return null;
+      const built = await build(source, all);
+      if (built === null || all.some((row) => row.childThreadId === built.destination.childThreadId)) return null;
       const transferred: StoredDelegation = {
         ...source,
-        ...sourcePatch,
+        ...built.sourcePatch,
         id: source.id,
-        continuedIn: destination.childThreadId,
+        continuedIn: built.destination.childThreadId,
         updatedAt: this.nowIso(),
       };
-      const next = [...all.map((row) => (row.id === source.id ? transferred : row)), destination];
+      const next = [...all.map((row) => (row.id === source.id ? transferred : row)), built.destination];
       await this.writeDelegationRows(next);
       return transferred;
-    });
+    }));
   }
 
   async updateDelegation(
@@ -894,22 +927,24 @@ export class ThreadStore {
   }
 
   /**
-   * Patch one row from the row as it stands under the ledger lock, so a value
-   * derived from it (a counter, a high-water mark) cannot be overwritten by a
-   * writer that read an older copy. A null patch writes nothing.
+   * Patch a delegation row from a builder run under the one ledger lock: the
+   * row it decides on is the row it writes, so a check and the write it
+   * guards cannot be separated by another writer. Null from the builder
+   * leaves the row alone; so does a missing row.
    */
   async updateDelegationWith(
     delegationId: string,
-    patchFor: (current: StoredDelegation) => Partial<StoredDelegation> | null,
+    build: (current: StoredDelegation) => Partial<StoredDelegation> | null | Promise<Partial<StoredDelegation> | null>,
   ): Promise<StoredDelegation | null> {
     return await this.withThreadLock("!delegations", async () => {
       const all = await this.readDelegations();
       const index = all.findIndex((delegation) => delegation.id === delegationId);
       if (index < 0) return null;
-      const patch = patchFor(all[index]!);
-      if (patch === null) return all[index]!;
+      const current = all[index]!;
+      const patch = await build(current);
+      if (patch === null) return null;
       const updated: StoredDelegation = {
-        ...all[index]!,
+        ...current,
         ...patch,
         id: delegationId,
         updatedAt: this.nowIso(),

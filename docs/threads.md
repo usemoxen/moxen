@@ -639,10 +639,16 @@ continuation has already finished, the notice is regenerated for that thread,
 so a lost callback cannot leave the parent with nothing. A report whose parent
 or task moves while it is being built is rechecked before it is sent and goes
 to the owner, with all of that task's waiting notices in one write. Each
-settle also records a generation on the delegation row; on startup the server
-replays pending batches and then queues a notice for any generation ahead of
-the last one a notice was queued for (`reportedGeneration` advances when the
-notice is queued, before a parent message records a receipt). A cancelled
+settle the parent is waiting on also records a generation on the delegation
+row: the delegated turn, a continuation's opener, `task_send` (including the
+turn a steer lands in), a queued, scheduled or recovered turn, and any settle
+a pending watch waits for, such as a follow-up after background work. A
+message typed straight into the task is none of these, so neither the running
+server nor a restart reports it. On startup the server replays pending batches
+and then queues a notice for any generation ahead of the last one a notice was
+queued or delivered for (`reportedGeneration` advances when the notice is
+queued, before a parent message records a receipt, and again on delivery). A
+watch that does not survive a restart owes nothing after it. A cancelled
 task replays nothing: cancelling its automatic continue counts its settles so
 far as reported, whether or not the parent is told, and a row that reads
 cancelled is skipped until fresh work revives it. In the JSONL
@@ -656,7 +662,9 @@ rather than answering with a superseded thread. Delegation ledger writes
 assume one writer per store root: the server that holds `server.lock`
 (`docs/overview.md`). That process serializes appends, rewrites and the
 one-step hand-off transfer under one ledger lock; two processes on the same
-root could still lose an append. A continued thread
+root could still lose an append. The ledger lock is taken outside any thread
+lock, never inside one, because a delegation write may take a thread lock
+while it holds the ledger. A continued thread
 starts no new delegations (`THREAD_CONTINUED` names the live thread):
 otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A manual continue needs an idle source: while one of its

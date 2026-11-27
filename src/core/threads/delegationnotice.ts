@@ -4,9 +4,13 @@
  * A task's run callback queues its parent's settle notice, but a process can
  * die between the terminal turn (and its review outcome) being written and
  * that callback running. Recovery must not depend on the predecessor's batch
- * still existing, so each settle also records its generation on the live
- * delegation row; a notice records the generation it was queued for. Startup
- * reconciliation sends whatever is still owed.
+ * still existing, so each settle the parent is waiting on also records its
+ * generation on the live delegation row; a notice records the generation it
+ * was queued or delivered for. Startup reconciliation sends whatever is still
+ * owed.
+ *
+ * These writes take `!delegations`, which is only ever taken outside a thread
+ * lock: never call one while holding a thread's lock.
  */
 import { isMaintenanceTurn } from "./maintenance.js";
 import type { ThreadStore } from "./store.js";
@@ -18,13 +22,20 @@ async function liveRow(store: ThreadStore, childThreadId: string): Promise<Store
 }
 
 /**
- * Record that this task's thread reached a new settle. Only a notifying live
- * row keeps the obligation, and Moxen's own compaction settles no work. The
- * generation is a counter on the row, not a count of the thread's turns: a
- * revert removes turns, and the settle after it must still read as newer than
- * anything already reported.
+ * Record a settle the parent is waiting to hear about. It is one only when
+ * the live path would report it: the delegated turn, `task_send`, and any
+ * queued, scheduled or recovered turn carry `parentNotice`; a continuation's
+ * opener is `handoffOpen`; `watched` says a watcher was waiting on the thread
+ * when the turn settled. A message typed straight into the task is none of
+ * these, so a restart reports nothing the running server would not have.
+ *
+ * Only a notifying live row keeps the obligation, and Moxen's own compaction
+ * settles no work. The generation is a counter on the row, not a count of the
+ * thread's turns: a revert removes turns, and the settle after it must still
+ * read as newer than anything already reported.
  */
-export async function markDelegationSettle(store: ThreadStore, threadId: string, turn: StoredTurn): Promise<void> {
+export async function markDelegationSettle(store: ThreadStore, threadId: string, turn: StoredTurn, watched: boolean): Promise<void> {
+  if (turn.parentNotice !== true && turn.handoffOpen !== true && !watched) return;
   const row = await liveRow(store, threadId);
   if (row === undefined || row.notify !== true) return;
   // A compaction written before the turn marker existed is known by its prompt.
@@ -38,7 +49,7 @@ export async function delegationSettleGeneration(store: ThreadStore, childThread
   return (await liveRow(store, childThreadId))?.settleGeneration ?? 0;
 }
 
-/** Record that a settle notice at this generation was queued, so recovery need not send it again. */
+/** Record that a settle notice at this generation was queued or delivered, so recovery need not send it again. */
 export async function markDelegationNoticeReported(store: ThreadStore, childThreadId: string, generation: number): Promise<void> {
   const row = await liveRow(store, childThreadId);
   if (row === undefined) return;

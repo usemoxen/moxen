@@ -821,6 +821,11 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // Decided now, before the run: a notice the batch already holds for this
     // task owns its settle, and the completion callback below only wakes it.
     const coveredParent = await heldNoticeParent(ctx, threadId);
+    // A queued, scheduled or recovered turn reports to a notifying parent
+    // when it settles: marked, so a restart still owes that report.
+    if ((await notifyDelegationParent(ctx, threadId)) !== null) {
+      await store.withThreadLock(threadId, () => store.updateTurn(threadId, turn.id, { parentNotice: true }));
+    }
     // Checked again once the session start and the reads above are done: they
     // take real time, and a drain can begin inside it. Nothing is sent; the
     // turn waits as queued work for the next server.
@@ -1153,7 +1158,13 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     let cancelProtection = false;
     let reservationToAbandon: { readonly threadId: string; readonly turnId: string } | null = null;
     const rows = policy || agent ? await queueRows(ctx) : [];
-    await ctx.store.withThreadLock(threadId, async () => {
+    // An agent's edit also holds the delegation ledger, so its authority check
+    // and its write see one set of rows. Lock order: `!delegations` outer,
+    // thread lock inner.
+    const underEditLocks = (run: () => Promise<void>): Promise<void> => agent
+      ? ctx.store.withThreadLock("!delegations", () => ctx.store.withThreadLock(threadId, run))
+      : ctx.store.withThreadLock(threadId, run);
+    await underEditLocks(async () => {
       const editLocked = async (): Promise<void> => {
         const turn = (await ctx.store.readTurns(threadId)).find((t) => t.id === turnId);
         if (!turn) throw new CliError("QUEUE_ENTRY_NOT_WAITING", "Only a waiting or removed entry can be edited.");
@@ -1311,8 +1322,7 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
         });
         ctx.store.emit(threadId, "queue-edited");
       };
-      if (agent) await ctx.store.withThreadLock("!delegations", editLocked);
-      else await editLocked();
+      await editLocked();
     });
     if (reservationToAbandon !== null) {
       const target: { readonly threadId: string; readonly turnId: string } = reservationToAbandon;
@@ -3974,10 +3984,10 @@ async function endContinuedSession(ctx: OperationContext, source: StoredThread):
  * Idempotent: a handoff retried after a restart adds no second row.
  */
 async function carryDelegation(store: ThreadStore, sourceId: string, destinationId: string): Promise<string | null> {
-  return await store.withThreadLock(sourceId, async () => {
-    const rows = await store.readDelegations().catch(() => [] as StoredDelegation[]);
-    const row = rows.find((candidate) => candidate.childThreadId === sourceId && candidate.status === "running");
-    if (!row || row.continuedIn !== undefined || rows.some((candidate) => candidate.childThreadId === destinationId)) return null;
+  // An ordinary thread nobody delegated takes neither lock.
+  if (!(await store.readDelegations().catch(() => [] as StoredDelegation[])).some((row) => row.childThreadId === sourceId)) return null;
+  const transferred = await store.transferDelegation(sourceId, async (row, rows) => {
+    if (row.status !== "running") return null;
     // Reconcile a decision the row missed — a crash between the terminal turn
     // and the row write — before it travels: the turn ledger is the truth.
     const turns = await store.readTurns(sourceId).catch(() => [] as StoredTurn[]);
@@ -4010,12 +4020,15 @@ async function carryDelegation(store: ThreadStore, sourceId: string, destination
       createdAt: now,
       updatedAt: now,
     };
-    const transferred = await store.transferDelegation(sourceId, destination, {
-      ...(reviewTask ? { reviewTask: true as const } : {}),
-      ...(outcome !== null ? { review: storedOutcome(outcome) } : {}),
-    });
-    return transferred === null ? null : transferred.notify === true ? transferred.parentThreadId : null;
+    return {
+      destination,
+      sourcePatch: {
+        ...(reviewTask ? { reviewTask: true as const } : {}),
+        ...(outcome !== null ? { review: storedOutcome(outcome) } : {}),
+      },
+    };
   });
+  return transferred === null ? null : transferred.notify === true ? transferred.parentThreadId : null;
 }
 
 /**
@@ -6556,7 +6569,12 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
   const cancelIds = mine.filter((entry) => pendingEntryKind(entry) === "cancel" && !settled.has(entry.child) && !movedOn(entry.child)).map((entry) => entry.child);
   const continuesTaskId = (id: string) => rows.find((row) => row.childThreadId === id && row.parentThreadId === parentThreadId)?.continuesTaskId;
   const generations = new Map<string, number>();
+  // The settle generation each report covers, read before its facts. Delivery
+  // records it too: a notice queued while the task was still working, or one
+  // already held when the settle landed, was queued at an older generation.
+  const covered = new Map<string, number>();
   const tasks = (await Promise.all(final.map(async (id) => {
+    covered.set(id, await delegationSettleGeneration(ctx.store, id));
     // Capture before taking the notice snapshot: the watcher must be able to
     // see a work turn that settles in the gap before it subscribes.
     generations.set(id, await settledWorkTurnCount(ctx, id));
@@ -6602,6 +6620,7 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
       continue;
     }
     generations.set(successor.childThreadId, await settledWorkTurnCount(ctx, successor.childThreadId));
+    covered.set(successor.childThreadId, notice.generation ?? 0);
     const replacement = await taskNotificationOf(ctx, successor.childThreadId);
     if (replacement === null) continue;
     replacementEntries.push(notice);
@@ -6691,6 +6710,11 @@ async function deliverTaskNotifications(ctx: OperationContext, parentThreadId: s
     // No turn read these reports. Keep the refused attempts separate from
     // the child-settle entries, whose watcher has a different wake condition.
     kept.push(...reported.map((entry) => ({ ...entry, refusedMessageId: started.messageId })));
+  } else {
+    for (const task of staying) {
+      const generation = noticeKindOf(task) === "settle" ? covered.get(task.taskId) : undefined;
+      if (generation !== undefined) await markDelegationNoticeReported(ctx.store, task.taskId, generation);
+    }
   }
   return { kept, deferred };
 }
@@ -6982,12 +7006,13 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     : null;
   let created: StoredThread;
   const now = ctx.store.nowIso();
-  const recordDelegation = async (): Promise<void> => {
+  const recordDelegation = async (ledgerLocked = false): Promise<void> => {
     const modelOf = (selection: { instanceId: string; model: string } | undefined) =>
       selection ? `${selection.instanceId}/${selection.model}` : null;
     const parentModel = modelOf(parent.modelSelection);
     const childModel = modelOf(modelSelection);
-    await ctx.store.appendDelegation({
+    const append = ledgerLocked ? ctx.store.appendDelegationLocked.bind(ctx.store) : ctx.store.appendDelegation.bind(ctx.store);
+    await append({
       id: randomUUID(), parentThreadId, childThreadId, prompt: task, status: "running",
       ...(worktree ? { baseBranch: worktree.baseBranch } : {}),
       ...(request.wait === false && request.notify !== false ? { notify: true } : {}),
@@ -7023,7 +7048,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     });
     if (lead) {
       // Publish membership only once clients can describe this delegated task.
-      await recordDelegation();
+      await recordDelegation(true);
       const run = lead.researchRun;
       await ctx.store.writeThreadRecord({ ...lead, researchRun: { ...run,
         roles: [...run.roles, { threadId: child.id, role: options.researchRole!, question: task }],
@@ -7034,7 +7059,11 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
     return child;
   };
   try {
-    created = options.researchRole === undefined ? await createChild() : await ctx.store.withThreadLock(parentThreadId, createChild);
+    // A role's row is written under the lead's lock, so the delegation ledger
+    // lock goes outside it.
+    created = options.researchRole === undefined
+      ? await createChild()
+      : await ctx.store.withThreadLock("!delegations", () => ctx.store.withThreadLock(parentThreadId, createChild));
   } catch (cause) {
     if (worktree) {
       await runProcess("git", ["worktree", "remove", "--force", worktree.path], { cwd: parentEnv.path }).catch(() => undefined);
@@ -7049,7 +7078,8 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
   // Recorded before the child's session starts: that start reads it to tell
   // the child it is a delegated task (`core/threads/instructions.ts`).
   if (options.researchRole === undefined) await recordDelegation();
-  const started = await startTurn(ctx, { threadId: created.id, prompt: task }).catch((cause: unknown) => {
+  const reportsBack = request.wait === false && request.notify !== false;
+  const started = await startTurn(ctx, { threadId: created.id, prompt: task, ...(reportsBack ? { parentNotice: true } : {}) }).catch((cause: unknown) => {
     throw new CliError(
       "THREAD_START_FAILED",
       `Created delegated thread ${created.id} but could not start its task turn. The child thread was left untouched.`,
@@ -7064,7 +7094,7 @@ export async function delegate(ctx: OperationContext, request: DelegateRequest, 
 
   // A delegation nobody waits on reports back by itself once the task
   // settles: the parent gets a message instead of having to poll for it.
-  if (request.wait === false && request.notify !== false && started.run !== null) {
+  if (reportsBack && started.run !== null) {
     void started.run.then(() => queueTaskNotification(ctx, parentThreadId, created.id)).catch(() => undefined);
   }
 
@@ -8203,6 +8233,7 @@ export async function sendTaskMessage(
     threadId: target.id,
     prompt: `${TASK_MESSAGE_HEADER}\n\n${message}`,
     origin: "task-message",
+    ...(row.notify === true ? { parentNotice: true } : {}),
     delivery: running === null ? "auto" : steerable ? "steer" : "queue",
     wakeSettled: wake,
     onEvent: () => undefined,
@@ -8220,6 +8251,10 @@ export async function sendTaskMessage(
   // which reaches the live turn without starting one.
   if (outcome !== "not_delivered" && row.status === "cancelled") {
     await reviveCancelledDelegation(ctx, target.id);
+  }
+  // A steer opens no turn of its own: the one that took it is what the parent now waits on.
+  if (row.notify === true && outcome === "steered") {
+    await ctx.store.withThreadLock(target.id, () => ctx.store.updateTurn(target.id, started.turn.id, { parentNotice: true }));
   }
   // The parent hears again when the task settles for good, whichever turn that is: the first report was one-shot.
   if (row.notify === true && (outcome === "started" || outcome === "queued" || outcome === "steered")) notifyWhenTaskSettles(ctx, parentThreadId, target.id);
@@ -8377,6 +8412,8 @@ function notifyWhenTaskSettles(
   let done = false;
   let checking = false;
   let again = false;
+  // While this waits, the task's settle is one the parent is owed.
+  const endWatch = ctx.store.watchSettle(childThreadId);
   const stop = ctx.store.subscribe((event) => {
     if (event.type !== "backend.thread.changed" || event.threadId !== childThreadId) return;
     if (event.reason !== "turn-completed" && event.reason !== "turn-failed" && event.reason !== "turn-interrupted") return;
@@ -8397,6 +8434,7 @@ function notifyWhenTaskSettles(
         }
         done = true;
         stop();
+        endWatch();
         onDone();
         await wake(ctx, parentThreadId, childThreadId);
       } while (again);

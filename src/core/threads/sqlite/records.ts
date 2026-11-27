@@ -377,6 +377,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.agentThreadId !== undefined) rest.agentThreadId = turn.agentThreadId;
   if (turn.reviewHandoff === true) rest.reviewHandoff = true;
   if (turn.reviewDecision !== undefined) rest.reviewDecision = turn.reviewDecision;
+  if (turn.parentNotice === true) rest.parentNotice = true;
 
   return {
     id: turn.id,
@@ -462,6 +463,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     ...(rest.turnOutputTokens === undefined ? {} : { turnOutputTokens: rest.turnOutputTokens as number }),
     ...(rest.reviewHandoff === true ? { reviewHandoff: true as const } : {}),
     ...(rest.reviewDecision === undefined ? {} : { reviewDecision: rest.reviewDecision as NonNullable<StoredTurn["reviewDecision"]> }),
+    ...(rest.parentNotice === true ? { parentNotice: true as const } : {}),
   };
 }
 

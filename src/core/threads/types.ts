@@ -489,6 +489,12 @@ export interface StoredTurn {
    * verdictless follow-up after this thread already pinned its own verdict).
    */
   readonly reviewDecision?: StoredReviewDecision;
+  /**
+   * The delegating parent waits to hear this turn settle: the delegated turn,
+   * a `task_send`, or a queued, scheduled or recovered turn. A turn typed
+   * straight into the task carries none, so a restart owes no notice for it.
+   */
+  readonly parentNotice?: true;
   /** Tokens spent by the provider run; null when the driver reported none. */
   readonly usage: TurnUsage | null;
   /** Per-turn output when usage itself is a provider session total. */
@@ -649,8 +655,8 @@ export interface StoredDelegation {
   /** This task was delegated as a review, or continues one: the parent reads review facts. */
   readonly reviewTask?: true;
   /**
-   * The newest settle this task's thread reached, counted on the row as each
-   * work turn settles. A notification obligation: when it is ahead of
+   * The newest settle the parent waits to hear about, counted on the row as
+   * each such turn settles. A notification obligation: when it is ahead of
    * `reportedGeneration`, a settle happened whose notice was never queued, and
    * startup recovery sends one.
    */
@@ -707,6 +713,8 @@ export interface SendTurnInput {
    * document and the acknowledgement instruction. Internal; never from a client.
    */
   readonly reviewHandoff?: boolean;
+  /** The delegating parent waits on the turn this send opens (see `StoredTurn.parentNotice`). Internal; never from a client. */
+  readonly parentNotice?: boolean;
   /** Images sent with the prompt; saved and recorded on the user message. */
   readonly attachments?: readonly ImageAttachmentUpload[];
   /**
