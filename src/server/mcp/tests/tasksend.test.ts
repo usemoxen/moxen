@@ -279,8 +279,15 @@ describe("task handoff on continue (MXN-300)", () => {
       const served = await (t.connection as unknown as { store(): Promise<ThreadStore> }).store();
       const idleTurn = (await served.readTurns(idle)).find((turn) => turn.status === "running")!;
       await completeTurn(served, idle, idleTurn.id, { text: "Idle task done." });
-      // Its first report reaches the orchestrator before any handoff, so later counts have a stable baseline.
-      await expect.poll(async () => (await t.notifications()).length, WAIT).toBe(1);
+      // Its first report is steered into the orchestrator's running turn; wait
+      // for arrival confirmation, not just the staged message row, or settling
+      // the turn below can race the steer's delivery gate and discard it.
+      await expect.poll(async () => {
+        const notices = await t.notifications();
+        if (notices.length !== 1) return false;
+        const activities = await t.store.readActivities(t.orchestrator);
+        return activities.some((row) => row.kind === "steer.confirmed" && row.payload?.messageId === notices[0]!.id);
+      }, WAIT).toBe(true);
 
       await t.settleRunningTurns();
       const continued = await t.connection.dispatch({ type: "thread.continue", threadId: t.orchestrator });

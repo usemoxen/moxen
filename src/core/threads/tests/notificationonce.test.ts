@@ -220,7 +220,8 @@ describe("a task's settle is reported once", () => {
       { timeout: 10_000, interval: 50 },
     ).toBe(1);
     await flushTurnRunners();
-    expect(await readBatches(w.root)).toEqual({});
+    // `retryTaskNotificationsWhenIdle` acknowledges the batch file after `startTurn` writes the retry message.
+    await expect.poll(() => readBatches(w.root), { timeout: 10_000, interval: 50 }).toEqual({});
 
     // Once only: a later flush, and the restart's recovery, find nothing left.
     await flushTaskNotifications(w.ctx, parent.id);
@@ -265,7 +266,8 @@ describe("a task's settle is reported once", () => {
       { timeout: 10_000, interval: 50 },
     ).toBe(1);
     await flushTurnRunners();
-    expect(await readBatches(w.root)).toEqual({});
+    // `retryTaskNotificationsWhenIdle` acknowledges the batch file after `startTurn` writes the retry message.
+    await expect.poll(() => readBatches(w.root), { timeout: 10_000, interval: 50 }).toEqual({});
     // The staged steer never arrived, so it left no second copy behind.
     expect((await noticesIn(w, parent.id)).filter((message) => message.turnId === live.turn.id)).toEqual([]);
   }, 30_000);

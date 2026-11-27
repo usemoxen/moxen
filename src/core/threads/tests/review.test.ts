@@ -11,12 +11,12 @@ import { describe, expect, it } from "vitest";
 import { testHarness } from "../../testing/harness.js";
 import { modeChange, modeInstructionKey, modeProcedure, PROCEDURE_MODES } from "../modes.js";
 import { reviewFactsOf, reviewVerdictOf, taskNotificationText, type TaskNotification } from "../notify.js";
-import { continueThread, delegate, describeTask, prepareQueuedHandoff, taskNotificationOf, type OperationContext } from "../operations.js";
+import { continueThread, delegate, describeTask, flushTaskNotifications, prepareQueuedHandoff, taskNotificationOf, type OperationContext } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
 import { REVIEW_HANDOFF_ACK, REVIEW_HANDOFF_INSTRUCTION } from "../reviewtask.js";
 import { createThread, sendTurn, completeTurn, failTurn } from "../threads.js";
 import { driverKindOfInstance } from "../../types.js";
-import type { TurnDriver } from "../execute.js";
+import { flushTurnRunners, type TurnDriver } from "../execute.js";
 
 function task(overrides: Partial<TaskNotification> & { title: string }): TaskNotification {
   return {
@@ -791,6 +791,12 @@ describe("continuing a review thread", () => {
       await completeTurn(w.store, next.threadId, opening!.id, { text: REVIEW_HANDOFF_ACK });
       current = next.threadId;
     }
+    // Drain opening-turn runners and the parent's pending notification batch
+    // timer so background work from the hand-off hops cannot read a predecessor
+    // while we spy on `describeTask`.
+    await flushTurnRunners();
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
 
     const read: string[] = [];
     const messages = w.store.readMessages.bind(w.store);
