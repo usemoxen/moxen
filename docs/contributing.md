@@ -72,7 +72,7 @@ exceptions.
   updaters), `remote.ts` (paired servers and remote access), and `catalog/`,
   `handover/`, `harness/` (Harness profiles), `infra/` (`client.ts` — the
   CLI's `ClientApi`), `memory/`, `projects/`,
-  `threads/`, `git/` (the `git` and `pr` command groups) — flags, prompts
+  `store/`, `threads/`, `git/` (the `git` and `pr` command groups) — flags, prompts
   and `--json` envelopes over `ClientApi`;
   `tests/envelopes/` pins every envelope byte-for-byte.
   Each has its own `tests/` subfolder.

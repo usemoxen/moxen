@@ -193,6 +193,8 @@ import {
 import { ranTurns, toThreadEnvelope } from "../core/threads/project.js";
 import { backfillNativeSubagents, subagentTranscript } from "../core/threads/subagents.js";
 import { openThreadStore, resolveStoreRoot, type ThreadStore } from "../core/threads/store.js";
+import type { StoreImportReport } from "../core/threads/sqlite/import.js";
+import { startImportJob, type ImportJob } from "../core/threads/sqlite/import-job.js";
 import { isKnownTurnStatus } from "../core/threads/problems.js";
 import type { ContextBreakdown, ContextWindowUsage, ProviderRuntimeEvent } from "../core/providers/spi.js";
 import { isCompactCommand } from "../core/providers/spi.js";
@@ -393,6 +395,8 @@ export interface DirectConnectionOptions {
   readonly updateApp?: (options: UpdateOptions) => Promise<UpdateResult>;
   /** Rolls Moxen itself back (tests); defaults to the real `rollbackRelease`. */
   readonly rollbackApp?: (options: UpdateOptions) => Promise<RollbackResult>;
+  /** The file the store import's worker starts from (tests: one that holds the import at a chosen step). */
+  readonly storeImportWorker?: string;
   /** The `fetch` the harness test and probe use; tests hand in a fake server. */
   readonly harnessFetch?: typeof fetch;
   /** Optional OAuth dependencies override (tests) for Sign in with ChatGPT login/logout. */
@@ -467,6 +471,9 @@ export class DirectConnection implements ClientApi {
   /** Profiles with a probe running: two at once would fight over a single-slot server. */
   private readonly probing = new Set<string>();
   private storePromise: Promise<ThreadStore> | null = null;
+  /** The JSONL import in flight, if any, in its worker: two at once would replace each other's rows. */
+  private storeImport: ImportJob | null = null;
+  private readonly storeImportWorker: string | undefined;
   private migrationPromise: Promise<void> | null = null;
   /** Set once an update or rollback has landed: the running code is stale. */
   private restartPending = false;
@@ -505,6 +512,7 @@ export class DirectConnection implements ClientApi {
     hydrateChatGptModelsCache(this.storeRoot);
     this.factories = options.drivers ?? {};
     this.harnessFetch = options.harnessFetch;
+    this.storeImportWorker = options.storeImportWorker;
     this.chatgptOAuth = options.chatgptOAuth;
     this.probeCodexCompanionFn = options.probeCodexCompanion;
     this.providerAccountLoginDeps = options.providerAccountLoginDeps;
@@ -1062,6 +1070,21 @@ export class DirectConnection implements ClientApi {
   private async store(): Promise<ThreadStore> {
     if (!this.storePromise) this.storePromise = openThreadStore(this.storeRoot);
     return await this.storePromise;
+  }
+
+  private async importStore(): Promise<StoreImportReport> {
+    // Opened first, so the root carries the store's own marker and gate.
+    await this.store();
+    if (this.closed) throw new CliError("CONNECTION_CLOSED", "The direct connection is closed.");
+    if (this.storeImport === null) {
+      const job = startImportJob(this.storeRoot, this.storeImportWorker === undefined ? {} : { workerEntry: this.storeImportWorker });
+      this.storeImport = job;
+      const done = (): void => {
+        if (this.storeImport === job) this.storeImport = null;
+      };
+      void job.report.then(done, done);
+    }
+    return await this.storeImport.report;
   }
 
   /** Whether an update or rollback has landed since this server started. */
@@ -2118,6 +2141,8 @@ export class DirectConnection implements ClientApi {
       }
       case "store.quarantine":
         return await (await this.store()).quarantineProblem(command.id);
+      case "store.import":
+        return await this.importStore();
       case "usage.wrap":
         await this.usageProtection.wrap(command.provider);
         return accepted;
@@ -3744,6 +3769,10 @@ export class DirectConnection implements ClientApi {
 
   async close(): Promise<void> {
     this.closed = true;
+    // Told first: an import must not go on, or be marked complete, while the
+    // rest of this teardown waits. Its worker's exit is awaited further down.
+    const importing = this.storeImport;
+    importing?.abort();
     this.stopThreadFailureSink();
     for (const entry of this.researchProposals.values()) entry.answer(null);
     for (const timer of this.pollTimers) clearInterval(timer);
@@ -3790,6 +3819,9 @@ export class DirectConnection implements ClientApi {
     }
     this.accountLogins.clear();
     this.ownedDrivers.clear();
+    // An import closes its database and its worker exits before the store is
+    // handed on; it stays marked unfinished, and running it again completes it.
+    await importing?.report.catch(() => undefined);
     // The store is free for the next server: without this a fast restart
     // would meet this process's own lock and have to take it over.
     await this.releaseStore().catch(() => undefined);

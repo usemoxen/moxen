@@ -19,7 +19,7 @@ import {
   encodeThread,
   encodeTurn,
 } from "../records.js";
-import { INSERT_ACTIVITY, INSERT_CHECKPOINT, INSERT_MESSAGE, INSERT_THREAD, INSERT_TURN } from "./inserts.js";
+import { INSERT_ACTIVITY, INSERT_CHECKPOINT, INSERT_MESSAGE, INSERT_THREAD, INSERT_TURN } from "../inserts.js";
 import { activityWithoutPayload, completedTurn, sparseCheckpoint, sparseMessage, sparseThread } from "./fixtures.js";
 import { insertRow, openForTest, rawForTest, temporaryRoot, underBun } from "./support.js";
 

@@ -7,9 +7,10 @@ what the performance budget is checked against. Until the cut-over, the JSONL
 store is still the source of truth.
 
 **Status:** step 1 (MXN-392) landed the connection, schema v1, the migration
-runner and the row mapping under `src/core/threads/sqlite/`. Nothing in
-production reads or writes the database yet. The rollout is in
-[Rollout](#rollout).
+runner and the row mapping under `src/core/threads/sqlite/`; step 2 (MXN-393)
+landed the [importer](#importing-the-jsonl-store), run with
+`moxen store import`. Nothing in production reads the database yet, and only
+the importer writes it. The rollout is in [Rollout](#rollout).
 
 ## Why
 
@@ -157,6 +158,9 @@ behaviour is proven.
 
 ## Schema v1
 
+Later migrations only add columns to `messages`: version 2 `automatic` and
+`control` (MXN-385), version 3 `queued_task_notice` (MXN-393).
+
 One row per record. A column holds what the code filters, sorts or patches on
 its own; everything else is one `rest` JSON column, merged back on read in
 `records.ts`. `STRICT` everywhere. Order comes from `seq INTEGER PRIMARY KEY`
@@ -302,6 +306,81 @@ emoji kept through the display metadata, a half-step queue order, unicode
 surrogates and nulls, and two rows with the same id in append order for each
 table whose uniqueness is not guaranteed (turns, messages, activities,
 checkpoints, delegations).
+
+## Importing the JSONL store
+
+`moxen store import` asks the server, which owns the store, to copy the JSONL
+ledgers into `store.db` (`src/core/threads/sqlite/import.ts`). The ledgers and
+`store.json` are only read.
+
+**What it refuses.** `store.json` goes through the JSONL store's own gate before
+anything is created: a newer version is `FORMAT_TOO_NEW` and an unreadable or
+impossible one `INVALID_FORMAT_VERSION`. Once a later engine version means the
+database is the source of truth, the importer refuses it (`STORE_NOT_JSONL`),
+so the kept JSONL copy can never overwrite newer data. Data older than the
+2026-11-06 compatibility baseline gets no migration: a missing marker does not
+date a store, so old records are judged one by one and quarantined when they do
+not have today's shape.
+
+**One transaction per thread.** Each deletes the thread's rows and the
+quarantine rows an earlier run made for it, then inserts every record in file
+order. The delegations ledger is one more transaction under the same rules. A
+last transaction removes threads the JSONL store no longer has. So resuming
+after a crash and importing again are the same pass: it starts from the first
+thread, skips nothing, and the database ends up mirroring the ledgers as they
+are then.
+
+**In a worker.** `bun:sqlite` is synchronous and verification reads the whole
+database back, so the server runs the import, verification included, in a
+worker thread (`import-job.ts`); only that thread touches `store.db`. Each
+server has one import at a time, and a second request while it runs gets that
+run's report. An abort is a flag in shared memory, which the importer reads
+after planning each thread, before each transaction, and before and after
+verification (`STORE_IMPORT_INTERRUPTED`). `close()` raises it before any other
+teardown, and hands the store on only once the worker has exited. The worker is
+never terminated; one that ends without a result is `STORE_IMPORT_FAILED`.
+
+The worker starts from its own file, so `import-worker.ts` is an entry point in
+both `scripts/build.ts` and `scripts/build-exe.ts`. A compiled executable
+finds it by its path from `src/`, the entry points' shared folder.
+
+**Imported or quarantined.** Every source record (one per thread record, one per
+non-blank ledger line) becomes a live row or a `quarantine` row:
+
+- Files are read as bytes, split at LF (a CR before it is part of the line
+  ending), and each record is decoded as strict UTF-8. One that is not valid is
+  quarantined, even where the JSONL readers would show U+FFFD and carry on.
+- A line is a row by the JSONL readers' own rule (`parseLedgerLine`): torn,
+  unparseable and id-less lines are quarantined. So is a row missing a field its
+  columns need, or holding the wrong type (`validate.ts`; STRICT alone would
+  convert a number into text), or naming another thread than its folder's.
+  Nothing is defaulted to make a record fit. A removed interaction mode reads as
+  Build, as the JSONL reader reads it.
+- A thread whose record is missing, unparseable, or invalid (no
+  `modelSelection`, say) has no thread row, so every one of its ledger lines is
+  quarantined with it. A folder with no records at all is ignored.
+- A file that exists but cannot be read is not a bad record: the import stops
+  with `STORE_IMPORT_READ_FAILED`.
+
+`quarantine.row_json` is `{origin: "jsonl-import", threadId, file, line}` plus
+the record: `file` is relative to the store root and `line` is null for a thread
+record. A record that is valid UTF-8 is `raw`, its text, which encodes back to
+the same bytes; any other is `rawBase64`, its bytes. A line is kept without its
+line ending, a thread record as the whole file. Re-importing replaces only rows
+with that origin.
+
+**Progress and verification.** `meta.import_state` is `running` from the first
+transaction until the counts check out. Then every table's live row count must
+equal what the pass imported, its quarantine rows what it set aside
+(`STORE_IMPORT_MISMATCH`), and `PRAGMA quick_check` must answer `ok`
+(`STORE_IMPORT_CORRUPT`). Only then do `import_state = 'complete'`,
+`imported_at` and `source_rows` (per table: source, imported, quarantined) land
+together.
+
+The JSONL store keeps changing after an import, so `complete` describes the
+store as it was read, not as it is now. The cut-over imports again with nothing
+else writing. An import run beside live turns can quarantine a line caught half
+written; the next run replaces it.
 
 ## Performance budget
 

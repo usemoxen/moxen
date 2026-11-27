@@ -41,12 +41,14 @@ const buildDefine = { "process.env.NODE_ENV": '"production"', __MOXEN_BUILD_REVI
 const result = await Bun.build({
   // The server and the moxen MCP server are spawned as their own processes
   // (`src/server/client.ts`, `src/server/mcp/main.ts`), as is the embedding
-  // worker (`src/core/memory/embedding-runtime.ts`).
+  // worker (`src/core/memory/embedding-runtime.ts`). The store import's worker
+  // thread starts from its own file too (`src/core/threads/sqlite/import-job.ts`).
   entrypoints: [
     join(root, "src/cli/index.ts"),
     join(root, "src/server/daemon.ts"),
     join(root, "src/server/mcp/entry.ts"),
     join(root, "src/core/memory/embedding-child-entry.ts"),
+    join(root, "src/core/threads/sqlite/import-worker.ts"),
   ],
   outdir,
   target: "bun",

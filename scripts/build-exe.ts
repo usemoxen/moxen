@@ -5,7 +5,8 @@
  *
  * One binary for every process: the CLI entry re-runs itself with an
  * internal first argument to become the autostarted daemon, the MCP server,
- * or the embedding worker (see `src/server/standalone.ts`). The platform
+ * or the embedding worker (see `src/server/standalone.ts`). A worker thread
+ * cannot be started that way: its file is a second entry point. The platform
  * native OpenTUI package stays external and travels beside the binary, like
  * it does beside the bundle. Without `--target` the binary is for this
  * machine; the release builds on each platform's own runner instead of
@@ -27,7 +28,9 @@ if (!/^bun-(darwin|linux|windows)-/.test(target)) throw new Error(`Not a Bun com
 await buildKnowledge();
 
 const result = await Bun.build({
-  entrypoints: [join(root, "src", "cli", "index.ts")],
+  // The first is the program. The rest are the files worker threads start from, which a
+  // compiled binary finds by their path from these entries' shared folder, `src/`.
+  entrypoints: [join(root, "src", "cli", "index.ts"), join(root, "src", "core", "threads", "sqlite", "import-worker.ts")],
   compile: { outfile: out, target },
   define: { "process.env.NODE_ENV": '"production"', __MOXEN_BUILD_REVISION__: JSON.stringify(readGitRevision(root) ?? "unknown") },
   // Native libraries are located on disk at runtime: leave them to node_modules.

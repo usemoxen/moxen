@@ -37,6 +37,7 @@ import { APP_VERSION } from "../server/api.js";
 import { requestedInteractionMode } from "../core/interactionmode.js";
 import { deleteMemory, editMemory, importClaudeMemory, listMemory, memoryEmbeddings, readMemory, saveMemory, searchMemory } from "./memory/memory.js";
 import { writeError, writeSuccess } from "./output.js";
+import { describeStoreImport, importStore } from "./store/store.js";
 import {
   createHandoverThread,
   type ThreadCreateOptions,
@@ -1049,6 +1050,18 @@ forge
         ...(options.deleteBranch !== undefined ? { deleteBranch: options.deleteBranch } : {}),
       });
       writeSuccess(result, context, `Merged #${result.number} (${result.strategy}).`);
+    }),
+  );
+
+const store = program.command("store").description("The server's thread store.");
+store
+  .command("import")
+  .description("Copy the JSONL thread store into the SQLite store.db, replacing an earlier import. The JSONL files are only read, and Moxen still runs on them. Records that cannot be imported are kept in the database's quarantine table. Safe to run again, including after an interrupted run.")
+  .action(() =>
+    action(async () => {
+      const context = await commandContext();
+      const result = await importStore(context.config);
+      writeSuccess(result, context, describeStoreImport(result));
     }),
   );
 

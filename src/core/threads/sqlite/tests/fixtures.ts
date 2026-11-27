@@ -18,7 +18,7 @@ export const AT = "2026-11-19T10:20:30.000Z";
 export const LATER = "2026-11-19T11:00:00.000Z";
 export const MODEL: ModelSelection = { instanceId: "claude", model: "claude-test-1" };
 
-export function fullThread(): StoredThread {
+export function fullThread() {
   return {
     id: "thread-1",
     projectId: "project-1",
@@ -118,7 +118,7 @@ export function fullThread(): StoredThread {
       { agentId: "agent-1", agentType: "Explore", description: null, status: "completed", startedAt: AT, stoppedAt: LATER },
     ],
     turnSeq: 4,
-  };
+  } satisfies Required<StoredThread>;
 }
 
 /** Only the required fields: the defaults must not turn into stored data. */
@@ -146,7 +146,7 @@ export function sparseThread(): StoredThread {
 }
 
 /** A queued turn with every queue, handoff, owner and usage field set. */
-export function queuedTurn(threadId = "thread-1"): StoredTurn {
+export function queuedTurn(threadId = "thread-1") {
   return {
     id: "turn-1",
     threadId,
@@ -204,7 +204,43 @@ export function queuedTurn(threadId = "thread-1"): StoredTurn {
     startedAt: AT,
     executionSeq: 3,
     completedAt: null,
-  };
+  } satisfies StoredTurn;
+}
+
+/**
+ * Every field a turn can carry. `satisfies Required<…>` makes a field added to
+ * the type fail typecheck here, and the round trip then fails until the codecs
+ * carry it: a field they do not name is silently lost in an import.
+ */
+export function everyTurn() {
+  return {
+    ...queuedTurn(),
+    id: "turn-every",
+    handoffOpen: true,
+    handoffPending: ["msg-1"],
+    handoffFailed: true,
+    maintenance: true,
+    origin: "compaction",
+    usageRecoveryNotice: true,
+  } satisfies Required<StoredTurn>;
+}
+
+/** Every field a message can carry, held to the type like `everyTurn`. */
+export function everyMessage() {
+  return { ...fullMessage(), id: "msg-every", queuedTaskNotice: true } satisfies Required<StoredMessage>;
+}
+
+/** Every field an activity can carry, held to the type like `everyTurn`. */
+export function everyActivity() {
+  return {
+    id: "act-every",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    kind: "tool-call.completed",
+    summary: "Read",
+    payload: { tool: "read" },
+    createdAt: AT,
+  } satisfies Required<StoredActivity>;
 }
 
 /** A settled turn with the nullable fields at null and no optional ones. */
@@ -228,7 +264,7 @@ export function completedTurn(threadId = "thread-1"): StoredTurn {
   };
 }
 
-export function fullMessage(): StoredMessage {
+export function fullMessage() {
   return {
     id: "msg-1",
     threadId: "thread-1",
@@ -262,7 +298,7 @@ export function fullMessage(): StoredMessage {
         },
       ],
     },
-  };
+  } satisfies StoredMessage;
 }
 
 /** Only the required fields: no attachments, origin or notification. */
@@ -279,7 +315,7 @@ export function activityWithoutPayload(): StoredActivity {
   return { id: "act-2", threadId: "thread-1", turnId: null, kind: "thread.created", summary: "Created", createdAt: AT };
 }
 
-export function fullCheckpoint(): StoredCheckpoint {
+export function fullCheckpoint() {
   return {
     id: "cp-1",
     threadId: "thread-1",
@@ -289,7 +325,7 @@ export function fullCheckpoint(): StoredCheckpoint {
     baseRef: "def456",
     createdAt: AT,
     files: [{ path: "src/a b.ts", additions: 3, deletions: 1 }],
-  };
+  } satisfies Required<StoredCheckpoint>;
 }
 
 /** The pre/post captures are missing, and so is the file list. */
@@ -297,7 +333,7 @@ export function sparseCheckpoint(): StoredCheckpoint {
   return { id: "cp-2", threadId: "thread-1", turnId: "turn-2", status: "unavailable", ref: null, baseRef: null, createdAt: AT };
 }
 
-export function fullDelegation(): StoredDelegation {
+export function fullDelegation() {
   return {
     id: "del-1",
     parentThreadId: "thread-1",
@@ -321,7 +357,7 @@ export function fullDelegation(): StoredDelegation {
     status: "completed",
     createdAt: AT,
     updatedAt: LATER,
-  };
+  } satisfies Required<StoredDelegation>;
 }
 
 export function sparseDelegation(): StoredDelegation {
