@@ -1934,16 +1934,24 @@ async function pendingAutoContinue(
  * Mark a delegated task's automatic continue cancelled so `task_status`
  * says so either way, and tell its parent unless asked not to. The mark
  * applies only when the child has no live work left: a follow-up still
- * running reports on its own when it settles. No-op when the thread is not
- * a live delegated task.
+ * running reports on its own when it settles. Either way the settles so far
+ * are accounted for: the cancellation is what the parent hears about them, or
+ * deliberately does not, so a restart must not report them. No-op when the
+ * thread is not a live delegated task.
  */
 export async function noteAutoContinueCancelled(ctx: OperationContext, threadId: string, opts: CancelAutoContinueOptions = {}): Promise<boolean> {
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   const row = rows.find((candidate) => candidate.childThreadId === threadId && candidate.continuedIn === undefined);
   if (!row) return false;
-  if (await taskHasSettledForGood(ctx, threadId)) {
-    if (row.status !== "cancelled") await ctx.store.updateDelegation(row.id, { status: "cancelled" }).catch(() => null);
-  }
+  const settled = await taskHasSettledForGood(ctx, threadId);
+  await ctx.store.updateDelegationWith(row.id, (current) => {
+    const generation = current.settleGeneration ?? 0;
+    const patch: Partial<StoredDelegation> = {
+      ...(settled && current.status !== "cancelled" ? { status: "cancelled" as const } : {}),
+      ...(generation > (current.reportedGeneration ?? 0) ? { reportedGeneration: generation } : {}),
+    };
+    return Object.keys(patch).length > 0 ? patch : null;
+  }).catch(() => null);
   if (row.notify === true && opts.notifyParent !== false) await queueTaskCancelNotification(ctx, threadId);
   return true;
 }
@@ -5998,7 +6006,9 @@ async function reportOwedSettles(ctx: OperationContext, recovered: ReadonlySet<s
   const rows = await ctx.store.readDelegations().catch(() => [] as StoredDelegation[]);
   const owed = new Set<string>();
   for (const row of rows) {
-    if (row.continuedIn !== undefined || row.notify !== true) continue;
+    // A cancelled task owes nothing. A parent's message or a restored queue
+    // entry revives the status at once; other work when it settles for good.
+    if (row.continuedIn !== undefined || row.notify !== true || row.status === "cancelled") continue;
     if ((row.settleGeneration ?? 0) <= (row.reportedGeneration ?? 0)) continue;
     if (!(await taskHasSettledForGood(ctx, row.childThreadId))) continue;
     await enqueueTaskNotification(ctx, row.parentThreadId, await observedTaskNotice(ctx, row.childThreadId));

@@ -890,10 +890,24 @@ export class ThreadStore {
     delegationId: string,
     patch: Partial<StoredDelegation>,
   ): Promise<StoredDelegation | null> {
+    return await this.updateDelegationWith(delegationId, () => patch);
+  }
+
+  /**
+   * Patch one row from the row as it stands under the ledger lock, so a value
+   * derived from it (a counter, a high-water mark) cannot be overwritten by a
+   * writer that read an older copy. A null patch writes nothing.
+   */
+  async updateDelegationWith(
+    delegationId: string,
+    patchFor: (current: StoredDelegation) => Partial<StoredDelegation> | null,
+  ): Promise<StoredDelegation | null> {
     return await this.withThreadLock("!delegations", async () => {
       const all = await this.readDelegations();
       const index = all.findIndex((delegation) => delegation.id === delegationId);
       if (index < 0) return null;
+      const patch = patchFor(all[index]!);
+      if (patch === null) return all[index]!;
       const updated: StoredDelegation = {
         ...all[index]!,
         ...patch,

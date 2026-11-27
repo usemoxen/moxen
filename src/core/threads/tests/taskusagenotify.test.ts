@@ -26,6 +26,8 @@ import {
   type OperationContext,
 } from "../operations.js";
 import { parseQueuePolicy } from "../queue.js";
+import { markDelegationNoticeReported } from "../delegationnotice.js";
+import { openThreadStore } from "../store.js";
 import { taskNotificationText } from "../notify.js";
 import { UsageProtection } from "../../usage/protection.js";
 
@@ -490,6 +492,64 @@ describe("cancelling a delegated task's automatic continue", () => {
     expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
     await flushTaskNotifications(w.ctx, parent.id);
     await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+  });
+
+  /** A notifying task whose usage-limit failure had its automatic continue cancelled. */
+  async function cancelledAfterLimit(opts: { notifyParent?: boolean } = {}) {
+    const w = await world({ autoContinueAtUsageLimit: true });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const stopped = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await failTurn(w.store, child.id, stopped.id, { error: "Usage limit reached." });
+    await scheduleUsageContinue(w.ctx, child.id, stopped.id, new Date(Date.now() + 3_600_000).toISOString());
+    expect(await cancelAutoContinue(w.ctx, child.id, opts)).toBe(true);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    return { w, parent, child };
+  }
+
+  /** A new server over the same store: it replays batches and owed settles. */
+  async function restart(w: Awaited<ReturnType<typeof world>>): Promise<void> {
+    await recoverTaskNotifications({ ...w.ctx, store: await openThreadStore(w.root) });
+    await flushTurnRunners();
+  }
+
+  it("adds no settle notice to the cancellation after a restart", async () => {
+    const { w, parent } = await cancelledAfterLimit();
+    await restart(w);
+    const delivered = await notificationsIn(w, parent.id);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain("was cancelled");
+  });
+
+  it("stays silent after a restart when asked not to notify", async () => {
+    const { w, parent } = await cancelledAfterLimit({ notifyParent: false });
+    await restart(w);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+  });
+
+  it("keeps the cancelled settle accounted for once later compaction revives the task", async () => {
+    const { w, parent, child } = await cancelledAfterLimit({ notifyParent: false });
+    // The compaction settles for good, which clears the cancelled mark
+    // without settling any work of its own.
+    await (await startTurn(w.ctx, { threadId: child.id, prompt: "/compact" })).run;
+    await flushTurnRunners();
+    expect((await w.store.readDelegations())[0]?.status).toBe("running");
+    await restart(w);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+  });
+
+  it("replays no settle for a running task its parent cancelled", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    // No run callback: the process dies before one could queue the notice.
+    await sendTurn(w.store, child.id, { prompt: "Build it" });
+    await cancelTask(w.ctx, parent.id, child.id);
+    await restart(w);
     expect(await notificationsIn(w, parent.id)).toEqual([]);
   });
 
@@ -1428,5 +1488,32 @@ describe("task notification text for pauses and cancellations", () => {
       { ...task, taskId: "other", status: "completed" },
     ]);
     expect(text).toContain("Updates on 2 tasks");
+  });
+});
+
+describe("owed settle bookkeeping (MXN-389)", () => {
+  async function notifyingTask() {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    const row = async () => (await w.store.readDelegations())[0]!;
+    return { w, child, row };
+  }
+
+  it("never lowers the reported generation when two notices are queued at once", async () => {
+    const { w, child, row } = await notifyingTask();
+    await Promise.all([markDelegationNoticeReported(w.store, child.id, 3), markDelegationNoticeReported(w.store, child.id, 2)]);
+    expect((await row()).reportedGeneration).toBe(3);
+  });
+
+  it.each(["completed", "interrupted"] as const)("owes nothing for a %s compaction written before the turn marker existed", async (outcome) => {
+    const { w, child, row } = await notifyingTask();
+    const compact = (await sendTurn(w.store, child.id, { prompt: "/compact" })).turn;
+    const { maintenance: _marker, ...legacy } = compact;
+    await w.store.rewriteLedger(child.id, "turns", [legacy]);
+    if (outcome === "completed") await completeTurn(w.store, child.id, compact.id, { text: "Conversation compacted." });
+    else await interruptTurn(w.store, child.id, compact.id);
+    expect((await row()).settleGeneration).toBeUndefined();
   });
 });

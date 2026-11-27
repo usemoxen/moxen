@@ -855,7 +855,7 @@ async function interruptTurnLocked(
   if (review !== null) await commitReviewDecision(store, review, thread.id, turn.id);
   // A message taken back before it ran, and Moxen's own compaction, settle
   // no work: neither leaves the parent a notice that recovery would owe.
-  if (turn.status === "running" && turn.maintenance !== true) await markDelegationSettle(store, thread.id);
+  if (turn.status === "running") await markDelegationSettle(store, thread.id, turn);
   return updated;
 }
 
@@ -1054,7 +1054,7 @@ export async function reconcileOrphanedTurn(
       createdAt: now,
     });
     if (review !== null) await commitReviewDecision(store, review, threadId, running.id);
-    if (running.maintenance !== true) await markDelegationSettle(store, threadId);
+    await markDelegationSettle(store, threadId, running);
     // A drain reconciles the orphan but starts nothing: a promotion taken
     // here would leave the lock already `running`, so the caller's runner
     // would dispatch it — around every start path's drain check. The queued
@@ -1864,7 +1864,7 @@ async function finishTurn(
       createdAt: now,
     });
     if (review !== null) await commitReviewDecision(store, review, threadId, turnId);
-    if (turn.maintenance !== true) await markDelegationSettle(store, threadId);
+    await markDelegationSettle(store, threadId, turn);
     // A settle during a drain promotes nothing: a promoted turn would start on
     // a server that is going away. Held for the admission path, it runs once
     // the next server is up.

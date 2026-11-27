@@ -642,7 +642,10 @@ to the owner, with all of that task's waiting notices in one write. Each
 settle also records a generation on the delegation row; on startup the server
 replays pending batches and then queues a notice for any generation ahead of
 the last one a notice was queued for (`reportedGeneration` advances when the
-notice is queued, before a parent message records a receipt). In the JSONL
+notice is queued, before a parent message records a receipt). A cancelled
+task replays nothing: cancelling its automatic continue counts its settles so
+far as reported, whether or not the parent is told, and a row that reads
+cancelled is skipped until fresh work revives it. In the JSONL
 store, crash recovery and hand-off races are not transactional: an
 interruption, a hand-off landing during delivery, or a crash between a turn
 and its delegation row can still duplicate or delay a notice. Those paths are
