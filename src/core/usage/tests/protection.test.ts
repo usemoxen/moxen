@@ -1413,6 +1413,29 @@ describe("usage protection", () => {
     }
   });
 
+  it("holds no notice reservation when a recovered turn's held-notice read fails", async () => {
+    const w = await world();
+    const id = await w.make("held notice read");
+    await completeTurn(w.store, id, openTurn(await w.store.readTurns(id))!.id, { text: "idle" });
+    await sendTurn(w.store, id, { prompt: "recovered", queue: parseQueuePolicy({ conditions: [] }) });
+    const read = w.store.readDelegations.bind(w.store);
+    // Thrown outright, past the read's own fallback, and only for that caller:
+    // the failure lands wherever the recovery asks for the held notice.
+    const spy = vi.spyOn(w.store, "readDelegations").mockImplementation(() => {
+      if (new Error().stack?.includes("heldNoticeParent")) throw new Error("injected held-notice failure");
+      return read();
+    });
+    try {
+      await expect(runDueScheduledTurn(w.ctx, id)).rejects.toThrow("injected held-notice failure");
+      expect(usageNoticeReserved(id)).toBe(false);
+      expect(w.prompts).not.toContain("recovered");
+    } finally {
+      spy.mockRestore();
+      await flushTurnRunners();
+      w.guard.close();
+    }
+  });
+
   it.each([
     ["text", "reset"], ["text", "answered"], ["runtime", "reset"], ["runtime", "answered"],
   ] as const)("drops a prepared %s warning when its wait ends before the send (%s)", async (channel, ending) => {

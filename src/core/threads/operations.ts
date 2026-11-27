@@ -814,6 +814,11 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     // notices and the developer split), then reconcile its warning slot before
     // the first prompt and decide provenance from every message in the batch.
     const prompt = await composeTurnPrompt(ctx, thread, turn.id, setup, message.text, rules?.text ?? null, usageNoticeParts(messages, turn));
+    // Decided now, before the run: a notice the batch already holds for this
+    // task owns its settle, and the completion callback below only wakes it.
+    // Read before the notice reservation exists, so nothing awaited between
+    // taking it and handing it to the runner can leave it behind.
+    const coveredParent = await heldNoticeParent(ctx, threadId);
     let notice;
     try {
       notice = await dispatchUsageNotice({
@@ -830,9 +835,6 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
       return;
     }
     const steps = [...deliveredSteps(setup), ...(rules ? [async () => rules.commit()] : [])];
-    // Decided now, before the run: a notice the batch already holds for this
-    // task owns its settle, and the completion callback below only wakes it.
-    const coveredParent = await heldNoticeParent(ctx, threadId);
     // Checked again once the session start and the reads above are done: they
     // take real time, and a drain can begin inside it. Nothing is sent; the
     // turn waits as queued work for the next server. The notice reservation is
@@ -1410,7 +1412,7 @@ export async function prepareQueuedHandoff(ctx: OperationContext, threadId: stri
   // one even when its turn predates the origin column.
   const origins = await loadTurnOrigins(store, [{ thread: source, turns }], ctx.config);
   const origin = turn.origin ?? origins.get(turnOriginKey(threadId, turn.id));
-  const userAuthorized = origin === undefined && turn.queue.automatic !== true && turn.queue.wakeUp !== true
+  const userAuthorized = origin === undefined && turn.automatic !== true && turn.queue.automatic !== true && turn.queue.wakeUp !== true
     && turn.scheduleReason !== "usage-reset" && turn.scheduleReason !== "usage-hold";
   // A handoff into a held Antigravity is one of the automatic prompts off
   // forbids: an automatic entry of any continuation (model or stored) is

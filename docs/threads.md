@@ -130,7 +130,9 @@ stopped for a compaction whose follow-up could not start, and a hand-off you
 queued yourself that wants a model summary completes on its stored summary
 rather than waiting on a summary the gate would hold. The
 entry shows why it waits, and runs with your next message or when you turn the
-setting on. Recovering a turn whose process died interrupts it either way, but
+setting on. A turn marked as Moxen's own dispatch never counts as your message,
+even with no origin: it releases no held entry, a task notice cannot ride it,
+and a queued hand-off carrying the mark is not one you queued. Recovering a turn whose process died interrupts it either way, but
 the follow-up it had queued is never dispatched past the gate: it goes back to
 queued for the admission path, which holds it like any other automatic prompt.
 A task notice holds its exception only while a live turn of yours can carry

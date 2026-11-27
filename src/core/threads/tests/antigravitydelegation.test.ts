@@ -20,7 +20,7 @@ import { driverKindOfInstance } from "../../types.js";
 import type { ProviderRuntimeEvent } from "../../providers/spi.js";
 import type { TurnDriver } from "../execute.js";
 import { COMPACT_PROMPT, COMPACTED_CONTINUE_PROMPT } from "../longthreads.js";
-import { parseQueuePolicy } from "../queue.js";
+import { antigravitySteerGate, parseQueuePolicy } from "../queue.js";
 import {
   actOnLongThread,
   compactMidTurn,
@@ -263,6 +263,40 @@ describe("Antigravity automatic prompts held while off", () => {
     await runWorkQueue(w.ctx);
     await settleRuns();
     expect((await w.store.readTurns(destination)).find((turn) => turn.id === moved!.id)?.status).toBe("completed");
+  });
+
+  it("never reads an automatic turn with no origin as fresh user consent", async () => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    const queued = await queueAgentMessage(w.ctx, thread.id, { message: "Check the logs" });
+    const statusOf = async () => (await w.store.readTurns(thread.id)).find((turn) => turn.id === queued.turnId)?.status;
+
+    // Only the flag says this later turn is not the user speaking.
+    const automatic = (await sendTurn(w.store, thread.id, { prompt: "Moxen's own dispatch", automatic: true })).turn;
+    expect(automatic.origin).toBeUndefined();
+    await completeTurn(w.store, thread.id, automatic.id, { text: "Done." });
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect(await statusOf()).toBe("queued");
+    const entry = (await readWorkQueue(w.ctx)).find((candidate) => candidate.turnId === queued.turnId)!;
+    expect(entry.blocked.join(" ")).toContain("providers.antigravity.allowUnsupportedUse");
+
+    // The user's own message still releases it.
+    const user = (await sendTurn(w.store, thread.id, { prompt: "Go on" })).turn;
+    await completeTurn(w.store, thread.id, user.id, { text: "Done." });
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    expect(await statusOf()).toBe("completed");
+  });
+
+  it.each([true, false])("lets an automatic notice ride a live turn only when the user wrote it (automatic, no origin: %s)", async (automatic) => {
+    const w = await world();
+    const thread = await w.make("antigravity", "gemini-4-neon");
+    const live = (await sendTurn(w.store, thread.id, { prompt: "Live work", ...(automatic ? { automatic: true } : {}) })).turn;
+    expect(live.origin).toBeUndefined();
+    const gate = await antigravitySteerGate(w.store, thread.id, live.id);
+    expect(gate.refuses(() => w.config.providers, true)).toBe(automatic);
+    await completeTurn(w.store, thread.id, live.id, { text: "Done." });
   });
 
   it("never reads the generated handoff of the move as fresh user consent, even stamped in the same millisecond", async () => {
@@ -522,6 +556,20 @@ describe("queued Antigravity model handoffs while off", () => {
     const storedHeld = (await w.store.readTurns(storedThread.id)).find((t) => t.id === storedHandoff.turn.id);
     expect(storedHeld?.status).toBe("queued");
     expect(storedHeld?.handoff).toBeUndefined();
+
+    // No origin and no queue flag: the turn's own flag still says the user
+    // did not queue this handoff.
+    const flaggedThread = await w.make("antigravity", "gemini-4-neon");
+    const flaggedHandoff = await sendTurn(w.store, flaggedThread.id, {
+      prompt: "Keep going",
+      automatic: true,
+      queue: { ...parseQueuePolicy({ conditions: [], continuation: "stored" }), requestId: "flagged-stored" },
+    }, w.config);
+    await runWorkQueue(w.ctx);
+    await settleRuns();
+    const flaggedHeld = (await w.store.readTurns(flaggedThread.id)).find((t) => t.id === flaggedHandoff.turn.id);
+    expect(flaggedHeld?.status).toBe("queued");
+    expect(flaggedHeld?.handoff).toBeUndefined();
   });
 
   it("completes a user-queued model handoff from an Antigravity source to another provider on the stored summary", async () => {
