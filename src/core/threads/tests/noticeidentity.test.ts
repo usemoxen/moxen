@@ -194,21 +194,19 @@ describe("a destination flush against a notice it never read", () => {
     // Another process queues this task's next settle into the batch file after
     // the flush took its snapshot: the durable entries are shared state. The
     // restore point is the flush's own read of the delegations, after the
-    // snapshot and before the acknowledgement.
-    const readDelegations = w.store.readDelegations.bind(w.store);
-    let armed = true;
-    const spy = vi.spyOn(w.store, "readDelegations").mockImplementation(async () => {
-      const rows = await readDelegations();
-      if (armed) {
-        armed = false;
+    // snapshot and before the acknowledgement. Settle genuinely new work
+    // after the first notice's facts are written, before the batch forgets it.
+    const append = w.store.appendLedger.bind(w.store);
+    let laterId: string | undefined;
+    const spy = vi.spyOn(w.store, "appendLedger").mockImplementation(async (id, ledger, row) => {
+      await append(id, ledger, row);
+      if (id === parent.id && ledger === "messages" && typeof row === "object" && row !== null && "origin" in row && row.origin === "task-notification" && laterId === undefined) {
+        const later = (await sendTurn(w.store, child.id, { prompt: "Later" })).turn;
+        laterId = later.id;
+        await completeTurn(w.store, child.id, later.id, { text: "Second result." });
         const file = path.join(w.root, "task-notification-batches.json");
-        const batches = JSON.parse(await readFile(file, "utf8")) as Record<string, { child: string; id?: string }[]>;
-        await writeFile(
-          file,
-          `${JSON.stringify({ ...batches, [parent.id]: [...(batches[parent.id] ?? []), { child: child.id, id: "settle:later" }] })}\n`,
-        );
+        await writeFile(file, `${JSON.stringify({ [parent.id]: [{ child: child.id, id: `settle:${child.id}:${later.id}` }] })}\n`);
       }
-      return rows;
     });
     try {
       await flushTaskNotifications(w.ctx, parent.id);
@@ -250,6 +248,88 @@ describe("a flush whose acknowledgement write failed", () => {
     await recoverTaskNotifications(w.ctx);
     await flushTurnRunners();
     expect(await notificationsIn(w, parent.id)).toHaveLength(1);
+    expect(await batchesOf(w)).toEqual({});
+  });
+});
+
+describe("notice delivery receipts", () => {
+  it("records the work turn a deferred notice actually describes", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    await settle(w, child.id, "First", "First result.");
+    await hold(w, parent.id);
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await release(w, parent.id);
+    const later = (await sendTurn(w.store, child.id, { prompt: "Second" })).turn;
+    await flushTaskNotifications(w.ctx, parent.id);
+    expect(await notificationsIn(w, parent.id)).toEqual([]);
+    await completeTurn(w.store, child.id, later.id, { text: "Second result." });
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+
+    const notices = (await w.store.readMessages(parent.id)).filter((message) => message.origin === "task-notification");
+    expect(notices.map((message) => message.notification?.tasks[0]?.settleTurnId)).toEqual([later.id]);
+    expect(notices[0]?.notification?.notices).toEqual([`settle:${child.id}:${later.id}`]);
+    expect(await batchesOf(w)).toEqual({});
+  });
+
+  it("deduplicates a settle after 65 newer durable notice receipts", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+    await settle(w, child.id, "Build it", "Done.");
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    const turns = await w.store.readTurns(parent.id);
+    const messages = await w.store.readMessages(parent.id);
+    const [receipt] = messages.filter((message) => message.origin === "task-notification");
+    const newer = Array.from({ length: 65 }, (_, i) => ({
+      ...receipt!, id: w.store.newId(), turnId: w.store.newId(),
+      notification: { tasks: [], notices: [`settle:another-task:${i}`] },
+    }));
+    await w.store.rewriteLedger(parent.id, "turns", [...turns, ...newer.map((message) => ({ ...turns[0]!, id: message.turnId, messageId: message.id }))]);
+    await w.store.rewriteLedger(parent.id, "messages", [...messages, ...newer]);
+
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, parent.id)).toHaveLength(66);
+    expect(await batchesOf(w)).toEqual({});
+  });
+
+  it.each(["adoption", "startup rebucketing"] as const)("does not replay a source receipt during %s", async (pathTaken) => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    await settle(w, child.id, "Build it", "Done.");
+    await queueTaskNotification(w.ctx, source.id, child.id);
+    batchIo.failWhen = (text) => Object.keys(JSON.parse(text)).length === 0;
+    batchIo.failuresLeft = 1;
+    await flushTaskNotifications(w.ctx, source.id);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, source.id)).toHaveLength(1);
+    expect((await batchesOf(w))[source.id]).toHaveLength(1);
+
+    let destinationId: string;
+    if (pathTaken === "adoption") {
+      destinationId = (await continueThread(w.ctx, { threadId: source.id })).threadId;
+      await flushTurnRunners();
+    } else {
+      // The adoption already repointed the task, but died before moving its batch.
+      destinationId = (await w.make("continuation")).id;
+      await w.store.updateDelegations([{ id: `d-${child.id}`, patch: { parentThreadId: destinationId } }]);
+    }
+    await recoverTaskNotifications(w.ctx);
+    await flushTurnRunners();
+    expect(await notificationsIn(w, destinationId)).toEqual([]);
     expect(await batchesOf(w)).toEqual({});
   });
 });

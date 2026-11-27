@@ -1205,6 +1205,84 @@ describe("a handoff that has not adopted its source's tasks yet", () => {
     }
   });
 
+  it("rechecks the live Antigravity opt-in for an interrupted agent opener", async () => {
+    let optIn = true;
+    const w = await world({ providers: { antigravity: { allowUnsupportedUse: true } } });
+    const ctx = { ...w.ctx, providersInForce: () => ({ antigravity: { allowUnsupportedUse: optIn } }) };
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const failure = vi.spyOn(w.store, "updateDelegations").mockRejectedValueOnce(new Error("injected adoption failure"));
+    try {
+      await expect(continueOwnThread(ctx, {
+        threadId: source.id,
+        summary: "Agent's original handoff.",
+        firstMessage: "Check the result.",
+        modelSelection: { instanceId: "antigravity", model: "gemini-4-neon" },
+      })).rejects.toThrow("injected adoption failure");
+    } finally {
+      failure.mockRestore();
+    }
+    const destinationId = (await destinationOf(w, source.id))!;
+    expect(destinationId).toBeTruthy();
+    optIn = false;
+    await recoverPendingAdoptions(ctx);
+    expect(await w.store.readTurns(destinationId)).toEqual([]);
+    expect((await w.store.readThreadRecord(destinationId))?.adoptingFrom).toBe(source.id);
+    expect((await w.store.readDelegations()).find((row) => row.childThreadId === child.id)?.parentThreadId).toBe(source.id);
+
+    optIn = true;
+    await recoverPendingAdoptions(ctx);
+    await finishTurns(w, destinationId);
+    expect(await w.store.readTurns(destinationId)).toMatchObject([{ handoffOpen: true, modelSelection: { instanceId: "antigravity" } }]);
+    expect((await w.store.readMessages(destinationId)).find((message) => message.role === "user")?.text).toContain("Check the result.");
+  });
+
+  it.each(["adoption", "opener turn", "opener message", "dependent queue"] as const)("recovers the scheduled opener and its dependent queue after a crash at %s", async (point) => {
+    const w = await world();
+    const source = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, source.id, child.id);
+    const pending = (await sendTurn(w.store, source.id, { prompt: "Transferred request", queue: parseQueuePolicy({ conditions: [] }) })).turn;
+    const scheduledFor = new Date(Date.now() + 3_600_000).toISOString();
+    const action = "Run the original first action.";
+    const append = w.store.appendLedger.bind(w.store);
+    let failed = false;
+    const appendFailure = vi.spyOn(w.store, "appendLedger").mockImplementation(async (id, ledger, row) => {
+      if (!failed && id !== source.id && (
+        (point === "opener turn" && ledger === "turns") ||
+        (point === "opener message" && ledger === "messages") ||
+        (point === "dependent queue" && ledger === "messages" && typeof row === "object" && row !== null && "text" in row && row.text === "Transferred request")
+      )) {
+        failed = true;
+        throw new Error("injected handoff failure");
+      }
+      return append(id, ledger, row);
+    });
+    const adoptionFailure = point === "adoption" ? vi.spyOn(w.store, "updateDelegations").mockRejectedValueOnce(new Error("injected handoff failure")) : null;
+    try {
+      await expect(continueThread(w.ctx, { threadId: source.id, scheduledFor, firstMessage: action })).rejects.toThrow("injected handoff failure");
+    } finally {
+      appendFailure.mockRestore();
+      adoptionFailure?.mockRestore();
+    }
+    const destinationId = (await destinationOf(w, source.id))!;
+    expect(destinationId).toBeTruthy();
+    await recoverPendingAdoptions(w.ctx);
+    await recoverPendingAdoptions(w.ctx);
+
+    const turns = await w.store.readTurns(destinationId);
+    const opener = turns.find((turn) => turn.handoffOpen === true);
+    expect(opener).toMatchObject({ scheduledFor, status: "queued" });
+    expect(turns.filter((turn) => turn.handoffOpen)).toHaveLength(1);
+    const messages = await w.store.readMessages(destinationId);
+    expect(messages.filter((message) => message.id === opener?.messageId)).toMatchObject([{ text: expect.stringContaining(action) }]);
+    const transfer = turns.find((turn) => turn.queue?.requestId === `handoff:transfer:${pending.id}`);
+    expect(transfer?.queue?.conditions).toContainEqual({ type: "entry", threadId: destinationId, turnId: opener?.id, serverWait: true });
+    expect(messages.filter((message) => message.turnId === transfer?.id)).toMatchObject([{ text: "Transferred request" }]);
+    expect((await w.store.readThreadRecord(destinationId))?.adoptingFrom).toBeNull();
+  });
+
   it("clears a receiving marker left behind once the adoption is behind it", async () => {
     const w = await world();
     const source = await w.make("orchestrator");

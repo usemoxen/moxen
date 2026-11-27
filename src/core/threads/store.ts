@@ -783,28 +783,17 @@ export class ThreadStore {
     });
   }
 
-  /**
-   * Take the notice identities off a message whose delivery never happened —
-   * a steer the provider refused, or a send that failed after the message was
-   * staged. The message stays in the turn's transcript, but its `notices`
-   * record would read as delivered on the next flush: the failed attempt
-   * delivered nothing, and the batch entry (with `refusedMessageId`, or the
-   * still-durable batch) keeps the retry. With `turnId` given, the newest
-   * task-notification message on that turn that still records identities is
-   * the one; without it, the message is named by id.
-   */
-  async clearStagedNoticeIdentities(threadId: string, target: { readonly turnId: string } | { readonly messageId: string }): Promise<void> {
+  /** Clear only this failed batch steer, leaving its transcript and any accepted receipt intact. */
+  async clearStagedNoticeIdentities(threadId: string, messageId: string): Promise<void> {
     await this.withThreadLock(threadId, async () => {
       await this.withThreadLock(`\0ledger:messages:${threadId}`, async () => {
         const messages = await this.readMessages(threadId);
-        const staged = "turnId" in target
-          ? [...messages].reverse().find((row) => row.turnId === target.turnId && row.origin === "task-notification" && row.notification?.notices)
-          : messages.find((row) => row.id === target.messageId);
+        const staged = messages.find((row) => row.id === messageId && row.origin === "task-notification" && !row.queuedTaskNotice);
         if (!staged?.notification?.notices) return;
-        const { notices: _notices, ...notification } = staged.notification;
-        await this.rewriteLedger(threadId, "messages", messages.map((row) => row.id === staged.id
-          ? { ...row, notification: { ...notification } }
-          : row));
+        const activities = await this.readActivities(threadId);
+        if (activities.some((row) => row.payload?.messageId === messageId && (row.kind === "steer.accepted" || row.kind === "steer.confirmed"))) return;
+        const { notices: _notices, noticeEntries: _noticeEntries, ...notification } = staged.notification;
+        await this.rewriteLedger(threadId, "messages", messages.map((row) => row.id === messageId ? { ...row, notification } : row));
       });
     });
   }

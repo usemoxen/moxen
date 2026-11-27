@@ -357,6 +357,7 @@ export async function createThread(
     ...(input.continuedFrom ? { continuedFrom: input.continuedFrom } : {}),
     ...(input.handoffFacts ? { handoffFacts: input.handoffFacts } : {}),
     ...(input.adoptingFrom ? { adoptingFrom: input.adoptingFrom } : {}),
+    ...(input.pendingContinuation ? { pendingContinuation: input.pendingContinuation } : {}),
   };
   await store.writeThreadRecord(thread);
   store.emit(thread.id, "created");
@@ -423,7 +424,7 @@ export async function sendTurn(
   input: SendTurnInput,
   /** The config in force, when the caller has it: lets admission hold Antigravity automatic prompts while delegation is off. */
   config?: Pick<CliConfig, "providers">,
-  guardNoticeSteer?: (target: StoredTurn) => void,
+  guardNoticeSteer?: (target: StoredTurn) => string | undefined,
 ): Promise<SendTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const prompt = input.prompt.trim();
@@ -612,8 +613,7 @@ export async function sendTurn(
     const modelSelection: ModelSelection = input.modelSelection ?? thread.modelSelection;
 
     if (running && (delivery === "auto" || delivery === "steer")) {
-      guardNoticeSteer?.(running);
-      const messageId = store.newId();
+      const messageId = guardNoticeSteer?.(running) ?? store.newId();
       await store.appendLedger(threadId, "messages", {
         id: messageId,
         threadId,

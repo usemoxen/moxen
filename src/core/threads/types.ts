@@ -156,6 +156,34 @@ export interface HandoffFacts {
   readonly pending: readonly HandoffPendingRequest[];
 }
 
+export interface ContinueThreadRequest {
+  readonly threadId: string;
+  readonly modelSelection?: ModelSelection;
+  readonly runtimeMode?: RuntimeMode;
+  readonly interactionMode?: InteractionMode;
+  readonly destinationThreadId?: string;
+  readonly queue?: QueuePolicy;
+  readonly modelSummary?: string;
+  readonly queuedTurnIds?: readonly string[];
+  /** Start the opener at this time rather than now. */
+  readonly scheduledFor?: string;
+  /** A server-initiated continuation. */
+  readonly automatic?: boolean;
+  /** An opening instruction to fold into the handoff document. */
+  readonly firstMessage?: string;
+  /** An agent-initiated continuation, subject to the delegation gate. */
+  readonly byAgent?: boolean;
+  /** A retry with the same key rejoins the reserved destination. */
+  readonly idempotencyKey?: string;
+}
+
+/** Frozen when the destination is reserved, until its opener and queue are durable. */
+export interface PendingContinuation {
+  readonly request: ContinueThreadRequest;
+  readonly document: string;
+  readonly gated: readonly HandoffPendingRequest[];
+}
+
 export interface StoredThread {
   readonly researchRun?: StoredResearchRun;
   readonly pastResearchRuns?: readonly StoredResearchRun[];
@@ -173,16 +201,10 @@ export interface StoredThread {
    * conversation is told as ordinary history.
    */
   readonly handoffFacts?: HandoffFacts;
-  /**
-   * Set from the moment this thread is created for a handoff until that
-   * handoff's adoption write lands (its tasks re-pointed here and its waiting
-   * notices moved): the thread is still receiving its predecessor's work.
-   * Written with the reservation so a crash mid-handoff is durable, and read
-   * by every continuation reservation so the thread cannot hand its
-   * predecessor's tasks on before it owns them. Cleared once that adoption
-   * commits; a later continue of this thread is its own, as before.
-   */
+  /** Source of a handoff still landing its tasks, opener or dependent queue entries. */
   readonly adoptingFrom?: string | null;
+  /** Recovery data written with the adoption marker and removed when it clears. */
+  readonly pendingContinuation?: PendingContinuation;
   /**
    * A manual continuation in flight on this thread (`reserveContinuation`):
    * while present, admission starts no turn here, so the new worker never
@@ -489,13 +511,10 @@ export interface StoredMessage {
   /** The origin's structured facts (`task-notification`: the tasks), for a client to draw. */
   readonly notification?: {
     readonly tasks: readonly TaskNotification[];
-    /**
-     * Identity of each pending task notice this message reports, in the same
-     * ledger write that accepts the turn: a replay after a failed batch
-     * acknowledgement reads it here and sends nothing twice. Internal, never
-     * projected to clients.
-     */
+    /** Internal identities of the task facts actually reported in this message. */
     readonly notices?: readonly string[];
+    /** Pending entries consumed by these facts when their original identities differ. */
+    readonly noticeEntries?: readonly string[];
   };
   /** Filed as a turn prompt, even if later folded into another queued turn. */
   readonly queuedTaskNotice?: true;
@@ -605,6 +624,7 @@ export interface CreateThreadInput {
   readonly handoffFacts?: HandoffFacts;
   /** Set on a destination created for a handoff; cleared once its adoption commits (see `StoredThread.adoptingFrom`). */
   readonly adoptingFrom?: string;
+  readonly pendingContinuation?: PendingContinuation;
 }
 
 export type SendIfBusy = "reject" | "inject";
