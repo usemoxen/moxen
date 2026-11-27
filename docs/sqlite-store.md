@@ -328,13 +328,28 @@ order. The delegations ledger is one more transaction under the same rules. A
 last transaction removes threads the JSONL store no longer has. So resuming
 after a crash and importing again are the same pass: it starts from the first
 thread, skips nothing, and the database ends up mirroring the ledgers as they
-are then. The pass yields between threads; a second request while one runs gets
-that run's report, and closing the server stops it between threads
-(`STORE_IMPORT_INTERRUPTED`).
+are then.
+
+**In a worker.** `bun:sqlite` is synchronous and verification reads the whole
+database back, so the server runs the import, verification included, in a
+worker thread (`import-job.ts`); only that thread touches `store.db`. Each
+server has one import at a time, and a second request while it runs gets that
+run's report. An abort is a flag in shared memory, which the importer reads
+after planning each thread, before each transaction, and before and after
+verification (`STORE_IMPORT_INTERRUPTED`). `close()` raises it before any other
+teardown, and hands the store on only once the worker has exited. The worker is
+never terminated; one that ends without a result is `STORE_IMPORT_FAILED`.
+
+The worker starts from its own file, so `import-worker.ts` is an entry point in
+both `scripts/build.ts` and `scripts/build-exe.ts`. A compiled executable
+finds it by its path from `src/`, the entry points' shared folder.
 
 **Imported or quarantined.** Every source record (one per thread record, one per
 non-blank ledger line) becomes a live row or a `quarantine` row:
 
+- Files are read as bytes, split at LF (a CR before it is part of the line
+  ending), and each record is decoded as strict UTF-8. One that is not valid is
+  quarantined, even where the JSONL readers would show U+FFFD and carry on.
 - A line is a row by the JSONL readers' own rule (`parseLedgerLine`): torn,
   unparseable and id-less lines are quarantined. So is a row missing a field its
   columns need, or holding the wrong type (`validate.ts`; STRICT alone would
@@ -347,9 +362,12 @@ non-blank ledger line) becomes a live row or a `quarantine` row:
 - A file that exists but cannot be read is not a bad record: the import stops
   with `STORE_IMPORT_READ_FAILED`.
 
-`quarantine.row_json` is `{origin: "jsonl-import", threadId, file, line, raw}`:
-`file` is relative to the store root, `line` is null for a thread record, and
-`raw` is the record as stored. Re-importing replaces only rows with that origin.
+`quarantine.row_json` is `{origin: "jsonl-import", threadId, file, line}` plus
+the record: `file` is relative to the store root and `line` is null for a thread
+record. A record that is valid UTF-8 is `raw`, its text, which encodes back to
+the same bytes; any other is `rawBase64`, its bytes. A line is kept without its
+line ending, a thread record as the whole file. Re-importing replaces only rows
+with that origin.
 
 **Progress and verification.** `meta.import_state` is `running` from the first
 transaction until the counts check out. Then every table's live row count must

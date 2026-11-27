@@ -52,9 +52,18 @@ export function renameReplacingSync(from: string, to: string): void {
  * that can land while a concurrent `renameReplacing` replaces the target.
  */
 export async function readFileRetrying(file: string): Promise<string> {
+  return await retryingRead(() => readFile(file, "utf8"));
+}
+
+/** `readFileRetrying` for the bytes as they are: nothing is decoded, so nothing is replaced. */
+export async function readBytesRetrying(file: string): Promise<Buffer> {
+  return await retryingRead(() => readFile(file));
+}
+
+async function retryingRead<T>(read: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await readFile(file, "utf8");
+      return await read();
     } catch (error) {
       if (!retryable(error, attempt)) throw error;
       await new Promise((resolve) => setTimeout(resolve, 15 * attempt));

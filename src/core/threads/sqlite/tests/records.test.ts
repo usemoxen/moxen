@@ -83,6 +83,16 @@ describe.skipIf(!underBun)("row round trip", () => {
     expect(decodeActivity(db.query<ActivityRow, []>("SELECT * FROM activities").get()!)).toEqual(everyActivity());
   });
 
+  it("does not read heldBySnooze: false back as true, and keeps it apart from absent (MXN-393)", () => {
+    const db = storeWithThreads();
+    const turns: StoredTurn[] = [{ ...completedTurn(), id: "held-no", heldBySnooze: false }, { ...completedTurn(), id: "held-unsaid" }];
+    for (const turn of turns) insertRow(db, INSERT_TURN, encodeTurn(turn));
+    const [no, unsaid] = db.query<TurnRow, []>("SELECT * FROM turns ORDER BY seq").all().map(decodeTurn);
+    expect(no!.heldBySnooze).toBe(false);
+    expect(unsaid).not.toHaveProperty("heldBySnooze");
+    expect([no, unsaid]).toEqual(turns);
+  });
+
   it("reads a thread back with every field set, and one with none of the optional ones", () => {
     const db = storeWithThreads();
     const full = fullThread();

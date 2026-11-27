@@ -250,6 +250,72 @@ describe.skipIf(!underBun)("importing the JSONL store", () => {
     expect(delegationsOf(db)).toEqual((await store.readDelegations()).filter((row) => row.id !== "del-bad"));
   });
 
+  it("does not import a line that is not UTF-8, and keeps its exact bytes in quarantine", async () => {
+    const { root, store } = await sourceStore("import-bytes");
+    const ledger = (id: string, name: string): string => path.join(root, "threads", id, name);
+    /** `text` with the bytes where its `@` was. */
+    const spliced = (text: string, bytes: number[]): Buffer => {
+      const [head, tail] = text.split("@");
+      return Buffer.concat([Buffer.from(head!), Buffer.from(bytes), Buffer.from(tail!)]);
+    };
+    // Whole, JSON-shaped, and one byte inside a string is not UTF-8.
+    const intact = spliced(JSON.stringify({ ...fullMessage(), id: "msg-bad-byte", threadId: "thread-2", text: "A@B" }), [0xff]);
+    // Cut halfway through a four-byte character.
+    const torn = spliced('{"id":"msg-torn","text":"@', [0xf0, 0x9f]);
+    appendFileSync(ledger("thread-2", "messages.jsonl"), Buffer.concat([intact, Buffer.from("\n"), torn]));
+    const record = spliced(`${JSON.stringify({ ...sparseThread(), id: "bytes-thread", title: "A@B" })}\r\n`, [0xc3]);
+    const child = Buffer.from(JSON.stringify({ ...completedTurn("bytes-thread"), id: "bytes-turn" }));
+    mkdirSync(path.dirname(ledger("bytes-thread", "x")), { recursive: true });
+    writeFileSync(ledger("bytes-thread", "thread.json"), record);
+    writeFileSync(ledger("bytes-thread", "turns.jsonl"), child);
+    // CRLF endings and a blank CRLF line are line endings, not damage.
+    appendFileSync(ledger("thread-3", "turns.jsonl"), `${JSON.stringify({ ...completedTurn("thread-3"), id: "turn-crlf" })}\r\n\r\n`);
+    // The JSONL reader decodes the bad byte as U+FFFD and takes the line: the importer must not.
+    expect((await store.readMessages("thread-2")).map((row) => row.id)).toContain("msg-bad-byte");
+    const before = jsonlTree(root);
+
+    const report = await importJsonlStore(root);
+
+    expect(report.tables.messages).toEqual({ source: 9, imported: 7, quarantined: 2 });
+    expect(jsonlTree(root)).toEqual(before);
+    const db = open(root);
+    expect(rowsOf<MessageRow>(db, "messages", "thread-2").map((row) => row.id)).toEqual(["msg-thread-2"]);
+    expect(rowsOf<TurnRow>(db, "turns", "thread-3").map((row) => row.id)).toEqual(["turn-thread-3", "turn-crlf"]);
+    const aside = quarantine(db) as Array<ReturnType<typeof quarantine>[number] & { rawBase64?: string }>;
+    expect(aside.map((row) => [row.file, row.line, row.reason, row.raw, row.rawBase64])).toEqual([
+      ["threads/bytes-thread/thread.json", null, "thread.json is not valid UTF-8", undefined, record.toString("base64")],
+      ["threads/bytes-thread/turns.jsonl", 1, "its thread record is quarantined", child.toString(), undefined],
+      ["threads/thread-2/messages.jsonl", 2, "line is not valid UTF-8", undefined, intact.toString("base64")],
+      ["threads/thread-2/messages.jsonl", 3, "line is not valid UTF-8", undefined, torn.toString("base64")],
+    ]);
+    expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM quarantine WHERE instr(row_json, char(65533)) > 0").get()).toEqual({ n: 0 });
+  });
+
+  it.each([
+    [
+      "that lands at the last yield, after the delegations commit",
+      (abort: AbortController) => (step: ImportStep) => {
+        if (step.phase === "committed" && step.threadId === null) setImmediate(() => abort.abort());
+      },
+    ],
+    [
+      "that arrives while the import is being verified",
+      (abort: AbortController) => (step: ImportStep) => {
+        if (step.phase === "verified") abort.abort();
+      },
+    ],
+  ])("is not marked complete by an abort %s", async (_when, abortOn) => {
+    const { root } = await sourceStore("import-late-abort");
+    const abort = new AbortController();
+    await expect(importJsonlStore(root, { signal: abort.signal, onStep: abortOn(abort) })).rejects.toThrow(
+      expect.objectContaining({ code: "STORE_IMPORT_INTERRUPTED" }),
+    );
+    const db = open(root);
+    expect(counts(db)).toEqual({ ...SOURCE_COUNTS, quarantine: 0 });
+    expect(meta(db)).not.toHaveProperty("imported_at");
+    expect(meta(db).import_state).toBe("running");
+  });
+
   it("resumes after the process is killed inside a thread's transaction", async () => {
     const { root, store } = await sourceStore("import-crash");
     // A quarantined line in a thread that commits before the crash must not double on resume.

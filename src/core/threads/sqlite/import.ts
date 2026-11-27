@@ -17,8 +17,9 @@
  * (`validate.ts`). A file that cannot be read at all is not a bad record: the
  * import stops there, still `running`, rather than dropping what it never saw.
  *
- * `bun:sqlite` is synchronous, so each transaction blocks the process for one
- * thread's worth of rows; the pass yields between threads.
+ * `bun:sqlite` is synchronous and the closing verification reads the whole
+ * database, so the server never runs this on its own thread: it goes through
+ * `import-job.ts`, which runs it in a worker.
  */
 import { readdir } from "node:fs/promises";
 import path from "node:path";
@@ -27,7 +28,7 @@ import type { Database, Statement } from "bun:sqlite";
 
 import { CliError } from "../../errors.js";
 import { FIRST_FORMAT_VERSION } from "../../format.js";
-import { readFileRetrying } from "../../infra/atomic.js";
+import { readBytesRetrying } from "../../infra/atomic.js";
 import { storedInteractionMode } from "../../interactionmode.js";
 import { isThreadId, parseLedgerLine, readStoreVersion } from "../store.js";
 import type { StoredActivity, StoredCheckpoint, StoredDelegation, StoredMessage, StoredThread, StoredTurn } from "../types.js";
@@ -68,15 +69,23 @@ export interface StoreImportReport {
   readonly quarantined: number;
 }
 
-/** Where the pass is: inside a transaction about to commit, or just after it. `threadId` is null for delegations. */
+/**
+ * Where the pass is: inside a transaction about to commit, just after it, or
+ * past verification and about to mark the import complete. `threadId` is null
+ * for the delegations transaction and for `verified`.
+ */
 export interface ImportStep {
-  readonly phase: "before-commit" | "committed";
+  readonly phase: "before-commit" | "committed" | "verified";
   readonly threadId: string | null;
 }
 
 export interface ImportOptions {
-  /** Stops the pass between threads, leaving `import_state = 'running'`. */
-  readonly signal?: AbortSignal;
+  /**
+   * Stops the pass at its next checkpoint (after planning, before each
+   * transaction, around verification), leaving `import_state = 'running'`.
+   * An `AbortSignal`, or anything that answers `aborted` when asked.
+   */
+  readonly signal?: { readonly aborted: boolean };
   /** Milliseconds since epoch; injectable for tests. */
   readonly clock?: () => number;
   /** Test seam: production never sets it. Throwing (or dying) here is how the tests crash the import. */
@@ -93,14 +102,41 @@ const LEDGERS = [
   { file: "checkpoints.jsonl", table: "checkpoints", insert: INSERT_CHECKPOINT, problem: checkpointProblem, encode: (row: unknown) => encodeCheckpoint(row as StoredCheckpoint) },
 ] as const;
 
+/**
+ * A record's bytes as a quarantine row keeps them: `raw` text when they are
+ * valid UTF-8 (which re-encodes to the same bytes), else `rawBase64`. Decoding
+ * bad bytes would put U+FFFD where they were.
+ */
+type Kept = { readonly raw: string } | { readonly rawBase64: string };
+
 interface Rejected {
   readonly table: ImportTable;
   readonly reason: string;
   /** Path under the store root, with `/` on every platform. */
   readonly file: string;
   readonly line: number | null;
-  /** The record exactly as stored. */
-  readonly raw: string;
+  readonly kept: Kept;
+}
+
+/** One stored record: its bytes, and their text when they are valid UTF-8. */
+interface SourceRecord {
+  readonly bytes: Uint8Array;
+  readonly text: string | null;
+}
+
+/** Strict: a byte that is not UTF-8 refuses the record. A BOM is kept, so it fails to parse as it does for the JSONL readers. */
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+function sourceRecord(bytes: Uint8Array): SourceRecord {
+  try {
+    return { bytes, text: strictUtf8.decode(bytes) };
+  } catch {
+    return { bytes, text: null };
+  }
+}
+
+function keep(record: SourceRecord): Kept {
+  return record.text === null ? { rawBase64: Buffer.from(record.bytes).toString("base64") } : { raw: record.text };
 }
 
 interface Insert {
@@ -115,10 +151,10 @@ interface Plan {
   readonly rejected: Rejected[];
 }
 
-/** A file's text, or null when it does not exist. Any other failure stops the import. */
-async function readSource(file: string): Promise<string | null> {
+/** A file's bytes, or null when it does not exist. Any other failure stops the import. */
+async function readSource(file: string): Promise<Buffer | null> {
   try {
-    return await readFileRetrying(file);
+    return await readBytesRetrying(file);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new CliError("STORE_IMPORT_READ_FAILED", `Could not read ${file}, so the import stopped: ${error instanceof Error ? error.message : String(error)}. Run it again once the file reads.`, {
@@ -128,20 +164,41 @@ async function readSource(file: string): Promise<string | null> {
   }
 }
 
-/** The non-blank lines of a ledger with their 1-based numbers, as the JSONL readers see them. */
-function ledgerLines(raw: string): Array<{ line: number; raw: string }> {
-  return raw.split("\n").flatMap((text, index) => (text.trim().length === 0 ? [] : [{ line: index + 1, raw: text }]));
+const LF = 0x0a;
+const CR = 0x0d;
+
+/**
+ * The non-blank lines of a ledger with their 1-based numbers, as the JSONL
+ * readers count them. Split on bytes, so each line is decoded on its own; the
+ * line ending (LF, or CRLF) is not part of the record.
+ */
+function ledgerLines(raw: Buffer | null): Array<SourceRecord & { readonly line: number }> {
+  const lines: Array<SourceRecord & { line: number }> = [];
+  if (raw === null) return lines;
+  for (let start = 0, line = 1; start < raw.length; line += 1) {
+    const newline = raw.indexOf(LF, start);
+    let end = newline < 0 ? raw.length : newline;
+    const next = end + 1;
+    if (end > start && raw[end - 1] === CR) end -= 1;
+    const record = sourceRecord(raw.subarray(start, end));
+    if (record.text === null || record.text.trim().length > 0) lines.push({ line, ...record });
+    start = next;
+  }
+  return lines;
 }
 
-/** Why a parsed line is not a row, in the words a quarantine row keeps. */
-function lineReason(kind: "bad-json" | "bad-row"): string {
-  return kind === "bad-json" ? "line is not valid JSON" : "line has no row id";
+/** A line as a row, by the JSONL readers' own rule, or why it is not one in the words a quarantine row keeps. */
+function lineVerdict(record: SourceRecord): { readonly row: Record<string, unknown> } | { readonly reason: string } {
+  if (record.text === null) return { reason: "line is not valid UTF-8" };
+  const parsed = parseLedgerLine(record.text);
+  if (parsed.kind === "row") return { row: parsed.row };
+  return { reason: parsed.kind === "bad-json" ? "line is not valid JSON" : "line has no row id" };
 }
 
 function planLedger(
   plan: Plan,
   options: {
-    readonly raw: string;
+    readonly raw: Buffer | null;
     readonly file: string;
     readonly table: ImportTable;
     readonly sql: string;
@@ -152,44 +209,46 @@ function planLedger(
 ): void {
   for (const entry of ledgerLines(options.raw)) {
     const reject = (reason: string): void => {
-      plan.rejected.push({ table: options.table, reason, file: options.file, line: entry.line, raw: entry.raw });
+      plan.rejected.push({ table: options.table, reason, file: options.file, line: entry.line, kept: keep(entry) });
     };
-    const parsed = parseLedgerLine(entry.raw);
-    if (parsed.kind !== "row") {
-      reject(lineReason(parsed.kind));
+    const verdict = lineVerdict(entry);
+    if ("reason" in verdict) {
+      reject(verdict.reason);
       continue;
     }
-    const problem = options.problem(parsed.row);
+    const problem = options.problem(verdict.row);
     if (problem !== null) {
       reject(`invalid record: ${problem}`);
       continue;
     }
-    plan.inserts.push({ table: options.table, sql: options.sql, row: options.encode(parsed.row) });
+    plan.inserts.push({ table: options.table, sql: options.sql, row: options.encode(verdict.row) });
   }
 }
 
 /** The thread record as the JSONL reader would show it, or why it would not. */
-function readRecord(raw: string, threadId: string): { readonly thread: StoredThread } | { readonly reason: string } {
+function readRecord(record: SourceRecord, threadId: string): { readonly thread: StoredThread } | { readonly reason: string } {
   if (!isThreadId(threadId)) return { reason: "invalid thread folder name" };
+  if (record.text === null) return { reason: "thread.json is not valid UTF-8" };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(record.text);
   } catch {
     return { reason: "thread.json is not valid JSON" };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { reason: "invalid thread record: not an object" };
   if ((parsed as { id?: unknown }).id !== threadId) return { reason: "invalid thread record: its id does not match its folder" };
   // A removed mode reads as Build, exactly as `readThreadRecord` reads it.
-  const record = { ...(parsed as Record<string, unknown>), interactionMode: storedInteractionMode((parsed as { interactionMode?: unknown }).interactionMode) };
-  const problem = threadProblem(record);
-  return problem === null ? { thread: record as unknown as StoredThread } : { reason: `invalid thread record: ${problem}` };
+  const thread = { ...(parsed as Record<string, unknown>), interactionMode: storedInteractionMode((parsed as { interactionMode?: unknown }).interactionMode) };
+  const problem = threadProblem(thread);
+  return problem === null ? { thread: thread as unknown as StoredThread } : { reason: `invalid thread record: ${problem}` };
 }
 
 /** Everything one thread's folder holds. A folder with no records at all plans nothing. */
 async function planThread(root: string, threadId: string): Promise<Plan> {
   const folder = path.join(root, "threads", threadId);
   const name = (file: string): string => `threads/${threadId}/${file}`;
-  const record = await readSource(path.join(folder, "thread.json"));
+  const bytes = await readSource(path.join(folder, "thread.json"));
+  const record = bytes === null ? null : sourceRecord(bytes);
   const ledgers = [];
   for (const ledger of LEDGERS) ledgers.push({ ...ledger, raw: await readSource(path.join(folder, ledger.file)) });
   const plan: Plan = { inserts: [], rejected: [] };
@@ -199,7 +258,7 @@ async function planThread(root: string, threadId: string): Promise<Plan> {
     plan.inserts.push({ table: "threads", sql: INSERT_THREAD, row: encodeThread(verdict.thread) });
     for (const ledger of ledgers) {
       planLedger(plan, {
-        raw: ledger.raw ?? "",
+        raw: ledger.raw,
         file: name(ledger.file),
         table: ledger.table,
         sql: ledger.insert,
@@ -213,19 +272,19 @@ async function planThread(root: string, threadId: string): Promise<Plan> {
   // Without a record there is no thread row, and every child row needs one: the
   // whole folder goes to quarantine, line by line, so it can be put back.
   for (const ledger of ledgers) {
-    for (const entry of ledgerLines(ledger.raw ?? "")) {
-      const parsed = parseLedgerLine(entry.raw);
+    for (const entry of ledgerLines(ledger.raw)) {
+      const own = lineVerdict(entry);
       plan.rejected.push({
         table: ledger.table,
-        reason: parsed.kind === "row" ? "its thread record is quarantined" : lineReason(parsed.kind),
+        reason: "row" in own ? "its thread record is quarantined" : own.reason,
         file: name(ledger.file),
         line: entry.line,
-        raw: entry.raw,
+        kept: keep(entry),
       });
     }
   }
   if (record !== null || plan.rejected.length > 0) {
-    plan.rejected.unshift({ table: "threads", reason: verdict.reason, file: name("thread.json"), line: null, raw: record ?? "" });
+    plan.rejected.unshift({ table: "threads", reason: verdict.reason, file: name("thread.json"), line: null, kept: record === null ? { raw: "" } : keep(record) });
   }
   return plan;
 }
@@ -233,7 +292,7 @@ async function planThread(root: string, threadId: string): Promise<Plan> {
 async function planDelegations(root: string): Promise<Plan> {
   const plan: Plan = { inserts: [], rejected: [] };
   planLedger(plan, {
-    raw: (await readSource(path.join(root, "delegations.jsonl"))) ?? "",
+    raw: await readSource(path.join(root, "delegations.jsonl")),
     file: "delegations.jsonl",
     table: "delegations",
     sql: INSERT_DELEGATION,
@@ -263,12 +322,11 @@ function bind(statement: Statement, row: object): void {
 function write(db: Database, plan: Plan, threadId: string | null, at: string): void {
   for (const insert of plan.inserts) bind(db.query(insert.sql), insert.row);
   for (const rejected of plan.rejected) {
-    const { table, reason, ...source } = rejected;
     bind(db.query(INSERT_QUARANTINE), {
       at,
-      reason,
-      table_name: table,
-      row_json: JSON.stringify({ origin: QUARANTINE_ORIGIN, threadId, ...source }),
+      reason: rejected.reason,
+      table_name: rejected.table,
+      row_json: JSON.stringify({ origin: QUARANTINE_ORIGIN, threadId, file: rejected.file, line: rejected.line, ...rejected.kept }),
     });
   }
 }
@@ -356,7 +414,7 @@ function verify(db: Database, counts: Tally): void {
   }
 }
 
-function checkInterrupted(signal: AbortSignal | undefined): void {
+function checkInterrupted(signal: ImportOptions["signal"]): void {
   if (signal?.aborted) {
     throw new CliError("STORE_IMPORT_INTERRUPTED", "The import was interrupted before it finished. Run it again to complete it; the JSONL store is unchanged.");
   }
@@ -391,6 +449,7 @@ export async function importJsonlStore(storeRoot: string, options: ImportOptions
 
   const db = openStoreDatabase(root);
   try {
+    checkInterrupted(options.signal);
     transaction(db, () => {
       setMeta(db, { engine: "sqlite", schema: String(SCHEMA_VERSION), import_state: "running" });
       db.exec("DELETE FROM meta WHERE key IN ('imported_at', 'source_rows')");
@@ -401,6 +460,8 @@ export async function importJsonlStore(storeRoot: string, options: ImportOptions
     const present = new Set<string>();
 
     const replace = (threadId: string | null, plan: Plan, clear: () => void): void => {
+      // The plan was read across awaits, so an abort may have arrived since.
+      checkInterrupted(options.signal);
       transaction(db, () => {
         dropQuarantine(db, earlier.get(quarantineKey(threadId)));
         clear();
@@ -423,6 +484,7 @@ export async function importJsonlStore(storeRoot: string, options: ImportOptions
 
     checkInterrupted(options.signal);
     replace(null, await planDelegations(root), () => db.exec("DELETE FROM delegations"));
+    checkInterrupted(options.signal);
 
     // What an earlier run imported and the JSONL store no longer has goes too:
     // the database mirrors the source as it is now.
@@ -433,7 +495,11 @@ export async function importJsonlStore(storeRoot: string, options: ImportOptions
       dropQuarantine(db, [...earlier.values()].flat());
     });
     await yieldToEventLoop();
+    checkInterrupted(options.signal);
     verify(db, counts);
+    options.onStep?.({ phase: "verified", threadId: null });
+    // Verification takes a while on a large store: the last word is asked for after it.
+    checkInterrupted(options.signal);
 
     const importedAt = new Date(clock()).toISOString();
     transaction(db, () => setMeta(db, { import_state: "complete", imported_at: importedAt, source_rows: JSON.stringify(counts) }));
