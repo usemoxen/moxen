@@ -20,6 +20,7 @@ import { isDraining, serverDrainingError } from "./drain.js";
 import { antigravityUnsupportedUseAllowed, driverKindOfInstance, type CliConfig, type InteractionMode, type ModelSelection, type RuntimeMode } from "../types.js";
 import { ThreadStore } from "./store.js";
 import { isKnownTurnStatus, type StoreProblem } from "./problems.js";
+import { ranTurns } from "./project.js";
 import type {
   CreateThreadInput,
   MessageOrigin,
@@ -688,7 +689,7 @@ export async function sendTurn(
         throw continuationBusyError(threadId);
       }
     }
-    const executionSeq = status === "running" ? nextTurnSeq(thread, turns) : undefined;
+    const executionSeq = status === "running" ? await allocateTurnSeqLocked(store, thread, turns) : undefined;
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
@@ -872,7 +873,7 @@ export async function startBackgroundTurn(
         { exitCode: 4, details: { threadId, turnId: live.id } },
       );
     }
-    const executionSeq = nextTurnSeq(admitted, turns);
+    const executionSeq = await allocateTurnSeqLocked(store, admitted, turns);
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
@@ -907,17 +908,45 @@ export async function startBackgroundTurn(
 }
 
 /**
- * Next monotonic execution sequence for a turn becoming `running` on this
- * thread. Never decreases on revert, and starts above legacy turns on threads
- * that predated `turnSeq`.
+ * Assign durable `executionSeq` values to any existing ran turns that predate
+ * sequencing, in their legacy `ranTurns` order, before allocating a new
+ * sequence on this thread. That locks pre-upgrade history strictly ahead of
+ * post-upgrade turns even when the system clock steps backwards.
+ *
+ * Caller must hold the thread lock.
  */
-function nextTurnSeq(thread: StoredThread, turns: readonly StoredTurn[]): number {
+async function seedLegacyExecutionSeqsLocked(
+  store: ThreadStore,
+  thread: StoredThread,
+  turns: readonly StoredTurn[],
+): Promise<{ highest: number; seeded: Map<string, number> }> {
   let highest = thread.turnSeq ?? 0;
   for (const turn of turns) {
     if (turn.executionSeq !== undefined && turn.executionSeq > highest) highest = turn.executionSeq;
   }
-  const ranCount = turns.filter((turn) => turn.status !== "queued").length;
-  if (ranCount > highest) highest = ranCount;
+  const seeded = new Map<string, number>();
+  const unsequenced = ranTurns(turns).filter((turn) => turn.executionSeq === undefined);
+  for (const legacy of unsequenced) {
+    highest += 1;
+    await store.updateTurn(thread.id, legacy.id, { executionSeq: highest });
+    seeded.set(legacy.id, highest);
+  }
+  return { highest, seeded };
+}
+
+/**
+ * Next monotonic execution sequence for a turn becoming `running` on this
+ * thread. Never decreases on revert, and seeds pre-upgrade ran turns first so
+ * new sequenced work always orders after existing history.
+ *
+ * Caller must hold the thread lock.
+ */
+async function allocateTurnSeqLocked(
+  store: ThreadStore,
+  thread: StoredThread,
+  turns: readonly StoredTurn[],
+): Promise<number> {
+  const { highest } = await seedLegacyExecutionSeqsLocked(store, thread, turns);
   return highest + 1;
 }
 
@@ -1620,7 +1649,7 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     }
   }
   if (!next) return;
-  const executionSeq = nextTurnSeq(thread, turns);
+  const executionSeq = await allocateTurnSeqLocked(store, thread, turns);
   await store.writeThreadRecord({
     ...thread,
     turnSeq: executionSeq,
@@ -1914,10 +1943,14 @@ export async function interruptTurn(
     let targetForStop = target;
     let threadForStop = thread;
     if (target.status !== "queued" && target.executionSeq === undefined) {
-      const legacySeq = nextTurnSeq(thread, turns);
-      threadForStop = { ...thread, turnSeq: legacySeq };
+      const { highest, seeded } = await seedLegacyExecutionSeqsLocked(store, thread, turns);
+      const legacySeq = seeded.get(target.id) ?? highest + 1;
+      const nextHighest = Math.max(highest, legacySeq);
+      threadForStop = { ...thread, turnSeq: nextHighest };
       await store.writeThreadRecord(threadForStop);
-      await store.updateTurn(threadId, target.id, { executionSeq: legacySeq });
+      if (!seeded.has(target.id)) {
+        await store.updateTurn(threadId, target.id, { executionSeq: legacySeq });
+      }
       targetForStop = { ...target, executionSeq: legacySeq };
     }
     const hasRunner = store.isTracked(targetForStop.id);

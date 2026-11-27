@@ -58,7 +58,14 @@ function runAt(turn: StoredTurn): number {
  * The thread's turns in the order they ran: the numbering every reader shows.
  * Ledger row order is not that order — a message queued before a later turn
  * starts after it — so numbering by row would move turns a client has
- * already seen. Ties keep ledger order.
+ * already seen.
+ *
+ * Input contract: `turns` is supplied in persisted ledger order. Sequenced
+ * turns sort strictly by monotonic `executionSeq`; legacy unsequenced turns
+ * sort by finite start/create timestamp (invalid timestamps sort earliest)
+ * with ties preserving ledger order. Live writes seed pre-upgrade legacy turns
+ * before allocating new sequences, so active ledgers order purely by
+ * `executionSeq`.
  */
 function finiteRunAt(turn: StoredTurn): number {
   const at = runAt(turn);

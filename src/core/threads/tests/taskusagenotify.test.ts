@@ -1470,15 +1470,19 @@ describe("cancellations that race later work", () => {
     expect(remainingUserPrompts).toEqual(["L first", "A second"]);
   });
 
-  it("keeps executionSeq order across a backward clock step in a mixed legacy and sequenced ledger", async () => {
+  it("keeps pre-upgrade history ahead of new sequenced turns even across a backward clock step", async () => {
     const w = await scriptedWorld(async () => completed("Done."));
-    let now = "2026-11-27T05:01:00.000Z";
+    let now = "2026-11-27T05:11:00.000Z";
     w.store.nowIso = () => now;
     const thread = await w.make("mixed-backward-clock");
 
+    // Pre-upgrade legacy turn L ran at 05:11 (no executionSeq, no thread.turnSeq).
     const legacy = await startTurn(w.ctx, { threadId: thread.id, prompt: "L first" });
     await legacy.run;
     await flushTurnRunners();
+    const rawThread = (await w.store.readThreadRecord(thread.id))!;
+    const { turnSeq: _dropThreadSeq, ...legacyThread } = rawThread;
+    await w.store.writeThreadRecord(legacyThread);
     await w.store.rewriteLedger(
       thread.id,
       "turns",
@@ -1489,23 +1493,78 @@ describe("cancellations that race later work", () => {
       }),
     );
 
+    // After upgrade the wall clock steps backwards before A (05:10) and B (05:05) run.
     now = "2026-11-27T05:10:00.000Z";
     const a = await startTurn(w.ctx, { threadId: thread.id, prompt: "A second" });
     await a.run;
     await flushTurnRunners();
 
-    // Clock steps backward before B runs (seq 3 < A's timestamp, > L's timestamp).
     now = "2026-11-27T05:05:00.000Z";
     const b = await startTurn(w.ctx, { threadId: thread.id, prompt: "B third" });
     await b.run;
     await flushTurnRunners();
 
-    // Execution order must stay [L, A, B] despite B's earlier wall clock: keeping 2 drops B.
+    // L was seeded durably before A ran, so execution order stays [L, A, B]: keeping 2 drops B.
     await revertThread(w.ctx, thread.id, 2);
     const remainingUserPrompts = (await w.store.readMessages(thread.id))
       .filter((m) => m.role === "user")
       .map((m) => m.text);
     expect(remainingUserPrompts).toEqual(["L first", "A second"]);
+  });
+
+  it("still marks a cancelled task when a newer follow-up settled and was reverted before the mark landed", async () => {
+    const aParked = deferred();
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Running A") {
+        aParked.resolve();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Follow-up B done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Running A" });
+    await aParked.promise;
+    await sendTurn(w.store, child.id, { prompt: "Queued B", delivery: "queue" });
+
+    // Pause the cancellation's delegation mark write until after B has settled and been reverted.
+    const markEntered = deferred();
+    const releaseMark = deferred();
+    let interceptMark = true;
+    const pausedStore = new Proxy(w.ctx.store, {
+      get(target, property) {
+        if (property === "updateDelegationWith") {
+          return async (...args: Parameters<typeof target.updateDelegationWith>) => {
+            if (interceptMark) {
+              interceptMark = false;
+              markEntered.resolve();
+              await releaseMark.promise;
+            }
+            return await target.updateDelegationWith(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof w.ctx.store;
+
+    const cancelling = cancelTask({ ...w.ctx, store: pausedStore }, parent.id, child.id);
+    await markEntered.promise;
+    await a.run;
+    await flushTurnRunners();
+
+    // B promoted, ran, and settled (recording lastSettledSeq > A's seq), then was reverted.
+    expect((await w.store.readTurns(child.id)).map((t) => t.status)).toEqual(["interrupted", "completed"]);
+    await revertThread(w.ctx, child.id, 1);
+    expect((await w.store.readTurns(child.id)).map((t) => t.id)).toEqual([a.turn.id]);
+
+    // Now release the paused cancellation mark write: B is gone, so A's cancel must land.
+    releaseMark.resolve();
+    const cancelled = await cancelling;
+    expect(cancelled.interruptRequested).toBe(true);
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
   });
 
   it("assigns a durable boundary when cancelling and reverting a legacy unsequenced turn", async () => {

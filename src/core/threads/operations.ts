@@ -1726,7 +1726,21 @@ async function markCancelled(
     if (anchorTurnId !== undefined) {
       const resolvedSeq = anchorSeq ?? turns.find((turn) => turn.id === anchorTurnId)?.executionSeq;
       if (resolvedSeq !== undefined && current.lastSettledSeq !== undefined) {
-        if (current.lastSettledSeq > resolvedSeq) return null;
+        if (current.lastSettledSeq > resolvedSeq) {
+          // A newer execution settled before this mark could land, but it only
+          // supersedes the cancellation when a newer settled turn is still
+          // retained in the current ledger (a reverted follow-up must not
+          // suppress a valid cancellation mark).
+          const retainedNewerSettled = ran.some(
+            (turn) =>
+              turn.status !== "running"
+              && turn.status !== "queued"
+              && turn.executionSeq !== undefined
+              && turn.executionSeq > resolvedSeq
+              && turn.executionSeq <= current.lastSettledSeq!,
+          );
+          if (retainedNewerSettled) return null;
+        }
       } else {
         const anchorAt = ran.findIndex((turn) => turn.id === anchorTurnId);
         const lastAt = current.lastSettledTurnId === undefined ? -1 : ran.findIndex((turn) => turn.id === current.lastSettledTurnId);
