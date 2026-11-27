@@ -89,6 +89,7 @@ export function fullThread(): StoredThread {
     nativeSubagents: [
       { agentId: "agent-1", agentType: "Explore", description: null, status: "completed", startedAt: AT, stoppedAt: LATER },
     ],
+    turnSeq: 4,
   };
 }
 
@@ -167,6 +168,7 @@ export function queuedTurn(threadId = "thread-1"): StoredTurn {
     createdAt: AT,
     updatedAt: LATER,
     startedAt: AT,
+    executionSeq: 3,
     completedAt: null,
   };
 }
@@ -271,9 +273,10 @@ export function fullDelegation(): StoredDelegation {
     modelSnapshot: { parent: "claude/claude-test-1" },
     review: { verdict: "MERGE", report: "Looks good 🧵" },
     cancelledTurnId: "turn-2",
-    cancelledTurnAt: AT,
+    cancelledAfterSeq: 2,
     cancelledGeneration: 2,
     lastSettledTurnId: "turn-3",
+    lastSettledSeq: 3,
     status: "completed",
     createdAt: AT,
     updatedAt: LATER,

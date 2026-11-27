@@ -277,6 +277,13 @@ export interface StoredThread {
   readonly modeState?: Readonly<Record<string, InteractionMode>>;
   /** The provider's own subagents, running and latest finished (`subagents.ts`). Absent until the first. */
   readonly nativeSubagents?: readonly StoredNativeSubagent[];
+  /**
+   * Monotonic counter of turns that have started running on this thread.
+   * Incremented whenever a turn becomes `running` and never decremented on
+   * revert, so cancellation ordering survives reverts and same-millisecond
+   * turns without depending on wall-clock timestamps.
+   */
+  readonly turnSeq?: number;
 }
 
 export interface UsagePause {
@@ -427,6 +434,12 @@ export interface StoredTurn {
   readonly updatedAt: string;
   /** When a queued or scheduled turn actually started; a turn that ran at once started at `createdAt`. */
   readonly startedAt?: string;
+  /**
+   * Monotonic execution sequence assigned from `StoredThread.turnSeq` when
+   * this turn became `running`. Absent on queued turns that have not started
+   * yet and on rows written before it existed.
+   */
+  readonly executionSeq?: number;
   readonly completedAt: string | null;
   /**
    * The process expected to run the turn, set when it becomes `running`.
@@ -570,13 +583,14 @@ export interface StoredDelegation {
    */
   readonly cancelledTurnId?: string;
   /**
-   * The run time (`startedAt ?? createdAt`) of `cancelledTurnId`. When the
-   * stopped turn is later reverted out of the ledger, a settling turn that
-   * ran at or after this time is still recognised as fresh work instead of
-   * leaving the task stuck `cancelled`. Absent on rows cancelled while idle,
-   * and on rows written before it existed.
+   * Monotonic execution-sequence boundary (`StoredTurn.executionSeq` /
+   * `StoredThread.turnSeq`) covered by the latest cancellation mark — both
+   * explicit turn cancels and recovery cancels. Only a settling turn whose
+   * `executionSeq` is strictly greater than this boundary counts as fresh
+   * work, surviving reverts and same-millisecond clocks. Absent on rows
+   * written before it existed.
    */
-  readonly cancelledTurnAt?: string;
+  readonly cancelledAfterSeq?: number;
   /**
    * Counts successful cancellations on this row. A settle reads it with the
    * row and clears only while it still matches, so a cancellation written in
@@ -591,6 +605,12 @@ export interface StoredDelegation {
    * rows written before it existed.
    */
   readonly lastSettledTurnId?: string;
+  /**
+   * Monotonic high-water `executionSeq` of turns that have settled on this
+   * task. Updated only upward so a delayed settle callback from an older turn
+   * can never overwrite a newer settled turn.
+   */
+  readonly lastSettledSeq?: number;
   readonly status: DelegationStatus;
   readonly createdAt: string;
   readonly updatedAt: string;

@@ -1189,6 +1189,163 @@ describe("cancellations that race later work", () => {
     expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
   });
 
+  it("rejects an older delayed settle even on the same clock tick after the cancelled turn is reverted", async () => {
+    const fixedNow = "2026-11-27T05:00:00.000Z";
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Old work done.");
+    });
+    w.store.nowIso = () => fixedNow;
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // Complete O on the same clock tick, holding O's settle callback before it
+    // touches the delegation row.
+    const heldO = deferred();
+    const releaseO = deferred();
+    let holdFirst = true;
+    const gatedOStore = gateStore(w.store, ["recordDelegationSettle"], async () => {
+      if (!holdFirst) return;
+      holdFirst = false;
+      heldO.resolve();
+      await releaseO.promise;
+    });
+    const o = await startTurn({ ...w.ctx, store: gatedOStore }, { threadId: child.id, prompt: "Work O" });
+    await heldO.promise;
+
+    // Start, cancel, and revert A (keeping O) on the exact same millisecond.
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await revertThread(w.ctx, child.id, 1);
+
+    // Releasing O's delayed settle callback must not clear A's cancellation.
+    releaseO.resolve();
+    await o.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
+  it("keeps lastSettledSeq monotonic so an older delayed settle cannot hide fresh work from a delayed cancel", async () => {
+    const fixedNow = "2026-11-27T05:00:00.000Z";
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed(`Done ${prompt}`);
+    });
+    w.store.nowIso = () => fixedNow;
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // O completes with its settle callback held.
+    const heldO = deferred();
+    const releaseO = deferred();
+    let holdO = true;
+    const storeO = gateStore(w.store, ["recordDelegationSettle"], async () => {
+      if (!holdO) return;
+      holdO = false;
+      heldO.resolve();
+      await releaseO.promise;
+    });
+    const o = await startTurn({ ...w.ctx, store: storeO }, { threadId: child.id, prompt: "Work O" });
+    await heldO.promise;
+
+    // A starts and is cancelled, holding markCancelled before its write.
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    const heldCancel = deferred();
+    const releaseCancel = deferred();
+    let holdCancel = true;
+    const storeCancel = gateStore(w.store, ["updateDelegationWith"], async () => {
+      if (!holdCancel) return;
+      holdCancel = false;
+      heldCancel.resolve();
+      await releaseCancel.promise;
+    });
+    const cancelling = cancelTask({ ...w.ctx, store: storeCancel }, parent.id, child.id);
+    await heldCancel.promise;
+    await a.run;
+
+    // Revert A (keeping O) and complete fresh work B on the exact same tick.
+    await revertThread(w.ctx, child.id, 1);
+    const b = await startTurn(w.ctx, { threadId: child.id, prompt: "Work B" });
+    await b.run;
+
+    // Release O's older settle callback BEFORE A's delayed cancel write:
+    // lastSettledSeq must stay at B's seq so A's delayed cancel still loses.
+    releaseO.resolve();
+    await o.run;
+    releaseCancel.resolve();
+    await cancelling;
+    await flushTurnRunners();
+
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("completed");
+  });
+
+  it("gives a recovery cancellation its own boundary so a delayed settle held at recordDelegationSettle cannot erase it", async () => {
+    let parked!: () => void;
+    const aParked = new Promise<void>((resolve) => { parked = resolve; });
+    const w = await scriptedWorld(async (prompt, base, signal) => {
+      if (prompt === "Work A") {
+        parked();
+        return await base.awaitTurn("", "", signal);
+      }
+      return completed("Work B done.");
+    });
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegateNotifying(w, parent.id, child.id);
+
+    // Cancel and revert A.
+    const a = await startTurn(w.ctx, { threadId: child.id, prompt: "Work A" });
+    await aParked;
+    expect((await cancelTask(w.ctx, parent.id, child.id)).interruptRequested).toBe(true);
+    await a.run;
+    await flushTurnRunners();
+    await revertThread(w.ctx, child.id, 0);
+
+    // Complete B, holding its callback at recordDelegationSettle (before reading generation).
+    const heldB = deferred();
+    const releaseB = deferred();
+    let holdB = true;
+    const storeB = gateStore(w.store, ["recordDelegationSettle"], async () => {
+      if (!holdB) return;
+      holdB = false;
+      heldB.resolve();
+      await releaseB.promise;
+    });
+    const b = await startTurn({ ...w.ctx, store: storeB }, { threadId: child.id, prompt: "Work B" });
+    await heldB.promise;
+
+    // Queue and cancel a usage-reset continuation AFTER B ran.
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    await sendTurn(w.store, child.id, {
+      prompt: "Continue later.",
+      queue: { conditions: [], held: false, order: Date.now(), sequential: true, continuation: "same-thread", automatic: true },
+      scheduledFor: at,
+      scheduleReason: "usage-reset",
+    });
+    expect(await cancelAutoContinue(w.ctx, child.id)).toBe(true);
+
+    // Releasing B's delayed callback must not erase the newer recovery cancel.
+    releaseB.resolve();
+    await b.run;
+    await flushTurnRunners();
+    expect((await describeTask(w.ctx, parent.id, child.id)).task.status).toBe("cancelled");
+  });
+
   it("leaves a finished task alone when the cancel stops nothing", async () => {
     const w = await world();
     const parent = await w.make("orchestrator");

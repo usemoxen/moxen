@@ -872,9 +872,19 @@ export class ThreadStore {
     });
   }
 
-  /** Record that a task turn settled, for a later cancellation mark to see. */
-  async recordDelegationSettle(delegationId: string, turnId: string): Promise<void> {
-    await this.updateDelegationWith(delegationId, () => ({ lastSettledTurnId: turnId }));
+  /**
+   * Record that a task turn settled, monotonically by execution sequence so a
+   * delayed settle callback from an older turn can never overwrite newer work.
+   */
+  async recordDelegationSettle(delegationId: string, turnId: string, settledSeq?: number): Promise<void> {
+    await this.updateDelegationWith(delegationId, (current) => {
+      if (settledSeq !== undefined) {
+        if (current.lastSettledSeq !== undefined && settledSeq < current.lastSettledSeq) return null;
+        return { lastSettledTurnId: turnId, lastSettledSeq: settledSeq };
+      }
+      if (current.lastSettledSeq !== undefined) return null;
+      return { lastSettledTurnId: turnId };
+    });
   }
 
   /**

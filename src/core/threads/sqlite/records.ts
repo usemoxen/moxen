@@ -259,6 +259,7 @@ export function encodeThread(thread: StoredThread): ThreadRow {
   if (thread.instructionState !== undefined) rest.instructionState = thread.instructionState;
   if (thread.modeState !== undefined) rest.modeState = thread.modeState;
   if (thread.nativeSubagents !== undefined) rest.nativeSubagents = thread.nativeSubagents;
+  if (thread.turnSeq !== undefined) rest.turnSeq = thread.turnSeq;
   if (thread.snoozeConditions !== undefined) rest.snoozeConditions = thread.snoozeConditions;
   if (thread.snoozeLatched !== undefined) rest.snoozeLatched = thread.snoozeLatched;
   if (thread.snoozeGeneration !== undefined) rest.snoozeGeneration = thread.snoozeGeneration;
@@ -336,6 +337,7 @@ export function decodeThread(row: ThreadRow): StoredThread {
     ...(rest.instructionState === undefined ? {} : { instructionState: rest.instructionState as NonNullable<StoredThread["instructionState"]> }),
     ...(rest.modeState === undefined ? {} : { modeState: rest.modeState as NonNullable<StoredThread["modeState"]> }),
     ...(rest.nativeSubagents === undefined ? {} : { nativeSubagents: rest.nativeSubagents as NonNullable<StoredThread["nativeSubagents"]> }),
+    ...(rest.turnSeq === undefined ? {} : { turnSeq: rest.turnSeq as number }),
     ...(rest.snoozeConditions === undefined ? {} : { snoozeConditions: rest.snoozeConditions as NonNullable<StoredThread["snoozeConditions"]> }),
     ...(rest.snoozeLatched === undefined ? {} : { snoozeLatched: rest.snoozeLatched as NonNullable<StoredThread["snoozeLatched"]> }),
     ...(rest.snoozeGeneration === undefined ? {} : { snoozeGeneration: rest.snoozeGeneration as string }),
@@ -368,6 +370,7 @@ export function encodeTurn(turn: StoredTurn): TurnRow {
   if (turn.generation !== undefined) rest.generation = turn.generation;
   if (turn.turnOutputTokens !== undefined) rest.turnOutputTokens = turn.turnOutputTokens;
   if (turn.startedAt !== undefined) rest.startedAt = turn.startedAt;
+  if (turn.executionSeq !== undefined) rest.executionSeq = turn.executionSeq;
   if (turn.heldBySnooze !== undefined) rest.heldBySnooze = turn.heldBySnooze;
 
   return {
@@ -443,6 +446,7 @@ export function decodeTurn(row: TurnRow): StoredTurn {
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
     ...(rest.startedAt === undefined ? {} : { startedAt: rest.startedAt as string }),
+    ...(rest.executionSeq === undefined ? {} : { executionSeq: rest.executionSeq as number }),
     ...(rest.usagePause === undefined ? {} : { usagePause: rest.usagePause as NonNullable<StoredTurn["usagePause"]> }),
     ...(rest.handoffOpen === undefined ? {} : { handoffOpen: true as const }),
     ...(rest.handoffPending === undefined ? {} : { handoffPending: rest.handoffPending as readonly string[] }),
@@ -550,9 +554,10 @@ export function encodeDelegation(delegation: StoredDelegation): DelegationRow {
   if (delegation.modelSnapshot !== undefined) rest.modelSnapshot = delegation.modelSnapshot;
   if (delegation.review !== undefined) rest.review = delegation.review;
   if (delegation.cancelledTurnId !== undefined) rest.cancelledTurnId = delegation.cancelledTurnId;
-  if (delegation.cancelledTurnAt !== undefined) rest.cancelledTurnAt = delegation.cancelledTurnAt;
+  if (delegation.cancelledAfterSeq !== undefined) rest.cancelledAfterSeq = delegation.cancelledAfterSeq;
   if (delegation.cancelledGeneration !== undefined) rest.cancelledGeneration = delegation.cancelledGeneration;
   if (delegation.lastSettledTurnId !== undefined) rest.lastSettledTurnId = delegation.lastSettledTurnId;
+  if (delegation.lastSettledSeq !== undefined) rest.lastSettledSeq = delegation.lastSettledSeq;
   return {
     id: delegation.id,
     parent_thread_id: delegation.parentThreadId,
@@ -588,8 +593,9 @@ export function decodeDelegation(row: DelegationRow): StoredDelegation {
     ...(rest.modelSnapshot === undefined ? {} : { modelSnapshot: rest.modelSnapshot as NonNullable<StoredDelegation["modelSnapshot"]> }),
     ...(rest.review === undefined ? {} : { review: rest.review as NonNullable<StoredDelegation["review"]> }),
     ...(rest.cancelledTurnId === undefined ? {} : { cancelledTurnId: rest.cancelledTurnId as string }),
-    ...(rest.cancelledTurnAt === undefined ? {} : { cancelledTurnAt: rest.cancelledTurnAt as string }),
+    ...(rest.cancelledAfterSeq === undefined ? {} : { cancelledAfterSeq: rest.cancelledAfterSeq as number }),
     ...(rest.cancelledGeneration === undefined ? {} : { cancelledGeneration: rest.cancelledGeneration as number }),
     ...(rest.lastSettledTurnId === undefined ? {} : { lastSettledTurnId: rest.lastSettledTurnId as string }),
+    ...(rest.lastSettledSeq === undefined ? {} : { lastSettledSeq: rest.lastSettledSeq as number }),
   };
 }

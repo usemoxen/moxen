@@ -688,6 +688,7 @@ export async function sendTurn(
         throw continuationBusyError(threadId);
       }
     }
+    const executionSeq = status === "running" ? nextTurnSeq(thread, turns) : undefined;
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
@@ -696,6 +697,7 @@ export async function sendTurn(
       ...(heldBehind || (drainHeld && !snoozeHeld) ? { heldAtSettle: true } : {}),
       ...(snoozeHeld ? { heldBySnooze: true } : {}),
       ...(status === "running" ? { owner: currentTurnOwner() } : {}),
+      ...(executionSeq !== undefined ? { executionSeq } : {}),
       delivery:
         delivery === "queue" || waitingOut !== null || heldBehind || snoozeHeld ? (status === "queued" ? "queued" : "started")
         : delivery === "restart" ? "restarted"
@@ -758,7 +760,7 @@ export async function sendTurn(
         createdAt: now,
       });
     }
-    thread = { ...thread, updatedAt: now };
+    thread = { ...thread, ...(executionSeq !== undefined ? { turnSeq: executionSeq } : {}), updatedAt: now };
     await store.writeThreadRecord(thread);
     store.emit(threadId, status === "queued" ? "turn-queued" : "turn-started");
     return { thread, turn, messageId: turn.messageId, delivery: turn.delivery };
@@ -844,7 +846,8 @@ export async function startBackgroundTurn(
     // Re-checked inside the lock: the wait above runs before it, so two
     // concurrent starts (or a send that won the race) would otherwise both
     // record a running turn.
-    const live = liveTurn(await store.readTurns(threadId));
+    const turns = await store.readTurns(threadId);
+    const live = liveTurn(turns);
     if (live !== null && live.status === "running") {
       throw new CliError(
         "THREAD_BUSY",
@@ -869,11 +872,13 @@ export async function startBackgroundTurn(
         { exitCode: 4, details: { threadId, turnId: live.id } },
       );
     }
+    const executionSeq = nextTurnSeq(admitted, turns);
     const turn: StoredTurn = {
       id: store.newId(),
       threadId,
       status: "running",
       owner: currentTurnOwner(),
+      executionSeq,
       delivery: "background",
       messageId: store.newId(),
       runtimeMode: admitted.runtimeMode,
@@ -895,10 +900,25 @@ export async function startBackgroundTurn(
       summary: "Woken by a background task",
       createdAt: now,
     });
-    await store.writeThreadRecord({ ...admitted, updatedAt: now });
+    await store.writeThreadRecord({ ...admitted, turnSeq: executionSeq, updatedAt: now });
     store.emit(threadId, "turn-started");
     return turn;
   });
+}
+
+/**
+ * Next monotonic execution sequence for a turn becoming `running` on this
+ * thread. Never decreases on revert, and starts above legacy turns on threads
+ * that predated `turnSeq`.
+ */
+function nextTurnSeq(thread: StoredThread, turns: readonly StoredTurn[]): number {
+  let highest = thread.turnSeq ?? 0;
+  for (const turn of turns) {
+    if (turn.executionSeq !== undefined && turn.executionSeq > highest) highest = turn.executionSeq;
+  }
+  const ranCount = turns.filter((turn) => turn.status !== "queued").length;
+  if (ranCount > highest) highest = ranCount;
+  return highest + 1;
 }
 
 /** This process, as the owner of the turns it starts or promotes. */
@@ -1599,11 +1619,14 @@ async function promoteQueuedLocked(store: ThreadStore, threadId: string, now: st
     }
   }
   if (!next) return;
-  if (pause && pause.recoveryTurnId === next.id) {
-    await store.writeThreadRecord({ ...thread, usagePause: { ...pause, phase: "resuming" } });
-  }
+  const executionSeq = nextTurnSeq(thread, turns);
+  await store.writeThreadRecord({
+    ...thread,
+    turnSeq: executionSeq,
+    ...(pause && pause.recoveryTurnId === next.id ? { usagePause: { ...pause, phase: "resuming" } } : {}),
+  });
   await batchQueuedLocked(store, threadId, next, turns, now, thread.interactionMode, gated, driverKindOfInstance((next.modelSelection ?? thread.modelSelection).instanceId) === "antigravity");
-  await store.updateTurn(threadId, next.id, { status: "running", interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now, ...(next.heldAtSettle || next.heldBySnooze ? { heldAtSettle: undefined, heldBySnooze: undefined } : {}) });
+  await store.updateTurn(threadId, next.id, { status: "running", executionSeq, interactionMode: waitingInteractionMode(next, thread.interactionMode), owner: currentTurnOwner(), startedAt: now, updatedAt: now, ...(next.heldAtSettle || next.heldBySnooze ? { heldAtSettle: undefined, heldBySnooze: undefined } : {}) });
   await store.appendLedger(threadId, "activity", {
     id: store.newId(),
     threadId,
