@@ -572,7 +572,8 @@ describe("Antigravity orphan recovery held while off", () => {
     // this child; the flush keeps it back while the task still has work.
     await queueTaskNotification(w.ctx, parent.id, child.id);
     await flushTaskNotifications(w.ctx, parent.id);
-    expect(await readBatches(w.root)).toEqual({ [parent.id]: [{ child: child.id }] });
+    // The notice's identity is the batch's own bookkeeping; the test names the task.
+    expect((await readBatches(w.root))[parent.id]).toEqual([{ child: child.id, id: expect.any(String) }]);
 
     // The restart comes back with automatic prompts off, and recovers the
     // orphan. Interrupting it is right; running the queued follow-up is not.

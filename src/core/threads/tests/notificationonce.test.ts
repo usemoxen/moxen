@@ -122,6 +122,64 @@ describe("a task's settle is reported once", () => {
     expect(steered).toHaveLength(1);
   }, 30_000);
 
+  it("recovers a staged notice steer the provider never accepted", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    await delegate(w, parent.id, child.id);
+    await settleChild(w, child.id);
+    const turnId = (await w.store.readTurns(child.id))[0]!.id;
+    await queueTaskNotification(w.ctx, parent.id, child.id);
+    const running = await sendTurn(w.store, parent.id, { prompt: "Orchestrate." });
+    // The previous process died between staging and sending the steer.
+    const staged = await sendTurn(w.store, parent.id, {
+      prompt: "Unsent notice",
+      origin: "task-notification",
+      delivery: "steer",
+      notification: { tasks: [(await taskNotificationOf(w.ctx, child.id))!], notices: [`settle:${child.id}:${turnId}`] },
+    }, undefined, () => undefined);
+    expect(staged.turn.id).toBe(running.turn.id);
+    await w.store.updateTurn(parent.id, running.turn.id, { owner: { pid: 2_147_483_647, host: running.turn.owner!.host } });
+
+    await recoverTaskNotifications(w.ctx);
+    await flushTurnRunners();
+    const delivered = (await noticesIn(w, parent.id)).filter((notice) => notice.id !== staged.messageId);
+    expect(delivered.map((notice) => notice.notification?.tasks[0]?.settleTurnId)).toEqual([turnId]);
+    expect(await readBatches(w.root)).toEqual({});
+  });
+
+  it("does not strip the previous confirmed notice when the next steer fails before append", async () => {
+    const w = await world({ leaveTurnsRunning: true, steering: { codex: "delivers" } });
+    const parent = await w.make("orchestrator");
+    const first = await w.make("first task");
+    const second = await w.make("second task");
+    for (const child of [first, second]) {
+      await delegate(w, parent.id, child.id);
+      await settleChild(w, child.id);
+    }
+    const running = await startTurn(w.ctx, { threadId: parent.id, prompt: "Orchestrate." });
+    await queueTaskNotification(w.ctx, parent.id, first.id);
+    await flushTaskNotifications(w.ctx, parent.id);
+    const [notice] = await noticesIn(w, parent.id);
+    expect(notice?.notification?.notices).toHaveLength(1);
+    expect((await w.store.readActivities(parent.id)).some((row) => row.kind === "steer.confirmed" && row.payload?.messageId === notice?.id)).toBe(true);
+
+    await queueTaskNotification(w.ctx, parent.id, second.id);
+    const append = w.store.appendLedger.bind(w.store);
+    const failure = vi.spyOn(w.store, "appendLedger").mockImplementation(async (id, ledger, row) => {
+      if (id === parent.id && ledger === "messages") throw new Error("injected message append failure");
+      return append(id, ledger, row);
+    });
+    try {
+      await expect(flushTaskNotifications(w.ctx, parent.id)).rejects.toThrow("injected message append failure");
+    } finally {
+      failure.mockRestore();
+      await interruptTurn(w.store, parent.id, running.turn.id);
+      await flushTurnRunners();
+    }
+    expect((await noticesIn(w, parent.id))[0]?.notification?.notices).toEqual(notice?.notification?.notices);
+  });
+
   it("files a notice for an idle parent whose turn ended before the steer left", async () => {
     const steered: string[] = [];
     const w = await world({

@@ -783,6 +783,21 @@ export class ThreadStore {
     });
   }
 
+  /** Clear only this failed batch steer, leaving its transcript and any accepted receipt intact. */
+  async clearStagedNoticeIdentities(threadId: string, messageId: string): Promise<void> {
+    await this.withThreadLock(threadId, async () => {
+      await this.withThreadLock(`\0ledger:messages:${threadId}`, async () => {
+        const messages = await this.readMessages(threadId);
+        const staged = messages.find((row) => row.id === messageId && row.origin === "task-notification" && !row.queuedTaskNotice);
+        if (!staged?.notification?.notices) return;
+        const activities = await this.readActivities(threadId);
+        if (activities.some((row) => row.payload?.messageId === messageId && (row.kind === "steer.accepted" || row.kind === "steer.confirmed"))) return;
+        const { notices: _notices, noticeEntries: _noticeEntries, ...notification } = staged.notification;
+        await this.rewriteLedger(threadId, "messages", messages.map((row) => row.id === messageId ? { ...row, notification } : row));
+      });
+    });
+  }
+
   /**
    * Turns ledger rows. With `reportTornTail`, an unterminated bad-JSON tail
    * is reported at once instead of being pended for a confirming re-read:

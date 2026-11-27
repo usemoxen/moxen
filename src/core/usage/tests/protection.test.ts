@@ -23,6 +23,12 @@ import { buildHandoff } from "../../threads/handoff.js";
 
 afterEach(resetUsageLimitsForTests);
 
+/** The durable notice batches with each entry's identity dropped: these tests pin which notices wait, not their internal ids. */
+async function noticeBatches(root: string): Promise<Record<string, unknown>> {
+  const raw = JSON.parse(await readFile(path.join(root, "task-notification-batches.json"), "utf8").catch(() => "{}")) as Record<string, { id?: string }[]>;
+  return Object.fromEntries(Object.entries(raw).map(([parent, entries]) => [parent, entries.map(({ id: _id, ...rest }) => rest)]));
+}
+
 async function world(provider: "claude" | "codex" = "codex", driverOverride?: TurnDriver) {
   const sent: string[] = [];
   const prompts: string[] = [];
@@ -247,12 +253,12 @@ describe("usage protection", () => {
       // Held: nothing goes out and no turn starts behind the hold.
       expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
       expect((await w.store.readTurns(parent)).filter((turn) => turn.status === "queued")).toHaveLength(0);
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
+      expect(await noticeBatches(w.root)).toEqual({ [parent]: [{ child }] });
       // A restart keeps the held batch without delivering it.
       const store = await openThreadStore(w.root);
       await recoverTaskNotifications({ ...w.ctx, store });
       expect((await store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
+      expect(await noticeBatches(w.root)).toEqual({ [parent]: [{ child }] });
       // The user's next message carries the notice with it.
       const user = await startTurn({ ...w.ctx, store }, { threadId: parent, prompt: "continue" });
       await user.run;
@@ -261,7 +267,7 @@ describe("usage protection", () => {
       expect(messages).toHaveLength(1);
       expect(messages[0]!.notification?.tasks[0]).toMatchObject({ taskId: child, title: "child report" });
       expect(w.prompts.at(-1)).toContain(child);
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({});
+      expect(await noticeBatches(w.root)).toEqual({});
     } finally { w.guard.close(); }
   });
 
@@ -274,7 +280,7 @@ describe("usage protection", () => {
     try {
       await queueTaskNotification(w.ctx, parent, child);
       // Durable before the timer fires: the sidecar names the batch.
-      const persisted = JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8")) as Record<string, { child: string }[]>;
+      const persisted = (await noticeBatches(w.root)) as Record<string, { child: string }[]>;
       expect(persisted[parent]).toEqual([{ child }]);
       // A restart before the timer fires replays the batch...
       const store = await openThreadStore(w.root);
@@ -288,7 +294,7 @@ describe("usage protection", () => {
       await recoverTaskNotifications(ctx);
       await settleRuns();
       expect((await store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(1);
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({});
+      expect(await noticeBatches(w.root)).toEqual({});
     } finally { w.guard.close(); }
   });
 
@@ -304,7 +310,7 @@ describe("usage protection", () => {
       await queueTaskNotification(w.ctx, parent, child);
       await expect(flushTaskNotifications(w.ctx, parent)).rejects.toThrow();
       // At-least-once: the batch is still on disk for the retry, and nothing went out.
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({ [parent]: [{ child }] });
+      expect(await noticeBatches(w.root)).toEqual({ [parent]: [{ child }] });
       expect((await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification")).toHaveLength(0);
       await updateThreadMeta(w.store, parent, { modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" } });
       await flushTaskNotifications(w.ctx, parent);
@@ -312,7 +318,7 @@ describe("usage protection", () => {
       const messages = (await w.store.readMessages(parent)).filter((row) => row.origin === "task-notification");
       expect(messages).toHaveLength(1);
       expect(messages[0]!.notification?.tasks.map((task) => task.taskId)).toEqual([child]);
-      expect(JSON.parse(await readFile(path.join(w.root, "task-notification-batches.json"), "utf8"))).toEqual({});
+      expect(await noticeBatches(w.root)).toEqual({});
     } finally { w.guard.close(); }
   });
 

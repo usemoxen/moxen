@@ -253,6 +253,8 @@ export function encodeThread(thread: StoredThread): ThreadRow {
   if (thread.researchRole !== undefined) rest.researchRole = thread.researchRole;
   if (thread.researchPicker !== undefined) rest.researchPicker = thread.researchPicker;
   if (thread.continueClaim !== undefined) rest.continueClaim = thread.continueClaim;
+  if (thread.adoptingFrom !== undefined) rest.adoptingFrom = thread.adoptingFrom;
+  if (thread.pendingContinuation !== undefined) rest.pendingContinuation = thread.pendingContinuation;
   if (thread.handoffFacts !== undefined) rest.handoffFacts = thread.handoffFacts;
   if (thread.usageProtectionOverride !== undefined) rest.usageProtectionOverride = thread.usageProtectionOverride;
   if (thread.providerSessions !== undefined) rest.providerSessions = thread.providerSessions;
@@ -330,6 +332,8 @@ export function decodeThread(row: ThreadRow): StoredThread {
     ...(rest.researchRole === undefined ? {} : { researchRole: rest.researchRole as NonNullable<StoredThread["researchRole"]> }),
     ...(rest.researchPicker === undefined ? {} : { researchPicker: rest.researchPicker as NonNullable<StoredThread["researchPicker"]> }),
     ...(rest.continueClaim === undefined ? {} : { continueClaim: rest.continueClaim as NonNullable<StoredThread["continueClaim"]> }),
+    ...(rest.adoptingFrom === undefined ? {} : { adoptingFrom: rest.adoptingFrom as Exclude<StoredThread["adoptingFrom"], undefined> }),
+    ...(rest.pendingContinuation === undefined ? {} : { pendingContinuation: rest.pendingContinuation as NonNullable<StoredThread["pendingContinuation"]> }),
     ...(rest.handoffFacts === undefined ? {} : { handoffFacts: rest.handoffFacts as NonNullable<StoredThread["handoffFacts"]> }),
     ...(rest.usageProtectionOverride === undefined ? {} : { usageProtectionOverride: rest.usageProtectionOverride as NonNullable<StoredThread["usageProtectionOverride"]> }),
     ...(rest.providerSessions === undefined ? {} : { providerSessions: rest.providerSessions as NonNullable<StoredThread["providerSessions"]> }),

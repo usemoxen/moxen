@@ -583,11 +583,26 @@ that continues hands every task it delegated to the new thread — running,
 idle, finished and cancelled alike, including tasks that themselves carried
 on (research roles stay with the run): the handoff lists them, and from then
 on steering, `task_status` and completion notifications resolve against the
-new parent while the old one reads `TASK_NOT_FOUND`. The re-pointing is one
-atomic write, so a notification deciding mid-transfer sees every row before
-or every row after it; a report queued and fully delivered just before the
-transfer still reaches the old thread — the task's next report, and
-`task_status` on the new parent at any time, cover it. A continued thread
+new parent while the old one reads `TASK_NOT_FOUND`. Notices already waiting
+for the old thread move with the handoff once its ownership write lands; a
+notice that arrives afterwards is routed to the live parent before its
+allowance is checked, so the old thread being spent or held does not decide
+where it goes. The new thread's own hold still keeps it waiting there. The
+re-pointing is one atomic write, so a
+notification deciding mid-transfer sees every row before or every row after
+it; a report queued and fully delivered just before the transfer still
+reaches the old thread — the task's next report, and `task_status` on the
+new parent at any time, cover it. The new thread records from its creation
+that it is still receiving this handoff, and clears that record once its
+predecessor's tasks and waiting notices are its. Until then it cannot be
+continued itself: a reservation on it — the palette action, an agent's
+`thread_continue`, a queued handoff naming its own destination, and a retry
+after a crash alike — is refused with `THREAD_BUSY` carrying the handoff
+contention the queue pass already understands, so the entry stays queued for
+a later pass instead of failing. A crash mid-handoff leaves that record
+behind, and the next start finishes the adoption before it recovers notices,
+so the tasks land on the thread that owns them and not on one that already
+moved on. A continued thread
 starts no new delegations (`THREAD_CONTINUED` names the live thread):
 otherwise the row would answer to a dormant thread while its continuation
 steers beside it. A manual continue needs an idle source: while one of its
@@ -639,7 +654,9 @@ and runs at its time. An immediate message still releases a hold and runs
 first, as on any held thread. A pause notice batched for the source but not
 yet delivered moves to the continuation when it inherits the hold, so the
 parent still hears it naming the live task; without an inherited hold it is
-dropped, and the task's settle report covers it.
+dropped, and the task's settle report covers it. It follows the task's own
+continuation chain to whichever thread owns the task now, so a handoff of the
+parent in between cannot leave it on the dormant thread.
 A provider's prompt cache lasts minutes up to an hour, so a recovery long after
 the thread's last activity reads the whole conversation again. With
 `usageColdResume handoff`, a due automatic recovery whose thread has been idle
@@ -1171,6 +1188,23 @@ notice was about to steer into can end while the notice is on its way in: the
 notice is then filed as a turn of its own, not left waiting for the parent's
 next message.
 
+Each notice carries an identity: its task, its kind (settle, pause,
+cancellation) and the task turn it reports, so a later settle of the
+same task is a different notice — and a revert that removes the turn,
+with a wake that settles a fresh one, reports again rather than reading
+as the notice already delivered. A batch flush delivers the notices it
+read and acknowledges exactly those, leaving anything a handoff or a
+later settle added meanwhile for the next flush. The identity of each
+delivered notice is recorded on the message that reports it, in the same
+write that accepts the turn, so a flush whose acknowledgement write
+fails is not replayed as a second message after a restart; the check
+reads the parent's recent notification messages, not an open-ended
+record. A steer the provider refused — or a send that failed after the
+message was staged — carries no such record: the failed attempt's
+identities are cleared, and the batch entry keeps the retry. An entry
+whose batch row carried no identity (written before identities existed)
+is judged the old way, against the parent's ledger.
+
 ### A delegated task that runs out of usage
 
 A task that runs out of usage auto-continues as any thread does: a continue
@@ -1188,13 +1222,13 @@ parent is told by default. Either way `task_status` reads `cancelled` from
 then on, until a wake (`task_send` with `wake: true`) revives the task.
 
 A parent that has itself run out of usage does not receive task notices yet:
-they wait, durably — a restart inside the wait loses nothing — and arrive
-together as one message once its usage is back. When its automatic continue
-is switched off, there is no recovery to ride on, so they go out with the
-user's next message instead, all together rather than each on its own.
-Continuing the parent into a new thread moves the wait with it: the live
-thread resolves through `continuedIn`, so the new parent gets the message
-and the old one gets nothing.
+they wait durably and arrive together as one message once its usage is back.
+A crash inside the wait replays them on restart, at least once. When its
+automatic continue is switched off, there is no recovery to ride on, so they
+go out with the user's next message instead, all together rather than each on
+its own. Continuing the parent into a new thread hands the waiting notices to
+the live thread with the handoff; delivery resolves through `continuedIn`, so
+the new parent gets the message and the old one does not.
 
 Only the thread that owns a task steers it: the one that delegated it, or the
 continuation that took it over. Continuing hands every delegation row to the
@@ -1484,7 +1518,11 @@ A `modelSelection` with `provider`/`model` together is refused.
   speaks in the thread, which resets the count. A user's own palette
   continue never counts. A call retried with the same `idempotencyKey`
   returns the first continuation with a note, even when the new text
-  differs: the first summary is kept.
+  differs: the first summary is kept. It reports that only once the handoff
+  durably finished — its tasks and waiting notices moved and its first turn
+  started; a call that died before that finishes the same reservation with
+  the summary and first message it is retried with, since the first one was
+  never written into the new thread.
 - Mid-turn ordering: the new thread's first turn waits until the source
   thread has nothing running or queued (an entry condition on the calling
   turn plus a thread condition on the source, admitted by the work queue),

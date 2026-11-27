@@ -156,6 +156,34 @@ export interface HandoffFacts {
   readonly pending: readonly HandoffPendingRequest[];
 }
 
+export interface ContinueThreadRequest {
+  readonly threadId: string;
+  readonly modelSelection?: ModelSelection;
+  readonly runtimeMode?: RuntimeMode;
+  readonly interactionMode?: InteractionMode;
+  readonly destinationThreadId?: string;
+  readonly queue?: QueuePolicy;
+  readonly modelSummary?: string;
+  readonly queuedTurnIds?: readonly string[];
+  /** Start the opener at this time rather than now. */
+  readonly scheduledFor?: string;
+  /** A server-initiated continuation. */
+  readonly automatic?: boolean;
+  /** An opening instruction to fold into the handoff document. */
+  readonly firstMessage?: string;
+  /** An agent-initiated continuation, subject to the delegation gate. */
+  readonly byAgent?: boolean;
+  /** A retry with the same key rejoins the reserved destination. */
+  readonly idempotencyKey?: string;
+}
+
+/** Frozen when the destination is reserved, until its opener and queue are durable. */
+export interface PendingContinuation {
+  readonly request: ContinueThreadRequest;
+  readonly document: string;
+  readonly gated: readonly HandoffPendingRequest[];
+}
+
 export interface StoredThread {
   readonly researchRun?: StoredResearchRun;
   readonly pastResearchRuns?: readonly StoredResearchRun[];
@@ -173,6 +201,10 @@ export interface StoredThread {
    * conversation is told as ordinary history.
    */
   readonly handoffFacts?: HandoffFacts;
+  /** Source of a handoff still landing its tasks, opener or dependent queue entries. */
+  readonly adoptingFrom?: string | null;
+  /** Recovery data written with the adoption marker and removed when it clears. */
+  readonly pendingContinuation?: PendingContinuation;
   /**
    * A manual continuation in flight on this thread (`reserveContinuation`):
    * while present, admission starts no turn here, so the new worker never
@@ -493,7 +525,13 @@ export interface StoredMessage {
   /** A message moxen wrote into the thread rather than the user (see `MessageOrigin`). */
   readonly origin?: MessageOrigin;
   /** The origin's structured facts (`task-notification`: the tasks), for a client to draw. */
-  readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  readonly notification?: {
+    readonly tasks: readonly TaskNotification[];
+    /** Internal identities of the task facts actually reported in this message. */
+    readonly notices?: readonly string[];
+    /** Pending entries consumed by these facts when their original identities differ. */
+    readonly noticeEntries?: readonly string[];
+  };
   /** Filed as a turn prompt, even if later folded into another queued turn. */
   readonly queuedTaskNotice?: true;
 }
@@ -600,6 +638,9 @@ export interface CreateThreadInput {
   readonly continuedFrom?: string;
   /** The hand-off facts the new thread carries (see `HandoffFacts`); only the continue path passes them. */
   readonly handoffFacts?: HandoffFacts;
+  /** Set on a destination created for a handoff; cleared once its adoption commits (see `StoredThread.adoptingFrom`). */
+  readonly adoptingFrom?: string;
+  readonly pendingContinuation?: PendingContinuation;
 }
 
 export type SendIfBusy = "reject" | "inject";
@@ -632,7 +673,7 @@ export interface SendTurnInput {
   readonly continueAttempt?: number;
   /** A message moxen writes itself (with its facts), rather than the user. */
   readonly origin?: MessageOrigin;
-  readonly notification?: { readonly tasks: readonly TaskNotification[] };
+  readonly notification?: { readonly tasks: readonly TaskNotification[]; readonly notices?: readonly string[] };
   /** Internal: the prompt is the generated hand-off that opens a continued thread, recorded as its provenance. */
   readonly handoffOpen?: true;
   /** Internal: the pending request message ids this hand-off opener carries as its task (see `StoredTurn.handoffPending`). */

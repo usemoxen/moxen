@@ -118,7 +118,30 @@ export function untrackContinuation(token: string): void {
 }
 
 /**
- * Whether a manual continuation in flight forbids starting a turn on this
+ * Whether a claim would block admission now, judged without writing: a
+ * handoff running here, or a claim from a live process that is still fresh.
+ * A stale claim (dead owner, own dead handoff, or past the TTL) reads as not
+ * blocking, exactly as `continuationInFlight` would heal it — but this never
+ * writes. Callers that do not hold this thread's lock must use this one:
+ * healing a stale claim from another thread's lock (or none) rewrites a
+ * record they never serialized, losing a concurrent title or mode write.
+ */
+export function continuationClaimLive(thread: StoredThread): boolean {
+  const claim = thread.continueClaim;
+  if (!claim) return false;
+  // The handoff runs here: effective for its whole life, however long
+  // provider startup takes — never expired by age.
+  if (liveContinuations.has(claim.token)) return true;
+  // Same host, our own pid, but no live handoff owns the token: its cleanup
+  // already ran (untrack precedes the record clear), so the record write
+  // must have died with the handoff — stale, not blocking.
+  const ownDeadHandoff = claim.host === os.hostname() && claim.pid === process.pid;
+  const fresh = Date.parse(claim.at) > Date.now() - CONTINUE_CLAIM_TTL_MS;
+  const alive = claim.host === os.hostname() ? processAlive(claim.pid) : true;
+  return !ownDeadHandoff && alive && fresh;
+}
+
+/** Whether a manual continuation in flight forbids starting a turn on this
  * thread now. A claim whose handoff runs in this process blocks for as long
  * as it runs. Otherwise the owner is judged by pid (same host) or age
  * alone (another host, which production never writes — paired servers keep
@@ -126,22 +149,13 @@ export function untrackContinuation(token: string): void {
  * handoff never wedges the thread, and a reused pid cannot block past the
  * TTL. Returns the thread as admission must see it (healed when it was
  * dead), since the caller holds the lock and writes its own copy back
- * afterwards. Caller must hold the thread lock.
+ * afterwards. Caller must hold the thread lock; a reader without it uses
+ * `continuationClaimLive` instead.
  */
 export async function continuationInFlight(store: ThreadStore, thread: StoredThread): Promise<{ blocked: boolean; thread: StoredThread }> {
+  if (continuationClaimLive(thread)) return { blocked: true, thread };
+  if (!thread.continueClaim) return { blocked: false, thread };
   const claim = thread.continueClaim;
-  if (!claim) return { blocked: false, thread };
-  // The handoff runs here: effective for its whole life, however long
-  // provider startup takes — never expired by age.
-  if (liveContinuations.has(claim.token)) return { blocked: true, thread };
-  // Same host, our own pid, but no live handoff owns the token: its cleanup
-  // already ran (untrack precedes the record clear), so the record write
-  // must have died with the handoff. Heal at once rather than stalling
-  // until the TTL lapses.
-  const ownDeadHandoff = claim.host === os.hostname() && claim.pid === process.pid;
-  const fresh = Date.parse(claim.at) > Date.now() - CONTINUE_CLAIM_TTL_MS;
-  const alive = claim.host === os.hostname() ? processAlive(claim.pid) : true;
-  if (!ownDeadHandoff && alive && fresh) return { blocked: true, thread };
   const current = await store.readThreadRecord(thread.id);
   if (current?.continueClaim?.token !== claim.token) return { blocked: false, thread: current ?? thread };
   const healed = { ...current, continueClaim: null, updatedAt: store.nowIso() };
@@ -188,6 +202,20 @@ export function isContinuationBusy(cause: unknown): cause is CliError {
     cause.details !== null &&
     (cause.details as { continued?: unknown }).continued === true
   );
+}
+
+/**
+ * A THREAD_BUSY refusal raised because the thread is itself still receiving a
+ * handoff: continuing it now would hand its predecessor's tasks on before it
+ * owns them. Carries the same `continued` classifier as a handoff contention,
+ * so the queue pass leaves the entry queued for a later pass and usage
+ * protection retries its wrap-up instead of failing either for good.
+ */
+export function adoptionBusyError(threadId: string, continuedFrom: string): CliError {
+  return new CliError("THREAD_BUSY", `Thread ${threadId} is still receiving the handoff from ${continuedFrom}. Retry when it lands.`, {
+    exitCode: 4,
+    details: { threadId, continuedFrom, continued: true },
+  });
 }
 
 export function unreadableTurnsError(threadId: string, problem: StoreProblem): CliError {
@@ -329,6 +357,8 @@ export async function createThread(
     ...(input.researchRole ? { researchRole: input.researchRole } : {}),
     ...(input.continuedFrom ? { continuedFrom: input.continuedFrom } : {}),
     ...(input.handoffFacts ? { handoffFacts: input.handoffFacts } : {}),
+    ...(input.adoptingFrom ? { adoptingFrom: input.adoptingFrom } : {}),
+    ...(input.pendingContinuation ? { pendingContinuation: input.pendingContinuation } : {}),
   };
   await store.writeThreadRecord(thread);
   store.emit(thread.id, "created");
@@ -395,7 +425,7 @@ export async function sendTurn(
   input: SendTurnInput,
   /** The config in force, when the caller has it: lets admission hold Antigravity automatic prompts while delegation is off. */
   config?: Pick<CliConfig, "providers">,
-  guardNoticeSteer?: (target: StoredTurn) => void,
+  guardNoticeSteer?: (target: StoredTurn) => string | undefined,
 ): Promise<SendTurnResult> {
   const threadId = requireThreadId(rawThreadId);
   const prompt = input.prompt.trim();
@@ -584,8 +614,7 @@ export async function sendTurn(
     const modelSelection: ModelSelection = input.modelSelection ?? thread.modelSelection;
 
     if (running && (delivery === "auto" || delivery === "steer")) {
-      guardNoticeSteer?.(running);
-      const messageId = store.newId();
+      const messageId = guardNoticeSteer?.(running) ?? store.newId();
       await store.appendLedger(threadId, "messages", {
         id: messageId,
         threadId,

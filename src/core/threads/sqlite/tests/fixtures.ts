@@ -44,6 +44,22 @@ export function fullThread(): StoredThread {
     hasPendingApprovals: true,
     hasPendingUserInput: false,
     continuedFrom: "thread-0",
+    adoptingFrom: "thread-0",
+    pendingContinuation: {
+      request: {
+        threadId: "thread-0",
+        modelSelection: MODEL,
+        byAgent: true,
+        scheduledFor: LATER,
+        firstMessage: "Preserve the original first action.",
+        queuedTurnIds: ["turn-0"],
+        modelSummary: "Model-produced handoff.",
+        idempotencyKey: "original-request",
+        queue: { conditions: [{ type: "thread", threadId: "thread-0" }], held: false, order: 1, sequential: false, continuation: "same-thread" },
+      },
+      document: "# Handoff\n\nOriginal snapshot.",
+      gated: [{ sourceThreadId: "thread-0", turnId: "turn-0", messageId: "deferred", text: "Wait first.", scheduledFor: LATER }],
+    },
     handoffFacts: {
       sourceThreadId: "thread-0",
       goal: { text: "Ship the audit; the goalfinder marker tells it apart.", sourceThreadId: "thread-0" },
@@ -206,6 +222,8 @@ export function fullMessage(): StoredMessage {
       { type: "image", id: "att-1", name: "ünïcode image.png", mimeType: "image/png", sizeBytes: 1_234, path: "/tmp/a b/ünïcode image.png" },
     ],
     notification: {
+      notices: ["settle:task-1:turn-2"],
+      noticeEntries: ["settle:task-1:turn-1"],
       tasks: [
         {
           taskId: "task-1",

@@ -277,6 +277,20 @@ describe("row projections", () => {
     expect(
       toMessageEnvelope({ id: "m", threadId: "t", turnId: "u", role: "assistant", text: "x", createdAt: "c" }),
     ).toMatchObject({ streaming: false, updatedAt: "c" });
+    // A notice's identity is the batch's own bookkeeping: clients draw the
+    // tasks and never see it.
+    expect(
+      toMessageEnvelope({
+        id: "n",
+        threadId: "t",
+        turnId: "u",
+        role: "user",
+        text: "x",
+        createdAt: "c",
+        origin: "task-notification",
+        notification: { tasks: [], notices: ["settle:c:1"] },
+      }),
+    ).toEqual({ id: "n", role: "user", text: "x", turnId: "u", streaming: false, createdAt: "c", updatedAt: "c", origin: "task-notification", notification: { tasks: [] } });
     expect(
       toActivityEnvelope({ id: "a", threadId: "t", turnId: null, kind: "k", summary: "s", createdAt: "c" }),
     ).toMatchObject({ tone: "info", turnId: null });

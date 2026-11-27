@@ -70,6 +70,56 @@ describe("a delegated task continued in a new thread", () => {
     expect(sent[0]).not.toContain(`(taskId ${child.id}`);
   }, 30_000);
 
+  it("notifies the parent automatically after a single continueThread with no retry", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d-single", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const first = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, first.id, { text: "Stopped at the usage limit." });
+
+    const continued = await continueThread(w.ctx, { threadId: child.id, automatic: true });
+    await flushTurnRunners();
+    let sent: string[] = [];
+    for (let waited = 0; waited < 10_000; waited += 200) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await flushTurnRunners();
+      sent = await notificationsIn(w, parent.id);
+      if (sent.length > 0) break;
+    }
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(`taskId ${continued.threadId}, continued from taskId ${child.id}`);
+  }, 30_000);
+
+  it("does not emit an unhandled rejection when parent notification fails after a single continueThread", async () => {
+    const w = await world();
+    const parent = await w.make("orchestrator");
+    const child = await w.make("task");
+    const now = new Date().toISOString();
+    await w.store.appendDelegation({ id: "d-single-fail", parentThreadId: parent.id, childThreadId: child.id, prompt: "Build it", status: "running", notify: true, createdAt: now, updatedAt: now });
+    const first = (await sendTurn(w.store, child.id, { prompt: "Build it" })).turn;
+    await completeTurn(w.store, child.id, first.id, { text: "Stopped at the usage limit." });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    const realRead = w.store.readThreadRecord.bind(w.store);
+    try {
+      await continueThread(w.ctx, { threadId: child.id, automatic: true });
+      w.store.readThreadRecord = (async (id: string) => {
+        if (id === parent.id) throw new Error("transient parent read failure");
+        return realRead(id);
+      }) as typeof w.store.readThreadRecord;
+      await flushTurnRunners();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(unhandled).toEqual([]);
+    } finally {
+      delete (w.store as unknown as Record<string, unknown>).readThreadRecord;
+      process.off("unhandledRejection", onUnhandled);
+    }
+  }, 30_000);
+
   it("leaves a thread that was not delegated without a delegation row", async () => {
     const w = await world();
     const thread = await w.make("solo");
@@ -658,6 +708,59 @@ describe("a manual continue with an active turn (MXN-372)", () => {
     expect(resumed.turn.status).toBe("running");
     expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
     await interruptTurn(w.store, source.id, resumed.turn.id);
+  });
+
+  it("does not rewrite a thread's record from a stale claim it reads while continuing another", async () => {
+    const w = await world();
+    const source = await w.make("A");
+    const done = (await sendTurn(w.store, source.id, { prompt: "Work" })).turn;
+    await completeTurn(w.store, source.id, done.id, { text: "Done." });
+    const continued = await continueThread(w.ctx, { threadId: source.id });
+    await flushTurnRunners();
+    for (const turn of await w.store.readTurns(continued.threadId)) {
+      if (turn.status === "running") await completeTurn(w.store, continued.threadId, turn.id, { text: "Opened." });
+    }
+    // The source carries a claim from a handoff that died with its process.
+    await w.store.withThreadLock(source.id, async () => {
+      const current = (await w.store.readThreadRecord(source.id))!;
+      await w.store.writeThreadRecord({ ...current, continueClaim: { token: "dead", pid: 999_999_999, host: os.hostname(), at: new Date().toISOString() }, updatedAt: w.store.nowIso() });
+    });
+    // A title saved under the source's own lock, exactly as it would land
+    // while the guard reads the stale claim to decide about the continuation.
+    const realWrite = w.store.writeThreadRecord.bind(w.store);
+    let injected = false;
+    const spy = vi.spyOn(w.store, "writeThreadRecord").mockImplementation(async (record) => {
+      if (!injected && record.id === source.id && !record.continueClaim) {
+        injected = true;
+        await w.store.withThreadLock(source.id, async () => {
+          const current = (await w.store.readThreadRecord(source.id))!;
+          await realWrite({ ...current, title: "Updated under lock" });
+        });
+      }
+      return realWrite(record);
+    });
+    try {
+      await continueThread(w.ctx, { threadId: continued.threadId });
+    } finally {
+      spy.mockRestore();
+    }
+    // No write to the source at all is the other good outcome (the check is
+    // read-only). Either way, a title saved under the source's own lock must
+    // survive: only a writer that took that lock could have read it.
+    const title = (await w.store.readThreadRecord(source.id))?.title;
+    expect(title, injected ? "a stale claim healed from an unlocked snapshot lost the title" : "no write to the source was expected to change its title").toBe(
+      injected ? "Updated under lock" : "A",
+    );
+    // Reading it as stale never wedges the source: its own admission heals
+    // the claim under the lock that serializes its writers.
+    await sendTurn(w.store, source.id, { prompt: "Again" });
+    expect((await w.store.readThreadRecord(source.id))?.continueClaim).toBeFalsy();
+    await flushTurnRunners();
+    for (const id of [source.id, continued.threadId]) {
+      for (const turn of await w.store.readTurns(id)) {
+        if (turn.status === "running") await interruptTurn(w.store, id, turn.id).catch(() => undefined);
+      }
+    }
   });
 
   it("still blocks sends on a fresh claim its host cannot judge", async () => {
