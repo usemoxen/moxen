@@ -1164,7 +1164,10 @@ describe("the queue pass's handoff preparation (MXN-382)", () => {
     expect(await w.store.readMessages(destinationId)).toEqual([]);
 
     // The next pass repairs the same reservation and only then settles the
-    // source: one destination turn, now with its prompt.
+    // source; the repaired destination turn then actually runs to completion
+    // with its prompt.
+    await runWorkQueue(w.ctx);
+    await flushTurnRunners();
     await runWorkQueue(w.ctx);
     await flushTurnRunners();
     const settled = (await w.store.readTurns(source.id)).find((turn) => turn.id === entry.id)!;
@@ -1172,9 +1175,11 @@ describe("the queue pass's handoff preparation (MXN-382)", () => {
     expect(settled.handoffFailed).toBeUndefined();
     const destinationTurns = await w.store.readTurns(destinationId);
     expect(destinationTurns).toHaveLength(1);
-    const prompt = (await w.store.readMessages(destinationId)).find((message) => message.turnId === destinationTurns[0]!.id);
-    expect(prompt?.role).toBe("user");
+    expect(destinationTurns[0]!.status).toBe("completed");
+    const destinationMessages = await w.store.readMessages(destinationId);
+    const prompt = destinationMessages.find((message) => message.turnId === destinationTurns[0]!.id && message.role === "user");
     expect(prompt?.text).toContain("# Continuing: solo");
+    expect(destinationMessages.some((message) => message.turnId === destinationTurns[0]!.id && message.role === "assistant")).toBe(true);
   });
 
   /**
@@ -1211,19 +1216,26 @@ describe("the queue pass's handoff preparation (MXN-382)", () => {
       }
       expect(events).toEqual([]);
 
-      // The fourth pass exceeds the repair cap and marks the handoff failed.
+      // The fourth pass exceeds the repair cap, marks the handoff failed, and
+      // settles the empty destination reservation.
       await runWorkQueue(w.ctx);
       const failed = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
       expect(failed.status).toBe("failed");
       expect(failed.handoffFailed).toBe(true);
       expect(events).toEqual(["handoff-failed"]);
+      const abandoned = await w.store.readTurns(failed.handoff!.destinationThreadId);
+      expect(abandoned).toHaveLength(1);
+      expect(abandoned[0]!.status).toBe("interrupted");
 
-      // Restoring resets the repair budget so a later pass can repair and complete.
+      // Restoring resets the repair budget so a later pass repairs the
+      // reservation, settles the source, and runs the destination to completion.
       blockDestinationMessages = false;
       await editWorkQueue(w.ctx, source.id, entry.id, "restore");
       const restored = (await w.store.readTurns(source.id)).find((candidate) => candidate.id === entry.id)!;
       expect(restored.handoff?.repairAttempts).toBeUndefined();
       await editWorkQueue(w.ctx, source.id, entry.id, "release");
+      await runWorkQueue(w.ctx);
+      await flushTurnRunners();
       await runWorkQueue(w.ctx);
       await flushTurnRunners();
 
@@ -1232,9 +1244,11 @@ describe("the queue pass's handoff preparation (MXN-382)", () => {
       const destinationId = settled.handoff!.destinationThreadId;
       const destinationTurns = await w.store.readTurns(destinationId);
       expect(destinationTurns).toHaveLength(1);
-      const prompt = (await w.store.readMessages(destinationId)).find((message) => message.turnId === destinationTurns[0]!.id);
-      expect(prompt?.role).toBe("user");
+      expect(destinationTurns[0]!.status).toBe("completed");
+      const destinationMessages = await w.store.readMessages(destinationId);
+      const prompt = destinationMessages.find((message) => message.turnId === destinationTurns[0]!.id && message.role === "user");
       expect(prompt?.text).toContain("# Continuing: solo");
+      expect(destinationMessages.some((message) => message.turnId === destinationTurns[0]!.id && message.role === "assistant")).toBe(true);
     } finally {
       w.store.appendLedger = realAppend;
       unsubscribe();

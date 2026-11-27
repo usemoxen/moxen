@@ -750,10 +750,11 @@ async function runRecoveredTurn(ctx: OperationContext, threadId: string, turn: S
     const messages = await store.readMessages(threadId);
     const message = turnPrompt(messages, turn);
     if (message === null) {
-      // A moved entry still being repaired (a crash between its turn and
-      // message writes) must wait for the repair, not fail and not run: put
-      // it back queued for the next continue on its source to complete.
-      if (isTransferDestinationRequestId(turn.queue?.requestId)) {
+      // A moved entry or a handoff reservation still being repaired (a crash
+      // between its turn and message writes) must wait for the repair, not
+      // fail and not run: put it back queued for the next pass on its source
+      // to complete.
+      if (isTransferDestinationRequestId(turn.queue?.requestId) || turn.queue?.requestId?.startsWith("handoff:")) {
         try {
           await store.withThreadLock(threadId, async () => {
             const fresh = (await store.readTurns(threadId)).find((candidate) => candidate.id === turn.id);
@@ -1125,6 +1126,7 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
     }
     let summaryToStop: StoredTurn | undefined;
     let cancelProtection = false;
+    let reservationToAbandon: { readonly threadId: string; readonly turnId: string } | null = null;
     const rows = policy ? await queueRows(ctx) : [];
     await ctx.store.withThreadLock(threadId, async () => {
       const turn = (await ctx.store.readTurns(threadId)).find((t) => t.id === turnId);
@@ -1208,6 +1210,12 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
         }
       }
       if (action === "remove" || action === "hold" || next.continuation !== "model") summaryToStop = (await ctx.store.readTurns(threadId)).find((candidate) => candidate.id === turn.handoff?.summaryTurnId && (candidate.status === "queued" || candidate.status === "running"));
+      if (turn.handoff && !isTransferredTurn(turn) && (action === "remove" || next.continuation === "same-thread")) {
+        const reserved = await reservedHandoffTurn(ctx.store, turn.handoff);
+        if (reserved && (reserved.status === "queued" || reserved.status === "running") && !(await handoffDelivered(ctx.store, turn.handoff))) {
+          reservationToAbandon = { threadId: turn.handoff.destinationThreadId, turnId: reserved.id };
+        }
+      }
       const protection = (await ctx.store.readThreadRecord(threadId))?.usagePause;
       if (action === "remove" && !protection?.forced && protection?.recoveryTurnId === turnId) {
         cancelProtection = true;
@@ -1236,6 +1244,10 @@ export async function editWorkQueue(ctx: OperationContext, threadId: string, tur
       }
       ctx.store.emit(threadId, "queue-edited");
     });
+    if (reservationToAbandon !== null) {
+      const target: { readonly threadId: string; readonly turnId: string } = reservationToAbandon;
+      await interruptTurn(ctx.store, target.threadId, target.turnId).catch(() => undefined);
+    }
     if (summaryToStop) {
       const thread = await ctx.store.readThreadRecord(threadId);
       if (thread && summaryToStop.status === "running") await Effect.runPromise(ctx.driverFor((summaryToStop.modelSelection ?? thread.modelSelection).instanceId).interruptTurn(threadId));
@@ -1319,6 +1331,7 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
           const failure = cause instanceof CliError ? cause.message : "Handoff preparation failed. Add the entry back to retry.";
           let finalized = false;
           let migrateDestination: string | null = null;
+          let abandonReservation: { readonly threadId: string; readonly turnId: string } | null = null;
           await ctx.store.withThreadLock(entry.threadId, async () => {
             const current = (await ctx.store.readTurns(entry.threadId)).find((turn) => turn.id === entry.turnId);
             if (current === undefined) return;
@@ -1354,18 +1367,26 @@ export async function runWorkQueue(ctx: OperationContext, now = Date.now(), snap
             // A reserved destination whose prompt has not landed is a partial
             // write from a start that never finished: leave the entry queued
             // for up to MAX_HANDOFF_REPAIR_ATTEMPTS passes so a transient error
-            // repairs the same reservation, then fail it instead of looping
-            // silently forever when retries keep throwing before prompt repair.
-            if (handoff !== undefined && (await reservedHandoffTurn(ctx.store, handoff)) !== undefined) {
+            // repairs the same reservation, then fail it (and settle the empty
+            // destination reservation) instead of looping silently forever.
+            const reserved = handoff === undefined ? undefined : await reservedHandoffTurn(ctx.store, handoff);
+            if (handoff !== undefined && reserved !== undefined) {
               const repairAttempts = (handoff.repairAttempts ?? 0) + 1;
               if (repairAttempts <= MAX_HANDOFF_REPAIR_ATTEMPTS) {
                 await ctx.store.updateTurn(entry.threadId, entry.turnId, { handoff: { ...handoff, repairAttempts } });
                 return;
               }
+              if (reserved.status === "queued" || reserved.status === "running") {
+                abandonReservation = { threadId: handoff.destinationThreadId, turnId: reserved.id };
+              }
             }
             await ctx.store.updateTurn(entry.threadId, entry.turnId, { status: "failed", handoffFailed: true, error: failure, completedAt: ctx.store.nowIso() });
             ctx.store.emit(entry.threadId, "handoff-failed");
           });
+          if (abandonReservation !== null) {
+            const target: { readonly threadId: string; readonly turnId: string } = abandonReservation;
+            await interruptTurn(ctx.store, target.threadId, target.turnId).catch(() => undefined);
+          }
           if (migrateDestination !== null) await migrateStagedMessages(ctx, entry.threadId, migrateDestination).catch(() => undefined);
           if (finalized) await flushTaskNotifications(ctx, entry.threadId).catch(() => undefined);
           continue;
@@ -1430,7 +1451,7 @@ async function reservedHandoffTurn(store: ThreadStore, handoff: HandoffRecord): 
  */
 async function handoffDelivered(store: ThreadStore, handoff: HandoffRecord): Promise<boolean> {
   const turn = await reservedHandoffTurn(store, handoff);
-  if (turn === undefined) return false;
+  if (turn === undefined || turn.status === "failed" || turn.status === "interrupted") return false;
   return (await store.readMessages(handoff.destinationThreadId)).some((message) => message.turnId === turn.id && message.role === "user");
 }
 
@@ -1538,19 +1559,30 @@ async function repairCarriedTurnPrompt(store: ThreadStore, destinationId: string
   const turn = (await store.readTurns(destinationId)).find((candidate) => candidate.queue?.requestId === requestId);
   if (turn === undefined) return;
   const hasPrompt = (messages: readonly StoredMessage[]): boolean => messages.some((message) => message.turnId === turn.id && message.role === "user");
-  if (hasPrompt(await store.readMessages(destinationId))) return;
+  const alreadyHasPrompt = hasPrompt(await store.readMessages(destinationId));
+  if (alreadyHasPrompt && turn.status !== "failed" && turn.status !== "interrupted") return;
   await store.withThreadLock(destinationId, async () => {
     const current = (await store.readTurns(destinationId)).find((candidate) => candidate.id === turn.id);
     if (current === undefined) return;
-    if ((await store.readMessages(destinationId)).some((message) => message.turnId === current.id && message.role === "user")) return;
-    await store.appendLedger(destinationId, "messages", {
-      id: current.messageId,
-      threadId: destinationId,
-      turnId: current.id,
-      role: "user",
-      text: prompt,
-      createdAt: store.nowIso(),
-    });
+    if (!(await store.readMessages(destinationId)).some((message) => message.turnId === current.id && message.role === "user")) {
+      await store.appendLedger(destinationId, "messages", {
+        id: current.messageId,
+        threadId: destinationId,
+        turnId: current.id,
+        role: "user",
+        text: prompt,
+        createdAt: store.nowIso(),
+      });
+    }
+    if (current.status === "failed" || current.status === "interrupted") {
+      await store.updateTurn(destinationId, current.id, {
+        status: "queued",
+        error: null,
+        completedAt: null,
+        owner: null,
+        updatedAt: store.nowIso(),
+      });
+    }
   });
 }
 
