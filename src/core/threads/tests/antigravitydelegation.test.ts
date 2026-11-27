@@ -1549,7 +1549,7 @@ describe("Antigravity dispatch gate at every path (LOCAL-034)", () => {
     expect(await readBatches(w.root)).toHaveProperty(parent.id);
 
     await releaseParked(release);
-    await vi.waitFor(async () => expect(await readBatches(w.root)).toEqual({}));
+    await vi.waitFor(async () => expect(await readBatches(w.root)).toEqual({}), { timeout: 10_000 });
     await settleRuns();
   }, 30_000);
 

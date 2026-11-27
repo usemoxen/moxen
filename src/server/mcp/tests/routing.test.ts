@@ -1,3 +1,6 @@
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { ClientApi } from "../../api.js";
@@ -5,6 +8,7 @@ import { answerMcp, type McpSessionOptions } from "../stdio.js";
 
 const CHILD_SESSION = "ses_child_is_shared";
 const PARENT_THREAD = "thread-parent";
+const ABS_CWD = path.resolve(os.tmpdir(), "moxen-routing-abs");
 
 interface Routing {
   readonly threadId: string;
@@ -180,8 +184,8 @@ describe("routed moxen calls: a registry write never changes identity (LOCAL-035
       register: async (callerThreadId) => {
         calls.push(callerThreadId);
         return {
-          project: { id: "p-1", title: "abs", workspaceRoot: "/abs", createdAt: "now" },
-          workspaceRoot: "/abs",
+          project: { id: "p-1", title: "abs", workspaceRoot: ABS_CWD, createdAt: "now" },
+          workspaceRoot: ABS_CWD,
           created: true,
         };
       },
@@ -194,7 +198,7 @@ describe("routed moxen calls: a registry write never changes identity (LOCAL-035
     const ownerRouting: Routing = { threadId: PARENT_THREAD, delegated: false, webFetch: true, memory: "write", checklist: false };
     const answer = await answerMcp(
       { ...session(PARENT_THREAD, ownerRouting, seen, 2), ...recording(calls) },
-      withSession("project_register", { cwd: "/abs" }, "ses_owner_shared"),
+      withSession("project_register", { cwd: ABS_CWD }, "ses_owner_shared"),
     );
     const result = answer?.result as { content: Array<{ text: string }>; isError: boolean };
     expect(result.isError).toBe(true);
@@ -210,7 +214,7 @@ describe("routed moxen calls: a registry write never changes identity (LOCAL-035
     const orchestrator: Routing = { threadId: "thread-orchestrator", delegated: false, webFetch: true, memory: "write", checklist: false };
     const answer = await answerMcp(
       { ...session(PARENT_THREAD, orchestrator, seen), ...recording(calls) },
-      withSession("project_register", { cwd: "/abs" }, CHILD_SESSION),
+      withSession("project_register", { cwd: ABS_CWD }, CHILD_SESSION),
     );
     const result = answer?.result as { content: Array<{ text: string }>; isError: boolean };
     expect(result.isError).toBe(true);
@@ -224,7 +228,7 @@ describe("routed moxen calls: a registry write never changes identity (LOCAL-035
     const calls: string[] = [];
     const answer = await answerMcp(
       { ...session(PARENT_THREAD, childRouting, seen), ...recording(calls) },
-      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "project_register", arguments: { cwd: "/abs" } } },
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "project_register", arguments: { cwd: ABS_CWD } } },
     );
     const result = answer?.result as { content: Array<{ text: string }>; isError: boolean };
     expect(result.isError).toBe(false);
